@@ -113,7 +113,9 @@ pub const Coroutine = struct {
                 }
 
                 coro.state = .dead;
-                ContextSwitcher.swap(&coro.context, coro.parent_context);
+                const parent = coro.parent_context;
+                coro.parent_context = undefined;
+                ContextSwitcher.swap(&coro.context, parent);
                 unreachable;
             }
         }.entry;
