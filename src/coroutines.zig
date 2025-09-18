@@ -49,12 +49,19 @@ pub const CoroutineState = enum {
     dead,
 };
 
+pub const CoroutineResult = union(enum) {
+    pending: void,    // Coroutine hasn't finished yet
+    success: void,    // Coroutine completed successfully
+    failure: anyerror, // Coroutine failed with this error
+};
+
 pub const Coroutine = struct {
     context: *anyopaque,
     stack: Stack,
     state: CoroutineState,
     scheduler: *Scheduler,
     id: u32,
+    result: CoroutineResult,
 
     fn init(scheduler: *Scheduler, id: u32, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
         if (!is_supported) return error.UnsupportedPlatform;
@@ -84,7 +91,26 @@ pub const Coroutine = struct {
                 const coro_stack_end = @intFromPtr(coro.stack.ptr) + coro.stack.len;
                 const args_location: *align(1) Args = @ptrFromInt(std.mem.alignBackward(usize, coro_stack_end - @sizeOf(Args), stack_alignment));
 
-                @call(.auto, func, args_location.*);
+                // Handle both void and error union return types
+                const ReturnType = @TypeOf(@call(.auto, func, args_location.*));
+
+                if (ReturnType == void) {
+                    @call(.auto, func, args_location.*);
+                    coro.result = .success;
+                } else {
+                    const return_info = @typeInfo(ReturnType);
+                    if (return_info == .error_union) {
+                        if (@call(.auto, func, args_location.*)) |_| {
+                            coro.result = .success;
+                        } else |err| {
+                            coro.result = .{ .failure = err };
+                        }
+                    } else {
+                        // Non-void, non-error return type - just call and mark success
+                        _ = @call(.auto, func, args_location.*);
+                        coro.result = .success;
+                    }
+                }
 
                 coro.state = .dead;
                 ContextSwitcher.swap(&coro.context, &coro.scheduler.main_context);
@@ -102,6 +128,7 @@ pub const Coroutine = struct {
             .state = .ready,
             .scheduler = scheduler,
             .id = id,
+            .result = .pending,
         };
     }
 

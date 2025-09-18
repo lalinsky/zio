@@ -14,6 +14,8 @@ pub const Scheduler = coroutines.Scheduler;
 pub const CoroutineState = coroutines.CoroutineState;
 pub const Error = coroutines.Error;
 
+const MAX_COROUTINES = 32;
+
 // Zio-specific errors
 pub const ZioError = error{
     LibuvError,
@@ -127,6 +129,19 @@ pub const Runtime = struct {
         while (c.uv_loop_alive(self.loop) != 0) {
             _ = c.uv_run(self.loop, c.UV_RUN_ONCE);
         }
+    }
+
+    pub fn getResult(self: *Runtime, id: u32) ?coroutines.CoroutineResult {
+        if (id >= self.scheduler.count) return null;
+        return self.scheduler.coroutines[id].result;
+    }
+
+    pub fn getAllResults(self: *Runtime) []coroutines.CoroutineResult {
+        var results: [MAX_COROUTINES]coroutines.CoroutineResult = undefined;
+        for (0..self.scheduler.count) |i| {
+            results[i] = self.scheduler.coroutines[i].result;
+        }
+        return results[0..self.scheduler.count];
     }
 };
 
