@@ -89,35 +89,51 @@ pub const Runtime = struct {
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
         const current = coroutines.getCurrentCoroutine() orelse return ZioError.NotInCoroutine;
 
-        // Allocate timer data and timer handle in one allocation
-        const timer_data = try self.allocator.create(TimerData);
-        errdefer self.allocator.destroy(timer_data);
-
-        timer_data.* = TimerData{
+        // Stack allocate timer data
+        var timer_data = TimerData{
             .timer = undefined, // Will be initialized by uv_timer_init
             .coroutine = current,
             .runtime = self,
         };
 
+        // Timer callback
+        const timer_cb = struct {
+            fn callback(handle: [*c]c.uv_timer_t) callconv(.c) void {
+                const data: *TimerData = @ptrCast(@as(*allowzero TimerData, @fieldParentPtr("timer", handle.?)));
+                data.coroutine.state = .ready;
+            }
+        }.callback;
+
+        // Close callback
+        const close_cb = struct {
+            fn callback(handle: [*c]c.uv_handle_t) callconv(.c) void {
+                const timer: *c.uv_timer_t = @ptrCast(@alignCast(handle));
+                const data: *TimerData = @fieldParentPtr("timer", timer);
+                data.coroutine.state = .ready;
+            }
+        }.callback;
+
         const result = c.uv_timer_init(self.loop, &timer_data.timer);
         if (result != 0) {
-            self.allocator.destroy(timer_data);
             return ZioError.LibuvError;
         }
-
 
         // Start the timer
-        const start_result = c.uv_timer_start(&timer_data.timer, sleep_timer_cb, milliseconds, 0);
+        const start_result = c.uv_timer_start(&timer_data.timer, timer_cb, milliseconds, 0);
         if (start_result != 0) {
-            self.allocator.destroy(timer_data);
             return ZioError.LibuvError;
         }
 
-        // Mark this coroutine as waiting and yield control
+        // Wait for timer to fire
         current.state = .waiting;
         self.yield();
 
-        // When we get here, the timer has fired and the coroutine is ready again
+        // Timer fired, now close it and wait for close completion
+        current.state = .waiting;
+        c.uv_close(@ptrCast(&timer_data.timer), close_cb);
+        self.yield();
+
+        // Now timer is closed and timer_data can be safely destroyed
     }
 
     pub fn run(self: *Runtime) void {
@@ -174,19 +190,4 @@ pub const Runtime = struct {
 };
 
 
-// Close callback for timer cleanup
-fn timer_close_cb(handle: [*c]c.uv_handle_t) callconv(.c) void {
-    const timer: *c.uv_timer_t = @ptrCast(@alignCast(handle));
-    const data: *TimerData = @fieldParentPtr("timer", timer);
-    data.runtime.allocator.destroy(data);
-}
-
-// Timer callback for sleep
-fn sleep_timer_cb(handle: [*c]c.uv_timer_t) callconv(.c) void {
-    const data: *TimerData = @ptrCast(@as(*allowzero TimerData, @fieldParentPtr("timer", handle.?)));
-    data.coroutine.state = .ready;
-
-    // Close the timer handle properly
-    c.uv_close(@ptrCast(handle), timer_close_cb);
-}
 
