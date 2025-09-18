@@ -119,39 +119,8 @@ void scheduler_yield(void) {
     coroutine_t *current_coro = &g_scheduler.coroutines[g_scheduler.current];
     current_coro->state = COROUTINE_READY;
 
-    int next = -1;
-    for (int i = (g_scheduler.current + 1) % g_scheduler.count;
-         i != g_scheduler.current;
-         i = (i + 1) % g_scheduler.count) {
-        if (g_scheduler.coroutines[i].state == COROUTINE_READY) {
-            next = i;
-            break;
-        }
-    }
-
-    if (next == -1) {
-        for (int i = 0; i < g_scheduler.count; i++) {
-            if (g_scheduler.coroutines[i].state == COROUTINE_READY) {
-                next = i;
-                break;
-            }
-        }
-    }
-
-    if (next == -1) {
-        save_context(&current_coro->context);
-        restore_context(&g_scheduler.main_context);
-        return;
-    }
-
-    context_t *old_ctx = &current_coro->context;
-    context_t *new_ctx = &g_scheduler.coroutines[next].context;
-
-    g_scheduler.current = next;
-    g_scheduler.coroutines[next].state = COROUTINE_RUNNING;
-
-    save_context(old_ctx);
-    restore_context(new_ctx);
+    save_context(&current_coro->context);
+    restore_context(&g_scheduler.main_context);
 }
 
 void scheduler_run(void) {
