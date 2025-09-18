@@ -20,72 +20,123 @@ pub const ZioError = error{
     NotInCoroutine,
 } || Error;
 
-// Global state
-var g_loop: ?*c.uv_loop_t = null;
-var g_scheduler: ?*Scheduler = null;
-var g_allocator: ?Allocator = null;
-
 // Timer callback data
 const TimerData = struct {
     coroutine: *Coroutine,
     completed: bool = false,
-    allocator: Allocator,
+    runtime: *Runtime,
     timer: *c.uv_timer_t,
 };
 
-// Initialize the zio runtime
-pub fn init(allocator: Allocator) !void {
-    g_allocator = allocator;
+// Runtime class - the main zio runtime
+pub const Runtime = struct {
+    loop: *c.uv_loop_t,
+    scheduler: Scheduler,
+    allocator: Allocator,
 
-    // Initialize libuv loop
-    g_loop = try allocator.create(c.uv_loop_t);
-    const result = c.uv_loop_init(g_loop.?);
-    if (result != 0) {
-        allocator.destroy(g_loop.?);
-        g_loop = null;
-        return ZioError.LibuvError;
+    pub fn init(allocator: Allocator) !Runtime {
+        // Initialize libuv loop
+        const loop = try allocator.create(c.uv_loop_t);
+        errdefer allocator.destroy(loop);
+
+        const result = c.uv_loop_init(loop);
+        if (result != 0) {
+            allocator.destroy(loop);
+            return ZioError.LibuvError;
+        }
+
+        return Runtime{
+            .loop = loop,
+            .scheduler = Scheduler.init(allocator),
+            .allocator = allocator,
+        };
     }
 
-    // Initialize scheduler
-    g_scheduler = try allocator.create(Scheduler);
-    g_scheduler.?.* = Scheduler.init(allocator);
-}
-
-// Cleanup the zio runtime
-pub fn deinit() void {
-    if (g_scheduler) |scheduler| {
-        scheduler.deinit();
-        g_allocator.?.destroy(scheduler);
-        g_scheduler = null;
+    pub fn deinit(self: *Runtime) void {
+        self.scheduler.deinit();
+        _ = c.uv_loop_close(self.loop);
+        self.allocator.destroy(self.loop);
     }
 
-    if (g_loop) |loop| {
-        _ = c.uv_loop_close(loop);
-        g_allocator.?.destroy(loop);
-        g_loop = null;
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype) !u32 {
+        return self.scheduler.spawn(func, args);
     }
 
-    g_allocator = null;
-}
+    pub fn yield(self: *Runtime) void {
+        self.scheduler.yieldCurrent();
+    }
 
-// Spawn a coroutine
-pub fn spawn(comptime func: anytype, args: anytype) !u32 {
-    const scheduler = g_scheduler orelse return ZioError.NotInCoroutine;
-    return scheduler.spawn(func, args);
-}
+    pub fn sleep(self: *Runtime, milliseconds: u64) !void {
+        const current = coroutines.getCurrentCoroutine() orelse return ZioError.NotInCoroutine;
 
-// Yield current coroutine
-pub fn yield() void {
-    const scheduler = g_scheduler orelse return;
-    scheduler.yieldCurrent();
-}
+        // Create timer handle
+        const timer = try self.allocator.create(c.uv_timer_t);
+        errdefer self.allocator.destroy(timer);
+
+        const result = c.uv_timer_init(self.loop, timer);
+        if (result != 0) {
+            self.allocator.destroy(timer);
+            return ZioError.LibuvError;
+        }
+
+        // Set up timer data (allocated on heap to survive past this function)
+        const timer_data = try self.allocator.create(TimerData);
+        timer_data.* = TimerData{
+            .coroutine = current,
+            .completed = false,
+            .runtime = self,
+            .timer = timer,
+        };
+        timer.*.data = timer_data;
+
+        // Start the timer
+        const start_result = c.uv_timer_start(timer, sleep_timer_cb, milliseconds, 0);
+        if (start_result != 0) {
+            self.allocator.destroy(timer_data);
+            self.allocator.destroy(timer);
+            return ZioError.LibuvError;
+        }
+
+        // Mark this coroutine as waiting and yield control
+        current.state = .waiting;
+        self.yield();
+
+        // When we get here, the timer has fired and the coroutine is ready again
+    }
+
+    pub fn run(self: *Runtime) void {
+        while (true) {
+            // Run all ready coroutines until none are ready
+            while (self.scheduler.runOnce()) {}
+
+            // Check if all coroutines are dead
+            var all_dead = true;
+            for (0..self.scheduler.count) |i| {
+                if (self.scheduler.coroutines[i].state != .dead) {
+                    all_dead = false;
+                    break;
+                }
+            }
+            if (all_dead) break;
+
+            // Wait for I/O events to make coroutines ready again
+            _ = c.uv_run(self.loop, c.UV_RUN_ONCE);
+        }
+
+        // Process any remaining close callbacks to clean up memory
+        while (c.uv_loop_alive(self.loop) != 0) {
+            _ = c.uv_run(self.loop, c.UV_RUN_ONCE);
+        }
+    }
+};
+
 
 // Close callback for timer cleanup
 fn timer_close_cb(handle: [*c]c.uv_handle_t) callconv(.c) void {
     const timer: *c.uv_timer_t = @ptrCast(@alignCast(handle));
     const data: *TimerData = @ptrCast(@alignCast(timer.*.data));
-    data.allocator.destroy(data.timer);
-    data.allocator.destroy(data);
+    data.runtime.allocator.destroy(data.timer);
+    data.runtime.allocator.destroy(data);
 }
 
 // Timer callback for sleep
@@ -98,72 +149,3 @@ fn sleep_timer_cb(handle: [*c]c.uv_timer_t) callconv(.c) void {
     c.uv_close(@ptrCast(handle), timer_close_cb);
 }
 
-// Async sleep function using libuv timer
-pub fn sleep(milliseconds: u64) !void {
-    const current = coroutines.getCurrentCoroutine() orelse return ZioError.NotInCoroutine;
-    const loop = g_loop orelse return ZioError.LibuvError;
-    const allocator = g_allocator orelse return ZioError.LibuvError;
-
-    // Create timer handle
-    const timer = try allocator.create(c.uv_timer_t);
-    errdefer allocator.destroy(timer);
-
-    const result = c.uv_timer_init(loop, timer);
-    if (result != 0) {
-        allocator.destroy(timer);
-        return ZioError.LibuvError;
-    }
-
-    // Set up timer data (allocated on heap to survive past this function)
-    const timer_data = try allocator.create(TimerData);
-    timer_data.* = TimerData{
-        .coroutine = current,
-        .completed = false,
-        .allocator = allocator,
-        .timer = timer,
-    };
-    timer.*.data = timer_data;
-
-    // Start the timer
-    const start_result = c.uv_timer_start(timer, sleep_timer_cb, milliseconds, 0);
-    if (start_result != 0) {
-        allocator.destroy(timer_data);
-        allocator.destroy(timer);
-        return ZioError.LibuvError;
-    }
-
-    // Mark this coroutine as waiting and yield control
-    current.state = .waiting;
-    yield();
-
-    // When we get here, the timer has fired and the coroutine is ready again
-}
-
-// Main event loop integration
-pub fn run() void {
-    const scheduler = g_scheduler orelse return;
-    const loop = g_loop orelse return;
-
-    while (true) {
-        // Run all ready coroutines until none are ready
-        while (scheduler.runOnce()) {}
-
-        // Check if all coroutines are dead
-        var all_dead = true;
-        for (0..scheduler.count) |i| {
-            if (scheduler.coroutines[i].state != .dead) {
-                all_dead = false;
-                break;
-            }
-        }
-        if (all_dead) break;
-
-        // Wait for I/O events to make coroutines ready again
-        _ = c.uv_run(loop, c.UV_RUN_ONCE);
-    }
-
-    // Process any remaining close callbacks to clean up memory
-    while (c.uv_loop_alive(loop) != 0) {
-        _ = c.uv_run(loop, c.UV_RUN_ONCE);
-    }
-}
