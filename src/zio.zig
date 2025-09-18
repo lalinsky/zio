@@ -24,10 +24,9 @@ pub const ZioError = error{
 
 // Timer callback data
 const TimerData = struct {
+    timer: c.uv_timer_t,
     coroutine: *Coroutine,
-    completed: bool = false,
     runtime: *Runtime,
-    timer: *c.uv_timer_t,
 };
 
 // Runtime class - the main zio runtime
@@ -110,31 +109,27 @@ pub const Runtime = struct {
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
         const current = coroutines.getCurrentCoroutine() orelse return ZioError.NotInCoroutine;
 
-        // Create timer handle
-        const timer = try self.allocator.create(c.uv_timer_t);
-        errdefer self.allocator.destroy(timer);
+        // Allocate timer data and timer handle in one allocation
+        const timer_data = try self.allocator.create(TimerData);
+        errdefer self.allocator.destroy(timer_data);
 
-        const result = c.uv_timer_init(self.loop, timer);
+        timer_data.* = TimerData{
+            .timer = undefined, // Will be initialized by uv_timer_init
+            .coroutine = current,
+            .runtime = self,
+        };
+
+        const result = c.uv_timer_init(self.loop, &timer_data.timer);
         if (result != 0) {
-            self.allocator.destroy(timer);
+            self.allocator.destroy(timer_data);
             return ZioError.LibuvError;
         }
 
-        // Set up timer data (allocated on heap to survive past this function)
-        const timer_data = try self.allocator.create(TimerData);
-        timer_data.* = TimerData{
-            .coroutine = current,
-            .completed = false,
-            .runtime = self,
-            .timer = timer,
-        };
-        timer.*.data = timer_data;
 
         // Start the timer
-        const start_result = c.uv_timer_start(timer, sleep_timer_cb, milliseconds, 0);
+        const start_result = c.uv_timer_start(&timer_data.timer, sleep_timer_cb, milliseconds, 0);
         if (start_result != 0) {
             self.allocator.destroy(timer_data);
-            self.allocator.destroy(timer);
             return ZioError.LibuvError;
         }
 
@@ -190,15 +185,13 @@ pub const Runtime = struct {
 // Close callback for timer cleanup
 fn timer_close_cb(handle: [*c]c.uv_handle_t) callconv(.c) void {
     const timer: *c.uv_timer_t = @ptrCast(@alignCast(handle));
-    const data: *TimerData = @ptrCast(@alignCast(timer.*.data));
-    data.runtime.allocator.destroy(data.timer);
+    const data: *TimerData = @fieldParentPtr("timer", timer);
     data.runtime.allocator.destroy(data);
 }
 
 // Timer callback for sleep
 fn sleep_timer_cb(handle: [*c]c.uv_timer_t) callconv(.c) void {
-    const data: *TimerData = @ptrCast(@alignCast(handle.*.data));
-    data.completed = true;
+    const data: *TimerData = @ptrCast(@as(*allowzero TimerData, @fieldParentPtr("timer", handle.?)));
     data.coroutine.state = .ready;
 
     // Close the timer handle properly
