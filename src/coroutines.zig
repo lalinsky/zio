@@ -142,6 +142,11 @@ pub const Coroutine = struct {
         self.parent_context = parent_context;
         ContextSwitcher.swap(parent_context, &self.context);
     }
+
+    pub fn waitForReady(self: *Coroutine) void {
+        self.state = .waiting;
+        yield();
+    }
 };
 
 

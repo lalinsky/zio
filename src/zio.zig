@@ -29,6 +29,18 @@ const TimerData = struct {
     runtime: *Runtime,
 };
 
+// Generic callback generator for any handle type
+fn markReady(comptime T: type, comptime HandleType: type, comptime field_name: []const u8) fn([*c]HandleType) callconv(.c) void {
+    const FieldType = @TypeOf(@field(@as(T, undefined), field_name));
+    return struct {
+        fn callback(handle: [*c]HandleType) callconv(.c) void {
+            const typed_handle: *FieldType = @ptrCast(@alignCast(handle));
+            const data: *T = @ptrCast(@as(*allowzero T, @fieldParentPtr(field_name, typed_handle)));
+            data.coroutine.state = .ready;
+        }
+    }.callback;
+}
+
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
     loop: *c.uv_loop_t,
@@ -96,26 +108,18 @@ pub const Runtime = struct {
             .runtime = self,
         };
 
-        // Timer callback
-        const timer_cb = struct {
-            fn callback(handle: [*c]c.uv_timer_t) callconv(.c) void {
-                const data: *TimerData = @ptrCast(@as(*allowzero TimerData, @fieldParentPtr("timer", handle.?)));
-                data.coroutine.state = .ready;
-            }
-        }.callback;
-
-        // Close callback
-        const close_cb = struct {
-            fn callback(handle: [*c]c.uv_handle_t) callconv(.c) void {
-                const timer: *c.uv_timer_t = @ptrCast(@alignCast(handle));
-                const data: *TimerData = @fieldParentPtr("timer", timer);
-                data.coroutine.state = .ready;
-            }
-        }.callback;
+        // Both callbacks use the same generic pattern with explicit types
+        const timer_cb = markReady(TimerData, c.uv_timer_t, "timer");
+        const close_cb = markReady(TimerData, c.uv_handle_t, "timer");
 
         const result = c.uv_timer_init(self.loop, &timer_data.timer);
         if (result != 0) {
             return ZioError.LibuvError;
+        }
+
+        defer {
+            c.uv_close(@ptrCast(&timer_data.timer), close_cb);
+            current.waitForReady();
         }
 
         // Start the timer
@@ -125,15 +129,9 @@ pub const Runtime = struct {
         }
 
         // Wait for timer to fire
-        current.state = .waiting;
-        self.yield();
+        current.waitForReady();
 
-        // Timer fired, now close it and wait for close completion
-        current.state = .waiting;
-        c.uv_close(@ptrCast(&timer_data.timer), close_cb);
-        self.yield();
-
-        // Now timer is closed and timer_data can be safely destroyed
+        // Timer fired, defer will handle cleanup
     }
 
     pub fn run(self: *Runtime) void {
