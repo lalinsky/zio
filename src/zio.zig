@@ -10,11 +10,11 @@ const c = @cImport({
 // Re-export coroutine functionality
 pub const coroutines = @import("coroutines.zig");
 pub const Coroutine = coroutines.Coroutine;
-pub const Scheduler = coroutines.Scheduler;
 pub const CoroutineState = coroutines.CoroutineState;
 pub const Error = coroutines.Error;
 
 const MAX_COROUTINES = 32;
+const STACK_SIZE = 8192;
 
 // Zio-specific errors
 pub const ZioError = error{
@@ -33,7 +33,10 @@ const TimerData = struct {
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
     loop: *c.uv_loop_t,
-    scheduler: Scheduler,
+    coroutines: [MAX_COROUTINES]Coroutine,
+    current: i32,
+    count: u32,
+    main_context: *anyopaque,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) !Runtime {
@@ -49,23 +52,59 @@ pub const Runtime = struct {
 
         return Runtime{
             .loop = loop,
-            .scheduler = Scheduler.init(allocator),
+            .coroutines = undefined,
+            .current = -1,
+            .count = 0,
+            .main_context = undefined,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Runtime) void {
-        self.scheduler.deinit();
+        for (0..self.count) |i| {
+            self.allocator.free(self.coroutines[i].stack);
+        }
         _ = c.uv_loop_close(self.loop);
         self.allocator.destroy(self.loop);
     }
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype) !u32 {
-        return self.scheduler.spawn(func, args);
+        if (self.count >= MAX_COROUTINES) {
+            return error.TooManyCoroutines;
+        }
+
+        const id = self.count;
+        const stack = try self.allocator.alignedAlloc(u8, coroutines.stack_alignment, STACK_SIZE);
+
+        self.coroutines[id] = try Coroutine.init(id, stack, func, args);
+        self.count += 1;
+
+        return id;
     }
 
     pub fn yield(self: *Runtime) void {
-        self.scheduler.yieldCurrent();
+        if (self.current == -1) return;
+        // Don't change state - let the coroutine decide its own state before yielding
+        coroutines.yield();
+    }
+
+    fn runOnce(self: *Runtime) bool {
+        // Find next ready coroutine
+        var next: i32 = -1;
+        for (0..self.count) |i| {
+            if (self.coroutines[i].state == .ready) {
+                next = @intCast(i);
+                break;
+            }
+        }
+
+        if (next == -1) return false; // No ready coroutines
+
+        self.current = next;
+        self.coroutines[@intCast(next)].state = .running;
+        self.coroutines[@intCast(next)].switchTo(&self.main_context);
+
+        return true;
     }
 
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
@@ -107,14 +146,16 @@ pub const Runtime = struct {
     }
 
     pub fn run(self: *Runtime) void {
+        self.current = -1;
+
         while (true) {
             // Run all ready coroutines until none are ready
-            while (self.scheduler.runOnce()) {}
+            while (self.runOnce()) {}
 
             // Check if all coroutines are dead
             var all_dead = true;
-            for (0..self.scheduler.count) |i| {
-                if (self.scheduler.coroutines[i].state != .dead) {
+            for (0..self.count) |i| {
+                if (self.coroutines[i].state != .dead) {
                     all_dead = false;
                     break;
                 }
@@ -132,16 +173,16 @@ pub const Runtime = struct {
     }
 
     pub fn getResult(self: *Runtime, id: u32) ?coroutines.CoroutineResult {
-        if (id >= self.scheduler.count) return null;
-        return self.scheduler.coroutines[id].result;
+        if (id >= self.count) return null;
+        return self.coroutines[id].result;
     }
 
     pub fn getAllResults(self: *Runtime) []coroutines.CoroutineResult {
         var results: [MAX_COROUTINES]coroutines.CoroutineResult = undefined;
-        for (0..self.scheduler.count) |i| {
-            results[i] = self.scheduler.coroutines[i].result;
+        for (0..self.count) |i| {
+            results[i] = self.coroutines[i].result;
         }
-        return results[0..self.scheduler.count];
+        return results[0..self.count];
     }
 };
 

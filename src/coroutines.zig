@@ -36,7 +36,7 @@ pub fn getCurrentCoroutine() ?*Coroutine {
 
 pub fn yield() void {
     const coro = current_coroutine orelse unreachable;
-    ContextSwitcher.swap(&coro.context, &coro.scheduler.main_context);
+    ContextSwitcher.swap(&coro.context, coro.parent_context);
 }
 
 const MAX_COROUTINES = 32;
@@ -59,11 +59,11 @@ pub const Coroutine = struct {
     context: *anyopaque,
     stack: Stack,
     state: CoroutineState,
-    scheduler: *Scheduler,
+    parent_context: **anyopaque,
     id: u32,
     result: CoroutineResult,
 
-    fn init(scheduler: *Scheduler, id: u32, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
+    pub fn init(id: u32, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
         if (!is_supported) return error.UnsupportedPlatform;
 
         const Args = @TypeOf(args);
@@ -113,7 +113,7 @@ pub const Coroutine = struct {
                 }
 
                 coro.state = .dead;
-                ContextSwitcher.swap(&coro.context, &coro.scheduler.main_context);
+                ContextSwitcher.swap(&coro.context, coro.parent_context);
                 unreachable;
             }
         }.entry;
@@ -126,96 +126,22 @@ pub const Coroutine = struct {
             .context = @ptrFromInt(stack_ptr),
             .stack = stack,
             .state = .ready,
-            .scheduler = scheduler,
+            .parent_context = undefined, // Will be set when switchTo is called
             .id = id,
             .result = .pending,
         };
     }
 
-    pub fn switchTo(self: *Coroutine) void {
+    pub fn switchTo(self: *Coroutine, parent_context: **anyopaque) void {
         const old_coro = current_coroutine;
         current_coroutine = self;
         defer current_coroutine = old_coro;
 
-        ContextSwitcher.swap(&self.scheduler.main_context, &self.context);
+        self.parent_context = parent_context;
+        ContextSwitcher.swap(parent_context, &self.context);
     }
 };
 
-pub const Scheduler = struct {
-    coroutines: [MAX_COROUTINES]Coroutine,
-    current: i32,
-    count: u32,
-    main_context: *anyopaque,
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator) Scheduler {
-        return Scheduler{
-            .coroutines = undefined,
-            .current = -1,
-            .count = 0,
-            .main_context = undefined,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *Scheduler) void {
-        for (0..self.count) |i| {
-            self.allocator.free(self.coroutines[i].stack);
-        }
-    }
-
-    pub fn spawn(self: *Scheduler, comptime func: anytype, args: anytype) !u32 {
-        if (self.count >= MAX_COROUTINES) {
-            return error.TooManyCoroutines;
-        }
-
-        const id = self.count;
-        const stack = try self.allocator.alignedAlloc(u8, stack_alignment, STACK_SIZE);
-
-        self.coroutines[id] = try Coroutine.init(self, id, stack, func, args);
-        self.count += 1;
-
-        return id;
-    }
-
-    pub fn runOnce(self: *Scheduler) bool {
-        // Find next ready coroutine
-        var next: i32 = -1;
-        for (0..self.count) |i| {
-            if (self.coroutines[i].state == .ready) {
-                next = @intCast(i);
-                break;
-            }
-        }
-
-        if (next == -1) return false; // No ready coroutines
-
-        self.current = next;
-        self.coroutines[@intCast(next)].state = .running;
-        self.coroutines[@intCast(next)].switchTo();
-
-        return true;
-    }
-
-    pub fn run(self: *Scheduler) void {
-        self.current = -1;
-
-        while (true) {
-            if (!self.runOnce()) break;
-        }
-
-        for (0..self.count) |i| {
-            self.allocator.free(self.coroutines[i].stack);
-        }
-        self.count = 0;
-    }
-
-    pub fn yieldCurrent(self: *Scheduler) void {
-        if (self.current == -1) return;
-        // Don't change state - let the coroutine decide its own state before yielding
-        yield();
-    }
-};
 
 // Platform-specific context switching implementations
 const Unsupported = struct {
