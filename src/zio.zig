@@ -33,7 +33,6 @@ const TimerData = struct {
 pub const Runtime = struct {
     loop: *c.uv_loop_t,
     coroutines: [MAX_COROUTINES]Coroutine,
-    current: i32,
     count: u32,
     main_context: *anyopaque,
     allocator: Allocator,
@@ -52,7 +51,6 @@ pub const Runtime = struct {
         return Runtime{
             .loop = loop,
             .coroutines = undefined,
-            .current = -1,
             .count = 0,
             .main_context = undefined,
             .allocator = allocator,
@@ -82,29 +80,11 @@ pub const Runtime = struct {
     }
 
     pub fn yield(self: *Runtime) void {
-        if (self.current == -1) return;
+        _ = self; // Runtime parameter not needed, but kept for API consistency
         // Don't change state - let the coroutine decide its own state before yielding
         coroutines.yield();
     }
 
-    fn runOnce(self: *Runtime) bool {
-        // Find next ready coroutine
-        var next: i32 = -1;
-        for (0..self.count) |i| {
-            if (self.coroutines[i].state == .ready) {
-                next = @intCast(i);
-                break;
-            }
-        }
-
-        if (next == -1) return false; // No ready coroutines
-
-        self.current = next;
-        self.coroutines[@intCast(next)].state = .running;
-        self.coroutines[@intCast(next)].switchTo(&self.main_context);
-
-        return true;
-    }
 
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
         const current = coroutines.getCurrentCoroutine() orelse return ZioError.NotInCoroutine;
@@ -141,20 +121,32 @@ pub const Runtime = struct {
     }
 
     pub fn run(self: *Runtime) void {
-        self.current = -1;
-
         while (true) {
-            // Run all ready coroutines until none are ready
-            while (self.runOnce()) {}
+            var all_dead = false;
 
-            // Check if all coroutines are dead
-            var all_dead = true;
-            for (0..self.count) |i| {
-                if (self.coroutines[i].state != .dead) {
-                    all_dead = false;
-                    break;
+            // Run all ready coroutines until none are ready
+            while (true) {
+                var found_ready = false;
+                all_dead = true;
+
+                // Find next ready coroutine and check if all are dead in single pass
+                for (0..self.count) |i| {
+                    const state = self.coroutines[i].state;
+
+                    if (state != .dead) {
+                        all_dead = false;
+                    }
+
+                    if (state == .ready and !found_ready) {
+                        self.coroutines[i].state = .running;
+                        self.coroutines[i].switchTo(&self.main_context);
+                        found_ready = true;
+                    }
                 }
+
+                if (all_dead or !found_ready) break;
             }
+
             if (all_dead) break;
 
             // Wait for I/O events to make coroutines ready again
