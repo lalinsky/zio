@@ -30,13 +30,13 @@ const TimerData = struct {
 };
 
 // Generic callback generator for any handle type
-fn markReady(comptime T: type, comptime HandleType: type, comptime field_name: []const u8) fn([*c]HandleType) callconv(.c) void {
+fn markReadyOnCallback(comptime T: type, comptime HandleType: type, comptime field_name: []const u8) fn ([*c]HandleType) callconv(.c) void {
     const FieldType = @TypeOf(@field(@as(T, undefined), field_name));
     return struct {
         fn callback(handle: [*c]HandleType) callconv(.c) void {
             const typed_handle: *FieldType = @ptrCast(@alignCast(handle));
             const data: *T = @ptrCast(@as(*allowzero T, @fieldParentPtr(field_name, typed_handle)));
-            data.coroutine.state = .ready;
+            data.runtime.markReady(data.coroutine);
         }
     }.callback;
 }
@@ -44,10 +44,18 @@ fn markReady(comptime T: type, comptime HandleType: type, comptime field_name: [
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
     loop: *c.uv_loop_t,
-    coroutines: [MAX_COROUTINES]Coroutine,
     count: u32,
     main_context: *anyopaque,
     allocator: Allocator,
+
+    coroutines: std.AutoHashMapUnmanaged(u64, *CoroNode) = .{},
+
+    ready_queue: CoroList = .{},
+    cleanup_queue: CoroList = .{},
+
+    const Coro = Coroutine;
+    const CoroList = std.DoublyLinkedList(Coro);
+    const CoroNode = CoroList.Node;
 
     pub fn init(allocator: Allocator) !Runtime {
         // Initialize libuv loop
@@ -70,9 +78,13 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
-        for (0..self.count) |i| {
-            self.allocator.free(self.coroutines[i].stack);
+        var iter = self.coroutines.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*.data.stack);
+            self.allocator.destroy(entry.value_ptr.*);
         }
+        self.coroutines.deinit(self.allocator);
+
         _ = c.uv_loop_close(self.loop);
         self.allocator.destroy(self.loop);
     }
@@ -83,20 +95,32 @@ pub const Runtime = struct {
         }
 
         const id = self.count;
-        const stack = try self.allocator.alignedAlloc(u8, coroutines.stack_alignment, STACK_SIZE);
-
-        self.coroutines[id] = try Coroutine.init(id, stack, func, args);
         self.count += 1;
+
+        const entry = try self.coroutines.getOrPut(self.allocator, id);
+        if (entry.found_existing) {
+            std.debug.panic("Coroutine ID {} already exists", .{id});
+        }
+        errdefer self.coroutines.removeByPtr(entry.key_ptr);
+
+        var coro = try self.allocator.create(CoroNode);
+        errdefer self.allocator.destroy(coro);
+
+        const stack = try self.allocator.alignedAlloc(u8, coroutines.stack_alignment, STACK_SIZE);
+        errdefer self.allocator.free(stack);
+
+        coro.data = try Coroutine.init(id, stack, func, args);
+        entry.value_ptr.* = coro;
+
+        self.ready_queue.append(coro);
 
         return id;
     }
 
     pub fn yield(self: *Runtime) void {
-        _ = self; // Runtime parameter not needed, but kept for API consistency
-        // Don't change state - let the coroutine decide its own state before yielding
+        _ = self;
         coroutines.yield();
     }
-
 
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
         const current = coroutines.getCurrentCoroutine() orelse return ZioError.NotInCoroutine;
@@ -109,8 +133,8 @@ pub const Runtime = struct {
         };
 
         // Both callbacks use the same generic pattern with explicit types
-        const timer_cb = markReady(TimerData, c.uv_timer_t, "timer");
-        const close_cb = markReady(TimerData, c.uv_handle_t, "timer");
+        const timer_cb = markReadyOnCallback(TimerData, c.uv_timer_t, "timer");
+        const close_cb = markReadyOnCallback(TimerData, c.uv_handle_t, "timer");
 
         const result = c.uv_timer_init(self.loop, &timer_data.timer);
         if (result != 0) {
@@ -134,34 +158,48 @@ pub const Runtime = struct {
         // Timer fired, defer will handle cleanup
     }
 
+    pub fn markReady(self: *Runtime, coro: *Coroutine) void {
+        if (coro.state == .ready) return;
+        coro.state = .ready;
+        const node: *CoroNode = @fieldParentPtr("data", coro);
+        self.ready_queue.append(node);
+    }
+
     pub fn run(self: *Runtime) void {
         while (true) {
-            var all_dead = false;
+            var reschedule: CoroList = .{};
 
-            // Run all ready coroutines until none are ready
-            while (true) {
-                var found_ready = false;
-                all_dead = true;
-
-                // Find next ready coroutine and check if all are dead in single pass
-                for (0..self.count) |i| {
-                    const state = self.coroutines[i].state;
-
-                    if (state != .dead) {
-                        all_dead = false;
-                    }
-
-                    if (state == .ready and !found_ready) {
-                        self.coroutines[i].state = .running;
-                        self.coroutines[i].switchTo(&self.main_context);
-                        found_ready = true;
-                    }
-                }
-
-                if (all_dead or !found_ready) break;
+            // Cleanup dead coroutines
+            while (self.cleanup_queue.pop()) |coro| {
+                _ = self.coroutines.remove(coro.data.id);
+                self.allocator.free(coro.data.stack);
+                self.allocator.destroy(coro);
             }
 
-            if (all_dead) break;
+            // Process all ready coroutines (once)
+            while (self.ready_queue.pop()) |coro| {
+                coro.data.state = .running;
+                coro.data.switchTo(&self.main_context);
+
+                // If the coroutines just yielded, it will end up in running state, so mark it as ready
+                if (coro.data.state == .running) {
+                    coro.data.state = .ready;
+                }
+
+                switch (coro.data.state) {
+                    .ready => reschedule.append(coro),
+                    .dead => self.cleanup_queue.append(coro),
+                    else => {},
+                }
+            }
+
+            // Re-add coroutines that we previously ready
+            self.ready_queue.concatByMoving(&reschedule);
+
+            // If we have no active coroutines, exit
+            if (self.coroutines.size == 0) {
+                break;
+            }
 
             // Wait for I/O events to make coroutines ready again
             _ = c.uv_run(self.loop, c.UV_RUN_ONCE);
@@ -174,18 +212,7 @@ pub const Runtime = struct {
     }
 
     pub fn getResult(self: *Runtime, id: u32) ?coroutines.CoroutineResult {
-        if (id >= self.count) return null;
-        return self.coroutines[id].result;
-    }
-
-    pub fn getAllResults(self: *Runtime) []coroutines.CoroutineResult {
-        var results: [MAX_COROUTINES]coroutines.CoroutineResult = undefined;
-        for (0..self.count) |i| {
-            results[i] = self.coroutines[i].result;
-        }
-        return results[0..self.count];
+        const value = self.coroutines.get(id) orelse return null;
+        return value.data.result;
     }
 };
-
-
-

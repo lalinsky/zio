@@ -42,16 +42,16 @@ pub fn yield() void {
 const MAX_COROUTINES = 32;
 const STACK_SIZE = 8192;
 
-pub const CoroutineState = enum {
-    ready,
-    running,
-    waiting,
-    dead,
+pub const CoroutineState = enum(u8) {
+    ready = 0,
+    running = 1,
+    waiting = 2,
+    dead = 3,
 };
 
 pub const CoroutineResult = union(enum) {
-    pending: void,    // Coroutine hasn't finished yet
-    success: void,    // Coroutine completed successfully
+    pending: void, // Coroutine hasn't finished yet
+    success: void, // Coroutine completed successfully
     failure: anyerror, // Coroutine failed with this error
 };
 
@@ -60,10 +60,10 @@ pub const Coroutine = struct {
     stack: Stack,
     state: CoroutineState,
     parent_context: **anyopaque,
-    id: u32,
+    id: u64,
     result: CoroutineResult,
 
-    pub fn init(id: u32, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
+    pub fn init(id: u64, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
         if (!is_supported) return error.UnsupportedPlatform;
 
         const Args = @TypeOf(args);
@@ -148,7 +148,6 @@ pub const Coroutine = struct {
         yield();
     }
 };
-
 
 // Platform-specific context switching implementations
 const Unsupported = struct {
