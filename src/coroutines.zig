@@ -4,15 +4,6 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-const is_supported = switch (builtin.cpu.arch) {
-    .x86_64 => true,
-    .aarch64 => true,
-    else => false,
-};
-
-pub const stack_alignment = 16;
-pub const Stack = []align(stack_alignment) u8;
-
 pub const Error = error{
     StackTooSmall,
     UnsupportedPlatform,
@@ -21,16 +12,15 @@ pub const Error = error{
 
 threadlocal var current_coroutine: ?*Coroutine = null;
 
-pub fn getCurrent() ?*Coroutine {
+pub inline fn getCurrent() ?*Coroutine {
     return current_coroutine;
 }
 
-pub fn yield() void {
+pub inline fn yield() void {
     const coro = current_coroutine orelse unreachable;
     switchContext(&coro.context, coro.parent_context_ptr);
 }
 
-const MAX_COROUTINES = 32;
 const STACK_SIZE = 8192;
 
 pub const CoroutineState = enum(u8) {
@@ -46,6 +36,10 @@ pub const CoroutineResult = union(enum) {
     failure: anyerror, // Coroutine failed with this error
 };
 
+pub const stack_alignment = 16;
+pub const Stack = []align(stack_alignment) u8;
+pub const StackPtr = [*]align(stack_alignment) u8;
+
 pub const Context = switch (builtin.cpu.arch) {
     .x86_64 => extern struct {
         rsp: u64,
@@ -60,15 +54,17 @@ pub const Context = switch (builtin.cpu.arch) {
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
-pub fn initContext(stack_ptr: usize, entry_point: anytype) Context {
+pub const EntryPointFn = fn () callconv(.naked) noreturn;
+
+pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Context {
     return switch (builtin.cpu.arch) {
         .x86_64 => .{
-            .rsp = stack_ptr,
+            .rsp = @intFromPtr(stack_ptr),
             .rbp = 0,
             .rip = @intFromPtr(entry_point),
         },
         .aarch64 => .{
-            .sp = stack_ptr,
+            .sp = @intFromPtr(stack_ptr),
             .fp = 0,
             .pc = @intFromPtr(entry_point),
         },
@@ -128,6 +124,35 @@ pub fn switchContext(
     }
 }
 
+/// Entry point for coroutines that reads function pointer and args from stack.
+///
+/// Expected stack layout for both x86_64 and arm64:
+///   rsp/sp + 0 = closure_ptr     (function pointer)
+///   rsp/sp + 8 = closure_ptr + 8 (args data)
+///
+/// x86_64 handles stack alignment here since we use JMP instead of CALL:
+/// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
+/// - CALL would push 8-byte return address, so we push 0 to simulate this
+/// - If the function unexpectedly returns, it will crash on null address (defensive)
+///
+/// ARM64 stores return address in x30 register (not stack), so we set x30=0 for safety
+fn coroEntry() callconv(.naked) noreturn {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ pushq $0
+            \\ leaq 16(%%rsp), %%rdi
+            \\ jmpq *8(%%rsp)
+        ),
+        .aarch64 => asm volatile (
+            \\ mov x30, #0
+            \\ add x0, sp, #8
+            \\ ldr x2, [sp]
+            \\ br x2
+        ),
+        else => @compileError("unsupported architecture"),
+    }
+}
+
 pub const Coroutine = struct {
     context: Context,
     parent_context_ptr: *Context,
@@ -137,15 +162,13 @@ pub const Coroutine = struct {
     id: u64,
 
     pub fn init(id: u64, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
-        if (!is_supported) return error.UnsupportedPlatform;
-
         const Args = @TypeOf(args);
         const stack_base = @intFromPtr(stack.ptr);
-        const stack_end = @intFromPtr(stack.ptr + stack.len);
+        const stack_end = @intFromPtr(stack.ptr) + stack.len;
 
-        // Create entry point first so we can use its type and address
-        const entry_point = struct {
-            fn entry(args_location: *align(1) Args) callconv(.c) noreturn {
+        // Wrapper for handling the life-cycle of a coroutine
+        const wrapperFn = struct {
+            fn wrapper(args_location: *align(1) Args) callconv(.c) noreturn {
                 const coro = current_coroutine orelse unreachable;
                 coro.state = .running;
 
@@ -168,24 +191,31 @@ pub const Coroutine = struct {
                 switchContext(&coro.context, coro.parent_context_ptr);
                 unreachable;
             }
-        }.entry;
+        }.wrapper;
+
+        const Closure = struct {
+            func: @TypeOf(&wrapperFn) align(1),
+            args: Args align(1),
+        };
+
+        // Double-check that we have the layout that fiberEntry expects
+        comptime {
+            std.debug.assert(@offsetOf(Closure, "func") == 0);
+            std.debug.assert(@offsetOf(Closure, "args") == 8);
+            std.debug.assert(@sizeOf(Closure) == 8 + @sizeOf(Args));
+        }
 
         // Store function pointer and args as a contiguous block at the end of stack
-        const closure_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(@TypeOf(&entry_point)) - @sizeOf(Args), stack_alignment);
+        const closure_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(Closure), stack_alignment);
         if (closure_ptr < stack_base) return error.StackTooSmall;
 
         // Set up function pointer and args
-        const func_ptr: *align(stack_alignment) @TypeOf(&entry_point) = @ptrFromInt(closure_ptr);
-        const args_ptr: *align(1) Args = @ptrFromInt(closure_ptr + @sizeOf(@TypeOf(&entry_point)));
-
-        func_ptr.* = &entry_point;
-        args_ptr.* = args;
-
-        // The initial stack pointer points to the function pointer
-        const initial_stack_ptr = closure_ptr;
+        const closure: *align(stack_alignment) Closure = @ptrFromInt(closure_ptr);
+        closure.func = &wrapperFn;
+        closure.args = args;
 
         return Coroutine{
-            .context = initContext(initial_stack_ptr, &fiberEntry),
+            .context = initContext(@ptrCast(closure), &coroEntry),
             .stack = stack,
             .state = .ready,
             .parent_context_ptr = undefined, // Will be set when switchTo is called
@@ -208,33 +238,3 @@ pub const Coroutine = struct {
         yield();
     }
 };
-
-/// Entry point for coroutines that reads function pointer and args from stack.
-///
-/// Stack layout after initContext:
-/// Both architectures: rsp/sp = closure_ptr
-///   rsp/sp + 0 = closure_ptr     (function pointer)
-///   rsp/sp + 8 = closure_ptr + 8 (args data)
-///
-/// x86_64 handles stack alignment here since we use JMP instead of CALL:
-/// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
-/// - CALL would push 8-byte return address, so we push 0 to simulate this
-/// - If the function unexpectedly returns, it will crash on null address (defensive)
-///
-/// ARM64 stores return address in x30 register (not stack), so we set x30=0 for safety
-fn fiberEntry() callconv(.naked) noreturn {
-    switch (builtin.cpu.arch) {
-        .x86_64 => asm volatile (
-            \\ pushq $0
-            \\ leaq 16(%%rsp), %%rdi
-            \\ jmpq *8(%%rsp)
-        ),
-        .aarch64 => asm volatile (
-            \\ mov x30, #0
-            \\ add x0, sp, #8
-            \\ ldr x2, [sp]
-            \\ br x2
-        ),
-        else => @compileError("unsupported architecture"),
-    }
-}
