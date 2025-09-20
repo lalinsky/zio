@@ -163,9 +163,8 @@ pub const Coroutine = struct {
     stack: Stack,
     state: CoroutineState,
     result: CoroutineResult,
-    id: u64,
 
-    pub fn init(allocator: std.mem.Allocator, id: u64, comptime func: anytype, args: anytype, options: CoroutineOptions) !Coroutine {
+    pub fn init(allocator: std.mem.Allocator, comptime func: anytype, args: anytype, options: CoroutineOptions) !Coroutine {
         const Args = @TypeOf(args);
 
         // Wrapper for handling the life-cycle of a coroutine
@@ -229,7 +228,6 @@ pub const Coroutine = struct {
             .stack = stack,
             .state = .ready,
             .parent_context_ptr = undefined, // Will be set when switchTo is called
-            .id = id,
             .result = .pending,
         };
     }
