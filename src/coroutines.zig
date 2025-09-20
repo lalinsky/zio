@@ -4,22 +4,13 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-const ContextSwitcher = switch (builtin.cpu.arch) {
-    .x86_64 => switch (builtin.os.tag) {
-        .windows => Intel_Microsoft,
-        else => Intel_SysV,
-    },
-    .aarch64 => Arm_64,
-    else => Unsupported,
-};
-
 const is_supported = switch (builtin.cpu.arch) {
     .x86_64 => true,
     .aarch64 => true,
     else => false,
 };
 
-pub const stack_alignment = ContextSwitcher.alignment;
+pub const stack_alignment = 16;
 pub const Stack = []align(stack_alignment) u8;
 
 pub const Error = error{
@@ -36,7 +27,7 @@ pub fn getCurrentCoroutine() ?*Coroutine {
 
 pub fn yield() void {
     const coro = current_coroutine orelse unreachable;
-    ContextSwitcher.swap(&coro.context, coro.parent_context);
+    swapContext(&coro.context, coro.parent_context);
 }
 
 const MAX_COROUTINES = 32;
@@ -55,11 +46,100 @@ pub const CoroutineResult = union(enum) {
     failure: anyerror, // Coroutine failed with this error
 };
 
+pub const Context = switch (builtin.cpu.arch) {
+    .x86_64 => extern struct {
+        rsp: u64,
+        rbp: u64,
+        rip: u64,
+    },
+    .aarch64 => extern struct {
+        sp: u64,
+        fp: u64,
+        pc: u64,
+    },
+    else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
+};
+
+pub fn initContext(stack_ptr: usize, entry_point: *const fn () callconv(.withStackAlign(.c, 16)) noreturn) Context {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => .{
+            // x86_64 System V ABI requires 16-byte alignment before CALL instruction.
+            // Since we use JMP (not CALL), we must simulate the post-CALL state:
+            // CALL would push 8-byte return address, so we subtract 8 to simulate this.
+            // The function never returns, so we don't need an actual return address.
+            .rsp = stack_ptr - 8,
+            .rbp = 0,
+            .rip = @intFromPtr(entry_point),
+        },
+        .aarch64 => .{
+            // ARM64 AAPCS: Stack must always remain 16-byte aligned.
+            // Unlike x86_64, ARM64 stores return address in x30 register (not stack),
+            // so no stack adjustment is needed to simulate post-call state.
+            .sp = stack_ptr,
+            .fp = 0,
+            .pc = @intFromPtr(entry_point),
+        },
+        else => @compileError("unsupported architecture"),
+    };
+}
+
+/// Context switching function using C calling convention.
+///
+/// This function follows C ABI, which means:
+/// - Caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11, xmm0-xmm15 on x86_64;
+///   x0-x18, x30, v0-v7, v16-v31 on ARM64) can be freely modified
+/// - Callee-saved registers must be preserved OR marked as clobbered
+///
+/// Since we're doing a context switch, all callee-saved registers will have
+/// different values when we "return" (jump to new context), so we mark them
+/// as clobbered to inform the compiler they cannot be relied upon.
+pub fn swapContext(
+    noalias current_context: *Context,
+    noalias new_context: *Context,
+) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ leaq 0f(%%rip), %%rdx
+            \\ movq %%rsp, 0(%%rax)
+            \\ movq %%rbp, 8(%%rax)
+            \\ movq %%rdx, 16(%%rax)
+            \\ movq 0(%%rcx), %%rsp
+            \\ movq 8(%%rcx), %%rbp
+            \\ jmpq *16(%%rcx)
+            \\0:
+            :
+            : [current] "{rax}" (current_context),
+              [new] "{rcx}" (new_context)
+            : "rbx", "r12", "r13", "r14", "r15", "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23", "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31", "memory"
+        ),
+        .aarch64 => asm volatile (
+            \\ adr x9, 0f
+            \\ str x9, [x0, #16]
+            \\ mov x9, sp
+            \\ str x9, [x0, #0]
+            \\ mov x9, fp
+            \\ str x9, [x0, #8]
+            \\ ldr x9, [x1, #0]
+            \\ mov sp, x9
+            \\ ldr x9, [x1, #8]
+            \\ mov fp, x9
+            \\ ldr x9, [x1, #16]
+            \\ br x9
+            \\0:
+            :
+            : [current] "{x0}" (current_context),
+              [new] "{x1}" (new_context)
+            : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "memory"
+        ),
+        else => @compileError("unsupported architecture"),
+    }
+}
+
 pub const Coroutine = struct {
-    context: *anyopaque,
+    context: Context,
     stack: Stack,
     state: CoroutineState,
-    parent_context: **anyopaque,
+    parent_context: *Context,
     id: u64,
     result: CoroutineResult,
 
@@ -71,21 +151,18 @@ pub const Coroutine = struct {
         const stack_end = @intFromPtr(stack.ptr + stack.len);
 
         // Store args at the end of the stack
-        var stack_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(Args), stack_alignment);
+        const stack_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(Args), stack_alignment);
         if (stack_ptr < stack_base) return error.StackTooSmall;
 
         // Store the arguments at this location
         const args_ptr: *align(1) Args = @ptrFromInt(stack_ptr);
         args_ptr.* = args;
 
-        // Reserve space for the context switching data
-        stack_ptr = std.mem.alignBackward(usize, stack_ptr - @sizeOf(usize) * ContextSwitcher.word_count, stack_alignment);
-        assert(std.mem.isAligned(stack_ptr, stack_alignment));
-        if (stack_ptr < stack_base) return error.StackTooSmall;
+        // No need to reserve stack space for context - it's stored in the Coroutine struct
 
-        // Create entry point using the zefi pattern
+        // Create entry point - no args needed, we'll look them up
         const entry_point = struct {
-            fn entry() callconv(.c) noreturn {
+            fn entry() callconv(.withStackAlign(.c, 16)) noreturn {
                 const coro = current_coroutine orelse unreachable;
                 // Calculate args location from the stack boundaries
                 const coro_stack_end = @intFromPtr(coro.stack.ptr) + coro.stack.len;
@@ -115,17 +192,13 @@ pub const Coroutine = struct {
                 coro.state = .dead;
                 const parent = coro.parent_context;
                 coro.parent_context = undefined;
-                ContextSwitcher.swap(&coro.context, parent);
+                swapContext(&coro.context, parent);
                 unreachable;
             }
         }.entry;
 
-        // Set up the entry point in the context
-        var entry: [*]*const fn () callconv(.c) noreturn = @ptrFromInt(stack_ptr);
-        entry[ContextSwitcher.entry_offset] = entry_point;
-
         return Coroutine{
-            .context = @ptrFromInt(stack_ptr),
+            .context = initContext(stack_ptr, &entry_point),
             .stack = stack,
             .state = .ready,
             .parent_context = undefined, // Will be set when switchTo is called
@@ -134,13 +207,13 @@ pub const Coroutine = struct {
         };
     }
 
-    pub fn switchTo(self: *Coroutine, parent_context: **anyopaque) void {
+    pub fn switchTo(self: *Coroutine, parent_context: *Context) void {
         const old_coro = current_coroutine;
         current_coroutine = self;
         defer current_coroutine = old_coro;
 
         self.parent_context = parent_context;
-        ContextSwitcher.swap(parent_context, &self.context);
+        swapContext(parent_context, &self.context);
     }
 
     pub fn waitForReady(self: *Coroutine) void {
@@ -149,177 +222,17 @@ pub const Coroutine = struct {
     }
 };
 
-// Platform-specific context switching implementations
-const Unsupported = struct {
-    pub const alignment = 16;
-    pub const word_count = 0;
-    pub const entry_offset = 0;
-
-    pub fn swap(
-        noalias _: **anyopaque,
-        noalias _: **anyopaque,
-    ) void {
-        @panic("unsupported platform");
+fn fiberEntry() callconv(.naked) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ leaq 8(%%rsp), %%rdi
+            \\ jmpq *(%%rsp)
+        ),
+        .aarch64 => asm volatile (
+            \\ mov x0, sp
+            \\ ldr x2, [sp, #-8]
+            \\ br x2
+        ),
+        else => @compileError("unsupported architecture"),
     }
-};
-
-const Intel_SysV = struct {
-    pub const word_count = 7;
-    pub const entry_offset = word_count - 1;
-    pub const alignment = 16;
-    pub const swap = zefi_stack_swap;
-
-    extern fn zefi_stack_swap(
-        noalias current_context_ptr: **anyopaque,
-        noalias new_context_ptr: **anyopaque,
-    ) void;
-
-    comptime {
-        asm (assembly);
-    }
-
-    const assembly =
-        \\.global zefi_stack_swap
-        \\zefi_stack_swap:
-        \\  pushq %rbx
-        \\  pushq %rbp
-        \\  pushq %r12
-        \\  pushq %r13
-        \\  pushq %r14
-        \\  pushq %r15
-        \\
-        \\  movq %rsp, (%rdi)
-        \\  movq (%rsi), %rsp
-        \\
-        \\  popq %r15
-        \\  popq %r14
-        \\  popq %r13
-        \\  popq %r12
-        \\  popq %rbp
-        \\  popq %rbx
-        \\
-        \\  retq
-    ;
-};
-
-const Intel_Microsoft = struct {
-    pub const word_count = 31;
-    pub const entry_offset = word_count - 1;
-    pub const alignment = 16;
-    pub const swap = zefi_stack_swap;
-
-    extern fn zefi_stack_swap(
-        noalias current_context_ptr: **anyopaque,
-        noalias new_context_ptr: **anyopaque,
-    ) void;
-
-    comptime {
-        asm (assembly);
-    }
-
-    const assembly =
-        \\.global zefi_stack_swap
-        \\zefi_stack_swap:
-        \\  pushq %gs:0x10
-        \\  pushq %gs:0x08
-        \\
-        \\  pushq %rbx
-        \\  pushq %rbp
-        \\  pushq %rdi
-        \\  pushq %rsi
-        \\  pushq %r12
-        \\  pushq %r13
-        \\  pushq %r14
-        \\  pushq %r15
-        \\
-        \\  subq $160, %rsp
-        \\  movups %xmm6, 0x00(%rsp)
-        \\  movups %xmm7, 0x10(%rsp)
-        \\  movups %xmm8, 0x20(%rsp)
-        \\  movups %xmm9, 0x30(%rsp)
-        \\  movups %xmm10, 0x40(%rsp)
-        \\  movups %xmm11, 0x50(%rsp)
-        \\  movups %xmm12, 0x60(%rsp)
-        \\  movups %xmm13, 0x70(%rsp)
-        \\  movups %xmm14, 0x80(%rsp)
-        \\  movups %xmm15, 0x90(%rsp)
-        \\
-        \\  movq %rsp, (%rcx)
-        \\  movq (%rdx), %rsp
-        \\
-        \\  movups 0x00(%rsp), %xmm6
-        \\  movups 0x10(%rsp), %xmm7
-        \\  movups 0x20(%rsp), %xmm8
-        \\  movups 0x30(%rsp), %xmm9
-        \\  movups 0x40(%rsp), %xmm10
-        \\  movups 0x50(%rsp), %xmm11
-        \\  movups 0x60(%rsp), %xmm12
-        \\  movups 0x70(%rsp), %xmm13
-        \\  movups 0x80(%rsp), %xmm14
-        \\  movups 0x90(%rsp), %xmm15
-        \\  addq $160, %rsp
-        \\
-        \\  popq %r15
-        \\  popq %r14
-        \\  popq %r13
-        \\  popq %r12
-        \\  popq %rsi
-        \\  popq %rdi
-        \\  popq %rbp
-        \\  popq %rbx
-        \\
-        \\  popq %gs:0x08
-        \\  popq %gs:0x10
-        \\
-        \\  retq
-    ;
-};
-
-const Arm_64 = struct {
-    pub const word_count = 20;
-    pub const entry_offset = 0;
-    pub const alignment = 16;
-    pub const swap = zefi_stack_swap;
-
-    extern fn zefi_stack_swap(
-        noalias current_context_ptr: **anyopaque,
-        noalias new_context_ptr: **anyopaque,
-    ) void;
-
-    comptime {
-        asm (assembly);
-    }
-
-    const assembly =
-        \\.global zefi_stack_swap
-        \\zefi_stack_swap:
-        \\  stp lr, fp, [sp, #-20*8]!
-        \\  stp d8, d9, [sp, #2*8]
-        \\  stp d10, d11, [sp, #4*8]
-        \\  stp d12, d13, [sp, #6*8]
-        \\  stp d14, d15, [sp, #8*8]
-        \\  stp x19, x20, [sp, #10*8]
-        \\  stp x21, x22, [sp, #12*8]
-        \\  stp x23, x24, [sp, #14*8]
-        \\  stp x25, x26, [sp, #16*8]
-        \\  stp x27, x28, [sp, #18*8]
-        \\
-        \\  mov x9, sp
-        \\  str x9, [x0]
-        \\  ldr x9, [x1]
-        \\  mov sp, x9
-        \\
-        \\  ldp x27, x28, [sp, #18*8]
-        \\  ldp x25, x26, [sp, #16*8]
-        \\  ldp x23, x24, [sp, #14*8]
-        \\  ldp x21, x22, [sp, #12*8]
-        \\  ldp x19, x20, [sp, #10*8]
-        \\  ldp d14, d15, [sp, #8*8]
-        \\  ldp d12, d13, [sp, #6*8]
-        \\  ldp d10, d11, [sp, #4*8]
-        \\  ldp d8, d9, [sp, #2*8]
-        \\  ldp lr, fp, [sp], #20*8
-        \\
-        \\  ret
-    ;
-};
+}

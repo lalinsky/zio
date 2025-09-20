@@ -45,7 +45,7 @@ fn markReadyOnCallback(comptime T: type, comptime HandleType: type, comptime fie
 pub const Runtime = struct {
     loop: *c.uv_loop_t,
     count: u32,
-    main_context: *anyopaque,
+    main_context: coroutines.Context,
     allocator: Allocator,
 
     coroutines: std.AutoHashMapUnmanaged(u64, *CoroNode) = .{},
