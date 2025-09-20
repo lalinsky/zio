@@ -56,6 +56,13 @@ fn quickTask(runtime: *zio.Runtime, id: u32) void {
     print("Quick task {}: Done\n", .{id});
 }
 
+pub fn spawnAndWait(runtime: *zio.Runtime) !void {
+    const t1 = try runtime.spawn(task1, .{runtime}, .{});
+    print("waiting on task t1\n", .{});
+    runtime.wait(t1);
+    print("done task t1\n", .{});
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -84,6 +91,7 @@ pub fn main() !void {
         _ = try runtime.spawn(quickTask, .{ &runtime, @as(u32, @intCast(i)) }, .{});
     }
 
+    _ = try runtime.spawn(spawnAndWait, .{&runtime}, .{});
     // Run the event loop
     runtime.run();
 
