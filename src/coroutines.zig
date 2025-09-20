@@ -8,6 +8,7 @@ pub const Error = error{
     StackTooSmall,
     UnsupportedPlatform,
     TooManyCoroutines,
+    CoroutinePending,
 };
 
 threadlocal var current_coroutine: ?*Coroutine = null;
@@ -30,11 +31,59 @@ pub const CoroutineState = enum(u8) {
     dead = 3,
 };
 
-pub const CoroutineResult = union(enum) {
+pub const AnyCoroutineResult = union(enum) {
     pending: void, // Coroutine hasn't finished yet
-    success: void, // Coroutine completed successfully
+    success: *anyopaque, // Pointer to coroutine result
     failure: anyerror, // Coroutine failed with this error
 };
+
+pub fn CoroutineResult(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        any_result: *AnyCoroutineResult,
+
+        pub fn get(self: Self) T {
+            switch (self.any_result.*) {
+                .pending => {
+                    const type_info = @typeInfo(T);
+                    if (type_info == .error_union) {
+                        return error.CoroutinePending;
+                    } else {
+                        @panic("Coroutine is still pending");
+                    }
+                },
+                .success => |ptr| {
+                    if (T == void) {
+                        return {};
+                    } else {
+                        const type_info = @typeInfo(T);
+                        if (type_info == .error_union) {
+                            // For error unions, we stored only the payload, so return it directly
+                            const payload_type = type_info.error_union.payload;
+                            if (payload_type == void) {
+                                return {};
+                            } else {
+                                const typed_ptr: *payload_type = @ptrCast(@alignCast(ptr));
+                                return typed_ptr.*;
+                            }
+                        } else {
+                            const typed_ptr: *T = @ptrCast(@alignCast(ptr));
+                            return typed_ptr.*;
+                        }
+                    }
+                },
+                .failure => |err| {
+                    const type_info = @typeInfo(T);
+                    if (type_info == .error_union) {
+                        return err;
+                    } else {
+                        @panic("Coroutine failed but result type cannot represent errors");
+                    }
+                },
+            }
+        }
+    };
+}
 
 pub const stack_alignment = 16;
 pub const Stack = []align(stack_alignment) u8;
@@ -124,11 +173,14 @@ pub fn switchContext(
     }
 }
 
-/// Entry point for coroutines that reads function pointer and args from stack.
+/// Entry point for coroutines that reads function pointer from stack and passes data pointer.
 ///
-/// Expected stack layout for both x86_64 and arm64:
-///   rsp/sp + 0 = closure_ptr     (function pointer)
-///   rsp/sp + 8 = closure_ptr + 8 (args data)
+/// Expected stack layout for all platforms.
+///   rsp/sp + 0 = CoroutineData.func     (function pointer)
+///   rsp/sp + 8 = CoroutineData.args     (args data)
+///   rsp/sp + ... = CoroutineData.result (result storage)
+///
+/// The function is called with a pointer to the entire CoroutineData structure.
 ///
 /// x86_64 handles stack alignment here since we use JMP instead of CALL:
 /// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
@@ -140,12 +192,12 @@ fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => asm volatile (
             \\ pushq $0
-            \\ leaq 16(%%rsp), %%rdi
+            \\ leaq 8(%%rsp), %%rdi
             \\ jmpq *8(%%rsp)
         ),
         .aarch64 => asm volatile (
             \\ mov x30, #0
-            \\ add x0, sp, #8
+            \\ mov x0, sp
             \\ ldr x2, [sp]
             \\ br x2
         ),
@@ -162,52 +214,57 @@ pub const Coroutine = struct {
     parent_context_ptr: *Context,
     stack: Stack,
     state: CoroutineState,
-    result: CoroutineResult,
+    result: AnyCoroutineResult,
 
     pub fn init(allocator: std.mem.Allocator, comptime func: anytype, args: anytype, options: CoroutineOptions) !Coroutine {
         const Args = @TypeOf(args);
+        const ReturnType = @TypeOf(@call(.auto, func, args));
 
-        // Wrapper for handling the life-cycle of a coroutine
-        const wrapperFn = struct {
-            fn wrapper(args_location: *align(1) Args) callconv(.c) noreturn {
+        // For error unions, store only the payload type
+        const StoredReturnType = switch (@typeInfo(ReturnType)) {
+            .error_union => |info| info.payload,
+            else => ReturnType,
+        };
+
+        const CoroutineData = struct {
+            func: *const fn (*anyopaque) callconv(.c) noreturn,
+            args: Args,
+            result: StoredReturnType,
+
+            fn wrapper(self_ptr: *anyopaque) callconv(.c) noreturn {
+                const self: *@This() = @ptrCast(@alignCast(self_ptr));
                 const coro = current_coroutine orelse unreachable;
                 coro.state = .running;
 
                 // Handle both void and error union return types
-                const ReturnType = @TypeOf(@call(.auto, func, args_location.*));
                 const return_info = @typeInfo(ReturnType);
                 if (return_info == .error_union) {
-                    if (@call(.auto, func, args_location.*)) |_| {
-                        coro.result = .success;
+                    if (@call(.auto, func, self.args)) |result| {
+                        self.result = result;
+                        coro.result = .{ .success = &self.result };
                     } else |err| {
                         coro.result = .{ .failure = err };
                     }
                 } else {
-                    // Non-void, non-error return type - just call and mark success
-                    _ = @call(.auto, func, args_location.*);
-                    coro.result = .success;
+                    // Non-void, non-error return type - call and store result
+                    if (ReturnType == void) {
+                        @call(.auto, func, self.args);
+                        // For void, we still need to point to something valid
+                        coro.result = .{ .success = &self.result };
+                    } else {
+                        self.result = @call(.auto, func, self.args);
+                        coro.result = .{ .success = &self.result };
+                    }
                 }
 
                 coro.state = .dead;
                 switchContext(&coro.context, coro.parent_context_ptr);
                 unreachable;
             }
-        }.wrapper;
-
-        const Closure = struct {
-            func: @TypeOf(&wrapperFn) align(1),
-            args: Args align(1),
         };
 
-        // Double-check that we have the layout that fiberEntry expects
-        comptime {
-            std.debug.assert(@offsetOf(Closure, "func") == 0);
-            std.debug.assert(@offsetOf(Closure, "args") == 8);
-            std.debug.assert(@sizeOf(Closure) == 8 + @sizeOf(Args));
-        }
-
         // Allocate stack
-        const stack_size = std.mem.alignForward(usize, options.stack_size + @sizeOf(Closure), stack_alignment);
+        const stack_size = std.mem.alignForward(usize, options.stack_size + @sizeOf(CoroutineData), stack_alignment);
         const stack = try allocator.alignedAlloc(u8, stack_alignment, stack_size);
         errdefer allocator.free(stack);
 
@@ -215,16 +272,16 @@ pub const Coroutine = struct {
         const stack_base = @intFromPtr(stack.ptr);
         const stack_end = stack_base + stack.len;
 
-        // Store function pointer and args as a contiguous block at the end of stack
-        const closure_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(Closure), stack_alignment);
+        // Store function pointer, args, and result space as a contiguous block at the end of stack
+        const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
 
         // Set up function pointer and args
-        const closure: *align(stack_alignment) Closure = @ptrFromInt(closure_ptr);
-        closure.func = &wrapperFn;
-        closure.args = args;
+        const data: *CoroutineData = @ptrFromInt(data_ptr);
+        data.func = &CoroutineData.wrapper;
+        data.args = args;
 
         return Coroutine{
-            .context = initContext(@ptrCast(closure), &coroEntry),
+            .context = initContext(@ptrCast(data), &coroEntry),
             .stack = stack,
             .state = .ready,
             .parent_context_ptr = undefined, // Will be set when switchTo is called
@@ -248,5 +305,9 @@ pub const Coroutine = struct {
     pub fn waitForReady(self: *Coroutine) void {
         self.state = .waiting;
         yield();
+    }
+
+    pub fn getResult(self: *Coroutine, comptime T: type) CoroutineResult(T) {
+        return CoroutineResult(T){ .any_result = &self.result };
     }
 };

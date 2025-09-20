@@ -218,9 +218,9 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn getResult(self: *Runtime, id: u64) ?coroutines.CoroutineResult {
+    pub fn getResult(self: *Runtime, comptime T: type, id: u64) ?coroutines.CoroutineResult(T) {
         const task = self.tasks.get(id) orelse return null;
-        return task.data.coro.result;
+        return task.data.coro.getResult(T);
     }
 
     inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTaskList.Node {
