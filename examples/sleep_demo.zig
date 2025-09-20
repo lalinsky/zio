@@ -75,13 +75,13 @@ pub fn main() !void {
     start_time = getTimestamp();
 
     // Spawn various coroutines with different sleep patterns
-    _ = try runtime.spawn(task1, .{&runtime});
-    _ = try runtime.spawn(task2, .{ &runtime, "Worker-A", @as(u64, 800) });
-    _ = try runtime.spawn(task2, .{ &runtime, "Worker-B", @as(u64, 600) });
+    _ = try runtime.spawn(task1, .{&runtime}, .{});
+    _ = try runtime.spawn(task2, .{ &runtime, "Worker-A", @as(u64, 800) }, .{});
+    _ = try runtime.spawn(task2, .{ &runtime, "Worker-B", @as(u64, 600) }, .{});
 
     // Spawn several quick tasks
     for (1..4) |i| {
-        _ = try runtime.spawn(quickTask, .{ &runtime, @as(u32, @intCast(i)) });
+        _ = try runtime.spawn(quickTask, .{ &runtime, @as(u32, @intCast(i)) }, .{});
     }
 
     // Run the event loop

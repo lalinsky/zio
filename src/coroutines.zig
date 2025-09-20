@@ -21,7 +21,7 @@ pub inline fn yield() void {
     switchContext(&coro.context, coro.parent_context_ptr);
 }
 
-const STACK_SIZE = 8192;
+const DEFAULT_STACK_SIZE = 64 * 1024;
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
@@ -153,6 +153,10 @@ fn coroEntry() callconv(.naked) noreturn {
     }
 }
 
+pub const CoroutineOptions = struct {
+    stack_size: usize = DEFAULT_STACK_SIZE,
+};
+
 pub const Coroutine = struct {
     context: Context,
     parent_context_ptr: *Context,
@@ -161,10 +165,8 @@ pub const Coroutine = struct {
     result: CoroutineResult,
     id: u64,
 
-    pub fn init(id: u64, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
+    pub fn init(allocator: std.mem.Allocator, id: u64, comptime func: anytype, args: anytype, options: CoroutineOptions) !Coroutine {
         const Args = @TypeOf(args);
-        const stack_base = @intFromPtr(stack.ptr);
-        const stack_end = @intFromPtr(stack.ptr) + stack.len;
 
         // Wrapper for handling the life-cycle of a coroutine
         const wrapperFn = struct {
@@ -205,9 +207,17 @@ pub const Coroutine = struct {
             std.debug.assert(@sizeOf(Closure) == 8 + @sizeOf(Args));
         }
 
+        // Allocate stack
+        const stack_size = std.mem.alignForward(usize, options.stack_size + @sizeOf(Closure), stack_alignment);
+        const stack = try allocator.alignedAlloc(u8, stack_alignment, stack_size);
+        errdefer allocator.free(stack);
+
+        // Convert the stack pointer to ints for calculations
+        const stack_base = @intFromPtr(stack.ptr);
+        const stack_end = stack_base + stack.len;
+
         // Store function pointer and args as a contiguous block at the end of stack
         const closure_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(Closure), stack_alignment);
-        if (closure_ptr < stack_base) return error.StackTooSmall;
 
         // Set up function pointer and args
         const closure: *align(stack_alignment) Closure = @ptrFromInt(closure_ptr);
@@ -222,6 +232,10 @@ pub const Coroutine = struct {
             .id = id,
             .result = .pending,
         };
+    }
+
+    pub fn deinit(self: *Coroutine, allocator: std.mem.Allocator) void {
+        allocator.free(self.stack);
     }
 
     pub fn switchTo(self: *Coroutine, parent_context_ptr: *Context) void {

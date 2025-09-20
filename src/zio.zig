@@ -11,6 +11,7 @@ const c = @cImport({
 pub const coroutines = @import("coroutines.zig");
 pub const Coroutine = coroutines.Coroutine;
 pub const CoroutineState = coroutines.CoroutineState;
+pub const CoroutineOptions = coroutines.CoroutineOptions;
 pub const Error = coroutines.Error;
 
 const MAX_COROUTINES = 32;
@@ -28,6 +29,46 @@ const TimerData = struct {
     coroutine: *Coroutine,
     runtime: *Runtime,
 };
+
+pub fn CoroList(comptime next_field_name: []const u8) type {
+    return struct {
+        len: usize = 0,
+        head: ?*CoroNode = null,
+        tail: ?*CoroNode = null,
+
+        pub fn push(self: *Self, node: *CoroNode) void {
+            @field(node, next_field_name) = null;
+            if (self.head == null) {
+                self.head = node;
+            } else {
+                @field(self.tail.?, next_field_name) = node;
+            }
+            self.tail = node;
+            self.len += 1;
+        }
+    };
+}
+
+pub const CoroNode = struct {
+    coro: Coroutine,
+    next_ready: *CoroNode,
+    next_waiting: *CoroNode,
+};
+
+pub fn Task(comptime ResultType: type) type {
+    return struct {
+        const Self = @This();
+
+        id: u64,
+        coro: Coroutine,
+        next_waiting: ?*Self = null,
+
+        pub fn wait(self: *Self) !ResultType {
+            const current_coro = coroutines.getCurrent() orelse error.NotInCoroutine;
+            const current_task: *Self = @fieldParentPtr("coro", current_coro);
+        }
+    };
+}
 
 // Generic callback generator for any handle type
 fn markReadyOnCallback(comptime T: type, comptime HandleType: type, comptime field_name: []const u8) fn ([*c]HandleType) callconv(.c) void {
@@ -89,7 +130,7 @@ pub const Runtime = struct {
         self.allocator.destroy(self.loop);
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype) !u32 {
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !u32 {
         if (self.count >= MAX_COROUTINES) {
             return error.TooManyCoroutines;
         }
@@ -106,10 +147,9 @@ pub const Runtime = struct {
         var coro = try self.allocator.create(CoroNode);
         errdefer self.allocator.destroy(coro);
 
-        const stack = try self.allocator.alignedAlloc(u8, coroutines.stack_alignment, STACK_SIZE);
-        errdefer self.allocator.free(stack);
+        coro.data = try Coroutine.init(self.allocator, id, func, args, options);
+        errdefer coro.data.deinit(self.allocator);
 
-        coro.data = try Coroutine.init(id, stack, func, args);
         entry.value_ptr.* = coro;
 
         self.ready_queue.append(coro);

@@ -50,10 +50,10 @@ pub fn main() !void {
     print("=== ZIO Error Handling Demo ===\n\n", .{});
 
     // Spawn different types of coroutines
-    const id1 = try runtime.spawn(voidTask, .{ &runtime, "VoidTask" });
-    const id2 = try runtime.spawn(errorTask, .{ &runtime, "SuccessTask", false });
-    const id3 = try runtime.spawn(errorTask, .{ &runtime, "FailTask", true });
-    const id4 = try runtime.spawn(intTask, .{ &runtime, "IntTask", @as(i32, 42) });
+    const id1 = try runtime.spawn(voidTask, .{ &runtime, "VoidTask" }, .{});
+    const id2 = try runtime.spawn(errorTask, .{ &runtime, "SuccessTask", false }, .{});
+    const id3 = try runtime.spawn(errorTask, .{ &runtime, "FailTask", true }, .{});
+    const id4 = try runtime.spawn(intTask, .{ &runtime, "IntTask", @as(i32, 42) }, .{});
 
     print("Spawned {} coroutines\n\n", .{4});
 
