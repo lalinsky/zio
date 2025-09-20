@@ -123,7 +123,7 @@ pub const Runtime = struct {
     }
 
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
-        const current = coroutines.getCurrentCoroutine() orelse return ZioError.NotInCoroutine;
+        const current = coroutines.getCurrent() orelse return ZioError.NotInCoroutine;
 
         // Stack allocate timer data
         var timer_data = TimerData{

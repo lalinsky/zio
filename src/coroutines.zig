@@ -21,13 +21,13 @@ pub const Error = error{
 
 threadlocal var current_coroutine: ?*Coroutine = null;
 
-pub fn getCurrentCoroutine() ?*Coroutine {
+pub fn getCurrent() ?*Coroutine {
     return current_coroutine;
 }
 
 pub fn yield() void {
     const coro = current_coroutine orelse unreachable;
-    swapContext(&coro.context, coro.parent_context);
+    switchContext(&coro.context, coro.parent_context_ptr);
 }
 
 const MAX_COROUTINES = 32;
@@ -86,7 +86,7 @@ pub fn initContext(stack_ptr: usize, entry_point: anytype) Context {
 /// Since we're doing a context switch, all callee-saved registers will have
 /// different values when we "return" (jump to new context), so we mark them
 /// as clobbered to inform the compiler they cannot be relied upon.
-pub fn swapContext(
+pub fn switchContext(
     noalias current_context: *Context,
     noalias new_context: *Context,
 ) void {
@@ -102,7 +102,7 @@ pub fn swapContext(
             \\0:
             :
             : [current] "{rax}" (current_context),
-              [new] "{rcx}" (new_context)
+              [new] "{rcx}" (new_context),
             : "rbx", "r12", "r13", "r14", "r15", "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23", "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31", "memory"
         ),
         .aarch64 => asm volatile (
@@ -121,7 +121,7 @@ pub fn swapContext(
             \\0:
             :
             : [current] "{x0}" (current_context),
-              [new] "{x1}" (new_context)
+              [new] "{x1}" (new_context),
             : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "memory"
         ),
         else => @compileError("unsupported architecture"),
@@ -130,11 +130,11 @@ pub fn swapContext(
 
 pub const Coroutine = struct {
     context: Context,
+    parent_context_ptr: *Context,
     stack: Stack,
     state: CoroutineState,
-    parent_context: *Context,
-    id: u64,
     result: CoroutineResult,
+    id: u64,
 
     pub fn init(id: u64, stack: Stack, comptime func: anytype, args: anytype) Error!Coroutine {
         if (!is_supported) return error.UnsupportedPlatform;
@@ -145,34 +145,27 @@ pub const Coroutine = struct {
 
         // Create entry point first so we can use its type and address
         const entry_point = struct {
-            fn entry(args_location: *align(1) Args) callconv(.withStackAlign(.c, 16)) noreturn {
+            fn entry(args_location: *align(1) Args) callconv(.c) noreturn {
                 const coro = current_coroutine orelse unreachable;
+                coro.state = .running;
 
                 // Handle both void and error union return types
                 const ReturnType = @TypeOf(@call(.auto, func, args_location.*));
-
-                if (ReturnType == void) {
-                    @call(.auto, func, args_location.*);
-                    coro.result = .success;
-                } else {
-                    const return_info = @typeInfo(ReturnType);
-                    if (return_info == .error_union) {
-                        if (@call(.auto, func, args_location.*)) |_| {
-                            coro.result = .success;
-                        } else |err| {
-                            coro.result = .{ .failure = err };
-                        }
-                    } else {
-                        // Non-void, non-error return type - just call and mark success
-                        _ = @call(.auto, func, args_location.*);
+                const return_info = @typeInfo(ReturnType);
+                if (return_info == .error_union) {
+                    if (@call(.auto, func, args_location.*)) |_| {
                         coro.result = .success;
+                    } else |err| {
+                        coro.result = .{ .failure = err };
                     }
+                } else {
+                    // Non-void, non-error return type - just call and mark success
+                    _ = @call(.auto, func, args_location.*);
+                    coro.result = .success;
                 }
 
                 coro.state = .dead;
-                const parent = coro.parent_context;
-                coro.parent_context = undefined;
-                swapContext(&coro.context, parent);
+                switchContext(&coro.context, coro.parent_context_ptr);
                 unreachable;
             }
         }.entry;
@@ -182,7 +175,7 @@ pub const Coroutine = struct {
         if (closure_ptr < stack_base) return error.StackTooSmall;
 
         // Set up function pointer and args
-        const func_ptr: *@TypeOf(&entry_point) = @ptrFromInt(closure_ptr);
+        const func_ptr: *align(stack_alignment) @TypeOf(&entry_point) = @ptrFromInt(closure_ptr);
         const args_ptr: *align(1) Args = @ptrFromInt(closure_ptr + @sizeOf(@TypeOf(&entry_point)));
 
         func_ptr.* = &entry_point;
@@ -195,19 +188,19 @@ pub const Coroutine = struct {
             .context = initContext(initial_stack_ptr, &fiberEntry),
             .stack = stack,
             .state = .ready,
-            .parent_context = undefined, // Will be set when switchTo is called
+            .parent_context_ptr = undefined, // Will be set when switchTo is called
             .id = id,
             .result = .pending,
         };
     }
 
-    pub fn switchTo(self: *Coroutine, parent_context: *Context) void {
+    pub fn switchTo(self: *Coroutine, parent_context_ptr: *Context) void {
         const old_coro = current_coroutine;
         current_coroutine = self;
         defer current_coroutine = old_coro;
 
-        self.parent_context = parent_context;
-        swapContext(parent_context, &self.context);
+        self.parent_context_ptr = parent_context_ptr;
+        switchContext(parent_context_ptr, &self.context);
     }
 
     pub fn waitForReady(self: *Coroutine) void {
