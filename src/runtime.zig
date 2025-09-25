@@ -12,6 +12,7 @@ const Coroutine = coroutines.Coroutine;
 const CoroutineState = coroutines.CoroutineState;
 const CoroutineOptions = coroutines.CoroutineOptions;
 const Error = coroutines.Error;
+const RefCounter = @import("ref_counter.zig").RefCounter;
 
 const MAX_COROUTINES = 32;
 const STACK_SIZE = 8192;
@@ -46,7 +47,50 @@ pub const AnyTask = struct {
     id: u64,
     coro: Coroutine,
     waiting_list: AnyTaskList = .{},
+    ref_count: RefCounter(u32) = RefCounter(u32).init(),
 };
+
+// Typed task wrapper that provides type-safe wait() method
+pub fn Task(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        task: *AnyTaskList.Node,
+        runtime: *Runtime,
+
+        pub fn init(task: *AnyTaskList.Node, runtime: *Runtime) Self {
+            // Increment reference count when creating a Task(T) handle
+            task.data.ref_count.incr();
+            return Self{
+                .task = task,
+                .runtime = runtime,
+            };
+        }
+
+        pub fn deinit(self: Self) void {
+            // Decrement reference count for this Task(T) handle
+            if (self.task.data.ref_count.decr()) {
+                // Reference count reached zero, destroy the task
+                self.task.data.coro.deinit(self.runtime.allocator);
+                self.runtime.allocator.destroy(self.task);
+            }
+        }
+
+        pub fn wait(self: Self) T {
+            // Use the task directly to check if already completed
+            if (self.task.data.coro.result != .pending) {
+                const result = self.task.data.coro.getResult(T);
+                return result.get();
+            }
+
+            // Use runtime's wait method for the waiting logic
+            self.runtime.wait(self.task.data.id);
+
+            const result = self.task.data.coro.getResult(T);
+            return result.get();
+        }
+    };
+}
 
 // Linked list of tasks
 pub const AnyTaskList = std.DoublyLinkedList(AnyTask);
@@ -94,7 +138,9 @@ pub const Runtime = struct {
         self.allocator.destroy(self.loop);
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !u64 {
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(@TypeOf(@call(.auto, func, args))) {
+        const T = @TypeOf(@call(.auto, func, args));
+
         if (self.count >= MAX_COROUTINES) {
             return error.TooManyCoroutines;
         }
@@ -123,7 +169,7 @@ pub const Runtime = struct {
 
         self.ready_queue.append(task);
 
-        return task.data.id;
+        return Task(T).init(task, self);
     }
 
     pub fn yield(self: *Runtime) void {
@@ -174,8 +220,13 @@ pub const Runtime = struct {
             // Cleanup dead coroutines
             while (self.cleanup_queue.pop()) |task| {
                 _ = self.tasks.remove(task.data.id);
-                task.data.coro.deinit(self.allocator);
-                self.allocator.destroy(task);
+                // Runtime releases its reference when removing from hashmap
+                if (task.data.ref_count.decr()) {
+                    // No more references, safe to deallocate
+                    task.data.coro.deinit(self.allocator);
+                    self.allocator.destroy(task);
+                }
+                // If ref_count > 0, Task(T) handles still exist, keep the task alive
             }
 
             // Process all ready coroutines (once)

@@ -58,8 +58,9 @@ fn quickTask(runtime: *zio.Runtime, id: u32) void {
 
 pub fn spawnAndWait(runtime: *zio.Runtime) !void {
     const t1 = try runtime.spawn(task1, .{runtime}, .{});
+    defer t1.deinit();
     print("waiting on task t1\n", .{});
-    runtime.wait(t1);
+    t1.wait();
     print("done task t1\n", .{});
 }
 
@@ -82,16 +83,24 @@ pub fn main() !void {
     start_time = getTimestamp();
 
     // Spawn various coroutines with different sleep patterns
-    _ = try runtime.spawn(task1, .{&runtime}, .{});
-    _ = try runtime.spawn(task2, .{ &runtime, "Worker-A", @as(u64, 800) }, .{});
-    _ = try runtime.spawn(task2, .{ &runtime, "Worker-B", @as(u64, 600) }, .{});
+    const task1_handle = try runtime.spawn(task1, .{&runtime}, .{});
+    defer task1_handle.deinit();
+
+    const workerA_handle = try runtime.spawn(task2, .{ &runtime, "Worker-A", @as(u64, 800) }, .{});
+    defer workerA_handle.deinit();
+
+    const workerB_handle = try runtime.spawn(task2, .{ &runtime, "Worker-B", @as(u64, 600) }, .{});
+    defer workerB_handle.deinit();
 
     // Spawn several quick tasks
+    var quick_tasks: [3]@TypeOf(try runtime.spawn(quickTask, .{ &runtime, @as(u32, 1) }, .{})) = undefined;
     for (1..4) |i| {
-        _ = try runtime.spawn(quickTask, .{ &runtime, @as(u32, @intCast(i)) }, .{});
+        quick_tasks[i-1] = try runtime.spawn(quickTask, .{ &runtime, @as(u32, @intCast(i)) }, .{});
     }
+    defer for (quick_tasks) |task| task.deinit();
 
-    _ = try runtime.spawn(spawnAndWait, .{&runtime}, .{});
+    const spawnAndWait_handle = try runtime.spawn(spawnAndWait, .{&runtime}, .{});
+    defer spawnAndWait_handle.deinit();
     // Run the event loop
     runtime.run();
 

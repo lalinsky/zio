@@ -50,10 +50,14 @@ pub fn main() !void {
     print("=== ZIO Error Handling Demo ===\n\n", .{});
 
     // Spawn different types of coroutines
-    const id1 = try runtime.spawn(voidTask, .{ &runtime, "VoidTask" }, .{});
-    const id2 = try runtime.spawn(errorTask, .{ &runtime, "SuccessTask", false }, .{});
-    const id3 = try runtime.spawn(errorTask, .{ &runtime, "FailTask", true }, .{});
-    const id4 = try runtime.spawn(intTask, .{ &runtime, "IntTask", @as(i32, 42) }, .{});
+    const task1 = try runtime.spawn(voidTask, .{ &runtime, "VoidTask" }, .{});
+    defer task1.deinit();
+    const task2 = try runtime.spawn(errorTask, .{ &runtime, "SuccessTask", false }, .{});
+    defer task2.deinit();
+    const task3 = try runtime.spawn(errorTask, .{ &runtime, "FailTask", true }, .{});
+    defer task3.deinit();
+    const task4 = try runtime.spawn(intTask, .{ &runtime, "IntTask", @as(i32, 42) }, .{});
+    defer task4.deinit();
 
     print("Spawned {} coroutines\n\n", .{4});
 
@@ -62,38 +66,40 @@ pub fn main() !void {
 
     print("\n=== Results ===\n", .{});
 
-    // Check individual results
-    if (runtime.getResult(id1)) |result| {
-        switch (result) {
-            .pending => print("Task {}: Still pending\n", .{id1}),
-            .success => print("Task {}: Success\n", .{id1}),
-            .failure => |err| print("Task {}: Failed with {}\n", .{ id1, err }),
-        }
-    }
+    // Wait for results using the typed wait() method
+    print("Task {}: ", .{task1.task.data.id});
+    task1.wait(); // void return
+    print("Success (void)\n", .{});
 
-    if (runtime.getResult(id2)) |result| {
-        switch (result) {
-            .pending => print("Task {}: Still pending\n", .{id2}),
-            .success => print("Task {}: Success\n", .{id2}),
-            .failure => |err| print("Task {}: Failed with {}\n", .{ id2, err }),
-        }
-    }
+    print("Task {}: ", .{task2.task.data.id});
+    task2.wait() catch |err| {
+        print("Failed with {}\n", .{err});
+        // Jump to next task since this one failed
+        print("Task {}: ", .{task3.task.data.id});
+        task3.wait() catch |err3| {
+            print("Failed with {}\n", .{err3});
+        };
 
-    if (runtime.getResult(id3)) |result| {
-        switch (result) {
-            .pending => print("Task {}: Still pending\n", .{id3}),
-            .success => print("Task {}: Success\n", .{id3}),
-            .failure => |err| print("Task {}: Failed with {}\n", .{ id3, err }),
-        }
-    }
+        print("Task {}: ", .{task4.task.data.id});
+        const result = task4.wait();
+        print("Success, returned: {}\n", .{result});
+        return;
+    };
+    print("Success (!void)\n", .{});
 
-    if (runtime.getResult(id4)) |result| {
-        switch (result) {
-            .pending => print("Task {}: Still pending\n", .{id4}),
-            .success => print("Task {}: Success\n", .{id4}),
-            .failure => |err| print("Task {}: Failed with {}\n", .{ id4, err }),
-        }
-    }
+    print("Task {}: ", .{task3.task.data.id});
+    task3.wait() catch |err| {
+        print("Failed with {}\n", .{err});
+        // Continue to next task since this one failed as expected
+        print("Task {}: ", .{task4.task.data.id});
+        const result = task4.wait();
+        print("Success, returned: {}\n", .{result});
+        return;
+    };
+
+    print("Task {}: ", .{task4.task.data.id});
+    const result = task4.wait();
+    print("Success, returned: {}\n", .{result});
 
     print("\nAll coroutines completed!\n", .{});
 }

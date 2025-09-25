@@ -45,12 +45,7 @@ pub fn CoroutineResult(comptime T: type) type {
         pub fn get(self: Self) T {
             switch (self.any_result.*) {
                 .pending => {
-                    const type_info = @typeInfo(T);
-                    if (type_info == .error_union) {
-                        return error.CoroutinePending;
-                    } else {
-                        @panic("Coroutine is still pending");
-                    }
+                    @panic("Coroutine is still pending");
                 },
                 .success => |ptr| {
                     if (T == void) {
@@ -75,7 +70,7 @@ pub fn CoroutineResult(comptime T: type) type {
                 .failure => |err| {
                     const type_info = @typeInfo(T);
                     if (type_info == .error_union) {
-                        return err;
+                        return @errorCast(err);
                     } else {
                         @panic("Coroutine failed but result type cannot represent errors");
                     }
@@ -281,7 +276,7 @@ pub const Coroutine = struct {
         data.args = args;
 
         return Coroutine{
-            .context = initContext(@ptrCast(data), &coroEntry),
+            .context = initContext(@ptrCast(@alignCast(data)), &coroEntry),
             .stack = stack,
             .state = .ready,
             .parent_context_ptr = undefined, // Will be set when switchTo is called

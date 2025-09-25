@@ -53,6 +53,20 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(error_demo);
 
+    // Create task demo executable
+    const task_demo = b.addExecutable(.{
+        .name = "zio-task-demo",
+        .root_source_file = b.path("examples/task_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    task_demo.root_module.addImport("zio", zio);
+    task_demo.linkSystemLibrary("uv");
+    task_demo.linkLibC();
+
+    b.installArtifact(task_demo);
+
     // Create run step for example
     const run_example = b.addRunArtifact(example);
     run_example.step.dependOn(b.getInstallStep());
@@ -72,6 +86,16 @@ pub fn build(b: *std.Build) void {
 
     const run_error_step = b.step("run-error", "Run the error handling demo");
     run_error_step.dependOn(&run_error_demo.step);
+
+    // Create run step for task demo
+    const run_task_demo = b.addRunArtifact(task_demo);
+    run_task_demo.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_task_demo.addArgs(args);
+    }
+
+    const run_task_step = b.step("run-task", "Run the Task(T) demo");
+    run_task_step.dependOn(&run_task_demo.step);
 
     // Tests
     const lib_unit_tests = b.addTest(.{
