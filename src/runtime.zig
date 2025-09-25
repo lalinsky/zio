@@ -23,26 +23,27 @@ pub const ZioError = error{
 
 // Timer callback data
 const TimerData = struct {
+    timer: xev.Timer,
+    completion: xev.Completion,
     coroutine: *Coroutine,
     runtime: *Runtime,
 };
 
 // Timer callback for libxev
 fn timerCallback(
-    userdata: ?*anyopaque,
+    userdata: ?*TimerData,
     loop: *xev.Loop,
     completion: *xev.Completion,
-    result: xev.Result,
+    result: xev.Timer.RunError!void,
 ) xev.CallbackAction {
     _ = loop;
     _ = completion;
-    _ = result.timer catch {
+    _ = result catch {
         // Timer error - still wake up the coroutine
     };
 
     if (userdata) |data| {
-        const timer_data: *TimerData = @ptrCast(@alignCast(data));
-        timer_data.runtime.markReady(timer_data.coroutine);
+        data.runtime.markReady(data.coroutine);
     }
     return .disarm;
 }
@@ -179,15 +180,19 @@ pub const Runtime = struct {
 
         // Stack allocate timer data - safe because coroutine stack is stable
         var timer_data = TimerData{
+            .timer = xev.Timer.init() catch unreachable, // Can't fail in non-dynamic mode
+            .completion = .{},
             .coroutine = current,
             .runtime = self,
         };
-        var completion: xev.Completion = .{};
+        defer timer_data.timer.deinit();
 
-        // Start the timer directly on the loop
-        self.loop.timer(
-            &completion,
+        // Start the timer
+        timer_data.timer.run(
+            &self.loop,
+            &timer_data.completion,
             milliseconds,
+            TimerData,
             &timer_data,
             timerCallback,
         );
