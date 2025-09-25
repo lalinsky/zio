@@ -28,6 +28,9 @@ pub fn build(b: *std.Build) void {
     // Examples configuration
     const examples = [_]struct { name: []const u8, file: []const u8, step: []const u8, desc: []const u8 }{
         .{ .name = "zio-example", .file = "examples/sleep_demo.zig", .step = "run", .desc = "Run the sleep demo" },
+        .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig", .step = "run-server", .desc = "Run the TCP echo server" },
+        .{ .name = "tcp-client", .file = "examples/tcp_client.zig", .step = "run-client", .desc = "Run the TCP client demo" },
+        .{ .name = "udp-echo", .file = "examples/udp_echo.zig", .step = "run-udp", .desc = "Run the UDP echo demo" },
     };
 
     // Create executables and run steps

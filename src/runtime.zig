@@ -100,15 +100,22 @@ pub fn Task(comptime T: type) type {
             return coro_result.get();
         }
 
-        pub fn result(self: Self) !T {
+        pub fn result(self: Self) T {
             const coro_result = self.task.data.coro.result;
             switch (coro_result) {
-                .pending => @panic("Task has not completed yet"),
-                .value => {
+                .pending => std.debug.panic("Task has not completed yet", .{}),
+                .success => {
                     const typed_result = self.task.data.coro.getResult(T);
                     return typed_result.get();
                 },
-                .err => |err| return err,
+                .failure => |err| {
+                    const type_info = @typeInfo(T);
+                    if (type_info == .error_union) {
+                        return @as(T, @errorCast(err));
+                    } else {
+                        std.debug.panic("Task failed with error: {}", .{err});
+                    }
+                },
             }
         }
     };
