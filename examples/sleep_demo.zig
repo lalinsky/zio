@@ -13,18 +13,12 @@ fn task1(rt: *zio.Runtime) void {
     const elapsed = getTimestamp() - start_time;
     print("[{}ms] Task 1: Starting\n", .{elapsed});
 
-    rt.sleep(1000) catch |err| {
-        print("Task 1: Sleep error: {}\n", .{err});
-        return;
-    };
+    rt.sleep(1000);
 
     const elapsed2 = getTimestamp() - start_time;
     print("[{}ms] Task 1: After 1 second sleep\n", .{elapsed2});
 
-    rt.sleep(500) catch |err| {
-        print("Task 1: Sleep error: {}\n", .{err});
-        return;
-    };
+    rt.sleep(500);
 
     const elapsed3 = getTimestamp() - start_time;
     print("[{}ms] Task 1: Finished\n", .{elapsed3});
@@ -36,10 +30,7 @@ fn task2(rt: *zio.Runtime, name: []const u8, sleep_ms: u64) void {
     for (0..3) |i| {
         print("{s}: Iteration {}\n", .{ name, i });
 
-        rt.sleep(sleep_ms) catch |err| {
-            print("{s}: Sleep error: {}\n", .{ name, err });
-            return;
-        };
+        rt.sleep(sleep_ms);
     }
 
     print("{s}: Finished\n", .{name});
@@ -48,10 +39,7 @@ fn task2(rt: *zio.Runtime, name: []const u8, sleep_ms: u64) void {
 fn quickTask(rt: *zio.Runtime, id: u32) void {
     print("Quick task {}: Running\n", .{id});
 
-    rt.sleep(200) catch |err| {
-        print("Quick task {}: Sleep error: {}\n", .{ id, err });
-        return;
-    };
+    rt.sleep(200);
 
     print("Quick task {}: Done\n", .{id});
 }

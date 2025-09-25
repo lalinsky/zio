@@ -28,8 +28,6 @@ pub fn build(b: *std.Build) void {
     // Examples configuration
     const examples = [_]struct { name: []const u8, file: []const u8, step: []const u8, desc: []const u8 }{
         .{ .name = "zio-example", .file = "examples/sleep_demo.zig", .step = "run", .desc = "Run the sleep demo" },
-        .{ .name = "zio-error-demo", .file = "examples/error_demo.zig", .step = "run-error", .desc = "Run the error handling demo" },
-        .{ .name = "zio-task-demo", .file = "examples/task_demo.zig", .step = "run-task", .desc = "Run the Task(T) demo" },
     };
 
     // Create executables and run steps

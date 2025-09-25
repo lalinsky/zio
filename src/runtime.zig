@@ -16,12 +16,16 @@ const MAX_COROUTINES = 32;
 const STACK_SIZE = 8192;
 
 // Waker interface for asynchronous operations
-pub const Waker = struct {
+pub const Waiter = struct {
     runtime: *Runtime,
     coroutine: *Coroutine,
 
-    pub fn wake(self: Waker) void {
+    pub fn markReady(self: Waiter) void {
         self.runtime.markReady(self.coroutine);
+    }
+
+    pub fn waitForReady(self: Waiter) void {
+        self.coroutine.waitForReady();
     }
 };
 
@@ -32,20 +36,18 @@ pub const ZioError = error{
 } || Error;
 
 // Timer callback for libxev
-fn timerCallback(
-    userdata: ?*Waker,
+fn markReadyFromXevCallback(
+    userdata: ?*Waiter,
     loop: *xev.Loop,
     completion: *xev.Completion,
-    result: xev.Timer.RunError!void,
+    result: anyerror!void,
 ) xev.CallbackAction {
     _ = loop;
     _ = completion;
-    _ = result catch {
-        // Timer error - still wake up the coroutine
-    };
+    _ = result catch {};
 
     if (userdata) |waker| {
-        waker.wake();
+        waker.markReady();
     }
     return .disarm;
 }
@@ -87,15 +89,27 @@ pub fn Task(comptime T: type) type {
         pub fn wait(self: Self) T {
             // Use the task directly to check if already completed
             if (self.task.data.coro.result != .pending) {
-                const result = self.task.data.coro.getResult(T);
-                return result.get();
+                const coro_result = self.task.data.coro.getResult(T);
+                return coro_result.get();
             }
 
             // Use runtime's wait method for the waiting logic
             self.runtime.wait(self.task.data.id);
 
-            const result = self.task.data.coro.getResult(T);
-            return result.get();
+            const coro_result = self.task.data.coro.getResult(T);
+            return coro_result.get();
+        }
+
+        pub fn result(self: Self) !T {
+            const coro_result = self.task.data.coro.result;
+            switch (coro_result) {
+                .pending => @panic("Task has not completed yet"),
+                .value => {
+                    const typed_result = self.task.data.coro.getResult(T);
+                    return typed_result.get();
+                },
+                .err => |err| return err,
+            }
         }
     };
 }
@@ -177,35 +191,33 @@ pub const Runtime = struct {
         coroutines.yield();
     }
 
-    pub fn getWaker(self: *Runtime) Waker {
+    pub fn getWaiter(self: *Runtime) Waiter {
         const current = coroutines.getCurrent() orelse std.debug.panic("getWaker() must be called from within a coroutine", .{});
-        return Waker{
+        return Waiter{
             .runtime = self,
             .coroutine = current,
         };
     }
 
-    pub fn sleep(self: *Runtime, milliseconds: u64) !void {
-        const current = coroutines.getCurrent() orelse return ZioError.NotInCoroutine;
+    pub fn sleep(self: *Runtime, milliseconds: u64) void {
+        var waiter = self.getWaiter();
 
-        // Stack allocate - safe because coroutine stack is stable
-        var timer = xev.Timer.init() catch unreachable; // Can't fail in non-dynamic mode
+        var timer = xev.Timer.init() catch unreachable;
         defer timer.deinit();
-        var completion: xev.Completion = .{};
-        var waker = self.getWaker();
 
         // Start the timer
+        var completion: xev.Completion = undefined;
         timer.run(
             &self.loop,
             &completion,
             milliseconds,
-            Waker,
-            &waker,
-            timerCallback,
+            Waiter,
+            &waiter,
+            markReadyFromXevCallback,
         );
 
         // Wait for timer to fire
-        current.waitForReady();
+        waiter.waitForReady();
     }
 
     pub fn run(self: *Runtime) !void {
@@ -251,15 +263,13 @@ pub const Runtime = struct {
 
             // If we have no active coroutines, exit
             if (self.tasks.size == 0) {
+                self.loop.stop();
                 break;
             }
 
             // Wait for I/O events to make coroutines ready again
             try self.loop.run(.once);
         }
-
-        // Process any remaining events to clean up
-        try self.loop.run(.no_wait);
     }
 
     pub fn getResult(self: *Runtime, comptime T: type, id: u64) ?coroutines.CoroutineResult(T) {
@@ -273,7 +283,7 @@ pub const Runtime = struct {
         return node;
     }
 
-    pub fn markReady(self: *Runtime, coro: *Coroutine) void {
+    fn markReady(self: *Runtime, coro: *Coroutine) void {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = taskPtrFromCoroPtr(coro);
