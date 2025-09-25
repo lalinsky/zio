@@ -62,7 +62,7 @@ pub fn main() !void {
     print("Spawned {} coroutines\n\n", .{4});
 
     // Run the event loop
-    runtime.run();
+    try runtime.run();
 
     print("\n=== Results ===\n", .{});
 

@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Get libxev dependency
+    const xev = b.dependency("libxev", .{ .target = target, .optimize = optimize });
+
     // Create the zio library
     const zio_lib = b.addStaticLibrary(.{
         .name = "zio",
@@ -11,11 +14,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
-    // Link libuv
-    zio_lib.linkSystemLibrary("uv");
-    zio_lib.linkLibC();
-
+    zio_lib.root_module.addImport("xev", xev.module("xev"));
     b.installArtifact(zio_lib);
 
     // Create zio module for imports
@@ -24,78 +23,33 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    zio.addImport("xev", xev.module("xev"));
 
-    // Create example executable
-    const example = b.addExecutable(.{
-        .name = "zio-example",
-        .root_source_file = b.path("examples/sleep_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    // Examples configuration
+    const examples = [_]struct { name: []const u8, file: []const u8, step: []const u8, desc: []const u8 }{
+        .{ .name = "zio-example", .file = "examples/sleep_demo.zig", .step = "run", .desc = "Run the sleep demo" },
+        .{ .name = "zio-error-demo", .file = "examples/error_demo.zig", .step = "run-error", .desc = "Run the error handling demo" },
+        .{ .name = "zio-task-demo", .file = "examples/task_demo.zig", .step = "run-task", .desc = "Run the Task(T) demo" },
+    };
 
-    example.root_module.addImport("zio", zio);
-    example.linkSystemLibrary("uv");
-    example.linkLibC();
+    // Create executables and run steps
+    for (examples) |example| {
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_source_file = b.path(example.file),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.root_module.addImport("zio", zio);
+        b.installArtifact(exe);
 
-    b.installArtifact(example);
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
 
-    // Create error demo executable
-    const error_demo = b.addExecutable(.{
-        .name = "zio-error-demo",
-        .root_source_file = b.path("examples/error_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    error_demo.root_module.addImport("zio", zio);
-    error_demo.linkSystemLibrary("uv");
-    error_demo.linkLibC();
-
-    b.installArtifact(error_demo);
-
-    // Create task demo executable
-    const task_demo = b.addExecutable(.{
-        .name = "zio-task-demo",
-        .root_source_file = b.path("examples/task_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    task_demo.root_module.addImport("zio", zio);
-    task_demo.linkSystemLibrary("uv");
-    task_demo.linkLibC();
-
-    b.installArtifact(task_demo);
-
-    // Create run step for example
-    const run_example = b.addRunArtifact(example);
-    run_example.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_example.addArgs(args);
+        const run_step = b.step(example.step, example.desc);
+        run_step.dependOn(&run_cmd.step);
     }
-
-    const run_step = b.step("run", "Run the example");
-    run_step.dependOn(&run_example.step);
-
-    // Create run step for error demo
-    const run_error_demo = b.addRunArtifact(error_demo);
-    run_error_demo.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_error_demo.addArgs(args);
-    }
-
-    const run_error_step = b.step("run-error", "Run the error handling demo");
-    run_error_step.dependOn(&run_error_demo.step);
-
-    // Create run step for task demo
-    const run_task_demo = b.addRunArtifact(task_demo);
-    run_task_demo.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_task_demo.addArgs(args);
-    }
-
-    const run_task_step = b.step("run-task", "Run the Task(T) demo");
-    run_task_step.dependOn(&run_task_demo.step);
 
     // Tests
     const lib_unit_tests = b.addTest(.{
@@ -103,12 +57,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
-    lib_unit_tests.linkSystemLibrary("uv");
-    lib_unit_tests.linkLibC();
+    lib_unit_tests.root_module.addImport("xev", xev.module("xev"));
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
 }

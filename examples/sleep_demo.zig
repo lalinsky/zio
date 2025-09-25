@@ -102,7 +102,7 @@ pub fn main() !void {
     const spawnAndWait_handle = try runtime.spawn(spawnAndWait, .{&runtime}, .{});
     defer spawnAndWait_handle.deinit();
     // Run the event loop
-    runtime.run();
+    try runtime.run();
 
     print("\nAll coroutines completed!\n", .{});
 }

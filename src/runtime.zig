@@ -3,9 +3,7 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const c = @cImport({
-    @cInclude("uv.h");
-});
+const xev = @import("xev");
 
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -19,27 +17,35 @@ const STACK_SIZE = 8192;
 
 // Runtime-specific errors
 pub const ZioError = error{
-    LibuvError,
+    XevError,
     NotInCoroutine,
 } || Error;
 
 // Timer callback data
 const TimerData = struct {
-    timer: c.uv_timer_t,
+    timer: xev.Timer,
+    completion: xev.Completion,
     coroutine: *Coroutine,
     runtime: *Runtime,
 };
 
-// Generic callback generator for any handle type
-fn markReadyOnCallback(comptime T: type, comptime HandleType: type, comptime field_name: []const u8) fn ([*c]HandleType) callconv(.c) void {
-    const FieldType = @TypeOf(@field(@as(T, undefined), field_name));
-    return struct {
-        fn callback(handle: [*c]HandleType) callconv(.c) void {
-            const typed_handle: *FieldType = @ptrCast(@alignCast(handle));
-            const data: *T = @ptrCast(@as(*allowzero T, @fieldParentPtr(field_name, typed_handle)));
-            data.runtime.markReady(data.coroutine);
-        }
-    }.callback;
+// Timer callback for libxev
+fn timerCallback(
+    userdata: ?*TimerData,
+    loop: *xev.Loop,
+    completion: *xev.Completion,
+    result: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = loop;
+    _ = completion;
+    _ = result catch {
+        // Timer error - still wake up the coroutine
+    };
+
+    if (userdata) |data| {
+        data.runtime.markReady(data.coroutine);
+    }
+    return .disarm;
 }
 
 // Task for runtime scheduling
@@ -97,7 +103,7 @@ pub const AnyTaskList = std.DoublyLinkedList(AnyTask);
 
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
-    loop: *c.uv_loop_t,
+    loop: xev.Loop,
     count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -108,15 +114,8 @@ pub const Runtime = struct {
     cleanup_queue: AnyTaskList = .{},
 
     pub fn init(allocator: Allocator) !Runtime {
-        // Initialize libuv loop
-        const loop = try allocator.create(c.uv_loop_t);
-        errdefer allocator.destroy(loop);
-
-        const result = c.uv_loop_init(loop);
-        if (result != 0) {
-            allocator.destroy(loop);
-            return ZioError.LibuvError;
-        }
+        // Initialize libxev loop
+        const loop = try xev.Loop.init(.{});
 
         return Runtime{
             .allocator = allocator,
@@ -134,8 +133,7 @@ pub const Runtime = struct {
         }
         self.tasks.deinit(self.allocator);
 
-        _ = c.uv_loop_close(self.loop);
-        self.allocator.destroy(self.loop);
+        self.loop.deinit();
     }
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(@TypeOf(@call(.auto, func, args))) {
@@ -180,40 +178,30 @@ pub const Runtime = struct {
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
         const current = coroutines.getCurrent() orelse return ZioError.NotInCoroutine;
 
-        // Stack allocate timer data
+        // Stack allocate timer data - safe because coroutine stack is stable
         var timer_data = TimerData{
-            .timer = undefined, // Will be initialized by uv_timer_init
+            .timer = xev.Timer.init() catch return ZioError.XevError,
+            .completion = .{},
             .coroutine = current,
             .runtime = self,
         };
-
-        // Both callbacks use the same generic pattern with explicit types
-        const timer_cb = markReadyOnCallback(TimerData, c.uv_timer_t, "timer");
-        const close_cb = markReadyOnCallback(TimerData, c.uv_handle_t, "timer");
-
-        const result = c.uv_timer_init(self.loop, &timer_data.timer);
-        if (result != 0) {
-            return ZioError.LibuvError;
-        }
-
-        defer {
-            c.uv_close(@ptrCast(&timer_data.timer), close_cb);
-            current.waitForReady();
-        }
+        defer timer_data.timer.deinit();
 
         // Start the timer
-        const start_result = c.uv_timer_start(&timer_data.timer, timer_cb, milliseconds, 0);
-        if (start_result != 0) {
-            return ZioError.LibuvError;
-        }
+        timer_data.timer.run(
+            &self.loop,
+            &timer_data.completion,
+            milliseconds,
+            TimerData,
+            &timer_data,
+            timerCallback,
+        );
 
         // Wait for timer to fire
         current.waitForReady();
-
-        // Timer fired, defer will handle cleanup
     }
 
-    pub fn run(self: *Runtime) void {
+    pub fn run(self: *Runtime) !void {
         while (true) {
             var reschedule: AnyTaskList = .{};
 
@@ -260,13 +248,11 @@ pub const Runtime = struct {
             }
 
             // Wait for I/O events to make coroutines ready again
-            _ = c.uv_run(self.loop, c.UV_RUN_ONCE);
+            try self.loop.run(.once);
         }
 
-        // Process any remaining close callbacks to clean up memory
-        while (c.uv_loop_alive(self.loop) != 0) {
-            _ = c.uv_run(self.loop, c.UV_RUN_ONCE);
-        }
+        // Process any remaining events to clean up
+        try self.loop.run(.no_wait);
     }
 
     pub fn getResult(self: *Runtime, comptime T: type, id: u64) ?coroutines.CoroutineResult(T) {

@@ -1,0 +1,17 @@
+.{
+    .name = .zio,
+    .version = "0.1.0",
+    .fingerprint = 0xcf1598b354d576c4,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+    },
+    .dependencies = .{
+        .libxev = .{
+            .url = "https://github.com/mitchellh/libxev/archive/9f785d2.tar.gz",
+            .hash = "libxev-0.0.0-86vtcx8dEwDfl6p4tGVxCygft8oOsggfba9JO-k28J2x",
+        },
+    },
+}
