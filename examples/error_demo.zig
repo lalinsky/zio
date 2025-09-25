@@ -2,10 +2,10 @@ const std = @import("std");
 const print = std.debug.print;
 const zio = @import("zio");
 
-fn voidTask(runtime: *zio.Runtime, name: []const u8) void {
+fn voidTask(rt: *zio.Runtime, name: []const u8) void {
     print("{s}: Starting (void return)\n", .{name});
 
-    runtime.sleep(500) catch |err| {
+    rt.sleep(500) catch |err| {
         print("{s}: Sleep error: {}\n", .{ name, err });
         return;
     };
@@ -13,10 +13,10 @@ fn voidTask(runtime: *zio.Runtime, name: []const u8) void {
     print("{s}: Completed successfully\n", .{name});
 }
 
-fn errorTask(runtime: *zio.Runtime, name: []const u8, should_fail: bool) !void {
+fn errorTask(rt: *zio.Runtime, name: []const u8, should_fail: bool) !void {
     print("{s}: Starting (error return)\n", .{name});
 
-    try runtime.sleep(300);
+    try rt.sleep(300);
 
     if (should_fail) {
         print("{s}: Returning error\n", .{name});
@@ -26,10 +26,10 @@ fn errorTask(runtime: *zio.Runtime, name: []const u8, should_fail: bool) !void {
     print("{s}: Completed successfully\n", .{name});
 }
 
-fn intTask(runtime: *zio.Runtime, name: []const u8, value: i32) i32 {
+fn intTask(rt: *zio.Runtime, name: []const u8, value: i32) i32 {
     print("{s}: Starting (int return)\n", .{name});
 
-    runtime.sleep(400) catch |err| {
+    rt.sleep(400) catch |err| {
         print("{s}: Sleep error: {}\n", .{ name, err });
         return -1;
     };

@@ -6,21 +6,21 @@ fn addNumbers(a: i32, b: i32) i32 {
     return a + b;
 }
 
-fn delayedReturn(runtime: *zio.Runtime) !i32 {
-    runtime.sleep(100) catch return error.SleepFailed;
+fn delayedReturn(rt: *zio.Runtime) !i32 {
+    rt.sleep(100) catch return error.SleepFailed;
     return 42;
 }
 
-fn printMessage(runtime: *zio.Runtime, msg: []const u8) void {
-    runtime.sleep(50) catch return;
+fn printMessage(rt: *zio.Runtime, msg: []const u8) void {
+    rt.sleep(50) catch return;
     print("Message: {s}\n", .{msg});
 }
 
-fn mainCoroutine(runtime: *zio.Runtime) void {
+fn mainCoroutine(rt: *zio.Runtime) void {
     print("=== Task(T) Demo ===\n", .{});
 
     // Test with i32 return type
-    const task1 = runtime.spawn(addNumbers, .{ 10, 20 }, .{}) catch {
+    const task1 = rt.spawn(addNumbers, .{ 10, 20 }, .{}) catch {
         print("Failed to spawn task1\n", .{});
         return;
     };
@@ -28,7 +28,7 @@ fn mainCoroutine(runtime: *zio.Runtime) void {
     print("Spawned task1 (returns i32)\n", .{});
 
     // Test with error union return type
-    const task2 = runtime.spawn(delayedReturn, .{runtime}, .{}) catch {
+    const task2 = rt.spawn(delayedReturn, .{rt}, .{}) catch {
         print("Failed to spawn task2\n", .{});
         return;
     };
@@ -36,7 +36,7 @@ fn mainCoroutine(runtime: *zio.Runtime) void {
     print("Spawned task2 (returns !i32)\n", .{});
 
     // Test with void return type
-    const task3 = runtime.spawn(printMessage, .{ runtime, "Hello from task!" }, .{}) catch {
+    const task3 = rt.spawn(printMessage, .{ rt, "Hello from task!" }, .{}) catch {
         print("Failed to spawn task3\n", .{});
         return;
     };

@@ -17,11 +17,11 @@ A lightweight async I/O library for Zig, built on top of coroutines and libxev.
 const std = @import("std");
 const zio = @import("zio");
 
-fn myTask(runtime: *zio.Runtime, name: []const u8) void {
+fn myTask(rt: *zio.Runtime, name: []const u8) void {
     std.debug.print("{s}: Starting\n", .{name});
 
     // Async sleep for 1 second
-    runtime.sleep(1000) catch return;
+    rt.sleep(1000) catch return;
 
     std.debug.print("{s}: Finished\n", .{name});
 }
@@ -77,8 +77,8 @@ ZIO provides a typed task system similar to futures/promises:
 
 ```zig
 // Spawn tasks that return values
-const task1 = try runtime.spawn(addNumbers, .{ 10, 20 }, .{});
-const task2 = try runtime.spawn(fetchData, .{&runtime}, .{});
+const task1 = try rt.spawn(addNumbers, .{ 10, 20 }, .{});
+const task2 = try rt.spawn(fetchData, .{rt}, .{});
 
 // Wait for results (typed!)
 const sum = task1.wait();           // Returns i32

@@ -9,11 +9,11 @@ fn getTimestamp() u64 {
 
 var start_time: u64 = 0;
 
-fn task1(runtime: *zio.Runtime) void {
+fn task1(rt: *zio.Runtime) void {
     const elapsed = getTimestamp() - start_time;
     print("[{}ms] Task 1: Starting\n", .{elapsed});
 
-    runtime.sleep(1000) catch |err| {
+    rt.sleep(1000) catch |err| {
         print("Task 1: Sleep error: {}\n", .{err});
         return;
     };
@@ -21,7 +21,7 @@ fn task1(runtime: *zio.Runtime) void {
     const elapsed2 = getTimestamp() - start_time;
     print("[{}ms] Task 1: After 1 second sleep\n", .{elapsed2});
 
-    runtime.sleep(500) catch |err| {
+    rt.sleep(500) catch |err| {
         print("Task 1: Sleep error: {}\n", .{err});
         return;
     };
@@ -30,13 +30,13 @@ fn task1(runtime: *zio.Runtime) void {
     print("[{}ms] Task 1: Finished\n", .{elapsed3});
 }
 
-fn task2(runtime: *zio.Runtime, name: []const u8, sleep_ms: u64) void {
+fn task2(rt: *zio.Runtime, name: []const u8, sleep_ms: u64) void {
     print("{s}: Starting\n", .{name});
 
     for (0..3) |i| {
         print("{s}: Iteration {}\n", .{ name, i });
 
-        runtime.sleep(sleep_ms) catch |err| {
+        rt.sleep(sleep_ms) catch |err| {
             print("{s}: Sleep error: {}\n", .{ name, err });
             return;
         };
@@ -45,10 +45,10 @@ fn task2(runtime: *zio.Runtime, name: []const u8, sleep_ms: u64) void {
     print("{s}: Finished\n", .{name});
 }
 
-fn quickTask(runtime: *zio.Runtime, id: u32) void {
+fn quickTask(rt: *zio.Runtime, id: u32) void {
     print("Quick task {}: Running\n", .{id});
 
-    runtime.sleep(200) catch |err| {
+    rt.sleep(200) catch |err| {
         print("Quick task {}: Sleep error: {}\n", .{ id, err });
         return;
     };
@@ -56,8 +56,8 @@ fn quickTask(runtime: *zio.Runtime, id: u32) void {
     print("Quick task {}: Done\n", .{id});
 }
 
-pub fn spawnAndWait(runtime: *zio.Runtime) !void {
-    const t1 = try runtime.spawn(task1, .{runtime}, .{});
+pub fn spawnAndWait(rt: *zio.Runtime) !void {
+    const t1 = try rt.spawn(task1, .{rt}, .{});
     defer t1.deinit();
     print("waiting on task t1\n", .{});
     t1.wait();
