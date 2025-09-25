@@ -177,6 +177,14 @@ pub const Runtime = struct {
         coroutines.yield();
     }
 
+    pub fn getWaker(self: *Runtime) Waker {
+        const current = coroutines.getCurrent() orelse std.debug.panic("getWaker() must be called from within a coroutine", .{});
+        return Waker{
+            .runtime = self,
+            .coroutine = current,
+        };
+    }
+
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
         const current = coroutines.getCurrent() orelse return ZioError.NotInCoroutine;
 
@@ -184,10 +192,7 @@ pub const Runtime = struct {
         var timer = xev.Timer.init() catch unreachable; // Can't fail in non-dynamic mode
         defer timer.deinit();
         var completion: xev.Completion = .{};
-        var waker = Waker{
-            .runtime = self,
-            .coroutine = current,
-        };
+        var waker = self.getWaker();
 
         // Start the timer
         timer.run(
