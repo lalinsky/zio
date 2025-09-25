@@ -15,23 +15,25 @@ const RefCounter = @import("ref_counter.zig").RefCounter;
 const MAX_COROUTINES = 32;
 const STACK_SIZE = 8192;
 
+// Waker interface for asynchronous operations
+pub const Waker = struct {
+    runtime: *Runtime,
+    coroutine: *Coroutine,
+
+    pub fn wake(self: Waker) void {
+        self.runtime.markReady(self.coroutine);
+    }
+};
+
 // Runtime-specific errors
 pub const ZioError = error{
     XevError,
     NotInCoroutine,
 } || Error;
 
-// Timer callback data
-const TimerData = struct {
-    timer: xev.Timer,
-    completion: xev.Completion,
-    coroutine: *Coroutine,
-    runtime: *Runtime,
-};
-
 // Timer callback for libxev
 fn timerCallback(
-    userdata: ?*TimerData,
+    userdata: ?*Waker,
     loop: *xev.Loop,
     completion: *xev.Completion,
     result: xev.Timer.RunError!void,
@@ -42,8 +44,8 @@ fn timerCallback(
         // Timer error - still wake up the coroutine
     };
 
-    if (userdata) |data| {
-        data.runtime.markReady(data.coroutine);
+    if (userdata) |waker| {
+        waker.wake();
     }
     return .disarm;
 }
@@ -178,22 +180,22 @@ pub const Runtime = struct {
     pub fn sleep(self: *Runtime, milliseconds: u64) !void {
         const current = coroutines.getCurrent() orelse return ZioError.NotInCoroutine;
 
-        // Stack allocate timer data - safe because coroutine stack is stable
-        var timer_data = TimerData{
-            .timer = xev.Timer.init() catch unreachable, // Can't fail in non-dynamic mode
-            .completion = .{},
-            .coroutine = current,
+        // Stack allocate - safe because coroutine stack is stable
+        var timer = xev.Timer.init() catch unreachable; // Can't fail in non-dynamic mode
+        defer timer.deinit();
+        var completion: xev.Completion = .{};
+        var waker = Waker{
             .runtime = self,
+            .coroutine = current,
         };
-        defer timer_data.timer.deinit();
 
         // Start the timer
-        timer_data.timer.run(
+        timer.run(
             &self.loop,
-            &timer_data.completion,
+            &completion,
             milliseconds,
-            TimerData,
-            &timer_data,
+            Waker,
+            &waker,
             timerCallback,
         );
 
