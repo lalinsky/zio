@@ -20,3 +20,7 @@ pub const TcpStream = @import("tcp.zig").TcpStream;
 pub const UdpSocket = @import("udp.zig").UdpSocket;
 pub const UdpRecvResult = @import("udp.zig").UdpReadResult;
 pub const Address = @import("address.zig").Address;
+
+// Re-export synchronization functionality
+pub const Mutex = @import("sync.zig").Mutex;
+pub const Condition = @import("sync.zig").Condition;

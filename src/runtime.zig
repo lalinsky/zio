@@ -289,13 +289,13 @@ pub const Runtime = struct {
         return task.data.coro.getResult(T);
     }
 
-    inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTaskList.Node {
+    pub inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTaskList.Node {
         const task: *AnyTask = @fieldParentPtr("coro", coro);
         const node: *AnyTaskList.Node = @fieldParentPtr("data", task);
         return node;
     }
 
-    fn markReady(self: *Runtime, coro: *Coroutine) void {
+    pub fn markReady(self: *Runtime, coro: *Coroutine) void {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = taskPtrFromCoroPtr(coro);

@@ -30,6 +30,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sleep", .file = "examples/sleep.zig", .step = "run", .desc = "Run the sleep demo" },
         .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig", .step = "run-server", .desc = "Run the TCP echo server" },
         .{ .name = "tcp-client", .file = "examples/tcp_client.zig", .step = "run-client", .desc = "Run the TCP client demo" },
+        .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig", .step = "run-mutex", .desc = "Run the mutex demo" },
+        .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig", .step = "run-prodcons", .desc = "Run the producer-consumer demo" },
         //.{ .name = "udp-echo", .file = "examples/udp_echo.zig", .step = "run-udp", .desc = "Run the UDP echo demo" },
     };
 
