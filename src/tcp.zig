@@ -366,11 +366,8 @@ pub const TcpStream = struct {
             const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
             const dest = limit.slice(try w.writableSliceGreedy(1));
             const n = r.tcp_stream.read(dest) catch |err| switch (err) {
-                error.Canceled => return error.ReadFailed,
-                error.ConnectionResetByPeer => return error.ReadFailed,
                 error.EOF => return error.EndOfStream,
-                error.Unexpected => return error.ReadFailed,
-                else => |e| return e,
+                else => return error.ReadFailed,
             };
             w.advance(n);
             return n;
@@ -385,11 +382,8 @@ pub const TcpStream = struct {
             while (total_discarded < remaining) {
                 const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
                 const n = r.tcp_stream.read(io_reader.buffer[0..to_read]) catch |err| switch (err) {
-                    error.Canceled => return error.ReadFailed,
-                    error.ConnectionResetByPeer => return error.ReadFailed,
                     error.EOF => return error.EndOfStream,
-                    error.Unexpected => return error.ReadFailed,
-                    else => |e| return e,
+                    else => return error.ReadFailed,
                 };
                 if (n == 0) break;
                 total_discarded += n;
@@ -407,22 +401,16 @@ pub const TcpStream = struct {
             if (dest.len == 0) {
                 // If first buffer is empty, use the reader's internal buffer
                 const n = r.tcp_stream.read(io_reader.buffer) catch |err| switch (err) {
-                    error.Canceled => return error.ReadFailed,
-                    error.ConnectionResetByPeer => return error.ReadFailed,
                     error.EOF => return error.EndOfStream,
-                    error.Unexpected => return error.ReadFailed,
-                    else => |e| return e,
+                    else => return error.ReadFailed,
                 };
                 io_reader.end = n;
                 return 0;
             }
 
             const n = r.tcp_stream.read(dest) catch |err| switch (err) {
-                error.Canceled => return error.ReadFailed,
-                error.ConnectionResetByPeer => return error.ReadFailed,
                 error.EOF => return error.EndOfStream,
-                error.Unexpected => return error.ReadFailed,
-                else => |e| return e,
+                else => return error.ReadFailed,
             };
             return n;
         }
@@ -452,11 +440,7 @@ pub const TcpStream = struct {
             // First, write any buffered data
             if (io_writer.end > 0) {
                 _ = w.tcp_stream.write(io_writer.buffer[0..io_writer.end]) catch |err| switch (err) {
-                    error.BrokenPipe => return error.WriteFailed,
-                    error.Canceled => return error.WriteFailed,
-                    error.ConnectionResetByPeer => return error.WriteFailed,
-                    error.Unexpected => return error.WriteFailed,
-                    else => |e| return e,
+                    else => return error.WriteFailed,
                 };
                 io_writer.end = 0;
             }
@@ -466,11 +450,7 @@ pub const TcpStream = struct {
             for (data) |slice| {
                 for (0..@max(1, splat)) |_| {
                     const n = w.tcp_stream.write(slice) catch |err| switch (err) {
-                        error.BrokenPipe => return error.WriteFailed,
-                        error.Canceled => return error.WriteFailed,
-                        error.ConnectionResetByPeer => return error.WriteFailed,
-                        error.Unexpected => return error.WriteFailed,
-                        else => |e| return e,
+                        else => return error.WriteFailed,
                     };
                     total_written += n;
                     if (n < slice.len) return total_written;
@@ -484,11 +464,7 @@ pub const TcpStream = struct {
 
             if (io_writer.end > 0) {
                 _ = w.tcp_stream.write(io_writer.buffer[0..io_writer.end]) catch |err| switch (err) {
-                    error.BrokenPipe => return error.WriteFailed,
-                    error.Canceled => return error.WriteFailed,
-                    error.ConnectionResetByPeer => return error.WriteFailed,
-                    error.Unexpected => return error.WriteFailed,
-                    else => |e| return e,
+                    else => return error.WriteFailed,
                 };
                 io_writer.end = 0;
             }
