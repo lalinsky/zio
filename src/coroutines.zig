@@ -110,15 +110,6 @@ pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Contex
 }
 
 /// Context switching function using C calling convention.
-///
-/// This function follows C ABI, which means:
-/// - Caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11, xmm0-xmm15 on x86_64;
-///   x0-x18, x30, v0-v7, v16-v31 on ARM64) can be freely modified
-/// - Callee-saved registers must be preserved OR marked as clobbered
-///
-/// Since we're doing a context switch, all callee-saved registers will have
-/// different values when we "return" (jump to new context), so we mark them
-/// as clobbered to inform the compiler they cannot be relied upon.
 pub fn switchContext(
     noalias current_context: *Context,
     noalias new_context: *Context,
@@ -136,7 +127,67 @@ pub fn switchContext(
             :
             : [current] "{rax}" (current_context),
               [new] "{rcx}" (new_context),
-            : .{ .rbx = true, .r12 = true, .r13 = true, .r14 = true, .r15 = true, .xmm16 = true, .xmm17 = true, .xmm18 = true, .xmm19 = true, .xmm20 = true, .xmm21 = true, .xmm22 = true, .xmm23 = true, .xmm24 = true, .xmm25 = true, .xmm26 = true, .xmm27 = true, .xmm28 = true, .xmm29 = true, .xmm30 = true, .xmm31 = true, .memory = true }
+            : .{
+              .rax = true,
+              .rcx = true,
+              .rdx = true,
+              .rbx = true,
+              .rsi = true,
+              .r8 = true,
+              .r9 = true,
+              .r10 = true,
+              .r11 = true,
+              .r12 = true,
+              .r13 = true,
+              .r14 = true,
+              .r15 = true,
+              .mm0 = true,
+              .mm1 = true,
+              .mm2 = true,
+              .mm3 = true,
+              .mm4 = true,
+              .mm5 = true,
+              .mm6 = true,
+              .mm7 = true,
+              .zmm0 = true,
+              .zmm1 = true,
+              .zmm2 = true,
+              .zmm3 = true,
+              .zmm4 = true,
+              .zmm5 = true,
+              .zmm6 = true,
+              .zmm7 = true,
+              .zmm8 = true,
+              .zmm9 = true,
+              .zmm10 = true,
+              .zmm11 = true,
+              .zmm12 = true,
+              .zmm13 = true,
+              .zmm14 = true,
+              .zmm15 = true,
+              .zmm16 = true,
+              .zmm17 = true,
+              .zmm18 = true,
+              .zmm19 = true,
+              .zmm20 = true,
+              .zmm21 = true,
+              .zmm22 = true,
+              .zmm23 = true,
+              .zmm24 = true,
+              .zmm25 = true,
+              .zmm26 = true,
+              .zmm27 = true,
+              .zmm28 = true,
+              .zmm29 = true,
+              .zmm30 = true,
+              .zmm31 = true,
+              .fpsr = true,
+              .fpcr = true,
+              .mxcsr = true,
+              .rflags = true,
+              .dirflag = true,
+              .memory = true,
+            }
         ),
         .aarch64 => asm volatile (
             \\ adr x9, 0f
@@ -155,7 +206,89 @@ pub fn switchContext(
             :
             : [current] "{x0}" (current_context),
               [new] "{x1}" (new_context),
-            : .{ .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .x25 = true, .x26 = true, .x27 = true, .x28 = true, .x29 = true, .v8 = true, .v9 = true, .v10 = true, .v11 = true, .v12 = true, .v13 = true, .v14 = true, .v15 = true, .memory = true }
+            : .{
+              .x1 = true,
+              .x2 = true,
+              .x3 = true,
+              .x4 = true,
+              .x5 = true,
+              .x6 = true,
+              .x7 = true,
+              .x8 = true,
+              .x9 = true,
+              .x10 = true,
+              .x11 = true,
+              .x12 = true,
+              .x13 = true,
+              .x14 = true,
+              .x15 = true,
+              .x16 = true,
+              .x17 = true,
+              .x18 = true,
+              .x19 = true,
+              .x20 = true,
+              .x21 = true,
+              .x22 = true,
+              .x23 = true,
+              .x24 = true,
+              .x25 = true,
+              .x26 = true,
+              .x27 = true,
+              .x28 = true,
+              .x30 = true,
+              .z0 = true,
+              .z1 = true,
+              .z2 = true,
+              .z3 = true,
+              .z4 = true,
+              .z5 = true,
+              .z6 = true,
+              .z7 = true,
+              .z8 = true,
+              .z9 = true,
+              .z10 = true,
+              .z11 = true,
+              .z12 = true,
+              .z13 = true,
+              .z14 = true,
+              .z15 = true,
+              .z16 = true,
+              .z17 = true,
+              .z18 = true,
+              .z19 = true,
+              .z20 = true,
+              .z21 = true,
+              .z22 = true,
+              .z23 = true,
+              .z24 = true,
+              .z25 = true,
+              .z26 = true,
+              .z27 = true,
+              .z28 = true,
+              .z29 = true,
+              .z30 = true,
+              .z31 = true,
+              .p0 = true,
+              .p1 = true,
+              .p2 = true,
+              .p3 = true,
+              .p4 = true,
+              .p5 = true,
+              .p6 = true,
+              .p7 = true,
+              .p8 = true,
+              .p9 = true,
+              .p10 = true,
+              .p11 = true,
+              .p12 = true,
+              .p13 = true,
+              .p14 = true,
+              .p15 = true,
+              .fpcr = true,
+              .fpsr = true,
+              .ffr = true,
+              .memory = true,
+            }
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -178,11 +311,23 @@ pub fn switchContext(
 /// ARM64 stores return address in x30 register (not stack), so we set x30=0 for safety
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
-        .x86_64 => asm volatile (
-            \\ pushq $0
-            \\ leaq 8(%%rsp), %%rdi
-            \\ jmpq *8(%%rsp)
-        ),
+        .x86_64 => {
+            if (builtin.os.tag == .windows) {
+                // Windows x64 ABI: first integer arg in RCX
+                asm volatile (
+                    \\ pushq $0
+                    \\ leaq 8(%%rsp), %%rcx
+                    \\ jmpq *8(%%rsp)
+                );
+            } else {
+                // System V AMD64 ABI: first integer arg in RDI
+                asm volatile (
+                    \\ pushq $0
+                    \\ leaq 8(%%rsp), %%rdi
+                    \\ jmpq *8(%%rsp)
+                );
+            }
+        },
         .aarch64 => asm volatile (
             \\ mov x30, #0
             \\ mov x0, sp
