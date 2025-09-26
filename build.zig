@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -29,30 +28,26 @@ pub fn build(b: *std.Build) void {
     });
     zio.addImport("xev", xev.module("xev"));
 
-    // Examples configuration - only build on Zig 0.15+
-    const is_zig_015_or_later = builtin.zig_version.order(.{ .major = 0, .minor = 15, .patch = 0 }) != .lt;
+    // Examples configuration
+    const examples = [_]struct { name: []const u8, file: []const u8, step: []const u8, desc: []const u8 }{
+        .{ .name = "sleep", .file = "examples/sleep.zig", .step = "run", .desc = "Run the sleep demo" },
+        .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig", .step = "run-server", .desc = "Run the TCP echo server" },
+        .{ .name = "tcp-client", .file = "examples/tcp_client.zig", .step = "run-client", .desc = "Run the TCP client demo" },
+        //.{ .name = "udp-echo", .file = "examples/udp_echo.zig", .step = "run-udp", .desc = "Run the UDP echo demo" },
+    };
 
-    if (is_zig_015_or_later) {
-        const examples = [_]struct { name: []const u8, file: []const u8, step: []const u8, desc: []const u8 }{
-            .{ .name = "sleep", .file = "examples/sleep.zig", .step = "run", .desc = "Run the sleep demo" },
-            .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig", .step = "run-server", .desc = "Run the TCP echo server" },
-            .{ .name = "tcp-client", .file = "examples/tcp_client.zig", .step = "run-client", .desc = "Run the TCP client demo" },
-            //.{ .name = "udp-echo", .file = "examples/udp_echo.zig", .step = "run-udp", .desc = "Run the UDP echo demo" },
-        };
-
-        // Create executables and run steps
-        for (examples) |example| {
-            const exe = b.addExecutable(.{
-                .name = example.name,
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path(example.file),
-                    .target = target,
-                    .optimize = optimize,
-                }),
-            });
-            exe.root_module.addImport("zio", zio);
-            b.installArtifact(exe);
-        }
+    // Create executables and run steps
+    for (examples) |example| {
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(example.file),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        exe.root_module.addImport("zio", zio);
+        b.installArtifact(exe);
     }
 
     // Tests
