@@ -116,6 +116,9 @@ pub const TcpStream = struct {
     xev_tcp: xev.TCP,
     runtime: *Runtime,
 
+    pub const ReadError = anyerror;
+    pub const WriteError = anyerror;
+
     pub fn connect(runtime: *Runtime, addr: Address) !TcpStream {
         var tcp = try xev.TCP.init(addr);
         var waiter = runtime.getWaiter();
@@ -213,9 +216,9 @@ pub const TcpStream = struct {
     pub fn readv(self: *const TcpStream, iovecs: []std.posix.iovec) anyerror!usize {
         // Find the first non-empty buffer
         for (iovecs) |iovec| {
-            if (iovec.iov_len == 0) continue;
+            if (iovec.len == 0) continue;
 
-            const buffer = @as([*]u8, @ptrCast(iovec.iov_base))[0..iovec.iov_len];
+            const buffer = iovec.base[0..iovec.len];
             return try self.read(buffer);
         }
         return 0; // All iovecs are empty
@@ -225,7 +228,7 @@ pub const TcpStream = struct {
         var total_read: usize = 0;
 
         for (iovecs) |iovec| {
-            var buffer = @as([*]u8, @ptrCast(iovec.iov_base))[0..iovec.iov_len];
+            var buffer = iovec.base[0..iovec.len];
 
             while (buffer.len > 0) {
                 const bytes_read = try self.read(buffer);
@@ -240,6 +243,17 @@ pub const TcpStream = struct {
         }
 
         return total_read;
+    }
+
+    pub fn readAtLeast(self: *const TcpStream, buffer: []u8, len: usize) anyerror!usize {
+        std.debug.assert(len <= buffer.len);
+        var index: usize = 0;
+        while (index < len) {
+            const amt = try self.read(buffer[index..]);
+            if (amt == 0) break;
+            index += amt;
+        }
+        return index;
     }
 
     pub fn write(self: *const TcpStream, data: []const u8) !usize {
@@ -290,33 +304,28 @@ pub const TcpStream = struct {
     pub fn writev(self: *const TcpStream, iovecs: []const std.posix.iovec_const) anyerror!usize {
         // Find the first non-empty buffer
         for (iovecs) |iovec| {
-            if (iovec.iov_len == 0) continue;
+            if (iovec.len == 0) continue;
 
-            const buffer = @as([*]const u8, @ptrCast(iovec.iov_base))[0..iovec.iov_len];
+            const buffer = iovec.base[0..iovec.len];
             return try self.write(buffer);
         }
         return 0; // All iovecs are empty
     }
 
-    pub fn writevAll(self: *const TcpStream, iovecs: []std.posix.iovec_const) anyerror!usize {
-        var total_written: usize = 0;
-
+    pub fn writevAll(self: *const TcpStream, iovecs: []std.posix.iovec_const) anyerror!void {
         for (iovecs) |iovec| {
-            var buffer = @as([*]const u8, @ptrCast(iovec.iov_base))[0..iovec.iov_len];
+            var buffer = iovec.base[0..iovec.len];
 
             while (buffer.len > 0) {
                 const bytes_written = try self.write(buffer);
 
                 if (bytes_written == 0) {
-                    return total_written; // EOF or connection closed
+                    return; // EOF or connection closed
                 }
 
                 buffer = buffer[bytes_written..];
-                total_written += bytes_written;
             }
         }
-
-        return total_written;
     }
 
     pub fn shutdown(self: *TcpStream) !void {
@@ -515,9 +524,9 @@ test "TCP: readv reads first buffer only" {
             const buf3: [10]u8 = undefined;
 
             var iovecs = [_]std.posix.iovec{
-                .{ .iov_base = buf1.ptr, .iov_len = buf1.len },
-                .{ .iov_base = @constCast(buf2.ptr), .iov_len = buf2.len },
-                .{ .iov_base = @constCast(buf3.ptr), .iov_len = buf3.len },
+                .{ .base = buf1.ptr, .len = buf1.len },
+                .{ .base = @constCast(buf2.ptr), .len = buf2.len },
+                .{ .base = @constCast(buf3.ptr), .len = buf3.len },
             };
 
             const bytes_read = try stream.readv(&iovecs);
@@ -575,9 +584,9 @@ test "TCP: readvAll reads all buffers" {
             var buf3: [6]u8 = undefined;
 
             var iovecs = [_]std.posix.iovec{
-                .{ .iov_base = buf1.ptr, .iov_len = buf1.len },
-                .{ .iov_base = buf2.ptr, .iov_len = buf2.len },
-                .{ .iov_base = buf3.ptr, .iov_len = buf3.len },
+                .{ .base = buf1.ptr, .len = buf1.len },
+                .{ .base = buf2.ptr, .len = buf2.len },
+                .{ .base = buf3.ptr, .len = buf3.len },
             };
 
             const bytes_read = try stream.readvAll(&iovecs);
@@ -640,9 +649,9 @@ test "TCP: writev writes first buffer only" {
             const data3 = "World!";
 
             var iovecs = [_]std.posix.iovec_const{
-                .{ .iov_base = data1.ptr, .iov_len = data1.len },
-                .{ .iov_base = data2.ptr, .iov_len = data2.len },
-                .{ .iov_base = data3.ptr, .iov_len = data3.len },
+                .{ .base = data1.ptr, .len = data1.len },
+                .{ .base = data2.ptr, .len = data2.len },
+                .{ .base = data3.ptr, .len = data3.len },
             };
 
             const bytes_written = try stream.writev(&iovecs);
@@ -703,13 +712,12 @@ test "TCP: writevAll writes all buffers" {
             const data3 = "World!";
 
             var iovecs = [_]std.posix.iovec_const{
-                .{ .iov_base = data1.ptr, .iov_len = data1.len },
-                .{ .iov_base = data2.ptr, .iov_len = data2.len },
-                .{ .iov_base = data3.ptr, .iov_len = data3.len },
+                .{ .base = data1.ptr, .len = data1.len },
+                .{ .base = data2.ptr, .len = data2.len },
+                .{ .base = data3.ptr, .len = data3.len },
             };
 
-            const bytes_written = try stream.writevAll(&iovecs);
-            try testing.expect(bytes_written == 13);
+            try stream.writevAll(&iovecs);
 
             try stream.shutdown();
             stream.close();
@@ -747,8 +755,7 @@ test "TCP: vectored I/O edge cases" {
     const empty_write = try server_stream.writev(&empty_iovecs_write);
     try testing.expect(empty_write == 0);
 
-    const empty_writeall = try server_stream.writevAll(&empty_iovecs_write);
-    try testing.expect(empty_writeall == 0);
+    try server_stream.writevAll(&empty_iovecs_write);
 
     const empty_readall = try server_stream.readvAll(&empty_iovecs_read);
     try testing.expect(empty_readall == 0);
@@ -756,7 +763,7 @@ test "TCP: vectored I/O edge cases" {
     // Test zero-length buffers
     const zero_buf: [0]u8 = .{};
     var zero_iovecs = [_]std.posix.iovec{
-        .{ .iov_base = @constCast(zero_buf.ptr), .iov_len = 0 },
+        .{ .base = @constCast(zero_buf.ptr), .len = 0 },
     };
     const zero_read = try server_stream.readv(&zero_iovecs);
     try testing.expect(zero_read == 0);
