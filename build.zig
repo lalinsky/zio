@@ -26,16 +26,15 @@ pub fn build(b: *std.Build) void {
     zio.addImport("xev", xev.module("xev"));
 
     // Examples configuration
-    const examples = [_]struct { name: []const u8, file: []const u8, step: []const u8, desc: []const u8 }{
-        .{ .name = "sleep", .file = "examples/sleep.zig", .step = "run", .desc = "Run the sleep demo" },
-        .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig", .step = "run-server", .desc = "Run the TCP echo server" },
-        .{ .name = "tcp-client", .file = "examples/tcp_client.zig", .step = "run-client", .desc = "Run the TCP client demo" },
-        .{ .name = "tls-demo", .file = "examples/tls_demo.zig", .step = "run-tls", .desc = "Run the TLS demo" },
-        .{ .name = "tcp-test", .file = "examples/tcp_test.zig", .step = "run-tcp-test", .desc = "Run the TCP test" },
-        //.{ .name = "udp-echo", .file = "examples/udp_echo.zig", .step = "run-udp", .desc = "Run the UDP echo demo" },
+    const examples = [_]struct { name: []const u8, file: []const u8 }{
+        .{ .name = "sleep", .file = "examples/sleep.zig" },
+        .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
+        .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
+        .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },
+        //.{ .name = "udp-echo", .file = "examples/udp_echo.zig" },
     };
 
-    // Create executables and run steps
+    // Create executables
     for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
@@ -45,13 +44,6 @@ pub fn build(b: *std.Build) void {
         });
         exe.root_module.addImport("zio", zio);
         b.installArtifact(exe);
-
-        // Create run step for each example
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-
-        const run_step = b.step(example.step, example.desc);
-        run_step.dependOn(&run_cmd.step);
     }
 
     // Tests
