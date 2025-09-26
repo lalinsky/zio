@@ -22,8 +22,8 @@ jobs:
       with:
         version: 0.14.1
 
+    - name: Build
+      run: zig build
+
     - name: Run tests
       run: zig build test
-
-    - name: Build examples
-      run: zig build examples
