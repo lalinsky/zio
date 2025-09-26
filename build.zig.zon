@@ -10,8 +10,7 @@
     },
     .dependencies = .{
         .libxev = .{
-            .url = "https://github.com/mitchellh/libxev/archive/9f785d2.tar.gz",
-            .hash = "libxev-0.0.0-86vtcx8dEwDfl6p4tGVxCygft8oOsggfba9JO-k28J2x",
+            .path = "vendor/libxev",
         },
     },
 }
