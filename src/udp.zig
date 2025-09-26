@@ -4,7 +4,7 @@ const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
 const Address = @import("address.zig").Address;
 
-pub const UdpRecvResult = struct {
+pub const UdpReadResult = struct {
     bytes_read: usize,
     sender_addr: Address,
 };
@@ -24,7 +24,7 @@ pub const UdpSocket = struct {
         try self.xev_udp.bind(addr);
     }
 
-    pub fn recvFrom(self: *UdpSocket, buffer: []u8) !UdpRecvResult {
+    pub fn read(self: *UdpSocket, buffer: []u8) !UdpReadResult {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
@@ -74,13 +74,13 @@ pub const UdpSocket = struct {
         waiter.waitForReady();
 
         const bytes_read = try result_data.result;
-        return UdpRecvResult{
+        return UdpReadResult{
             .bytes_read = bytes_read,
             .sender_addr = result_data.sender_addr,
         };
     }
 
-    pub fn sendTo(self: *UdpSocket, data: []const u8, addr: Address) !usize {
+    pub fn write(self: *UdpSocket, addr: Address, data: []const u8) !usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
@@ -130,7 +130,7 @@ pub const UdpSocket = struct {
         return result_data.result;
     }
 
-    pub fn close(self: *UdpSocket) !void {
+    pub fn close(self: *UdpSocket) void {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -169,11 +169,8 @@ pub const UdpSocket = struct {
 
         waiter.waitForReady();
 
-        return result_data.result;
-    }
-
-    pub fn deinit(self: *const UdpSocket) void {
-        _ = self;
+        // Ignore close errors, following Zig std lib pattern
+        _ = result_data.result catch {};
     }
 };
 
@@ -188,7 +185,7 @@ test "UDP: basic send and receive" {
         fn run(rt: *Runtime, server_port: *u16) !void {
             const bind_addr = try Address.parseIp4("127.0.0.1", 0);
             var socket = try UdpSocket.init(rt, bind_addr);
-            defer socket.deinit();
+            defer socket.close();
 
             try socket.bind(bind_addr);
 
@@ -197,16 +194,11 @@ test "UDP: basic send and receive" {
 
             // Wait for and echo one message
             var buffer: [1024]u8 = undefined;
-            const recv_result = try socket.recvFrom(&buffer);
+            const recv_result = try socket.read(&buffer);
 
             // Echo back to sender
-            const bytes_sent = try socket.sendTo(
-                buffer[0..recv_result.bytes_read],
-                recv_result.sender_addr
-            );
+            const bytes_sent = try socket.write(buffer[0..recv_result.bytes_read], recv_result.sender_addr);
             try testing.expect(bytes_sent == recv_result.bytes_read);
-
-            try socket.close();
         }
     };
 
@@ -216,22 +208,20 @@ test "UDP: basic send and receive" {
 
             const client_addr = try Address.parseIp4("127.0.0.1", 0);
             var socket = try UdpSocket.init(rt, client_addr);
-            defer socket.deinit();
+            defer socket.close();
 
             try socket.bind(client_addr);
 
             // Send test data
             const test_data = "Hello, UDP!";
             const server_addr = try Address.parseIp4("127.0.0.1", server_port.*);
-            const bytes_sent = try socket.sendTo(test_data, server_addr);
+            const bytes_sent = try socket.write(server_addr, test_data);
             try testing.expect(bytes_sent == test_data.len);
 
             // Receive echo
             var buffer: [1024]u8 = undefined;
-            const recv_result = try socket.recvFrom(&buffer);
+            const recv_result = try socket.read(&buffer);
             try testing.expectEqualStrings(test_data, buffer[0..recv_result.bytes_read]);
-
-            try socket.close();
         }
     };
 

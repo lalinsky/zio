@@ -18,5 +18,5 @@ pub const File = @import("file.zig").File;
 pub const TcpListener = @import("tcp.zig").TcpListener;
 pub const TcpStream = @import("tcp.zig").TcpStream;
 pub const UdpSocket = @import("udp.zig").UdpSocket;
-pub const UdpRecvResult = @import("udp.zig").UdpRecvResult;
+pub const UdpRecvResult = @import("udp.zig").UdpReadResult;
 pub const Address = @import("address.zig").Address;
