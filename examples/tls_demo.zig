@@ -2,28 +2,36 @@ const std = @import("std");
 const zio = @import("zio");
 
 fn runTlsTask(rt: *zio.Runtime) !void {
-    // Connect to example.com (reliable HTTPS)
+    std.log.info("Starting TLS connection...", .{});
+
+    // Connect to httpbin.org (reliable HTTPS API)
     // TODO: Add DNS resolution support instead of hardcoded IP address
-    const addr = try zio.Address.parseIp4("93.184.216.34", 443); // example.com
+    const addr = try zio.Address.parseIp4("52.2.107.230", 443); // httpbin.org
+    std.log.info("Attempting TCP connection to httpbin.org:443...", .{});
+
     var stream = try zio.TcpStream.connect(rt, addr);
     defer stream.close();
 
-    std.log.info("Connected to example.com:443", .{});
+    std.log.info("TCP connected to httpbin.org:443 successfully!", .{});
+    std.log.info("Starting TLS handshake...", .{});
 
     // Initialize TLS client
-    var tls_client = try std.crypto.tls.Client.init(stream, .{
-        .host = .{ .explicit = "example.com" },
+    var tls_client = std.crypto.tls.Client.init(stream, .{
+        .host = .{ .explicit = "httpbin.org" },
         .ca = .no_verification, // For demo purposes - in production use proper CA verification
-    });
+    }) catch |err| {
+        std.log.err("TLS handshake failed: {}", .{err});
+        return;
+    };
 
     std.log.info("TLS handshake completed successfully!", .{});
 
     // Send HTTPS request
-    const request = "GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: zio.tls-demo\r\nConnection: close\r\n\r\n";
+    const request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: zio.tls-demo\r\nConnection: close\r\n\r\n";
 
     std.log.info("Sending HTTPS request...", .{});
-    const bytes_written = try tls_client.write(stream, request);
-    std.log.info("Sent {} bytes over TLS", .{bytes_written});
+    try tls_client.writeAll(stream, request);
+    std.log.info("Sent {} bytes over TLS", .{request.len});
 
     // Read HTTPS response
     var buffer: [4096]u8 = undefined;
@@ -43,8 +51,7 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator);
     defer runtime.deinit();
 
-
-    var tls_task = try runtime.spawn(runTlsTask, .{&runtime}, .{});
+    var tls_task = try runtime.spawn(runTlsTask, .{&runtime}, .{ .stack_size = 4 * 1024 * 1024 }); // Test 4MB stack
     defer tls_task.deinit();
 
     try runtime.run();

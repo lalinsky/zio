@@ -43,6 +43,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         exe.root_module.addImport("zio", zio);
+
+        // Link libc for examples that need mprotect/signals
+        if (std.mem.eql(u8, example.name, "stack-overflow-demo")) {
+            exe.linkLibC();
+        }
+
         b.installArtifact(exe);
     }
 
