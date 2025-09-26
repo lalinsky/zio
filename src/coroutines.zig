@@ -171,12 +171,14 @@ fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
             if (builtin.os.tag == .windows) {
+                // Windows x64 ABI: first integer arg in RCX
                 asm volatile (
                     \\ pushq $0
                     \\ leaq 8(%%rsp), %%rcx
                     \\ jmpq *8(%%rsp)
                 );
             } else {
+                // System V AMD64 ABI: first integer arg in RDI
                 asm volatile (
                     \\ pushq $0
                     \\ leaq 8(%%rsp), %%rdi
