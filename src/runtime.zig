@@ -12,9 +12,6 @@ const CoroutineOptions = coroutines.CoroutineOptions;
 const Error = coroutines.Error;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 
-const MAX_COROUTINES = 32;
-const STACK_SIZE = 8192;
-
 // Waker interface for asynchronous operations
 pub const Waiter = struct {
     runtime: *Runtime,
@@ -161,10 +158,6 @@ pub const Runtime = struct {
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(@TypeOf(@call(.auto, func, args))) {
         const T = @TypeOf(@call(.auto, func, args));
-
-        if (self.count >= MAX_COROUTINES) {
-            return error.TooManyCoroutines;
-        }
 
         const id = self.count;
         self.count += 1;
