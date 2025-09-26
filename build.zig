@@ -33,6 +33,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "udp-echo", .file = "examples/udp_echo.zig", .step = "run-udp", .desc = "Run the UDP echo demo" },
     };
 
+    const examples_step = b.step("examples", "Build examples");
+
     // Create executables and run steps
     for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -44,12 +46,7 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addImport("zio", zio);
         b.installArtifact(exe);
 
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| run_cmd.addArgs(args);
-
-        const run_step = b.step(example.step, example.desc);
-        run_step.dependOn(&run_cmd.step);
+        examples_step.dependOn(b.getInstallStep());
     }
 
     // Tests
