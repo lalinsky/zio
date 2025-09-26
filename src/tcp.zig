@@ -67,7 +67,7 @@ pub const TcpListener = struct {
         };
     }
 
-    pub fn close(self: *TcpListener) !void {
+    pub fn close(self: *TcpListener) void {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -106,13 +106,11 @@ pub const TcpListener = struct {
 
         waiter.waitForReady();
 
-        return result_data.result;
+        // Ignore close errors, following Zig std lib pattern
+        _ = result_data.result catch {};
     }
 
-    pub fn deinit(self: *const TcpListener) void {
-        _ = self;
-    }
-};
+    };
 
 pub const TcpStream = struct {
     xev_tcp: xev.TCP,
@@ -167,7 +165,7 @@ pub const TcpStream = struct {
         };
     }
 
-    pub fn read(self: *TcpStream, buffer: []u8) !usize {
+    pub fn read(self: *const TcpStream, buffer: []u8) !usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -212,7 +210,7 @@ pub const TcpStream = struct {
         return result_data.result;
     }
 
-    pub fn write(self: *TcpStream, data: []const u8) !usize {
+    pub fn write(self: *const TcpStream, data: []const u8) !usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -299,7 +297,7 @@ pub const TcpStream = struct {
         return result_data.result;
     }
 
-    pub fn close(self: *TcpStream) !void {
+    pub fn close(self: *TcpStream) void {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -338,13 +336,19 @@ pub const TcpStream = struct {
 
         waiter.waitForReady();
 
-        return result_data.result;
+        // Ignore close errors, following Zig std lib pattern
+        _ = result_data.result catch {};
     }
 
-    pub fn deinit(self: *const TcpStream) void {
-        _ = self;
+    pub fn reader(self: *const TcpStream) std.io.Reader(*const TcpStream, anyerror, read) {
+        return .{ .context = self };
     }
-};
+
+    pub fn writer(self: *const TcpStream) std.io.Writer(*const TcpStream, anyerror, write) {
+        return .{ .context = self };
+    }
+
+    };
 
 test "TCP: basic echo server and client" {
     const testing = std.testing;
@@ -364,7 +368,6 @@ test "TCP: basic echo server and client" {
 
             // Accept one connection
             var stream = try listener.accept();
-            defer stream.deinit();
 
             // Read and echo back
             var buffer: [1024]u8 = undefined;
@@ -373,8 +376,8 @@ test "TCP: basic echo server and client" {
             try testing.expect(bytes_written == bytes_read);
 
             try stream.shutdown();
-            try stream.close();
-            try listener.close();
+            stream.close();
+            listener.close();
         }
     };
 
@@ -384,7 +387,6 @@ test "TCP: basic echo server and client" {
 
             const addr = try Address.parseIp4("127.0.0.1", 8080);
             var stream = try TcpStream.connect(rt, addr);
-            defer stream.deinit();
 
             // Send test data
             const test_data = "Hello, TCP!";
@@ -397,7 +399,7 @@ test "TCP: basic echo server and client" {
             try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
 
             try stream.shutdown();
-            try stream.close();
+            stream.close();
         }
     };
 

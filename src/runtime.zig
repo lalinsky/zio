@@ -64,6 +64,7 @@ pub fn Task(comptime T: type) type {
 
         task: *AnyTaskList.Node,
         runtime: *Runtime,
+        detached: bool = false,
 
         pub fn init(task: *AnyTaskList.Node, runtime: *Runtime) Self {
             // Increment reference count when creating a Task(T) handle
@@ -74,20 +75,25 @@ pub fn Task(comptime T: type) type {
             };
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
+            self.detach();
+        }
+
+        pub fn detach(self: *Self) void {
+            if (self.detached) return;
             // Decrement reference count for this Task(T) handle
             if (self.task.data.ref_count.decr()) {
                 // Reference count reached zero, destroy the task
                 self.task.data.coro.deinit(self.runtime.allocator);
                 self.runtime.allocator.destroy(self.task);
             }
+            self.detached = true;
         }
 
-        pub fn wait(self: Self) T {
+        pub fn join(self: Self) T {
             // Use the task directly to check if already completed
             if (self.task.data.coro.result != .pending) {
-                const coro_result = self.task.data.coro.getResult(T);
-                return coro_result.get();
+                return self.task.data.coro.getResult(T).get();
             }
 
             // Use runtime's wait method for the waiting logic
@@ -115,6 +121,13 @@ pub fn Task(comptime T: type) type {
                 },
             }
         }
+    };
+}
+
+fn ReturnType(comptime func: anytype) type {
+    return switch (@typeInfo(@TypeOf(func))) {
+        .@"fn" => |info| if (info.return_type) |ret| ret else void,
+        else => @compileError("ReturnType only supports function types"),
     };
 }
 
@@ -156,9 +169,7 @@ pub const Runtime = struct {
         self.loop.deinit();
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(@TypeOf(@call(.auto, func, args))) {
-        const T = @TypeOf(@call(.auto, func, args));
-
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(ReturnType(func)) {
         const id = self.count;
         self.count += 1;
 
@@ -183,7 +194,8 @@ pub const Runtime = struct {
 
         self.ready_queue.append(task);
 
-        return Task(T).init(task, self);
+        task.data.ref_count.incr();
+        return .{ .task = task, .runtime = self };
     }
 
     pub fn yield(self: *Runtime) void {
