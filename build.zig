@@ -26,16 +26,17 @@ pub fn build(b: *std.Build) void {
     zio.addImport("xev", xev.module("xev"));
 
     // Examples configuration
-    const examples = [_]struct { name: []const u8, file: []const u8, step: []const u8, desc: []const u8 }{
-        .{ .name = "sleep", .file = "examples/sleep.zig", .step = "run", .desc = "Run the sleep demo" },
-        .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig", .step = "run-server", .desc = "Run the TCP echo server" },
-        .{ .name = "tcp-client", .file = "examples/tcp_client.zig", .step = "run-client", .desc = "Run the TCP client demo" },
-        .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig", .step = "run-mutex", .desc = "Run the mutex demo" },
-        .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig", .step = "run-prodcons", .desc = "Run the producer-consumer demo" },
-        //.{ .name = "udp-echo", .file = "examples/udp_echo.zig", .step = "run-udp", .desc = "Run the UDP echo demo" },
+    const examples = [_]struct { name: []const u8, file: []const u8 }{
+        .{ .name = "sleep", .file = "examples/sleep.zig" },
+        .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
+        .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
+        .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },
+        .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig" },
+        .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
+        //.{ .name = "udp-echo", .file = "examples/udp_echo.zig" },
     };
 
-    // Create executables and run steps
+    // Create executables
     for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
@@ -44,6 +45,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         exe.root_module.addImport("zio", zio);
+
+        // Link libc for examples that need mprotect/signals
+        if (std.mem.eql(u8, example.name, "stack-overflow-demo")) {
+            exe.linkLibC();
+        }
+
         b.installArtifact(exe);
     }
 
