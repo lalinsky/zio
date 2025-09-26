@@ -110,15 +110,6 @@ pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Contex
 }
 
 /// Context switching function using C calling convention.
-///
-/// This function follows C ABI, which means:
-/// - Caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11, xmm0-xmm15 on x86_64;
-///   x0-x18, x30, v0-v7, v16-v31 on ARM64) can be freely modified
-/// - Callee-saved registers must be preserved OR marked as clobbered
-///
-/// Since we're doing a context switch, all callee-saved registers will have
-/// different values when we "return" (jump to new context), so we mark them
-/// as clobbered to inform the compiler they cannot be relied upon.
 pub fn switchContext(
     noalias current_context: *Context,
     noalias new_context: *Context,
@@ -136,7 +127,7 @@ pub fn switchContext(
             :
             : [current] "{rax}" (current_context),
               [new] "{rcx}" (new_context),
-            : "rbx", "r12", "r13", "r14", "r15", "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23", "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31", "memory"
+            : "rdx", "rbx", "rdi", "rsi", "r12", "r13", "r14", "r15", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory"
         ),
         .aarch64 => asm volatile (
             \\ adr x9, 0f
@@ -155,7 +146,7 @@ pub fn switchContext(
             :
             : [current] "{x0}" (current_context),
               [new] "{x1}" (new_context),
-            : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "memory"
+            : "x9", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "memory"
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -178,11 +169,23 @@ pub fn switchContext(
 /// ARM64 stores return address in x30 register (not stack), so we set x30=0 for safety
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
-        .x86_64 => asm volatile (
-            \\ pushq $0
-            \\ leaq 8(%%rsp), %%rdi
-            \\ jmpq *8(%%rsp)
-        ),
+        .x86_64 => {
+            if (builtin.os.tag == .windows) {
+                // Windows x64 ABI: first integer arg in RCX
+                asm volatile (
+                    \\ pushq $0
+                    \\ leaq 8(%%rsp), %%rcx
+                    \\ jmpq *8(%%rsp)
+                );
+            } else {
+                // System V AMD64 ABI: first integer arg in RDI
+                asm volatile (
+                    \\ pushq $0
+                    \\ leaq 8(%%rsp), %%rdi
+                    \\ jmpq *8(%%rsp)
+                );
+            }
+        },
         .aarch64 => asm volatile (
             \\ mov x30, #0
             \\ mov x0, sp
