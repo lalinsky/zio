@@ -9,16 +9,22 @@ fn handleClient(in_stream: zio.TcpStream) !void {
         std.log.err("Failed to shutdown client connection: {}", .{err});
     };
 
-    var buffer: [1024]u8 = undefined;
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
 
-    const reader = stream.reader();
-    const writer = stream.writer();
+    var reader = stream.reader(&read_buffer);
+    var writer = stream.writer(&write_buffer);
 
     while (true) {
-        const line = try reader.readUntilDelimiterOrEof(&buffer, '\n') orelse break;
+        // Use new Reader delimiter method to read lines
+        const line = reader.interface.takeDelimiterExclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+
         std.log.info("Received: {s}", .{line});
-        try writer.writeAll(line);
-        try writer.writeAll("\n");
+        _ = try writer.interface.write(line);
+        _ = try writer.interface.write("\n");
     }
 }
 
