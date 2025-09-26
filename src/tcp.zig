@@ -1,8 +1,12 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
 const Address = @import("address.zig").Address;
+
+// Version compatibility detection
+const is_zig_015_or_later = builtin.zig_version.order(.{ .major = 0, .minor = 15, .patch = 0 }) != .lt;
 
 pub const TcpListener = struct {
     xev_tcp: xev.TCP,
@@ -494,13 +498,35 @@ pub const TcpStream = struct {
         }
     };
 
-    // Standard interface methods (following std.fs.File pattern)
-    pub fn reader(self: *const TcpStream, buffer: []u8) Reader {
-        return Reader.init(self, buffer);
+    // Version-compatible interface methods
+    pub fn reader(self: *const TcpStream, buffer: []u8) if (is_zig_015_or_later) Reader else std.io.GenericReader(*const TcpStream, ReadError, readFn) {
+        if (is_zig_015_or_later) {
+            return Reader.init(self, buffer);
+        } else {
+            _ = buffer; // Buffer not used in Zig 0.14 interface
+            return .{ .context = self };
+        }
     }
 
-    pub fn writer(self: *const TcpStream, buffer: []u8) Writer {
-        return Writer.init(self, buffer);
+    pub fn writer(self: *const TcpStream, buffer: []u8) if (is_zig_015_or_later) Writer else std.io.GenericWriter(*const TcpStream, WriteError, writeFn) {
+        if (is_zig_015_or_later) {
+            return Writer.init(self, buffer);
+        } else {
+            _ = buffer; // Buffer not used in Zig 0.14 interface
+            return .{ .context = self };
+        }
+    }
+
+    // Zig 0.14 compatible functions
+    const ReadError = error{ Canceled, ConnectionResetByPeer, EOF, Unexpected };
+    const WriteError = error{ BrokenPipe, Canceled, ConnectionResetByPeer, Unexpected };
+
+    fn readFn(context: *const TcpStream, buffer: []u8) ReadError!usize {
+        return context.read(buffer);
+    }
+
+    fn writeFn(context: *const TcpStream, bytes: []const u8) WriteError!usize {
+        return context.write(bytes);
     }
 
 

@@ -136,7 +136,7 @@ pub fn switchContext(
             :
             : [current] "{rax}" (current_context),
               [new] "{rcx}" (new_context),
-            : "rbx", "r12", "r13", "r14", "r15", "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23", "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31", "memory"
+            : .{ .rbx = true, .r12 = true, .r13 = true, .r14 = true, .r15 = true, .xmm16 = true, .xmm17 = true, .xmm18 = true, .xmm19 = true, .xmm20 = true, .xmm21 = true, .xmm22 = true, .xmm23 = true, .xmm24 = true, .xmm25 = true, .xmm26 = true, .xmm27 = true, .xmm28 = true, .xmm29 = true, .xmm30 = true, .xmm31 = true, .memory = true }
         ),
         .aarch64 => asm volatile (
             \\ adr x9, 0f
@@ -155,7 +155,7 @@ pub fn switchContext(
             :
             : [current] "{x0}" (current_context),
               [new] "{x1}" (new_context),
-            : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "memory"
+            : .{ .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .x25 = true, .x26 = true, .x27 = true, .x28 = true, .x29 = true, .v8 = true, .v9 = true, .v10 = true, .v11 = true, .v12 = true, .v13 = true, .v14 = true, .v15 = true, .memory = true }
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -253,7 +253,7 @@ pub const Coroutine = struct {
 
         // Allocate stack
         const stack_size = std.mem.alignForward(usize, options.stack_size + @sizeOf(CoroutineData), stack_alignment);
-        const stack = try allocator.alignedAlloc(u8, stack_alignment, stack_size);
+        const stack = try allocator.alignedAlloc(u8, @enumFromInt(stack_alignment), stack_size);
         errdefer allocator.free(stack);
 
         // Convert the stack pointer to ints for calculations

@@ -51,9 +51,10 @@ fn markReadyFromXevCallback(
 
 // Task for runtime scheduling
 pub const AnyTask = struct {
+    next: ?*AnyTask = null,
     id: u64,
     coro: Coroutine,
-    waiting_list: AnyTaskList = .{},
+    waiting_list: AnyTaskList = AnyTaskList{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
 };
 
@@ -62,13 +63,13 @@ pub fn Task(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        task: *AnyTaskList.Node,
+        task: *AnyTask,
         runtime: *Runtime,
         detached: bool = false,
 
-        pub fn init(task: *AnyTaskList.Node, runtime: *Runtime) Self {
+        pub fn init(task: *AnyTask, runtime: *Runtime) Self {
             // Increment reference count when creating a Task(T) handle
-            task.data.ref_count.incr();
+            task.ref_count.incr();
             return Self{
                 .task = task,
                 .runtime = runtime,
@@ -82,9 +83,9 @@ pub fn Task(comptime T: type) type {
         pub fn detach(self: *Self) void {
             if (self.detached) return;
             // Decrement reference count for this Task(T) handle
-            if (self.task.data.ref_count.decr()) {
+            if (self.task.ref_count.decr()) {
                 // Reference count reached zero, destroy the task
-                self.task.data.coro.deinit(self.runtime.allocator);
+                self.task.coro.deinit(self.runtime.allocator);
                 self.runtime.allocator.destroy(self.task);
             }
             self.detached = true;
@@ -92,23 +93,23 @@ pub fn Task(comptime T: type) type {
 
         pub fn join(self: Self) T {
             // Use the task directly to check if already completed
-            if (self.task.data.coro.result != .pending) {
-                return self.task.data.coro.getResult(T).get();
+            if (self.task.coro.result != .pending) {
+                return self.task.coro.getResult(T).get();
             }
 
             // Use runtime's wait method for the waiting logic
-            self.runtime.wait(self.task.data.id);
+            self.runtime.wait(self.task.id);
 
-            const coro_result = self.task.data.coro.getResult(T);
+            const coro_result = self.task.coro.getResult(T);
             return coro_result.get();
         }
 
         pub fn result(self: Self) T {
-            const coro_result = self.task.data.coro.result;
+            const coro_result = self.task.coro.result;
             switch (coro_result) {
                 .pending => std.debug.panic("Task has not completed yet", .{}),
                 .success => {
-                    const typed_result = self.task.data.coro.getResult(T);
+                    const typed_result = self.task.coro.getResult(T);
                     return typed_result.get();
                 },
                 .failure => |err| {
@@ -131,8 +132,51 @@ fn ReturnType(comptime func: anytype) type {
     };
 }
 
-// Linked list of tasks
-pub const AnyTaskList = std.DoublyLinkedList(AnyTask);
+// Simple singly-linked list of tasks
+pub const AnyTaskList = struct {
+    head: ?*AnyTask = null,
+    tail: ?*AnyTask = null,
+
+    pub fn push(self: *AnyTaskList, task: *AnyTask) void {
+        task.next = null;
+        if (self.tail) |tail| {
+            tail.next = task;
+            self.tail = task;
+        } else {
+            self.head = task;
+            self.tail = task;
+        }
+    }
+
+    pub fn pop(self: *AnyTaskList) ?*AnyTask {
+        const head = self.head orelse return null;
+        self.head = head.next;
+        if (self.head == null) {
+            self.tail = null;
+        }
+        head.next = null;
+        return head;
+    }
+
+    pub fn append(self: *AnyTaskList, task: *AnyTask) void {
+        self.push(task);
+    }
+
+    pub fn concatByMoving(self: *AnyTaskList, other: *AnyTaskList) void {
+        if (other.head == null) return;
+
+        if (self.tail) |tail| {
+            tail.next = other.head;
+            self.tail = other.tail;
+        } else {
+            self.head = other.head;
+            self.tail = other.tail;
+        }
+
+        other.head = null;
+        other.tail = null;
+    }
+};
 
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
@@ -141,7 +185,7 @@ pub const Runtime = struct {
     main_context: coroutines.Context,
     allocator: Allocator,
 
-    tasks: std.AutoHashMapUnmanaged(u64, *AnyTaskList.Node) = .{},
+    tasks: std.AutoHashMapUnmanaged(u64, *AnyTask) = .{},
 
     ready_queue: AnyTaskList = .{},
     cleanup_queue: AnyTaskList = .{},
@@ -161,7 +205,7 @@ pub const Runtime = struct {
         var iter = self.tasks.iterator();
         while (iter.next()) |entry| {
             const task = entry.value_ptr.*;
-            task.data.coro.deinit(self.allocator);
+            task.coro.deinit(self.allocator);
             self.allocator.destroy(task);
         }
         self.tasks.deinit(self.allocator);
@@ -179,22 +223,22 @@ pub const Runtime = struct {
         }
         errdefer self.tasks.removeByPtr(entry.key_ptr);
 
-        var task = try self.allocator.create(AnyTaskList.Node);
+        var task = try self.allocator.create(AnyTask);
         errdefer self.allocator.destroy(task);
 
-        task.data = .{
+        task.* = .{
             .id = id,
             .coro = undefined,
         };
 
-        task.data.coro = try Coroutine.init(self.allocator, func, args, options);
-        errdefer task.data.coro.deinit(self.allocator);
+        task.coro = try Coroutine.init(self.allocator, func, args, options);
+        errdefer task.coro.deinit(self.allocator);
 
         entry.value_ptr.* = task;
 
-        self.ready_queue.append(task);
+        self.ready_queue.push(task);
 
-        task.data.ref_count.incr();
+        task.ref_count.incr();
         return .{ .task = task, .runtime = self };
     }
 
@@ -238,11 +282,11 @@ pub const Runtime = struct {
 
             // Cleanup dead coroutines
             while (self.cleanup_queue.pop()) |task| {
-                _ = self.tasks.remove(task.data.id);
+                _ = self.tasks.remove(task.id);
                 // Runtime releases its reference when removing from hashmap
-                if (task.data.ref_count.decr()) {
+                if (task.ref_count.decr()) {
                     // No more references, safe to deallocate
-                    task.data.coro.deinit(self.allocator);
+                    task.coro.deinit(self.allocator);
                     self.allocator.destroy(task);
                 }
                 // If ref_count > 0, Task(T) handles still exist, keep the task alive
@@ -250,21 +294,21 @@ pub const Runtime = struct {
 
             // Process all ready coroutines (once)
             while (self.ready_queue.pop()) |task| {
-                task.data.coro.state = .running;
-                task.data.coro.switchTo(&self.main_context);
+                task.coro.state = .running;
+                task.coro.switchTo(&self.main_context);
 
                 // If the coroutines just yielded, it will end up in running state, so mark it as ready
-                if (task.data.coro.state == .running) {
-                    task.data.coro.state = .ready;
+                if (task.coro.state == .running) {
+                    task.coro.state = .ready;
                 }
 
-                switch (task.data.coro.state) {
-                    .ready => reschedule.append(task),
+                switch (task.coro.state) {
+                    .ready => reschedule.push(task),
                     .dead => {
-                        while (task.data.waiting_list.pop()) |waiting_task| {
-                            self.markReady(&waiting_task.data.coro);
+                        while (task.waiting_list.pop()) |waiting_task| {
+                            self.markReady(&waiting_task.coro);
                         }
-                        self.cleanup_queue.append(task);
+                        self.cleanup_queue.push(task);
                     },
                     else => {},
                 }
@@ -286,29 +330,28 @@ pub const Runtime = struct {
 
     pub fn getResult(self: *Runtime, comptime T: type, id: u64) ?coroutines.CoroutineResult(T) {
         const task = self.tasks.get(id) orelse return null;
-        return task.data.coro.getResult(T);
+        return task.coro.getResult(T);
     }
 
-    inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTaskList.Node {
+    inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTask {
         const task: *AnyTask = @fieldParentPtr("coro", coro);
-        const node: *AnyTaskList.Node = @fieldParentPtr("data", task);
-        return node;
+        return task;
     }
 
     fn markReady(self: *Runtime, coro: *Coroutine) void {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = taskPtrFromCoroPtr(coro);
-        self.ready_queue.append(task);
+        self.ready_queue.push(task);
     }
 
     pub fn wait(self: *Runtime, task_id: u64) void {
         const task = self.tasks.get(task_id) orelse return;
-        if (task.data.coro.result != .pending) {
+        if (task.coro.result != .pending) {
             return;
         }
         const current_coro = coroutines.getCurrent() orelse std.debug.panic("not in coroutine", .{});
-        task.data.waiting_list.append(taskPtrFromCoroPtr(current_coro));
+        task.waiting_list.push(taskPtrFromCoroPtr(current_coro));
         current_coro.waitForReady();
     }
 };
