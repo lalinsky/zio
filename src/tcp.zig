@@ -312,17 +312,12 @@ pub const TcpStream = struct {
         return 0; // All iovecs are empty
     }
 
-    pub fn writevAll(self: *const TcpStream, iovecs: []std.posix.iovec_const) anyerror!void {
+    pub fn writevAll(self: *const TcpStream, iovecs: []const std.posix.iovec_const) anyerror!void {
         for (iovecs) |iovec| {
             var buffer = iovec.base[0..iovec.len];
 
             while (buffer.len > 0) {
                 const bytes_written = try self.write(buffer);
-
-                if (bytes_written == 0) {
-                    return; // EOF or connection closed
-                }
-
                 buffer = buffer[bytes_written..];
             }
         }
