@@ -4,13 +4,6 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-pub const Error = error{
-    StackTooSmall,
-    UnsupportedPlatform,
-    TooManyCoroutines,
-    CoroutinePending,
-};
-
 threadlocal var current_coroutine: ?*Coroutine = null;
 
 pub inline fn getCurrent() ?*Coroutine {
