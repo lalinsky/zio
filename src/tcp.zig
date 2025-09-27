@@ -437,6 +437,7 @@ pub const TcpStream = struct {
                 error.EOF => return error.EndOfStream,
                 else => return error.ReadFailed,
             };
+            if (n == 0) return error.EndOfStream;
             w.advance(n);
             return n;
         }
@@ -462,24 +463,26 @@ pub const TcpStream = struct {
         fn readVec(io_reader: *std.io.Reader, data: [][]u8) std.io.Reader.Error!usize {
             const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
 
-            if (data.len == 0) return 0;
+            // Use writableVector to properly manage buffer and data vectors
+            var vecs: [32][]u8 = undefined; // Reasonable limit for vectored I/O
+            const dest_n, const data_size = try io_reader.writableVector(&vecs, data);
+            const dest = vecs[0..dest_n];
 
-            // Read into the first (and typically largest) buffer
-            const dest = data[0];
-            if (dest.len == 0) {
-                // If first buffer is empty, use the reader's internal buffer
-                const n = r.tcp_stream.read(io_reader.buffer) catch |err| switch (err) {
-                    error.EOF => return error.EndOfStream,
-                    else => return error.ReadFailed,
-                };
-                io_reader.end = n;
-                return 0;
-            }
+            if (dest.len == 0) return 0;
 
-            const n = r.tcp_stream.read(dest) catch |err| switch (err) {
+            // Read into the first available buffer
+            std.debug.assert(dest[0].len != 0);
+            const n = r.tcp_stream.read(dest[0]) catch |err| switch (err) {
                 error.EOF => return error.EndOfStream,
                 else => return error.ReadFailed,
             };
+            if (n == 0) return error.EndOfStream;
+
+            // If we read into the internal buffer, update end pointer
+            if (n > data_size) {
+                io_reader.end += n - data_size;
+                return data_size;
+            }
             return n;
         }
     };
@@ -504,37 +507,45 @@ pub const TcpStream = struct {
 
         fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_writer));
+            const buffered = io_writer.buffered();
 
             // First, write any buffered data
-            if (io_writer.end > 0) {
-                _ = w.tcp_stream.write(io_writer.buffer[0..io_writer.end]) catch |err| switch (err) {
+            if (buffered.len != 0) {
+                const n = w.tcp_stream.write(buffered) catch |err| switch (err) {
                     else => return error.WriteFailed,
                 };
-                io_writer.end = 0;
+                return io_writer.consume(n);
             }
 
             // Then write the provided data
-            var total_written: usize = 0;
-            for (data) |slice| {
-                for (0..@max(1, splat)) |_| {
-                    const n = w.tcp_stream.write(slice) catch |err| switch (err) {
-                        else => return error.WriteFailed,
-                    };
-                    total_written += n;
-                    if (n < slice.len) return total_written;
-                }
+            for (data[0..data.len -| 1]) |slice| {
+                if (slice.len == 0) continue;
+                const n = w.tcp_stream.write(slice) catch |err| switch (err) {
+                    else => return error.WriteFailed,
+                };
+                return io_writer.consume(n);
             }
-            return total_written;
+
+            // Handle splat pattern (last element repeated)
+            const pattern = data[data.len - 1];
+            if (pattern.len == 0 or splat == 0) return 0;
+
+            const n = w.tcp_stream.write(pattern) catch |err| switch (err) {
+                else => return error.WriteFailed,
+            };
+            return io_writer.consume(n);
         }
 
         fn flush(io_writer: *std.io.Writer) std.io.Writer.Error!void {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_writer));
 
-            if (io_writer.end > 0) {
-                _ = w.tcp_stream.write(io_writer.buffer[0..io_writer.end]) catch |err| switch (err) {
+            while (io_writer.end > 0) {
+                const buffered = io_writer.buffered();
+                const n = w.tcp_stream.write(buffered) catch |err| switch (err) {
                     else => return error.WriteFailed,
                 };
-                io_writer.end = 0;
+                if (n == 0) return error.WriteFailed; // No progress made
+                _ = io_writer.consume(n);
             }
         }
     };
@@ -549,8 +560,6 @@ pub const TcpStream = struct {
     }
 
     // Zig 0.14 compatible functions
-    const ReadError = error{ Canceled, ConnectionResetByPeer, EOF, Unexpected };
-    const WriteError = error{ BrokenPipe, Canceled, ConnectionResetByPeer, Unexpected };
 
     fn readFn(context: *const TcpStream, buffer: []u8) ReadError!usize {
         return context.read(buffer);
