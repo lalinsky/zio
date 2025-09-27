@@ -265,7 +265,11 @@ pub const Runtime = struct {
             if (options.thread_pool.stack_size) |size| config.stack_size = size;
             thread_pool.?.* = xev.ThreadPool.init(config);
         }
-        errdefer if (thread_pool) |tp| allocator.destroy(tp);
+        errdefer if (thread_pool) |tp| {
+            tp.shutdown();
+            tp.deinit();
+            allocator.destroy(tp);
+        };
 
         // Initialize libxev loop with optional ThreadPool
         const loop = try xev.Loop.init(.{
