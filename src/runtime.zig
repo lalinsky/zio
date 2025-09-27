@@ -225,9 +225,91 @@ pub const AnyTaskList = struct {
     }
 };
 
+// Blocking task handle returned by spawnBlocking
+pub fn BlockingHandle(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        task: *BlockingTask,
+        runtime: *Runtime,
+        detached: bool = false,
+
+        pub fn init(task: *BlockingTask, runtime: *Runtime) Self {
+            task.ref_count.incr();
+            return Self{
+                .task = task,
+                .runtime = runtime,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.detach();
+        }
+
+        pub fn detach(self: *Self) void {
+            if (self.detached) return;
+            if (self.task.ref_count.decr()) {
+                // Reference count reached zero, destroy the task
+                self.runtime.allocator.destroy(self.task);
+            }
+            self.detached = true;
+        }
+
+        pub fn join(self: Self) T {
+            // Get current coroutine context for waiting
+            const current_coro = coroutines.getCurrent();
+            if (current_coro) |coro| {
+                // We're in a coroutine, wait asynchronously
+                while (self.task.state.load(.acquire) != .completed) {
+                    self.task.waiter = Waiter{
+                        .runtime = self.runtime,
+                        .coroutine = coro,
+                    };
+                    coro.waitForReady();
+                }
+            } else {
+                // Not in coroutine, busy wait
+                while (self.task.state.load(.acquire) != .completed) {
+                    std.atomic.spinLoopHint();
+                }
+            }
+
+            // Get the result
+            const result_ptr = self.task.result.load(.acquire) orelse unreachable;
+            if (T == void) {
+                return {};
+            } else {
+                const typed_ptr: *T = @ptrCast(@alignCast(result_ptr));
+                return typed_ptr.*;
+            }
+        }
+    };
+}
+
+// Blocking task that runs in thread pool
+pub const BlockingTask = struct {
+    const State = enum(u32) {
+        pending = 0,
+        running = 1,
+        completed = 2,
+    };
+
+    pool_task: xev.ThreadPool.Task,
+    state: std.atomic.Value(State) = std.atomic.Value(State).init(.pending),
+    result: std.atomic.Value(?*anyopaque) = std.atomic.Value(?*anyopaque).init(null),
+    waiter: ?Waiter = null,
+    ref_count: RefCounter(u32) = RefCounter(u32).init(),
+    func_ptr: *const anyopaque,
+    args_ptr: *anyopaque,
+    result_storage: *anyopaque,
+    wrapper_fn: *const fn (*BlockingTask) void,
+    runtime: *Runtime,
+};
+
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
     loop: xev.Loop,
+    thread_pool: xev.ThreadPool,
     count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -241,14 +323,22 @@ pub const Runtime = struct {
         // Initialize libxev loop
         const loop = try xev.Loop.init(.{});
 
+        // Initialize thread pool with default configuration
+        const thread_pool = xev.ThreadPool.init(.{});
+
         return Runtime{
             .allocator = allocator,
             .loop = loop,
+            .thread_pool = thread_pool,
             .main_context = undefined,
         };
     }
 
     pub fn deinit(self: *Runtime) void {
+        // Shutdown thread pool first
+        self.thread_pool.shutdown();
+        self.thread_pool.deinit();
+
         var iter = self.tasks.iterator();
         while (iter.next()) |entry| {
             const task = entry.value_ptr.*;
@@ -404,5 +494,86 @@ pub const Runtime = struct {
         }
         task.waiting_list.append(current_task);
         current_coro.waitForReady();
+    }
+
+    pub fn spawnBlocking(self: *Runtime, comptime func: anytype, args: anytype) !BlockingHandle(ReturnType(func)) {
+        const Args = @TypeOf(args);
+        const Result = ReturnType(func);
+
+        const WrapperData = struct {
+            func: @TypeOf(func),
+            args: Args,
+            result: Result,
+
+            fn wrapper(blocking_task: *BlockingTask) void {
+                const task: *BlockingTask = blocking_task;
+                const self_ptr: *@This() = @ptrCast(@alignCast(task.args_ptr));
+
+                // Mark as running
+                task.state.store(.running, .release);
+
+                // Execute the function
+                if (Result == void) {
+                    @call(.auto, self_ptr.func, self_ptr.args);
+                } else {
+                    self_ptr.result = @call(.auto, self_ptr.func, self_ptr.args);
+                }
+
+                // Store result pointer
+                if (Result != void) {
+                    task.result.store(&self_ptr.result, .release);
+                } else {
+                    task.result.store(@ptrFromInt(1), .release); // Non-null dummy value for void
+                }
+
+                // Mark as completed and wake waiter if any
+                task.state.store(.completed, .release);
+
+                // Wake up waiting coroutine if any
+                if (task.waiter) |waiter| {
+                    waiter.markReady();
+                }
+            }
+
+            fn threadPoolCallback(pool_task: *xev.ThreadPool.Task) void {
+                const task: *BlockingTask = @fieldParentPtr("pool_task", pool_task);
+                task.wrapper_fn(task);
+            }
+        };
+
+        // Allocate blocking task
+        const task = try self.allocator.create(BlockingTask);
+        errdefer self.allocator.destroy(task);
+
+        // Allocate storage for wrapper data
+        const wrapper_data = try self.allocator.create(WrapperData);
+        errdefer self.allocator.destroy(wrapper_data);
+
+        wrapper_data.* = .{
+            .func = func,
+            .args = args,
+            .result = undefined,
+        };
+
+        task.* = .{
+            .pool_task = .{
+                .node = .{},
+                .callback = &WrapperData.threadPoolCallback,
+            },
+            .func_ptr = @ptrCast(&func),
+            .args_ptr = wrapper_data,
+            .result_storage = &wrapper_data.result,
+            .wrapper_fn = &WrapperData.wrapper,
+            .runtime = self,
+        };
+
+        // Increment reference count for the runtime's reference
+        task.ref_count.incr();
+
+        // Schedule on thread pool
+        const batch = xev.ThreadPool.Batch.from(&task.pool_task);
+        self.thread_pool.schedule(batch);
+
+        return BlockingHandle(Result).init(task, self);
     }
 };
