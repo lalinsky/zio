@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/zio.zig"),
         .target = target,
         .optimize = optimize,
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     lib_unit_tests.root_module.addImport("xev", xev.module("xev"));
 
