@@ -9,7 +9,7 @@ const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
 const CoroutineState = coroutines.CoroutineState;
 const CoroutineOptions = coroutines.CoroutineOptions;
-const Error = coroutines.Error;
+// const Error = coroutines.Error;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 
 // Waker interface for asynchronous operations
@@ -30,7 +30,7 @@ pub const Waiter = struct {
 pub const ZioError = error{
     XevError,
     NotInCoroutine,
-} || Error;
+};
 
 // Timer callback for libxev
 fn markReadyFromXevCallback(
@@ -56,6 +56,7 @@ pub const AnyTask = struct {
     coro: Coroutine,
     waiting_list: AnyTaskList = AnyTaskList{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
+    in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 };
 
 // Typed task wrapper that provides type-safe wait() method
@@ -138,6 +139,10 @@ pub const AnyTaskList = struct {
     tail: ?*AnyTask = null,
 
     pub fn push(self: *AnyTaskList, task: *AnyTask) void {
+        if (builtin.mode == .Debug) {
+            std.debug.assert(!task.in_list);
+            task.in_list = true;
+        }
         task.next = null;
         if (self.tail) |tail| {
             tail.next = task;
@@ -150,6 +155,9 @@ pub const AnyTaskList = struct {
 
     pub fn pop(self: *AnyTaskList) ?*AnyTask {
         const head = self.head orelse return null;
+        if (builtin.mode == .Debug) {
+            head.in_list = false;
+        }
         self.head = head.next;
         if (self.head == null) {
             self.tail = null;
@@ -175,6 +183,45 @@ pub const AnyTaskList = struct {
 
         other.head = null;
         other.tail = null;
+    }
+
+    pub fn remove(self: *AnyTaskList, task: *AnyTask) bool {
+        // Handle empty list
+        if (self.head == null) return false;
+
+        // Handle removing head
+        if (self.head == task) {
+            if (builtin.mode == .Debug) {
+                std.debug.assert(task.in_list);
+                task.in_list = false;
+            }
+            self.head = task.next;
+            if (self.head == null) {
+                self.tail = null;
+            }
+            task.next = null;
+            return true;
+        }
+
+        // Search for task in the list
+        var current = self.head;
+        while (current) |curr| {
+            if (curr.next == task) {
+                if (builtin.mode == .Debug) {
+                    std.debug.assert(task.in_list);
+                    task.in_list = false;
+                }
+                curr.next = task.next;
+                if (task == self.tail) {
+                    self.tail = curr;
+                }
+                task.next = null;
+                return true;
+            }
+            current = curr.next;
+        }
+
+        return false;
     }
 };
 
@@ -333,12 +380,12 @@ pub const Runtime = struct {
         return task.coro.getResult(T);
     }
 
-    inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTask {
+    pub inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTask {
         const task: *AnyTask = @fieldParentPtr("coro", coro);
         return task;
     }
 
-    fn markReady(self: *Runtime, coro: *Coroutine) void {
+    pub fn markReady(self: *Runtime, coro: *Coroutine) void {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = taskPtrFromCoroPtr(coro);
@@ -351,7 +398,11 @@ pub const Runtime = struct {
             return;
         }
         const current_coro = coroutines.getCurrent() orelse std.debug.panic("not in coroutine", .{});
-        task.waiting_list.push(taskPtrFromCoroPtr(current_coro));
+        const current_task = taskPtrFromCoroPtr(current_coro);
+        if (current_task == task) {
+            std.debug.panic("a task cannot wait on itself", .{});
+        }
+        task.waiting_list.append(current_task);
         current_coro.waitForReady();
     }
 };

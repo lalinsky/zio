@@ -1,9 +1,10 @@
+const std = @import("std");
+
 // Re-export coroutine functionality
 pub const coroutines = @import("coroutines.zig");
 pub const Coroutine = coroutines.Coroutine;
 pub const CoroutineState = coroutines.CoroutineState;
 pub const CoroutineOptions = coroutines.CoroutineOptions;
-pub const Error = coroutines.Error;
 
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
@@ -20,3 +21,12 @@ pub const TcpStream = @import("tcp.zig").TcpStream;
 pub const UdpSocket = @import("udp.zig").UdpSocket;
 pub const UdpRecvResult = @import("udp.zig").UdpReadResult;
 pub const Address = @import("address.zig").Address;
+
+// Re-export synchronization functionality
+pub const Mutex = @import("sync.zig").Mutex;
+pub const Condition = @import("sync.zig").Condition;
+
+test {
+    _ = Mutex;
+    _ = Condition;
+}
