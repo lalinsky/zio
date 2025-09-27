@@ -23,8 +23,8 @@ pub const RuntimeOptions = struct {
 
     pub const ThreadPoolOptions = struct {
         enabled: bool = backendNeedsThreadPool(),
-        max_threads: ?u32 = null,  // null = CPU count
-        stack_size: ?u32 = null,   // null = default stack size
+        max_threads: ?u32 = null, // null = CPU count
+        stack_size: ?u32 = null, // null = default stack size
     };
 };
 
@@ -143,10 +143,7 @@ pub fn Task(comptime T: type) type {
 }
 
 fn ReturnType(comptime func: anytype) type {
-    return switch (@typeInfo(@TypeOf(func))) {
-        .@"fn" => |info| if (info.return_type) |ret| ret else void,
-        else => @compileError("ReturnType only supports function types"),
-    };
+    return if (@typeInfo(@TypeOf(func)).@"fn".return_type) |ret| ret else void;
 }
 
 // Simple singly-linked list of tasks
@@ -308,6 +305,12 @@ pub const Runtime = struct {
     }
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(ReturnType(func)) {
+        const debug_crash = false;
+        if (debug_crash) {
+            const v = @call(.always_inline, func, args);
+            std.debug.print("Spawned task with ID {any}\n", .{v});
+        }
+
         const id = self.count;
         self.count += 1;
 

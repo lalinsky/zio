@@ -28,7 +28,5 @@ pub const Condition = @import("sync.zig").Condition;
 pub const ResetEvent = @import("sync.zig").ResetEvent;
 
 test {
-    _ = Mutex;
-    _ = Condition;
-    _ = ResetEvent;
+    std.testing.refAllDecls(@This());
 }

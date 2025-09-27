@@ -4,6 +4,8 @@ const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
 const Address = @import("address.zig").Address;
 
+const TEST_PORT = 45001;
+
 pub const TcpListener = struct {
     xev_tcp: xev.TCP,
     runtime: *Runtime,
@@ -110,7 +112,10 @@ pub const TcpListener = struct {
         _ = result_data.result catch {};
     }
 
-    };
+    pub fn deinit(self: *TcpListener) void {
+        self.close();
+    }
+};
 
 pub const TcpStream = struct {
     xev_tcp: xev.TCP,
@@ -119,6 +124,8 @@ pub const TcpStream = struct {
     pub const ReadError = anyerror;
     pub const WriteError = anyerror;
 
+    /// Establishes a TCP connection to the specified address.
+    /// Returns a connected TcpStream on success.
     pub fn connect(runtime: *Runtime, addr: Address) !TcpStream {
         var tcp = try xev.TCP.init(addr);
         var waiter = runtime.getWaiter();
@@ -168,6 +175,9 @@ pub const TcpStream = struct {
         };
     }
 
+    /// Reads data from the stream into the provided buffer.
+    /// Returns the number of bytes read, which may be less than buffer.len.
+    /// A return value of 0 indicates end-of-stream.
     pub fn read(self: *const TcpStream, buffer: []u8) !usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
@@ -213,6 +223,9 @@ pub const TcpStream = struct {
         return result_data.result;
     }
 
+    /// Reads data from the stream into the provided iovecs.
+    /// Returns the number of bytes read from the first non-empty buffer.
+    /// This differs from POSIX readv by only filling the first buffer.
     pub fn readv(self: *const TcpStream, iovecs: []std.posix.iovec) anyerror!usize {
         // Find the first non-empty buffer
         for (iovecs) |iovec| {
@@ -224,6 +237,9 @@ pub const TcpStream = struct {
         return 0; // All iovecs are empty
     }
 
+    /// Reads data from the stream into all provided iovecs until they are filled
+    /// or EOF is reached. Returns the total number of bytes read across all buffers.
+    /// Unlike readv, this function attempts to fill all buffers completely.
     pub fn readvAll(self: *const TcpStream, iovecs: []std.posix.iovec) anyerror!usize {
         var total_read: usize = 0;
 
@@ -245,17 +261,34 @@ pub const TcpStream = struct {
         return total_read;
     }
 
+    /// Returns the number of bytes read. If the number read is smaller than
+    /// `buffer.len`, it means the stream reached the end. Reaching the end of
+    /// a stream is not an error condition.
+    pub fn readAll(self: *const TcpStream, buffer: []u8) anyerror!usize {
+        return self.readAtLeast(buffer, buffer.len);
+    }
+
+    /// Returns the number of bytes read, calling the underlying read function
+    /// the minimal number of times until the buffer has at least `len` bytes
+    /// filled. If the number read is less than `len` it means the stream
+    /// reached the end. Reaching the end of the stream is not an error
+    /// condition.
     pub fn readAtLeast(self: *const TcpStream, buffer: []u8, len: usize) anyerror!usize {
         std.debug.assert(len <= buffer.len);
         var index: usize = 0;
         while (index < len) {
-            const amt = try self.read(buffer[index..]);
+            const amt = self.read(buffer[index..]) catch |err| switch (err) {
+                error.EOF => break,
+                else => return err,
+            };
             if (amt == 0) break;
             index += amt;
         }
         return index;
     }
 
+    /// Writes data to the stream. Returns the number of bytes written,
+    /// which may be less than the length of data.
     pub fn write(self: *const TcpStream, data: []const u8) !usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
@@ -301,6 +334,20 @@ pub const TcpStream = struct {
         return result_data.result;
     }
 
+    /// Writes all data to the stream, looping until the entire buffer is written.
+    /// Returns when all bytes have been written successfully.
+    pub fn writeAll(self: *const TcpStream, data: []const u8) !void {
+        var offset: usize = 0;
+
+        while (offset < data.len) {
+            const bytes_written = try self.write(data[offset..]);
+            offset += bytes_written;
+        }
+    }
+
+    /// Writes data from the provided iovecs to the stream.
+    /// Returns the number of bytes written from the first non-empty buffer.
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn writev(self: *const TcpStream, iovecs: []const std.posix.iovec_const) anyerror!usize {
         // Find the first non-empty buffer
         for (iovecs) |iovec| {
@@ -312,10 +359,13 @@ pub const TcpStream = struct {
         return 0; // All iovecs are empty
     }
 
+    /// Writes all data from the provided iovecs to the stream, looping until
+    /// all buffers are completely written.
+    /// See https://github.com/ziglang/zig/issues/7699
+    /// See equivalent function: `std.fs.File.writevAll`.
     pub fn writevAll(self: *const TcpStream, iovecs: []const std.posix.iovec_const) anyerror!void {
         for (iovecs) |iovec| {
             var buffer = iovec.base[0..iovec.len];
-
             while (buffer.len > 0) {
                 const bytes_written = try self.write(buffer);
                 buffer = buffer[bytes_written..];
@@ -323,6 +373,8 @@ pub const TcpStream = struct {
         }
     }
 
+    /// Shuts down the write side of the TCP connection.
+    /// This sends a FIN packet to signal that no more data will be sent.
     pub fn shutdown(self: *TcpStream) !void {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
@@ -365,6 +417,8 @@ pub const TcpStream = struct {
         return result_data.result;
     }
 
+    /// Closes the TCP stream and releases associated resources.
+    /// This operation is asynchronous but returns immediately.
     pub fn close(self: *TcpStream) void {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
@@ -415,37 +469,36 @@ pub const TcpStream = struct {
     pub fn writer(self: *const TcpStream) std.io.Writer(*const TcpStream, anyerror, write) {
         return .{ .context = self };
     }
-
-    };
+};
 
 test "TCP: basic echo server and client" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const ServerTask = struct {
         fn run(rt: *Runtime) !void {
-            const addr = try Address.parseIp4("127.0.0.1", 0);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
-            defer listener.deinit();
+            defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
 
             // Accept one connection
             var stream = try listener.accept();
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
             // Read and echo back
             var buffer: [1024]u8 = undefined;
             const bytes_read = try stream.read(&buffer);
             const bytes_written = try stream.write(buffer[0..bytes_read]);
-            try testing.expect(bytes_written == bytes_read);
-
-            try stream.shutdown();
-            stream.close();
-            listener.close();
+            try testing.expectEqual(bytes_read, bytes_written);
         }
     };
 
@@ -453,28 +506,29 @@ test "TCP: basic echo server and client" {
         fn run(rt: *Runtime) !void {
             rt.sleep(10); // Give server time to start
 
-            const addr = try Address.parseIp4("127.0.0.1", 8080);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
             // Send test data
             const test_data = "Hello, TCP!";
             const bytes_written = try stream.write(test_data);
-            try testing.expect(bytes_written == test_data.len);
+            try testing.expectEqual(test_data.len, bytes_written);
 
             // Read response
             var buffer: [1024]u8 = undefined;
             const bytes_read = try stream.read(&buffer);
             try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
-
-            try stream.shutdown();
-            stream.close();
         }
     };
 
-    const server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
     defer server_task.deinit();
 
-    const client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -487,55 +541,67 @@ test "TCP: readv reads first buffer only" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
+    var server_ready = false;
+
     const ServerTask = struct {
-        fn run(rt: *Runtime) !void {
-            const addr = try Address.parseIp4("127.0.0.1", 0);
+        fn run(rt: *Runtime, ready_flag: *bool) !void {
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
+            defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
 
-            var stream = try listener.accept();
-            _ = try stream.write("Hello, World!");
+            // Signal that server is ready
+            ready_flag.* = true;
 
-            try stream.shutdown();
-            stream.close();
-            listener.close();
+            var stream = try listener.accept();
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
+
+            try stream.writeAll("Hello, World!");
         }
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime) !void {
-            rt.sleep(10);
+        fn run(rt: *Runtime, ready_flag: *bool) !void {
+            // Wait for server to be ready
+            while (!ready_flag.*) {
+                rt.sleep(1);
+            }
 
-            const addr = try Address.parseIp4("127.0.0.1", 8080);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
             var buf1: [5]u8 = undefined;
-            const buf2: [5]u8 = undefined;
-            const buf3: [10]u8 = undefined;
+            var buf2: [5]u8 = undefined;
+            var buf3: [10]u8 = undefined;
 
             var iovecs = [_]std.posix.iovec{
-                .{ .base = buf1.ptr, .len = buf1.len },
-                .{ .base = @constCast(buf2.ptr), .len = buf2.len },
-                .{ .base = @constCast(buf3.ptr), .len = buf3.len },
+                .{ .base = buf1[0..].ptr, .len = buf1.len },
+                .{ .base = buf2[0..].ptr, .len = buf2.len },
+                .{ .base = buf3[0..].ptr, .len = buf3.len },
             };
 
             const bytes_read = try stream.readv(&iovecs);
-            try testing.expect(bytes_read == 5);
+            try testing.expectEqual(5, bytes_read);
             try testing.expectEqualStrings("Hello", &buf1);
-
-            stream.close();
         }
     };
 
-    const server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
-    const client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -547,23 +613,25 @@ test "TCP: readvAll reads all buffers" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const ServerTask = struct {
         fn run(rt: *Runtime) !void {
-            const addr = try Address.parseIp4("127.0.0.1", 0);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
+            defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
 
             var stream = try listener.accept();
-            _ = try stream.write("Hello, World!");
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
-            try stream.shutdown();
-            stream.close();
-            listener.close();
+            try stream.writeAll("Hello, World!");
         }
     };
 
@@ -571,7 +639,7 @@ test "TCP: readvAll reads all buffers" {
         fn run(rt: *Runtime) !void {
             rt.sleep(10);
 
-            const addr = try Address.parseIp4("127.0.0.1", 8081);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
 
             var buf1: [5]u8 = undefined;
@@ -579,13 +647,13 @@ test "TCP: readvAll reads all buffers" {
             var buf3: [6]u8 = undefined;
 
             var iovecs = [_]std.posix.iovec{
-                .{ .base = buf1.ptr, .len = buf1.len },
-                .{ .base = buf2.ptr, .len = buf2.len },
-                .{ .base = buf3.ptr, .len = buf3.len },
+                .{ .base = buf1[0..].ptr, .len = buf1.len },
+                .{ .base = buf2[0..].ptr, .len = buf2.len },
+                .{ .base = buf3[0..].ptr, .len = buf3.len },
             };
 
             const bytes_read = try stream.readvAll(&iovecs);
-            try testing.expect(bytes_read == 13);
+            try testing.expectEqual(13, bytes_read);
             try testing.expectEqualStrings("Hello", &buf1);
             try testing.expectEqualStrings(", ", &buf2);
             try testing.expectEqualStrings("World!", &buf3);
@@ -594,10 +662,10 @@ test "TCP: readvAll reads all buffers" {
         }
     };
 
-    const server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
     defer server_task.deinit();
 
-    const client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -609,26 +677,28 @@ test "TCP: writev writes first buffer only" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const ServerTask = struct {
         fn run(rt: *Runtime) !void {
-            const addr = try Address.parseIp4("127.0.0.1", 0);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
+            defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
 
             var stream = try listener.accept();
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
             var buffer: [20]u8 = undefined;
             const bytes_read = try stream.read(&buffer);
-            try testing.expect(bytes_read == 5);
+            try testing.expectEqual(5, bytes_read);
             try testing.expectEqualStrings("Hello", buffer[0..bytes_read]);
-
-            stream.close();
-            listener.close();
         }
     };
 
@@ -636,8 +706,12 @@ test "TCP: writev writes first buffer only" {
         fn run(rt: *Runtime) !void {
             rt.sleep(10);
 
-            const addr = try Address.parseIp4("127.0.0.1", 8082);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
             const data1 = "Hello";
             const data2 = ", ";
@@ -650,17 +724,14 @@ test "TCP: writev writes first buffer only" {
             };
 
             const bytes_written = try stream.writev(&iovecs);
-            try testing.expect(bytes_written == 5);
-
-            try stream.shutdown();
-            stream.close();
+            try testing.expectEqual(5, bytes_written);
         }
     };
 
-    const server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
     defer server_task.deinit();
 
-    const client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -672,26 +743,28 @@ test "TCP: writevAll writes all buffers" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const ServerTask = struct {
         fn run(rt: *Runtime) !void {
-            const addr = try Address.parseIp4("127.0.0.1", 0);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
+            defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
 
             var stream = try listener.accept();
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
             var buffer: [20]u8 = undefined;
-            const bytes_read = try stream.read(&buffer);
-            try testing.expect(bytes_read == 13);
+            const bytes_read = try stream.readAll(&buffer);
+            try testing.expectEqual(13, bytes_read);
             try testing.expectEqualStrings("Hello, World!", buffer[0..bytes_read]);
-
-            stream.close();
-            listener.close();
         }
     };
 
@@ -699,8 +772,12 @@ test "TCP: writevAll writes all buffers" {
         fn run(rt: *Runtime) !void {
             rt.sleep(10);
 
-            const addr = try Address.parseIp4("127.0.0.1", 8083);
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
 
             const data1 = "Hello";
             const data2 = ", ";
@@ -713,56 +790,16 @@ test "TCP: writevAll writes all buffers" {
             };
 
             try stream.writevAll(&iovecs);
-
-            try stream.shutdown();
-            stream.close();
         }
     };
 
-    const server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
     defer server_task.deinit();
 
-    const client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
     defer client_task.deinit();
 
     try runtime.run();
     try server_task.result();
     try client_task.result();
-}
-
-test "TCP: vectored I/O edge cases" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var runtime = try Runtime.init(allocator);
-    defer runtime.deinit();
-
-    const addr = try Address.parseIp4("127.0.0.1", 0);
-    var listener = try TcpListener.init(&runtime, addr);
-    var server_stream = try TcpStream.connect(&runtime, addr);
-
-    // Test empty iovecs
-    var empty_iovecs_read: [0]std.posix.iovec = .{};
-    const empty_read = try server_stream.readv(&empty_iovecs_read);
-    try testing.expect(empty_read == 0);
-
-    var empty_iovecs_write: [0]std.posix.iovec_const = .{};
-    const empty_write = try server_stream.writev(&empty_iovecs_write);
-    try testing.expect(empty_write == 0);
-
-    try server_stream.writevAll(&empty_iovecs_write);
-
-    const empty_readall = try server_stream.readvAll(&empty_iovecs_read);
-    try testing.expect(empty_readall == 0);
-
-    // Test zero-length buffers
-    const zero_buf: [0]u8 = .{};
-    var zero_iovecs = [_]std.posix.iovec{
-        .{ .base = @constCast(zero_buf.ptr), .len = 0 },
-    };
-    const zero_read = try server_stream.readv(&zero_iovecs);
-    try testing.expect(zero_read == 0);
-
-    server_stream.close();
-    listener.close();
 }

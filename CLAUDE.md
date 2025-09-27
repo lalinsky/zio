@@ -4,3 +4,6 @@
 - use `./check.sh --test-fail-first true` to stop on first test failure
 - prefer only running specific tests and stopping on the first failure, while working on the feature
 - run full check after you are done
+
+Extra notes:
+- use `zig env` to get the path to the Zig standard library, if you need to check something

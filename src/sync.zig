@@ -507,7 +507,7 @@ test "Condition broadcast" {
 test "ResetEvent basic set/reset/isSet" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init(&runtime);
@@ -531,7 +531,7 @@ test "ResetEvent basic set/reset/isSet" {
 test "ResetEvent wait/set signaling" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init(&runtime);
@@ -564,7 +564,7 @@ test "ResetEvent wait/set signaling" {
 test "ResetEvent timedWait timeout" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init(&runtime);
@@ -594,7 +594,7 @@ test "ResetEvent timedWait timeout" {
 test "ResetEvent multiple waiters broadcast" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init(&runtime);
@@ -634,7 +634,7 @@ test "ResetEvent multiple waiters broadcast" {
 test "ResetEvent wait on already set event" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init(&runtime);

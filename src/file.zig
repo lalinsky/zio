@@ -254,7 +254,7 @@ test "File: basic read and write" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -271,7 +271,7 @@ test "File: basic read and write" {
             // Write test
             const write_data = "Hello, zio!";
             const bytes_written = try zio_file.write(write_data);
-            try testing.expect(bytes_written == write_data.len);
+            try testing.expectEqual(write_data.len, bytes_written);
 
             // Read test - seek back to beginning first
             try file.seekTo(0);
@@ -281,7 +281,7 @@ test "File: basic read and write" {
         }
     };
 
-    const task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
+    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
     try runtime.run();
@@ -294,7 +294,7 @@ test "File: positional read and write" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -309,24 +309,24 @@ test "File: positional read and write" {
             defer zio_file.deinit();
 
             // Write at different positions
-            try testing.expect(5 == try zio_file.pwrite("HELLO", 0));
-            try testing.expect(5 == try zio_file.pwrite("WORLD", 10));
+            try testing.expectEqual(5, try zio_file.pwrite("HELLO", 0));
+            try testing.expectEqual(5, try zio_file.pwrite("WORLD", 10));
 
             // Read from positions
             var buf: [5]u8 = undefined;
-            try testing.expect(5 == try zio_file.pread(&buf, 0));
+            try testing.expectEqual(5, try zio_file.pread(&buf, 0));
             try testing.expectEqualStrings("HELLO", &buf);
 
-            try testing.expect(5 == try zio_file.pread(&buf, 10));
+            try testing.expectEqual(5, try zio_file.pread(&buf, 10));
             try testing.expectEqualStrings("WORLD", &buf);
 
             // Test reading from gap (should be zeros or random data)
             var gap_buf: [3]u8 = undefined;
-            try testing.expect(3 == try zio_file.pread(&gap_buf, 5));
+            try testing.expectEqual(3, try zio_file.pread(&gap_buf, 5));
         }
     };
 
-    const task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
+    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
     try runtime.run();
@@ -338,7 +338,7 @@ test "File: close operation" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -354,7 +354,7 @@ test "File: close operation" {
 
             // Write some data
             const bytes_written = try zio_file.write("test data");
-            try testing.expect(bytes_written == 9);
+            try testing.expectEqual(9, bytes_written);
 
             // Close the file using zio
             try zio_file.close();
@@ -363,7 +363,7 @@ test "File: close operation" {
         }
     };
 
-    const task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
+    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
     try runtime.run();

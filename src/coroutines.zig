@@ -209,7 +209,7 @@ pub const Coroutine = struct {
 
     pub fn init(allocator: std.mem.Allocator, comptime func: anytype, args: anytype, options: CoroutineOptions) !Coroutine {
         const Args = @TypeOf(args);
-        const ReturnType = @TypeOf(@call(.auto, func, args));
+        const ReturnType = @TypeOf(@call(.always_inline, func, args));
 
         // For error unions, store only the payload type
         const StoredReturnType = switch (@typeInfo(ReturnType)) {
@@ -230,7 +230,7 @@ pub const Coroutine = struct {
                 // Handle both void and error union return types
                 const return_info = @typeInfo(ReturnType);
                 if (return_info == .error_union) {
-                    if (@call(.auto, func, self.args)) |result| {
+                    if (@call(.always_inline, func, self.args)) |result| {
                         self.result = result;
                         coro.result = .{ .success = &self.result };
                     } else |err| {
@@ -239,11 +239,11 @@ pub const Coroutine = struct {
                 } else {
                     // Non-void, non-error return type - call and store result
                     if (ReturnType == void) {
-                        @call(.auto, func, self.args);
+                        @call(.always_inline, func, self.args);
                         // For void, we still need to point to something valid
                         coro.result = .{ .success = &self.result };
                     } else {
-                        self.result = @call(.auto, func, self.args);
+                        self.result = @call(.always_inline, func, self.args);
                         coro.result = .{ .success = &self.result };
                     }
                 }
