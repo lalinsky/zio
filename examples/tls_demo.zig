@@ -15,10 +15,23 @@ fn runTlsTask(rt: *zio.Runtime) !void {
     std.log.info("TCP connected to httpbin.org:443 successfully!", .{});
     std.log.info("Starting TLS handshake...", .{});
 
-    // Initialize TLS client
-    var tls_client = std.crypto.tls.Client.init(stream, .{
+    // Create buffers for TCP stream I/O
+    var tcp_read_buffer: [32 * 1024]u8 = undefined;
+    var tcp_write_buffer: [32 * 1024]u8 = undefined;
+
+    // Create separate buffers for TLS internal operations
+    var tls_read_buffer: [32 * 1024]u8 = undefined;
+    var tls_write_buffer: [32 * 1024]u8 = undefined;
+
+    // Initialize TLS client with stream reader/writer interfaces
+    var tcp_reader = stream.reader(&tcp_read_buffer);
+    var tcp_writer = stream.writer(&tcp_write_buffer);
+
+    var tls_client = std.crypto.tls.Client.init(&tcp_reader.interface, &tcp_writer.interface, .{
         .host = .{ .explicit = "httpbin.org" },
         .ca = .no_verification, // For demo purposes - in production use proper CA verification
+        .read_buffer = &tls_read_buffer,
+        .write_buffer = &tls_write_buffer,
     }) catch |err| {
         std.log.err("TLS handshake failed: {}", .{err});
         return;
@@ -30,12 +43,12 @@ fn runTlsTask(rt: *zio.Runtime) !void {
     const request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: zio.tls-demo\r\nConnection: close\r\n\r\n";
 
     std.log.info("Sending HTTPS request...", .{});
-    try tls_client.writeAll(stream, request);
+    try tls_client.writer.writeAll(request);
     std.log.info("Sent {} bytes over TLS", .{request.len});
 
     // Read HTTPS response
     var buffer: [4096]u8 = undefined;
-    const bytes_read = try tls_client.read(stream, &buffer);
+    const bytes_read = try tls_client.reader.readSliceShort(&buffer);
     std.log.info("Received {} bytes over TLS", .{bytes_read});
 
     // Print first part of response
@@ -50,6 +63,8 @@ pub fn main() !void {
 
     var runtime = try zio.Runtime.init(allocator);
     defer runtime.deinit();
+
+    // try runTlsTask(&runtime);
 
     var tls_task = try runtime.spawn(runTlsTask, .{&runtime}, .{ .stack_size = 4 * 1024 * 1024 }); // Test 4MB stack
     defer tls_task.deinit();

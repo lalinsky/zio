@@ -54,7 +54,7 @@ pub const AnyTask = struct {
     next: ?*AnyTask = null,
     id: u64,
     coro: Coroutine,
-    waiting_list: AnyTaskList = .{},
+    waiting_list: AnyTaskList = AnyTaskList{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 };
@@ -283,7 +283,7 @@ pub const Runtime = struct {
 
         entry.value_ptr.* = task;
 
-        self.ready_queue.append(task);
+        self.ready_queue.push(task);
 
         task.ref_count.incr();
         return .{ .task = task, .runtime = self };
@@ -350,12 +350,12 @@ pub const Runtime = struct {
                 }
 
                 switch (task.coro.state) {
-                    .ready => reschedule.append(task),
+                    .ready => reschedule.push(task),
                     .dead => {
                         while (task.waiting_list.pop()) |waiting_task| {
                             self.markReady(&waiting_task.coro);
                         }
-                        self.cleanup_queue.append(task);
+                        self.cleanup_queue.push(task);
                     },
                     else => {},
                 }
@@ -389,7 +389,7 @@ pub const Runtime = struct {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = taskPtrFromCoroPtr(coro);
-        self.ready_queue.append(task);
+        self.ready_queue.push(task);
     }
 
     pub fn wait(self: *Runtime, task_id: u64) void {
