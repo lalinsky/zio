@@ -9,7 +9,7 @@ const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
 const CoroutineState = coroutines.CoroutineState;
 const CoroutineOptions = coroutines.CoroutineOptions;
-const Error = coroutines.Error;
+// const Error = coroutines.Error;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 
 // Waker interface for asynchronous operations
@@ -30,7 +30,7 @@ pub const Waiter = struct {
 pub const ZioError = error{
     XevError,
     NotInCoroutine,
-} || Error;
+};
 
 // Timer callback for libxev
 fn markReadyFromXevCallback(
