@@ -249,7 +249,9 @@ pub fn BlockingHandle(comptime T: type) type {
         pub fn detach(self: *Self) void {
             if (self.detached) return;
             if (self.task.ref_count.decr()) {
-                // Reference count reached zero, destroy the task
+                // Reference count reached zero, destroy the task and wrapper data
+                // Use the cleanup function to properly destroy the wrapper data
+                self.task.cleanup_fn(self.task.runtime, self.task.args_ptr);
                 self.runtime.allocator.destroy(self.task);
             }
             self.detached = true;
@@ -303,6 +305,7 @@ pub const BlockingTask = struct {
     args_ptr: *anyopaque,
     result_storage: *anyopaque,
     wrapper_fn: *const fn (*BlockingTask) void,
+    cleanup_fn: *const fn (*Runtime, *anyopaque) void,
     runtime: *Runtime,
 };
 
@@ -501,7 +504,6 @@ pub const Runtime = struct {
         const Result = ReturnType(func);
 
         const WrapperData = struct {
-            func: @TypeOf(func),
             args: Args,
             result: Result,
 
@@ -514,9 +516,9 @@ pub const Runtime = struct {
 
                 // Execute the function
                 if (Result == void) {
-                    @call(.auto, self_ptr.func, self_ptr.args);
+                    @call(.auto, func, self_ptr.args);
                 } else {
-                    self_ptr.result = @call(.auto, self_ptr.func, self_ptr.args);
+                    self_ptr.result = @call(.auto, func, self_ptr.args);
                 }
 
                 // Store result pointer
@@ -533,11 +535,23 @@ pub const Runtime = struct {
                 if (task.waiter) |waiter| {
                     waiter.markReady();
                 }
+
+                // Decrement runtime's reference
+                if (task.ref_count.decr()) {
+                    // Last reference, free the wrapper data and task
+                    task.cleanup_fn(task.runtime, task.args_ptr);
+                    task.runtime.allocator.destroy(task);
+                }
             }
 
             fn threadPoolCallback(pool_task: *xev.ThreadPool.Task) void {
                 const task: *BlockingTask = @fieldParentPtr("pool_task", pool_task);
                 task.wrapper_fn(task);
+            }
+
+            fn cleanup(runtime: *Runtime, data_ptr: *anyopaque) void {
+                const data: *WrapperData = @ptrCast(@alignCast(data_ptr));
+                runtime.allocator.destroy(data);
             }
         };
 
@@ -550,7 +564,6 @@ pub const Runtime = struct {
         errdefer self.allocator.destroy(wrapper_data);
 
         wrapper_data.* = .{
-            .func = func,
             .args = args,
             .result = undefined,
         };
@@ -564,6 +577,7 @@ pub const Runtime = struct {
             .args_ptr = wrapper_data,
             .result_storage = &wrapper_data.result,
             .wrapper_fn = &WrapperData.wrapper,
+            .cleanup_fn = &WrapperData.cleanup,
             .runtime = self,
         };
 
