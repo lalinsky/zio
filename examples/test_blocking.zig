@@ -22,11 +22,11 @@ fn blockingExample(rt: *Runtime) !void {
     std.debug.print("Starting blocking example\n", .{});
 
     // Spawn a blocking task that runs in thread pool
-    const handle = try rt.spawnBlocking(computeIntensiveSync, .{1000000});
+    var handle = try rt.spawnBlocking(computeIntensiveSync, .{1000000});
     defer handle.detach();
 
     // Spawn an async task that should not be blocked
-    const async_task = try rt.spawn(asyncTask, .{rt}, .{});
+    var async_task = try rt.spawn(asyncTask, .{rt}, .{});
     defer async_task.detach();
 
     std.debug.print("Waiting for blocking task result...\n", .{});
