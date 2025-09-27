@@ -44,9 +44,9 @@ pub const Mutex = struct {
         // Check if there are waiters
         if (self.wait_queue.pop()) |task_node| {
             // Transfer ownership directly to next waiter
-            self.owner.store(&task_node.data.coro, .release);
+            self.owner.store(&task_node.coro, .release);
             // Wake them up (they already own the lock)
-            self.runtime.markReady(&task_node.data.coro);
+            self.runtime.markReady(&task_node.coro);
         } else {
             // No waiters, release the lock completely
             self.owner.store(null, .release);
@@ -90,12 +90,16 @@ pub const Condition = struct {
 
         const TimeoutContext = struct {
             runtime: *Runtime,
+            condition: *Condition,
+            task_node: *AnyTaskList.Node,
             coroutine: *coroutines.Coroutine,
             timed_out: *bool,
         };
 
         var timeout_ctx = TimeoutContext{
             .runtime = self.runtime,
+            .condition = self,
+            .task_node = task_node,
             .coroutine = current,
             .timed_out = &timed_out,
         };
@@ -118,8 +122,10 @@ pub const Condition = struct {
                     _ = c;
                     _ = result catch {};
                     if (ctx) |context| {
-                        context.timed_out.* = true;
-                        context.runtime.markReady(context.coroutine);
+                        if (context.condition.wait_queue.remove(context.task_node)) {
+                            context.timed_out.* = true;
+                            context.runtime.markReady(context.coroutine);
+                        }
                     }
                     return .disarm;
                 }
@@ -135,20 +141,19 @@ pub const Condition = struct {
 
         // Then check if we timed out and cleanup if needed
         if (timed_out) {
-            self.wait_queue.remove(task_node);
             return error.Timeout;
         }
     }
 
     pub fn signal(self: *Condition) void {
         if (self.wait_queue.pop()) |task_node| {
-            self.runtime.markReady(&task_node.data.coro);
+            self.runtime.markReady(&task_node.coro);
         }
     }
 
     pub fn broadcast(self: *Condition) void {
         while (self.wait_queue.pop()) |task_node| {
-            self.runtime.markReady(&task_node.data.coro);
+            self.runtime.markReady(&task_node.coro);
         }
     }
 };
