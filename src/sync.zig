@@ -34,7 +34,8 @@ pub const Mutex = struct {
         current.waitForReady();
 
         // When we wake up, unlock() has already transferred ownership to us
-        std.debug.assert(self.owner.load(.monotonic) == current);
+        const owner = self.owner.load(.acquire);
+        std.debug.assert(owner == current);
     }
 
     pub fn unlock(self: *Mutex) void {
