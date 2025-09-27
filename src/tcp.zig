@@ -3,6 +3,7 @@ const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
 const Address = @import("address.zig").Address;
+const ResetEvent = @import("sync.zig").ResetEvent;
 
 const TEST_PORT = 45001;
 
@@ -478,8 +479,10 @@ test "TCP: basic echo server and client" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
+    var server_ready = ResetEvent.init(&runtime);
+
     const ServerTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
@@ -487,14 +490,14 @@ test "TCP: basic echo server and client" {
             try listener.bind(addr);
             try listener.listen(1);
 
-            // Accept one connection
+            ready_event.set();
+
             var stream = try listener.accept();
             defer {
                 stream.shutdown() catch {};
                 stream.close();
             }
 
-            // Read and echo back
             var buffer: [1024]u8 = undefined;
             const bytes_read = try stream.read(&buffer);
             const bytes_written = try stream.write(buffer[0..bytes_read]);
@@ -503,8 +506,8 @@ test "TCP: basic echo server and client" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime) !void {
-            rt.sleep(10); // Give server time to start
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -513,22 +516,20 @@ test "TCP: basic echo server and client" {
                 stream.close();
             }
 
-            // Send test data
             const test_data = "Hello, TCP!";
             const bytes_written = try stream.write(test_data);
             try testing.expectEqual(test_data.len, bytes_written);
 
-            // Read response
             var buffer: [1024]u8 = undefined;
             const bytes_read = try stream.read(&buffer);
             try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -544,10 +545,10 @@ test "TCP: readv reads first buffer only" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server_ready = false;
+    var server_ready = ResetEvent.init(&runtime);
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, ready_flag: *bool) !void {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
@@ -555,8 +556,7 @@ test "TCP: readv reads first buffer only" {
             try listener.bind(addr);
             try listener.listen(1);
 
-            // Signal that server is ready
-            ready_flag.* = true;
+            ready_event.set();
 
             var stream = try listener.accept();
             defer {
@@ -569,11 +569,8 @@ test "TCP: readv reads first buffer only" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_flag: *bool) !void {
-            // Wait for server to be ready
-            while (!ready_flag.*) {
-                rt.sleep(1);
-            }
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -616,14 +613,18 @@ test "TCP: readvAll reads all buffers" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
+    var server_ready = ResetEvent.init(&runtime);
+
     const ServerTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
+
+            ready_event.set();
 
             var stream = try listener.accept();
             defer {
@@ -636,8 +637,8 @@ test "TCP: readvAll reads all buffers" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime) !void {
-            rt.sleep(10);
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -662,10 +663,10 @@ test "TCP: readvAll reads all buffers" {
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -680,14 +681,18 @@ test "TCP: writev writes first buffer only" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
+    var server_ready = ResetEvent.init(&runtime);
+
     const ServerTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
+
+            ready_event.set();
 
             var stream = try listener.accept();
             defer {
@@ -703,8 +708,8 @@ test "TCP: writev writes first buffer only" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime) !void {
-            rt.sleep(10);
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -728,10 +733,10 @@ test "TCP: writev writes first buffer only" {
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -746,14 +751,18 @@ test "TCP: writevAll writes all buffers" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
+    var server_ready = ResetEvent.init(&runtime);
+
     const ServerTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
+
+            ready_event.set();
 
             var stream = try listener.accept();
             defer {
@@ -769,8 +778,8 @@ test "TCP: writevAll writes all buffers" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime) !void {
-            rt.sleep(10);
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -793,10 +802,10 @@ test "TCP: writevAll writes all buffers" {
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{&runtime}, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{&runtime}, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
