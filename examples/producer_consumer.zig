@@ -84,7 +84,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var runtime = try zio.Runtime.init(gpa.allocator());
+    var runtime = try zio.Runtime.init(gpa.allocator(), .{});
     defer runtime.deinit();
 
     var buffer = BoundedBuffer.init(&runtime);

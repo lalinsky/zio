@@ -50,7 +50,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator);
+    var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     var server = try runtime.spawn(serverTask, .{&runtime}, .{});

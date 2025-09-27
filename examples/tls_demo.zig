@@ -48,7 +48,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator);
+    var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     var tls_task = try runtime.spawn(runTlsTask, .{&runtime}, .{ .stack_size = 4 * 1024 * 1024 }); // Test 4MB stack
