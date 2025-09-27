@@ -92,7 +92,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Initialize zio runtime
-    var runtime = try zio.Runtime.init(allocator);
+    var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     print("=== ZIO UDP Echo Demo ===\n", .{});

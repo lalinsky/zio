@@ -12,6 +12,22 @@ const CoroutineOptions = coroutines.CoroutineOptions;
 // const Error = coroutines.Error;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 
+// Compile-time detection of whether the backend needs ThreadPool
+fn backendNeedsThreadPool() bool {
+    return @hasField(xev.Loop, "thread_pool");
+}
+
+// Runtime configuration options
+pub const RuntimeOptions = struct {
+    thread_pool: ThreadPoolOptions = .{},
+
+    pub const ThreadPoolOptions = struct {
+        enabled: bool = backendNeedsThreadPool(),
+        max_threads: ?u32 = null,  // null = CPU count
+        stack_size: ?u32 = null,   // null = default stack size
+    };
+};
+
 // Waker interface for asynchronous operations
 pub const Waiter = struct {
     runtime: *Runtime,
@@ -228,6 +244,7 @@ pub const AnyTaskList = struct {
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
     loop: xev.Loop,
+    thread_pool: ?*xev.ThreadPool = null,
     count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -237,18 +254,42 @@ pub const Runtime = struct {
     ready_queue: AnyTaskList = .{},
     cleanup_queue: AnyTaskList = .{},
 
-    pub fn init(allocator: Allocator) !Runtime {
-        // Initialize libxev loop
-        const loop = try xev.Loop.init(.{});
+    pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
+        // Initialize ThreadPool if enabled
+        var thread_pool: ?*xev.ThreadPool = null;
+        if (options.thread_pool.enabled) {
+            thread_pool = try allocator.create(xev.ThreadPool);
+
+            var config = xev.ThreadPool.Config{};
+            if (options.thread_pool.max_threads) |max| config.max_threads = max;
+            if (options.thread_pool.stack_size) |size| config.stack_size = size;
+            thread_pool.?.* = xev.ThreadPool.init(config);
+        }
+        errdefer if (thread_pool) |tp| {
+            tp.shutdown();
+            tp.deinit();
+            allocator.destroy(tp);
+        };
+
+        // Initialize libxev loop with optional ThreadPool
+        const loop = try xev.Loop.init(.{
+            .thread_pool = thread_pool,
+        });
 
         return Runtime{
             .allocator = allocator,
             .loop = loop,
+            .thread_pool = thread_pool,
             .main_context = undefined,
         };
     }
 
     pub fn deinit(self: *Runtime) void {
+        // Shutdown ThreadPool before cleaning up tasks and loop
+        if (self.thread_pool) |tp| {
+            tp.shutdown();
+        }
+
         var iter = self.tasks.iterator();
         while (iter.next()) |entry| {
             const task = entry.value_ptr.*;
@@ -258,6 +299,12 @@ pub const Runtime = struct {
         self.tasks.deinit(self.allocator);
 
         self.loop.deinit();
+
+        // Clean up ThreadPool after loop
+        if (self.thread_pool) |tp| {
+            tp.deinit();
+            self.allocator.destroy(tp);
+        }
     }
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(ReturnType(func)) {
@@ -406,3 +453,21 @@ pub const Runtime = struct {
         current_coro.waitForReady();
     }
 };
+
+test "runtime with thread pool smoke test" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{
+        .thread_pool = .{ .enabled = true },
+    });
+    defer runtime.deinit();
+
+    // Verify ThreadPool was created
+    testing.expect(runtime.thread_pool != null) catch |err| {
+        std.debug.print("ThreadPool was not created when enabled\n", .{});
+        return err;
+    };
+
+    // Run empty runtime (should exit immediately)
+    try runtime.run();
+}

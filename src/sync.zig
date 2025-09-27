@@ -320,7 +320,7 @@ pub const ResetEvent = struct {
 test "Mutex basic lock/unlock" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var shared_counter: u32 = 0;
@@ -350,7 +350,7 @@ test "Mutex basic lock/unlock" {
 test "Mutex tryLock" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init(&runtime);
@@ -380,7 +380,7 @@ test "Mutex tryLock" {
 test "Condition basic wait/signal" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init(&runtime);
@@ -422,7 +422,7 @@ test "Condition basic wait/signal" {
 test "Condition timedWait timeout" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init(&runtime);
@@ -455,7 +455,7 @@ test "Condition timedWait timeout" {
 test "Condition broadcast" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator);
+    var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init(&runtime);
