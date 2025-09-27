@@ -25,8 +25,10 @@ pub const Address = @import("address.zig").Address;
 // Re-export synchronization functionality
 pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
+pub const ResetEvent = @import("sync.zig").ResetEvent;
 
 test {
     _ = Mutex;
     _ = Condition;
+    _ = ResetEvent;
 }
