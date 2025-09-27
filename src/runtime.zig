@@ -550,7 +550,7 @@ pub const Runtime = struct {
             }
 
             fn cleanup(runtime: *Runtime, data_ptr: *anyopaque) void {
-                const data: *WrapperData = @ptrCast(@alignCast(data_ptr));
+                const data: *@This() = @ptrCast(@alignCast(data_ptr));
                 runtime.allocator.destroy(data);
             }
         };
