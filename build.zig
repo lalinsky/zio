@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },
         .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig" },
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
+        .{ .name = "test-blocking", .file = "examples/test_blocking.zig" },
         //.{ .name = "udp-echo", .file = "examples/udp_echo.zig" },
     };
 
