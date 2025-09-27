@@ -7,6 +7,31 @@ const ResetEvent = @import("sync.zig").ResetEvent;
 
 const TEST_PORT = 45001;
 
+fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
+    const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+    var listener = try TcpListener.init(rt, addr);
+    defer listener.close();
+
+    try listener.bind(addr);
+    try listener.listen(1);
+
+    ready_event.set();
+
+    var stream = try listener.accept();
+    defer {
+        stream.shutdown() catch {};
+        stream.close();
+    }
+
+    var buffer: [1024]u8 = undefined;
+    while (true) {
+        const bytes_read = try stream.read(&buffer);
+        if (bytes_read == 0) break;
+
+        try stream.writeAll(buffer[0..bytes_read]);
+    }
+}
+
 pub const TcpListener = struct {
     xev_tcp: xev.TCP,
     runtime: *Runtime,
@@ -221,7 +246,10 @@ pub const TcpStream = struct {
 
         waiter.waitForReady();
 
-        return result_data.result;
+        return result_data.result catch |err| switch (err) {
+            error.EOF => 0,
+            else => err,
+        };
     }
 
     /// Reads data from the stream into the provided iovecs.
@@ -278,10 +306,7 @@ pub const TcpStream = struct {
         std.debug.assert(len <= buffer.len);
         var index: usize = 0;
         while (index < len) {
-            const amt = self.read(buffer[index..]) catch |err| switch (err) {
-                error.EOF => break,
-                else => return err,
-            };
+            const amt = try self.read(buffer[index..]);
             if (amt == 0) break;
             index += amt;
         }
@@ -481,52 +506,25 @@ test "TCP: basic echo server and client" {
 
     var server_ready = ResetEvent.init(&runtime);
 
-    const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
-
-            try listener.bind(addr);
-            try listener.listen(1);
-
-            ready_event.set();
-
-            var stream = try listener.accept();
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
-
-            var buffer: [1024]u8 = undefined;
-            const bytes_read = try stream.read(&buffer);
-            const bytes_written = try stream.write(buffer[0..bytes_read]);
-            try testing.expectEqual(bytes_read, bytes_written);
-        }
-    };
-
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
+            defer stream.close();
 
             const test_data = "Hello, TCP!";
-            const bytes_written = try stream.write(test_data);
-            try testing.expectEqual(test_data.len, bytes_written);
+            try stream.writeAll(test_data);
+            try stream.shutdown();
 
             var buffer: [1024]u8 = undefined;
-            const bytes_read = try stream.read(&buffer);
+            const bytes_read = try stream.readAll(&buffer);
             try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
     var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
@@ -547,37 +545,16 @@ test "TCP: readv reads first buffer only" {
 
     var server_ready = ResetEvent.init(&runtime);
 
-    const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
-
-            try listener.bind(addr);
-            try listener.listen(1);
-
-            ready_event.set();
-
-            var stream = try listener.accept();
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
-
-            try stream.writeAll("Hello, World!");
-        }
-    };
-
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
+            defer stream.close();
+
+            try stream.writeAll("Hello, World!");
+            try stream.shutdown();
 
             var buf1: [5]u8 = undefined;
             var buf2: [5]u8 = undefined;
@@ -595,7 +572,7 @@ test "TCP: readv reads first buffer only" {
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
     var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
@@ -615,33 +592,16 @@ test "TCP: readvAll reads all buffers" {
 
     var server_ready = ResetEvent.init(&runtime);
 
-    const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
-
-            try listener.bind(addr);
-            try listener.listen(1);
-
-            ready_event.set();
-
-            var stream = try listener.accept();
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
-
-            try stream.writeAll("Hello, World!");
-        }
-    };
-
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            try stream.writeAll("Hello, World!");
+            try stream.shutdown();
 
             var buf1: [5]u8 = undefined;
             var buf2: [2]u8 = undefined;
@@ -658,12 +618,10 @@ test "TCP: readvAll reads all buffers" {
             try testing.expectEqualStrings("Hello", &buf1);
             try testing.expectEqualStrings(", ", &buf2);
             try testing.expectEqualStrings("World!", &buf3);
-
-            stream.close();
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
     var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
@@ -683,40 +641,13 @@ test "TCP: writev writes first buffer only" {
 
     var server_ready = ResetEvent.init(&runtime);
 
-    const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
-
-            try listener.bind(addr);
-            try listener.listen(1);
-
-            ready_event.set();
-
-            var stream = try listener.accept();
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
-
-            var buffer: [20]u8 = undefined;
-            const bytes_read = try stream.read(&buffer);
-            try testing.expectEqual(5, bytes_read);
-            try testing.expectEqualStrings("Hello", buffer[0..bytes_read]);
-        }
-    };
-
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
+            defer stream.close();
 
             const data1 = "Hello";
             const data2 = ", ";
@@ -729,11 +660,17 @@ test "TCP: writev writes first buffer only" {
             };
 
             const bytes_written = try stream.writev(&iovecs);
+            try stream.shutdown();
             try testing.expectEqual(5, bytes_written);
+
+            var buffer: [20]u8 = undefined;
+            const bytes_read = try stream.readAll(&buffer);
+            try testing.expect(bytes_read >= 5);
+            try testing.expectEqualStrings("Hello", buffer[0..5]);
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
     var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
@@ -753,40 +690,13 @@ test "TCP: writevAll writes all buffers" {
 
     var server_ready = ResetEvent.init(&runtime);
 
-    const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
-
-            try listener.bind(addr);
-            try listener.listen(1);
-
-            ready_event.set();
-
-            var stream = try listener.accept();
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
-
-            var buffer: [20]u8 = undefined;
-            const bytes_read = try stream.readAll(&buffer);
-            try testing.expectEqual(13, bytes_read);
-            try testing.expectEqualStrings("Hello, World!", buffer[0..bytes_read]);
-        }
-    };
-
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             ready_event.wait();
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer {
-                stream.shutdown() catch {};
-                stream.close();
-            }
+            defer stream.close();
 
             const data1 = "Hello";
             const data2 = ", ";
@@ -799,10 +709,97 @@ test "TCP: writevAll writes all buffers" {
             };
 
             try stream.writevAll(&iovecs);
+            try stream.shutdown();
+
+            var buffer: [20]u8 = undefined;
+            const bytes_read = try stream.readAll(&buffer);
+            try testing.expectEqual(13, bytes_read);
+            try testing.expectEqualStrings("Hello, World!", buffer[0..bytes_read]);
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    defer server_task.deinit();
+
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    defer client_task.deinit();
+
+    try runtime.run();
+    try server_task.result();
+    try client_task.result();
+}
+
+test "TCP: readAtLeast reads minimum bytes" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    var server_ready = ResetEvent.init(&runtime);
+
+    const ClientTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
+
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            try stream.writeAll("Hello, World!");
+            try stream.shutdown();
+
+            var buffer: [20]u8 = undefined;
+            const bytes_read = try stream.readAtLeast(&buffer, 5);
+            try testing.expect(bytes_read >= 5);
+            try testing.expectEqualStrings("Hello", buffer[0..5]);
+
+            if (bytes_read < 13) {
+                const remaining = try stream.readAtLeast(buffer[bytes_read..], 2);
+                try testing.expect(remaining >= 2);
+            }
+        }
+    };
+
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    defer server_task.deinit();
+
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    defer client_task.deinit();
+
+    try runtime.run();
+    try server_task.result();
+    try client_task.result();
+}
+
+test "TCP: readAll reads entire buffer" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    var server_ready = ResetEvent.init(&runtime);
+
+    const ClientTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
+
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            try stream.writeAll("Hello, World!");
+            try stream.shutdown();
+
+            var buffer: [13]u8 = undefined;
+            const bytes_read = try stream.readAll(&buffer);
+            try testing.expectEqual(13, bytes_read);
+            try testing.expectEqualStrings("Hello, World!", &buffer);
+        }
+    };
+
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
     defer server_task.deinit();
 
     var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
