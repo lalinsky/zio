@@ -865,6 +865,15 @@ pub const Completion = struct {
                             &roflags,
                         );
                     },
+
+                    .vectors => |v| wasi.sock_recv(
+                        op.fd,
+                        @ptrCast(v.ptr),
+                        v.len,
+                        0,
+                        &n,
+                        &roflags,
+                    ),
                 };
 
                 break :res .{
@@ -907,6 +916,14 @@ pub const Completion = struct {
                             &n,
                         );
                     },
+
+                    .vectors => |v| wasi.sock_send(
+                        op.fd,
+                        @ptrCast(v.ptr),
+                        v.len,
+                        0,
+                        &n,
+                    ),
                 };
 
                 break :res .{
@@ -1108,7 +1125,9 @@ pub const ReadBuffer = union(enum) {
     /// for future fields.
     array: [32]u8,
 
-    // TODO: future will have vectors
+    /// Read into multiple buffers using vectored I/O.
+    /// Each iovec specifies a buffer to read into.
+    vectors: []posix.iovec,
 };
 
 /// WriteBuffer are the various options for writing.
@@ -1122,7 +1141,9 @@ pub const WriteBuffer = union(enum) {
         len: usize,
     },
 
-    // TODO: future will have vectors
+    /// Write from multiple buffers using vectored I/O.
+    /// Each iovec specifies a buffer to write from.
+    vectors: []posix.iovec_const,
 };
 
 /// A batch of subscriptions to send to poll_oneoff.

@@ -308,11 +308,9 @@ fn DynamicReadBuffer(comptime dynamic: type) type {
             buf: dynamic.superset(be).Api().ReadBuffer,
         ) Self {
             return switch (buf) {
-                inline else => |data, tag| @unionInit(
-                    Self,
-                    @tagName(tag),
-                    data,
-                ),
+                .slice => |v| .{ .slice = v },
+                .array => |v| .{ .array = v },
+                .vectors => @panic("vectors not supported in dynamic API"),
             };
         }
 
@@ -352,6 +350,7 @@ fn DynamicWriteBuffer(comptime dynamic: type) type {
             return switch (buf) {
                 .slice => |v| .{ .slice = v },
                 .array => |v| .{ .array = .{ .array = v.array, .len = v.len } },
+                .vectors => @panic("vectors not supported in dynamic API"),
             };
         }
 

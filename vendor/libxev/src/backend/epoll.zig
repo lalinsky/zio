@@ -979,6 +979,7 @@ pub const Completion = struct {
                 const n_ = switch (op.buffer) {
                     .slice => |v| posix.read(op.fd, v),
                     .array => |*v| posix.read(op.fd, v),
+                    .vectors => |v| posix.readv(op.fd, v),
                 };
 
                 break :res .{
@@ -993,6 +994,7 @@ pub const Completion = struct {
                 const n_ = switch (op.buffer) {
                     .slice => |v| posix.pread(op.fd, v, op.offset),
                     .array => |*v| posix.pread(op.fd, v, op.offset),
+                    .vectors => |v| posix.preadv(op.fd, v, op.offset),
                 };
 
                 break :res .{
@@ -1007,6 +1009,7 @@ pub const Completion = struct {
                 .write = switch (op.buffer) {
                     .slice => |v| posix.write(op.fd, v),
                     .array => |*v| posix.write(op.fd, v.array[0..v.len]),
+                    .vectors => |v| posix.writev(op.fd, v),
                 },
             },
 
@@ -1014,6 +1017,7 @@ pub const Completion = struct {
                 .pwrite = switch (op.buffer) {
                     .slice => |v| posix.pwrite(op.fd, v, op.offset),
                     .array => |*v| posix.pwrite(op.fd, v.array[0..v.len], op.offset),
+                    .vectors => |v| posix.pwritev(op.fd, v, op.offset),
                 },
             },
 
@@ -1021,6 +1025,7 @@ pub const Completion = struct {
                 .send = switch (op.buffer) {
                     .slice => |v| posix.send(op.fd, v, 0),
                     .array => |*v| posix.send(op.fd, v.array[0..v.len], 0),
+                    .vectors => |v| posix.writev(op.fd, v),
                 },
             },
 
@@ -1048,6 +1053,7 @@ pub const Completion = struct {
                 const n_ = switch (op.buffer) {
                     .slice => |v| posix.recv(op.fd, v, 0),
                     .array => |*v| posix.recv(op.fd, v, 0),
+                    .vectors => |v| posix.readv(op.fd, v),
                 };
 
                 break :res .{
@@ -1293,7 +1299,9 @@ pub const ReadBuffer = union(enum) {
     /// for future fields.
     array: [32]u8,
 
-    // TODO: future will have vectors
+    /// Read into multiple buffers using vectored I/O (readv).
+    /// Each iovec specifies a buffer to read into.
+    vectors: []posix.iovec,
 };
 
 /// WriteBuffer are the various options for writing.
@@ -1307,7 +1315,9 @@ pub const WriteBuffer = union(enum) {
         len: usize,
     },
 
-    // TODO: future will have vectors
+    /// Write from multiple buffers using vectored I/O (writev).
+    /// Each iovec specifies a buffer to write from.
+    vectors: []posix.iovec_const,
 };
 
 const ThreadPoolError = error{

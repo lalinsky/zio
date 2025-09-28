@@ -615,12 +615,39 @@ pub const Loop = struct {
 
             .send => |*v| action: {
                 self.associate_fd(completion.handle().?) catch unreachable;
-                const buffer: []const u8 = if (v.buffer == .slice) v.buffer.slice else v.buffer.array.array[0..v.buffer.array.len];
-                v.wsa_buffer = .{ .buf = @constCast(buffer.ptr), .len = @as(u32, @intCast(buffer.len)) };
+
+                const buffers_ptr: [*]windows.ws2_32.WSABUF = switch (v.buffer) {
+                    .slice, .array => blk: {
+                        const buffer: []const u8 = if (v.buffer == .slice) v.buffer.slice else v.buffer.array.array[0..v.buffer.array.len];
+                        v.wsa_buffers[0] = .{ .buf = @constCast(buffer.ptr), .len = @as(u32, @intCast(buffer.len)) };
+                        break :blk v.wsa_buffers.ptr;
+                    },
+                    .vectors => |iovecs| blk: {
+                        // Check bounds - we can only handle up to 8 vectors statically
+                        if (iovecs.len > v.wsa_buffers.len) {
+                            break :action .{ .result = .{ .send = error.TooManyVectors } };
+                        }
+
+                        // Convert iovecs to WSABUFs using static array
+                        for (iovecs, 0..) |iovec, i| {
+                            v.wsa_buffers[i] = .{
+                                .buf = @constCast(iovec.base),
+                                .len = @as(u32, @intCast(iovec.len)),
+                            };
+                        }
+                        break :blk v.wsa_buffers.ptr;
+                    },
+                };
+
+                const buffer_count: u32 = switch (v.buffer) {
+                    .slice, .array => 1,
+                    .vectors => |iovecs| @as(u32, @intCast(iovecs.len)),
+                };
+
                 const result = windows.ws2_32.WSASend(
                     asSocket(v.fd),
-                    @as([*]windows.ws2_32.WSABUF, @ptrCast(&v.wsa_buffer)),
-                    1,
+                    buffers_ptr,
+                    buffer_count,
                     null,
                     0,
                     &completion.overlapped,
@@ -640,15 +667,41 @@ pub const Loop = struct {
 
             .recv => |*v| action: {
                 self.associate_fd(completion.handle().?) catch unreachable;
-                const buffer: []u8 = if (v.buffer == .slice) v.buffer.slice else &v.buffer.array;
-                v.wsa_buffer = .{ .buf = buffer.ptr, .len = @as(u32, @intCast(buffer.len)) };
+
+                const buffers_ptr: [*]windows.ws2_32.WSABUF = switch (v.buffer) {
+                    .slice, .array => blk: {
+                        const buffer: []u8 = if (v.buffer == .slice) v.buffer.slice else &v.buffer.array;
+                        v.wsa_buffers[0] = .{ .buf = buffer.ptr, .len = @as(u32, @intCast(buffer.len)) };
+                        break :blk v.wsa_buffers.ptr;
+                    },
+                    .vectors => |iovecs| blk: {
+                        // Check bounds - we can only handle up to 8 vectors statically
+                        if (iovecs.len > v.wsa_buffers.len) {
+                            break :action .{ .result = .{ .recv = error.TooManyVectors } };
+                        }
+
+                        // Convert iovecs to WSABUFs using static array
+                        for (iovecs, 0..) |iovec, i| {
+                            v.wsa_buffers[i] = .{
+                                .buf = iovec.base,
+                                .len = @as(u32, @intCast(iovec.len)),
+                            };
+                        }
+                        break :blk v.wsa_buffers.ptr;
+                    },
+                };
+
+                const buffer_count: u32 = switch (v.buffer) {
+                    .slice, .array => 1,
+                    .vectors => |iovecs| @as(u32, @intCast(iovecs.len)),
+                };
 
                 var flags: u32 = 0;
 
                 const result = windows.ws2_32.WSARecv(
                     asSocket(v.fd),
-                    @as([*]windows.ws2_32.WSABUF, @ptrCast(&v.wsa_buffer)),
-                    1,
+                    buffers_ptr,
+                    buffer_count,
                     null,
                     &flags,
                     &completion.overlapped,
@@ -1262,13 +1315,13 @@ pub const Operation = union(OperationType) {
     send: struct {
         fd: windows.HANDLE,
         buffer: WriteBuffer,
-        wsa_buffer: windows.ws2_32.WSABUF = undefined,
+        wsa_buffers: [8]windows.ws2_32.WSABUF = undefined,
     },
 
     recv: struct {
         fd: windows.HANDLE,
         buffer: ReadBuffer,
-        wsa_buffer: windows.ws2_32.WSABUF = undefined,
+        wsa_buffers: [8]windows.ws2_32.WSABUF = undefined,
     },
 
     sendto: struct {
@@ -1420,7 +1473,9 @@ pub const ReadBuffer = union(enum) {
     /// for future fields.
     array: [32]u8,
 
-    // TODO: future will have vectors
+    /// Read into multiple buffers using vectored I/O.
+    /// On Windows, this uses WSARecv with WSABUF arrays.
+    vectors: []posix.iovec,
 };
 
 /// WriteBuffer are the various options for writing.
@@ -1434,7 +1489,9 @@ pub const WriteBuffer = union(enum) {
         len: usize,
     },
 
-    // TODO: future will have vectors
+    /// Write from multiple buffers using vectored I/O.
+    /// On Windows, this uses WSASend with WSABUF arrays.
+    vectors: []posix.iovec_const,
 };
 
 /// Timer that is inserted into the heap.

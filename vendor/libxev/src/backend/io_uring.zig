@@ -432,6 +432,12 @@ pub const Loop = struct {
                     // the offset in the fd.
                     @bitCast(@as(i64, -1)),
                 ),
+
+                .vectors => |vecs| sqe.prep_readv(
+                    v.fd,
+                    vecs,
+                    @bitCast(@as(i64, -1)),
+                ),
             },
 
             .pread => |*v| switch (v.buffer) {
@@ -444,6 +450,12 @@ pub const Loop = struct {
                 .slice => |buf| sqe.prep_read(
                     v.fd,
                     buf,
+                    v.offset,
+                ),
+
+                .vectors => |iovecs| sqe.prep_readv(
+                    v.fd,
+                    iovecs,
                     v.offset,
                 ),
             },
@@ -459,6 +471,12 @@ pub const Loop = struct {
                     v.fd,
                     buf,
                     0,
+                ),
+
+                .vectors => |iovecs| sqe.prep_readv(
+                    v.fd,
+                    iovecs,
+                    @bitCast(@as(i64, -1)),
                 ),
             },
 
@@ -481,6 +499,12 @@ pub const Loop = struct {
                     v.fd,
                     buf,
                     0,
+                ),
+
+                .vectors => |iovecs| sqe.prep_writev(
+                    v.fd,
+                    iovecs,
+                    @bitCast(@as(i64, -1)),
                 ),
             },
 
@@ -534,6 +558,15 @@ pub const Loop = struct {
                     // the offset in the fd.
                     @bitCast(@as(i64, -1)),
                 ),
+
+                .vectors => |iovecs| sqe.prep_writev(
+                    v.fd,
+                    iovecs,
+
+                    // offset is a u64 but if the value is -1 then it uses
+                    // the offset in the fd.
+                    @bitCast(@as(i64, -1)),
+                ),
             },
 
             .pwrite => |*v| switch (v.buffer) {
@@ -546,6 +579,12 @@ pub const Loop = struct {
                 .slice => |buf| sqe.prep_write(
                     v.fd,
                     buf,
+                    v.offset,
+                ),
+
+                .vectors => |iovecs| sqe.prep_writev(
+                    v.fd,
+                    iovecs,
                     v.offset,
                 ),
             },
@@ -818,6 +857,7 @@ pub const Completion = struct {
             return switch (active.buffer) {
                 .slice => |b| if (b.len == 0) 0 else ReadError.EOF,
                 .array => ReadError.EOF,
+                .vectors => ReadError.EOF,
             };
         }
 
@@ -1027,7 +1067,9 @@ pub const ReadBuffer = union(enum) {
     /// for future fields.
     array: [32]u8,
 
-    // TODO: future will have vectors
+    /// Read into multiple buffers using vectored I/O (readv).
+    /// Each iovec specifies a buffer to read into.
+    vectors: []posix.iovec,
 };
 
 /// WriteBuffer are the various options for writing.
@@ -1041,7 +1083,9 @@ pub const WriteBuffer = union(enum) {
         len: usize,
     },
 
-    // TODO: future will have vectors
+    /// Write from multiple buffers using vectored I/O (writev).
+    /// Each iovec specifies a buffer to write from.
+    vectors: []posix.iovec_const,
 };
 
 pub const AcceptError = error{

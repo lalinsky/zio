@@ -91,7 +91,7 @@ fn FileStream(comptime xev: type) type {
             ) xev.CallbackAction,
         ) void {
             switch (buf) {
-                inline .slice, .array => {
+                inline .slice, .array, .vectors => {
                     c.* = .{
                         .op = .{
                             .pread = .{
@@ -137,6 +137,7 @@ fn FileStream(comptime xev: type) type {
                             switch (buf) {
                                 .array => {},
                                 .slice => |v| if (v.len == 0) break :kqueue {},
+                                .vectors => {},
                             }
 
                             c.flags.threadpool = true;
@@ -280,7 +281,7 @@ fn FileStream(comptime xev: type) type {
             offset: u64,
         ) void {
             switch (buf) {
-                inline .slice, .array => {
+                inline .slice, .array, .vectors => {
                     c.* = .{
                         .op = .{
                             .pwrite = .{
@@ -843,6 +844,103 @@ fn FileTests(
 
             try loop.run(.until_done);
             try testing.expectEqualSlices(u8, "12345678", read_buf[0..read_len]);
+        }
+
+        test "vectored read/write" {
+            // Skip for dynamic API as it doesn't support vectors
+            if (xev.dynamic) return error.SkipZigTest;
+            // wasi: local files don't work with poll (always ready)
+            if (builtin.os.tag == .wasi) return error.SkipZigTest;
+            // windows: std.fs.File is not opened with OVERLAPPED flag.
+            if (builtin.os.tag == .windows) return error.SkipZigTest;
+            if (builtin.os.tag == .freebsd) return error.SkipZigTest;
+
+            const testing = std.testing;
+            const ThreadPool = @import("../ThreadPool.zig");
+            var tpool = ThreadPool.init(.{});
+            defer tpool.deinit();
+            defer tpool.shutdown();
+            var loop = try xev.Loop.init(.{ .thread_pool = &tpool });
+            defer loop.deinit();
+
+            const path = "test_vectored";
+            const f = try std.fs.cwd().createFile(path, .{ .read = true });
+            defer {
+                f.close();
+                std.fs.cwd().deleteFile(path) catch {};
+            }
+
+            const file = try Impl.init(f);
+
+            // Create vector write buffers
+            const buf1 = "Hello, ";
+            const buf2 = "vectored ";
+            const buf3 = "I/O!";
+
+            var write_vectors = [_]std.posix.iovec_const{
+                .{ .base = buf1.ptr, .len = buf1.len },
+                .{ .base = buf2.ptr, .len = buf2.len },
+                .{ .base = buf3.ptr, .len = buf3.len },
+            };
+
+            var c_write: xev.Completion = undefined;
+            file.write(&loop, &c_write, .{ .vectors = &write_vectors }, void, null, (struct {
+                fn callback(
+                    _: ?*void,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: Impl,
+                    _: xev.WriteBuffer,
+                    r: xev.WriteError!usize,
+                ) xev.CallbackAction {
+                    const written = r catch unreachable;
+                    // Should write all bytes from all vectors: 7 + 9 + 4 = 20
+                    std.testing.expectEqual(20, written) catch unreachable;
+                    return .disarm;
+                }
+            }).callback);
+
+            try loop.run(.until_done);
+
+            // Sync to ensure data is written
+            try f.sync();
+
+            // Now test vectored read
+            const f2 = try std.fs.cwd().openFile(path, .{});
+            defer f2.close();
+            const file2 = try Impl.init(f2);
+
+            var read_buf1: [7]u8 = undefined;
+            var read_buf2: [9]u8 = undefined;
+            var read_buf3: [4]u8 = undefined;
+
+            var read_vectors = [_]std.posix.iovec{
+                .{ .base = &read_buf1, .len = read_buf1.len },
+                .{ .base = &read_buf2, .len = read_buf2.len },
+                .{ .base = &read_buf3, .len = read_buf3.len },
+            };
+
+            var read_len: usize = 0;
+            var c_read: xev.Completion = undefined;
+            file2.read(&loop, &c_read, .{ .vectors = &read_vectors }, usize, &read_len, (struct {
+                fn callback(
+                    ud: ?*usize,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: Impl,
+                    _: xev.ReadBuffer,
+                    r: xev.ReadError!usize,
+                ) xev.CallbackAction {
+                    ud.?.* = r catch unreachable;
+                    return .disarm;
+                }
+            }).callback);
+
+            try loop.run(.until_done);
+            try testing.expectEqual(20, read_len);
+            try testing.expectEqualSlices(u8, "Hello, ", &read_buf1);
+            try testing.expectEqualSlices(u8, "vectored ", &read_buf2);
+            try testing.expectEqualSlices(u8, "I/O!", &read_buf3);
         }
     };
 }

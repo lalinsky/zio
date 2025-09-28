@@ -532,7 +532,7 @@ pub fn Readable(comptime xev: type, comptime T: type, comptime options: Options)
             ) xev.CallbackAction,
         ) void {
             switch (buf) {
-                inline .slice, .array => {
+                inline .slice, .array, .vectors => {
                     c.* = .{
                         .op = switch (options.read) {
                             .none => unreachable,
@@ -604,6 +604,7 @@ pub fn Readable(comptime xev: type, comptime T: type, comptime options: Options)
                             switch (buf) {
                                 .array => {},
                                 .slice => |v| if (v.len == 0) break :kqueue {},
+                                .vectors => {},
                             }
 
                             if (options.threadpool) c.flags.threadpool = true;
@@ -958,7 +959,7 @@ pub fn Writeable(comptime xev: type, comptime T: type, comptime options: Options
             buf: xev.WriteBuffer,
         ) void {
             switch (buf) {
-                inline .slice, .array => {
+                inline .slice, .array, .vectors => {
                     c.* = .{
                         .op = switch (options.write) {
                             .none => unreachable,
@@ -1007,6 +1008,11 @@ pub fn Writeable(comptime xev: type, comptime T: type, comptime options: Options
             return switch (buf) {
                 .slice => |slice| slice.len,
                 .array => |array| array.len,
+                .vectors => |vecs| blk: {
+                    var total: usize = 0;
+                    for (vecs) |vec| total += vec.len;
+                    break :blk total;
+                },
             };
         }
 
@@ -1030,6 +1036,23 @@ pub fn Writeable(comptime xev: type, comptime T: type, comptime options: Options
                         array.array[offset..][0..rem_len],
                     );
                     return wb;
+                },
+                .vectors => |vecs| {
+                    // Find which vector the offset falls into and adjust it
+                    var current_offset: usize = 0;
+                    for (vecs, 0..) |vec, i| {
+                        if (current_offset + vec.len > offset) {
+                            // The offset falls within this vector - adjust base and len
+                            const vec_offset = offset - current_offset;
+                            var adjusted_vecs = vecs[i..];
+                            adjusted_vecs[0].base = vec.base + vec_offset;
+                            adjusted_vecs[0].len = vec.len - vec_offset;
+                            return .{ .vectors = adjusted_vecs };
+                        }
+                        current_offset += vec.len;
+                    }
+                    // If we get here, offset was exactly at the end
+                    return .{ .vectors = vecs[vecs.len..] }; // Empty slice
                 },
             }
         }
