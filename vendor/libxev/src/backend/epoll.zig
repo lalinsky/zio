@@ -979,7 +979,7 @@ pub const Completion = struct {
                 const n_ = switch (op.buffer) {
                     .slice => |v| posix.read(op.fd, v),
                     .array => |*v| posix.read(op.fd, v),
-                    .vectors => |v| posix.readv(op.fd, v),
+                    .vectors => |v| posix.readv(op.fd, v.data[0..v.len]),
                 };
 
                 break :res .{
@@ -994,7 +994,7 @@ pub const Completion = struct {
                 const n_ = switch (op.buffer) {
                     .slice => |v| posix.pread(op.fd, v, op.offset),
                     .array => |*v| posix.pread(op.fd, v, op.offset),
-                    .vectors => |v| posix.preadv(op.fd, v, op.offset),
+                    .vectors => |v| posix.preadv(op.fd, v.data[0..v.len], op.offset),
                 };
 
                 break :res .{
@@ -1009,7 +1009,7 @@ pub const Completion = struct {
                 .write = switch (op.buffer) {
                     .slice => |v| posix.write(op.fd, v),
                     .array => |*v| posix.write(op.fd, v.array[0..v.len]),
-                    .vectors => |v| posix.writev(op.fd, v),
+                    .vectors => |v| posix.writev(op.fd, v.data[0..v.len]),
                 },
             },
 
@@ -1017,7 +1017,7 @@ pub const Completion = struct {
                 .pwrite = switch (op.buffer) {
                     .slice => |v| posix.pwrite(op.fd, v, op.offset),
                     .array => |*v| posix.pwrite(op.fd, v.array[0..v.len], op.offset),
-                    .vectors => |v| posix.pwritev(op.fd, v, op.offset),
+                    .vectors => |v| posix.pwritev(op.fd, v.data[0..v.len], op.offset),
                 },
             },
 
@@ -1025,7 +1025,7 @@ pub const Completion = struct {
                 .send = switch (op.buffer) {
                     .slice => |v| posix.send(op.fd, v, 0),
                     .array => |*v| posix.send(op.fd, v.array[0..v.len], 0),
-                    .vectors => |v| posix.writev(op.fd, v),
+                    .vectors => |v| posix.writev(op.fd, v.data[0..v.len]),
                 },
             },
 
@@ -1053,7 +1053,7 @@ pub const Completion = struct {
                 const n_ = switch (op.buffer) {
                     .slice => |v| posix.recv(op.fd, v, 0),
                     .array => |*v| posix.recv(op.fd, v, 0),
-                    .vectors => |v| posix.readv(op.fd, v),
+                    .vectors => |v| posix.readv(op.fd, v.data[0..v.len]),
                 };
 
                 break :res .{
@@ -1300,8 +1300,27 @@ pub const ReadBuffer = union(enum) {
     array: [32]u8,
 
     /// Read into multiple buffers using vectored I/O (readv).
-    /// Each iovec specifies a buffer to read into.
-    vectors: []posix.iovec,
+    /// Contains up to 2 iovecs for efficient syscall usage.
+    vectors: struct {
+        data: [2]posix.iovec,
+        len: usize,
+    },
+
+    /// Create a ReadBuffer from a slice of byte slices, automatically
+    /// choosing the optimal representation (slice for single buffer,
+    /// vectors for multiple buffers).
+    pub fn fromSlices(slices: [][]u8) ReadBuffer {
+        if (slices.len == 0) return .{ .slice = &.{} };
+        if (slices.len == 1) return .{ .slice = slices[0] };
+
+        // Convert to platform-specific iovec format for vectored I/O
+        var data: [2]posix.iovec = undefined;
+        const len = @min(slices.len, 2);
+        for (slices[0..len], 0..) |slice, i| {
+            data[i] = .{ .base = slice.ptr, .len = slice.len };
+        }
+        return .{ .vectors = .{ .data = data, .len = len } };
+    }
 };
 
 /// WriteBuffer are the various options for writing.
@@ -1316,8 +1335,27 @@ pub const WriteBuffer = union(enum) {
     },
 
     /// Write from multiple buffers using vectored I/O (writev).
-    /// Each iovec specifies a buffer to write from.
-    vectors: []posix.iovec_const,
+    /// Contains up to 2 iovecs for efficient syscall usage.
+    vectors: struct {
+        data: [2]posix.iovec_const,
+        len: usize,
+    },
+
+    /// Create a WriteBuffer from a slice of byte slices, automatically
+    /// choosing the optimal representation (slice for single buffer,
+    /// vectors for multiple buffers).
+    pub fn fromSlices(slices: []const []const u8) WriteBuffer {
+        if (slices.len == 0) return .{ .slice = "" };
+        if (slices.len == 1) return .{ .slice = slices[0] };
+
+        // Convert to platform-specific iovec format for vectored I/O
+        var data: [2]posix.iovec_const = undefined;
+        const len = @min(slices.len, 2);
+        for (slices[0..len], 0..) |slice, i| {
+            data[i] = .{ .base = slice.ptr, .len = slice.len };
+        }
+        return .{ .vectors = .{ .data = data, .len = len } };
+    }
 };
 
 const ThreadPoolError = error{

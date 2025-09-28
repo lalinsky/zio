@@ -604,7 +604,7 @@ pub fn Readable(comptime xev: type, comptime T: type, comptime options: Options)
                             switch (buf) {
                                 .array => {},
                                 .slice => |v| if (v.len == 0) break :kqueue {},
-                                .vectors => {},
+                                .vectors => |v| if (v.len == 0) break :kqueue {},
                             }
 
                             if (options.threadpool) c.flags.threadpool = true;
@@ -1010,7 +1010,7 @@ pub fn Writeable(comptime xev: type, comptime T: type, comptime options: Options
                 .array => |array| array.len,
                 .vectors => |vecs| blk: {
                     var total: usize = 0;
-                    for (vecs) |vec| total += vec.len;
+                    for (vecs.data[0..vecs.len]) |vec| total += vec.len;
                     break :blk total;
                 },
             };
@@ -1038,21 +1038,31 @@ pub fn Writeable(comptime xev: type, comptime T: type, comptime options: Options
                     return wb;
                 },
                 .vectors => |vecs| {
-                    // Find which vector the offset falls into and adjust it
-                    var current_offset: usize = 0;
-                    for (vecs, 0..) |vec, i| {
-                        if (current_offset + vec.len > offset) {
-                            // The offset falls within this vector - adjust base and len
-                            const vec_offset = offset - current_offset;
-                            var adjusted_vecs = vecs[i..];
-                            adjusted_vecs[0].base = vec.base + vec_offset;
-                            adjusted_vecs[0].len = vec.len - vec_offset;
-                            return .{ .vectors = adjusted_vecs };
+                    var result = xev.WriteBuffer{ .vectors = .{ .data = undefined, .len = 0 } };
+                    var skip = offset;
+
+                    for (vecs.data[0..vecs.len]) |vec| {
+                        if (skip >= vec.len) {
+                            skip -= vec.len;
+                            continue;
                         }
-                        current_offset += vec.len;
+
+                        // Copy remaining vectors, adjusting the first one
+                        if (skip > 0) {
+                            result.vectors.data[result.vectors.len] = .{
+                                .base = vec.base + skip,
+                                .len = vec.len - skip,
+                            };
+                            skip = 0;
+                        } else {
+                            result.vectors.data[result.vectors.len] = vec;
+                        }
+                        result.vectors.len += 1;
+
+                        // Stop if we've filled our result array
+                        if (result.vectors.len >= 2) break;
                     }
-                    // If we get here, offset was exactly at the end
-                    return .{ .vectors = vecs[vecs.len..] }; // Empty slice
+                    return result;
                 },
             }
         }

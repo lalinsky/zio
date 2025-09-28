@@ -27,3 +27,6 @@ jobs:
 
     - name: Run tests
       run: zig build test
+
+    - name: Run xev tests
+      run: cd vendor/libxev && zig build test
