@@ -257,10 +257,9 @@ pub const File = struct {
 };
 
 test "File: basic read and write" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     const testing = std.testing;
     const allocator = testing.allocator;
+    const fs = @import("fs.zig");
 
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
@@ -269,17 +268,12 @@ test "File: basic read and write" {
         fn run(rt: *Runtime) !void {
             std.log.info("TestTask: Starting file test", .{});
 
-            var tmp_dir = testing.tmpDir(.{});
-            defer tmp_dir.cleanup();
-            std.log.info("TestTask: Created tmp dir", .{});
-
-            const file = try tmp_dir.dir.createFile("test.txt", .{ .read = true });
-            defer file.close();
-            std.log.info("TestTask: Created file", .{});
-
-            var zio_file = try File.init(rt, file);
+            // Create a test file using the new fs module
+            const file_path = "test_file_basic.txt";
+            var zio_file = try fs.createFile(rt, file_path, .{});
             defer zio_file.deinit();
-            std.log.info("TestTask: Initialized zio file", .{});
+            defer std.fs.cwd().deleteFile(file_path) catch {};
+            std.log.info("TestTask: Created file using fs module", .{});
 
             // Write test
             const write_data = "Hello, zio!";
@@ -288,12 +282,20 @@ test "File: basic read and write" {
             std.log.info("TestTask: Wrote {} bytes", .{bytes_written});
             try testing.expectEqual(write_data.len, bytes_written);
 
-            // Read test - seek back to beginning first
-            std.log.info("TestTask: About to seek to beginning", .{});
-            try file.seekTo(0);
-            std.log.info("TestTask: About to read data", .{});
+            // Close file before reopening for read
+            try zio_file.close();
+            std.log.info("TestTask: Closed file after write", .{});
+
+            // Read test - reopen the file for reading
+            var read_file = try fs.openFile(rt, file_path, .{ .mode = .read_only });
+            defer read_file.deinit();
+            defer read_file.close() catch |err| {
+                std.log.warn("Failed to close read file: {}", .{err});
+            };
+            std.log.info("TestTask: Reopened file for reading", .{});
+
             var buffer: [100]u8 = undefined;
-            const bytes_read = try zio_file.read(&buffer);
+            const bytes_read = try read_file.read(&buffer);
             std.log.info("TestTask: Read {} bytes", .{bytes_read});
             try testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
             std.log.info("TestTask: File test completed successfully", .{});
@@ -310,24 +312,22 @@ test "File: basic read and write" {
 }
 
 test "File: positional read and write" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     const testing = std.testing;
     const allocator = testing.allocator;
+    const fs = @import("fs.zig");
 
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
-            var tmp_dir = testing.tmpDir(.{});
-            defer tmp_dir.cleanup();
-
-            const file = try tmp_dir.dir.createFile("test.txt", .{ .read = true });
-            defer file.close();
-
-            var zio_file = try File.init(rt, file);
+            const file_path = "test_file_positional.txt";
+            var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
             defer zio_file.deinit();
+            defer zio_file.close() catch |err| {
+                std.log.warn("Failed to close positional test file: {}", .{err});
+            };
+            defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write at different positions
             try testing.expectEqual(5, try zio_file.pwrite("HELLO", 0));
@@ -356,24 +356,19 @@ test "File: positional read and write" {
 }
 
 test "File: close operation" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     const testing = std.testing;
     const allocator = testing.allocator;
+    const fs = @import("fs.zig");
 
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
-            var tmp_dir = testing.tmpDir(.{});
-            defer tmp_dir.cleanup();
-
-            const file = try tmp_dir.dir.createFile("test.txt", .{ .read = true });
-            // Don't defer file.close() here since we're testing zio_file.close()
-
-            var zio_file = try File.init(rt, file);
+            const file_path = "test_file_close.txt";
+            var zio_file = try fs.createFile(rt, file_path, .{});
             defer zio_file.deinit();
+            defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write some data
             const bytes_written = try zio_file.write("test data");
