@@ -332,6 +332,7 @@ fn DynamicReadBuffer(comptime dynamic: type) type {
         /// Create a ReadBuffer from a slice of byte slices, automatically
         /// delegating to the current backend's fromSlices implementation.
         pub fn fromSlices(slices: [][]u8) Self {
+            std.debug.assert(slices.len <= 2);
             return switch (dynamic.backend) {
                 inline else => |tag| {
                     const api = (comptime dynamic.superset(tag)).Api();
@@ -381,6 +382,7 @@ fn DynamicWriteBuffer(comptime dynamic: type) type {
         /// Create a WriteBuffer from a slice of byte slices, automatically
         /// delegating to the current backend's fromSlices implementation.
         pub fn fromSlices(slices: []const []const u8) Self {
+            std.debug.assert(slices.len <= 2);
             return switch (dynamic.backend) {
                 inline else => |tag| {
                     const api = (comptime dynamic.superset(tag)).Api();

@@ -1144,6 +1144,7 @@ pub const ReadBuffer = union(enum) {
     /// choosing the optimal representation (slice for single buffer,
     /// vectors for multiple buffers).
     pub fn fromSlices(slices: [][]u8) ReadBuffer {
+        std.debug.assert(slices.len <= 2);
         if (slices.len == 0) return .{ .slice = &.{} };
         if (slices.len == 1) return .{ .slice = slices[0] };
 
@@ -1179,6 +1180,7 @@ pub const WriteBuffer = union(enum) {
     /// choosing the optimal representation (slice for single buffer,
     /// vectors for multiple buffers).
     pub fn fromSlices(slices: []const []const u8) WriteBuffer {
+        std.debug.assert(slices.len <= 2);
         if (slices.len == 0) return .{ .slice = "" };
         if (slices.len == 1) return .{ .slice = slices[0] };
 
