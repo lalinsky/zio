@@ -303,7 +303,7 @@ test "File: basic read and write" {
     var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
-    try runtime.run(.{ .timeout_ns = 5 * std.time.ns_per_s });
+    try runtime.run();
 
     // Clean API to check task result
     try task.result();
@@ -350,7 +350,7 @@ test "File: positional read and write" {
     var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
-    try runtime.run(.{ .timeout_ns = 5 * std.time.ns_per_s });
+    try runtime.run();
 
     try task.result();
 }
@@ -389,7 +389,7 @@ test "File: close operation" {
     var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
-    try runtime.run(.{ .timeout_ns = 5 * std.time.ns_per_s });
+    try runtime.run();
 
     try task.result();
 }
