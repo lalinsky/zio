@@ -14,6 +14,7 @@ pub const Task = runtime.Task;
 
 // Re-export I/O functionality
 pub const File = @import("file.zig").File;
+pub const fs = @import("fs.zig");
 
 // Re-export network functionality
 pub const TcpListener = @import("tcp.zig").TcpListener;
