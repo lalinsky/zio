@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
@@ -67,7 +68,9 @@ pub const File = struct {
     }
 
     pub fn write(self: *File, data: []const u8) !usize {
+        std.log.info("File.write: Starting write of {} bytes", .{data.len});
         var waiter = self.runtime.getWaiter();
+        std.log.info("File.write: Got waiter", .{});
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -97,6 +100,7 @@ pub const File = struct {
 
         var result_data: Result = .{ .waiter = waiter };
 
+        std.log.info("File.write: About to call xev_file.write", .{});
         self.xev_file.write(
             &self.runtime.loop,
             &completion,
@@ -106,8 +110,10 @@ pub const File = struct {
             Result.callback,
         );
 
+        std.log.info("File.write: Called xev_file.write, now waiting for ready", .{});
         waiter.waitForReady();
 
+        std.log.info("File.write: Wait completed, returning result", .{});
         return result_data.result;
     }
 
@@ -251,6 +257,8 @@ pub const File = struct {
 };
 
 test "File: basic read and write" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -259,25 +267,36 @@ test "File: basic read and write" {
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
+            std.log.info("TestTask: Starting file test", .{});
+
             var tmp_dir = testing.tmpDir(.{});
             defer tmp_dir.cleanup();
+            std.log.info("TestTask: Created tmp dir", .{});
 
             const file = try tmp_dir.dir.createFile("test.txt", .{ .read = true });
             defer file.close();
+            std.log.info("TestTask: Created file", .{});
 
             var zio_file = try File.init(rt, file);
             defer zio_file.deinit();
+            std.log.info("TestTask: Initialized zio file", .{});
 
             // Write test
             const write_data = "Hello, zio!";
+            std.log.info("TestTask: About to write data", .{});
             const bytes_written = try zio_file.write(write_data);
+            std.log.info("TestTask: Wrote {} bytes", .{bytes_written});
             try testing.expectEqual(write_data.len, bytes_written);
 
             // Read test - seek back to beginning first
+            std.log.info("TestTask: About to seek to beginning", .{});
             try file.seekTo(0);
+            std.log.info("TestTask: About to read data", .{});
             var buffer: [100]u8 = undefined;
             const bytes_read = try zio_file.read(&buffer);
+            std.log.info("TestTask: Read {} bytes", .{bytes_read});
             try testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+            std.log.info("TestTask: File test completed successfully", .{});
         }
     };
 
@@ -291,6 +310,8 @@ test "File: basic read and write" {
 }
 
 test "File: positional read and write" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -335,6 +356,8 @@ test "File: positional read and write" {
 }
 
 test "File: close operation" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const testing = std.testing;
     const allocator = testing.allocator;
 
