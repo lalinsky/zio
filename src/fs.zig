@@ -110,11 +110,10 @@ pub fn createFile(runtime: *Runtime, path: []const u8, options: CreateOptions) !
 }
 
 fn openFileWindows(runtime: *Runtime, path: []const u8, options: OpenOptions) !File {
-    const allocator = runtime.allocator;
+    _ = runtime.allocator;
 
     // Convert path to UTF-16
-    const path_w = try windows.sliceToPrefixedFileW(allocator, path);
-    defer allocator.free(path_w.span());
+    const path_w = try windows.sliceToPrefixedFileW(null, path);
 
     // Set desired access based on mode
     const desired_access: windows.DWORD = switch (options.mode) {
