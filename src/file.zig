@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
@@ -256,8 +257,8 @@ pub const File = struct {
 };
 
 test "File: basic read and write" {
-    if (std.builtin.os.tag == .windows) return error.SkipZigTest;
-    
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -309,7 +310,7 @@ test "File: basic read and write" {
 }
 
 test "File: positional read and write" {
-    if (std.builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -355,7 +356,7 @@ test "File: positional read and write" {
 }
 
 test "File: close operation" {
-    if (std.builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     const allocator = testing.allocator;
