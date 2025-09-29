@@ -518,7 +518,8 @@ fn UDPSendMsg(comptime xev: type) type {
                 },
 
                 .vectors => |vecs| {
-                    @memcpy(s.op.recv.iov[0..vecs.len], vecs.data[0..vecs.len]);
+                    s.op.recv.msghdr.iov = &vecs.data;
+                    s.op.recv.msghdr.iovlen = vecs.len;
                 },
             }
 
@@ -627,7 +628,8 @@ fn UDPSendMsg(comptime xev: type) type {
                 },
 
                 .vectors => |vecs| {
-                    @memcpy(s.op.send.iov[0..vecs.len], vecs.data[0..vecs.len]);
+                    s.op.send.msghdr.iov = &vecs.data;
+                    s.op.send.msghdr.iovlen = vecs.len;
                 },
             }
 
