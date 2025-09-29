@@ -6,94 +6,40 @@ const Runtime = @import("runtime.zig").Runtime;
 
 const windows = if (builtin.os.tag == .windows) std.os.windows else struct {};
 
-/// File access mode for reading and/or writing
-pub const OpenMode = enum {
-    /// Open file for reading only
-    read_only,
-    /// Open file for writing only
-    write_only,
-    /// Open file for both reading and writing
-    read_write,
-};
-
-/// File creation behavior when opening files
-pub const CreateMode = enum {
-    /// Create new file, fail if it already exists
-    create_new,
-    /// Always create file, overwrite if it exists
-    create_always,
-    /// Open existing file or create if it doesn't exist
-    open_always,
-    /// Open existing file, fail if it doesn't exist
-    open_existing,
-};
-
-/// File sharing permissions for concurrent access (Windows-specific, ignored on Unix)
-pub const SharingMode = enum {
-    /// Exclusive access - no other processes can access the file
-    none,
-    /// Allow other processes to read the file
-    read,
-    /// Allow other processes to write to the file
-    write,
-    /// Allow other processes to read and write the file
-    read_write,
-};
-
-/// Options for opening existing files or creating new ones
-pub const OpenOptions = struct {
-    /// Access mode for the file
-    mode: OpenMode = .read_only,
-    /// File creation behavior
-    create: CreateMode = .open_existing,
-    /// Sharing permissions (Windows only)
-    sharing: SharingMode = .read_write,
-};
-
-/// Options for creating new files
-pub const CreateOptions = struct {
-    /// Access mode for the new file
-    mode: OpenMode = .read_write,
-    /// Whether to truncate existing files
-    truncate: bool = true,
-};
-
 /// Open a file for async I/O operations.
 ///
-/// Opens an existing file or creates a new one based on the provided options.
-/// On Windows, files are created with FILE_FLAG_OVERLAPPED for IOCP compatibility.
+/// Opens an existing file for reading and/or writing.
+/// On Windows, files are opened with FILE_FLAG_OVERLAPPED for IOCP compatibility.
 /// The returned File handle supports async read, write, pread, pwrite, and close operations.
 ///
 /// ## Parameters
 /// - `runtime`: The ZIO runtime instance for async operations
 /// - `path`: Path to the file (supports both relative and absolute paths)
-/// - `options`: Configuration for file access mode, creation behavior, and sharing permissions
+/// - `flags`: std.fs.File.OpenFlags specifying access mode
 ///
 /// ## Returns
 /// A File instance that must be closed with `close()` and freed with `deinit()`
 ///
 /// ## Errors
-/// - `FileNotFound`: File doesn't exist when using `open_existing` mode
-/// - `PathAlreadyExists`: File exists when using `create_new` mode
+/// - `FileNotFound`: File doesn't exist
 /// - `AccessDenied`: Insufficient permissions to access the file
 /// - Platform-specific file system errors
-pub fn openFile(runtime: *Runtime, path: []const u8, options: OpenOptions) !File {
+pub fn openFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlags) !File {
     if (builtin.os.tag == .windows) {
-        return openFileWindows(runtime, path, options);
+        return openFileWindows(runtime, path, flags);
     } else {
-        return openFileUnix(runtime, path, options);
+        return openFileUnix(runtime, path, flags);
     }
 }
 
 /// Create a file for async I/O operations.
 ///
-/// Creates a new file with the specified access mode. This is a convenience function
-/// that wraps `openFile` with appropriate creation options.
+/// Creates a new file with the specified creation flags.
 ///
 /// ## Parameters
 /// - `runtime`: The ZIO runtime instance for async operations
 /// - `path`: Path to the file (supports both relative and absolute paths)
-/// - `options`: Configuration for file access mode and truncation behavior
+/// - `flags`: std.fs.File.CreateFlags specifying creation behavior
 ///
 /// ## Returns
 /// A File instance that must be closed with `close()` and freed with `deinit()`
@@ -101,42 +47,86 @@ pub fn openFile(runtime: *Runtime, path: []const u8, options: OpenOptions) !File
 /// ## Errors
 /// - `AccessDenied`: Insufficient permissions to create the file
 /// - Platform-specific file system errors
-pub fn createFile(runtime: *Runtime, path: []const u8, options: CreateOptions) !File {
+pub fn createFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.CreateFlags) !File {
     if (builtin.os.tag == .windows) {
-        return createFileWindows(runtime, path, options);
+        return createFileWindows(runtime, path, flags);
     } else {
-        return createFileUnix(runtime, path, options);
+        return createFileUnix(runtime, path, flags);
     }
 }
 
-fn openFileWindows(runtime: *Runtime, path: []const u8, options: OpenOptions) !File {
-    _ = runtime.allocator;
+fn openFileWindows(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlags) !File {
+    // File locking is not supported in async I/O context
+    if (flags.lock != .none) {
+        return error.Unsupported;
+    }
 
     // Convert path to UTF-16
     const path_w = try windows.sliceToPrefixedFileW(null, path);
 
     // Set desired access based on mode
-    const desired_access: windows.DWORD = switch (options.mode) {
+    const desired_access: windows.DWORD = switch (flags.mode) {
         .read_only => windows.GENERIC_READ,
         .write_only => windows.GENERIC_WRITE,
         .read_write => windows.GENERIC_READ | windows.GENERIC_WRITE,
     };
 
-    // Set creation disposition based on create mode
-    const creation_disposition: windows.DWORD = switch (options.create) {
-        .create_new => windows.CREATE_NEW,
-        .create_always => windows.CREATE_ALWAYS,
-        .open_always => windows.OPEN_ALWAYS,
-        .open_existing => windows.OPEN_EXISTING,
-    };
+    // Open existing file only
+    const creation_disposition: windows.DWORD = windows.OPEN_EXISTING;
 
-    // Set sharing mode based on options
-    const share_mode: windows.DWORD = switch (options.sharing) {
-        .none => 0,
-        .read => windows.FILE_SHARE_READ,
-        .write => windows.FILE_SHARE_WRITE,
-        .read_write => windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
-    };
+    // Use same sharing mode as std.fs for consistency
+    const share_mode: windows.DWORD = windows.FILE_SHARE_WRITE | windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE;
+
+    // Create file with FILE_FLAG_OVERLAPPED for IOCP compatibility
+    const handle = windows.kernel32.CreateFileW(
+        path_w.span().ptr,
+        desired_access,
+        share_mode,
+        null,
+        creation_disposition,
+        windows.FILE_FLAG_OVERLAPPED,
+        null,
+    );
+
+    if (handle == windows.INVALID_HANDLE_VALUE) {
+        const err = windows.kernel32.GetLastError();
+        return switch (err) {
+            windows.Win32Error.FILE_NOT_FOUND => error.FileNotFound,
+            windows.Win32Error.ACCESS_DENIED => error.AccessDenied,
+            else => windows.unexpectedError(err),
+        };
+    }
+
+    // Create File instance using the handle
+    return File.initFd(runtime, handle);
+}
+
+fn createFileWindows(runtime: *Runtime, path: []const u8, flags: std.fs.File.CreateFlags) !File {
+    // File locking is not supported in async I/O context
+    if (flags.lock != .none) {
+        return error.Unsupported;
+    }
+
+    // Convert path to UTF-16
+    const path_w = try windows.sliceToPrefixedFileW(null, path);
+
+    // Set desired access based on flags
+    // CreateFlags always allows writing, read is optional
+    const desired_access: windows.DWORD = if (flags.read)
+        (windows.GENERIC_READ | windows.GENERIC_WRITE)
+    else
+        windows.GENERIC_WRITE;
+
+    // Set creation disposition based on flags
+    const creation_disposition: windows.DWORD = if (flags.exclusive)
+        windows.CREATE_NEW
+    else if (flags.truncate)
+        windows.CREATE_ALWAYS
+    else
+        windows.OPEN_ALWAYS;
+
+    // Use same sharing mode as std.fs for consistency
+    const share_mode: windows.DWORD = windows.FILE_SHARE_WRITE | windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE;
 
     // Create file with FILE_FLAG_OVERLAPPED for IOCP compatibility
     const handle = windows.kernel32.CreateFileW(
@@ -163,50 +153,23 @@ fn openFileWindows(runtime: *Runtime, path: []const u8, options: OpenOptions) !F
     return File.initFd(runtime, handle);
 }
 
-fn createFileWindows(runtime: *Runtime, path: []const u8, options: CreateOptions) !File {
-    const open_options = OpenOptions{
-        .mode = options.mode,
-        .create = if (options.truncate) .create_always else .open_always,
-    };
-    return openFileWindows(runtime, path, open_options);
-}
-
-fn openFileUnix(runtime: *Runtime, path: []const u8, options: OpenOptions) !File {
-    // Convert OpenOptions to std.fs.File.OpenFlags
-    var flags: std.fs.File.OpenFlags = .{};
-
-    switch (options.mode) {
-        .read_only => flags.mode = .read_only,
-        .write_only => flags.mode = .write_only,
-        .read_write => flags.mode = .read_write,
+fn openFileUnix(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlags) !File {
+    // File locking is not supported in async I/O context
+    if (flags.lock != .none) {
+        return error.Unsupported;
     }
 
-    const std_file = switch (options.create) {
-        .create_new => blk: {
-            const file = std.fs.cwd().createFile(path, .{ .read = options.mode != .write_only, .exclusive = true }) catch |err| switch (err) {
-                error.PathAlreadyExists => return error.PathAlreadyExists,
-                else => return err,
-            };
-            break :blk file;
-        },
-        .create_always => try std.fs.cwd().createFile(path, .{ .read = options.mode != .write_only }),
-        .open_always => std.fs.cwd().createFile(path, .{ .read = options.mode != .write_only }) catch |err| switch (err) {
-            error.PathAlreadyExists => try std.fs.cwd().openFile(path, flags),
-            else => return err,
-        },
-        .open_existing => try std.fs.cwd().openFile(path, flags),
-    };
-
+    const std_file = try std.fs.cwd().openFile(path, flags);
     return File.init(runtime, std_file);
 }
 
-fn createFileUnix(runtime: *Runtime, path: []const u8, options: CreateOptions) !File {
-    const create_flags: std.fs.File.CreateFlags = .{
-        .read = options.mode != .write_only,
-        .truncate = options.truncate,
-    };
+fn createFileUnix(runtime: *Runtime, path: []const u8, flags: std.fs.File.CreateFlags) !File {
+    // File locking is not supported in async I/O context
+    if (flags.lock != .none) {
+        return error.Unsupported;
+    }
 
-    const std_file = try std.fs.cwd().createFile(path, create_flags);
+    const std_file = try std.fs.cwd().createFile(path, flags);
     return File.init(runtime, std_file);
 }
 

@@ -322,7 +322,7 @@ test "File: positional read and write" {
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
             const file_path = "test_file_positional.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{});
+            var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
             defer zio_file.deinit();
             defer zio_file.close() catch |err| {
                 std.log.warn("Failed to close positional test file: {}", .{err});
