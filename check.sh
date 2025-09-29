@@ -73,4 +73,12 @@ else
 fi
 zig build test
 
+echo "=== Running xev unit tests ==="
+if [ -n "$TEST_FILTER" ]; then
+    echo "Running unit tests with filter: $TEST_FILTER"
+else
+    echo "Running all xev unit tests..."
+fi
+cd vendor/libxev && zig build test
+
 echo "=== All checks passed! ==="
