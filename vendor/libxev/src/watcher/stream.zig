@@ -1047,7 +1047,6 @@ pub fn Writeable(comptime xev: type, comptime T: type, comptime options: Options
                             continue;
                         }
 
-                        // Copy remaining vectors, adjusting the first one
                         if (skip > 0) {
                             result.vectors.data[result.vectors.len] = .{
                                 .base = vec.base + skip,
@@ -1058,9 +1057,6 @@ pub fn Writeable(comptime xev: type, comptime T: type, comptime options: Options
                             result.vectors.data[result.vectors.len] = vec;
                         }
                         result.vectors.len += 1;
-
-                        // Stop if we've filled our result array
-                        if (result.vectors.len >= 2) break;
                     }
                     return result;
                 },
