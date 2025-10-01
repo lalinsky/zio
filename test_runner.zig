@@ -1,87 +1,72 @@
-// Enhanced test runner from https://github.com/karlseguin/http.zig
-// Provides colorized output, timing information, memory leak detection, and environment variable configuration
-// Modified to suppress log output for passing tests, only show logs for failed tests
-// Also displays full test names in output instead of truncated versions
-//
 // in your build.zig, you can specify a custom test runner:
 // const tests = b.addTest(.{
-//   .target = target,
-//   .optimize = optimize,
-//   .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple }, // add this line
-//   .root_source_file = b.path("src/main.zig"),
+//    .root_module = $MODULE_BEING_TESTED,
+//    .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
 // });
+
+pub const std_options = std.Options{
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .websocket, .level = .warn },
+    },
+    .logFn = customLogFn,
+};
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 
-// Log capture context
+const BORDER = "=" ** 80;
+
+// Log capture for suppressing logs in passing tests
 const LogCapture = struct {
-    captured_log_buffer: ?*std.ArrayList(u8) = null,
+    capture_writer: ?*std.Io.Writer = null,
     mutex: std.Thread.Mutex = .{},
 
     pub fn logFn(
         self: *@This(),
         comptime level: std.log.Level,
-        comptime scope: @Type(.enum_literal),
+        comptime scope: @TypeOf(.enum_literal),
         comptime format: []const u8,
         args: anytype,
     ) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const scope_prefix = "(" ++ switch (scope) {
-            std.log.default_log_scope => @tagName(scope),
-            else => @tagName(scope),
-        } ++ "/" ++ @tagName(level) ++ "): ";
+        const scope_prefix = "(" ++ @tagName(scope) ++ "/" ++ @tagName(level) ++ "): ";
 
-        if (self.captured_log_buffer) |buf| {
-            // Capture to buffer during test execution
-            buf.writer().print(scope_prefix ++ format ++ "\n", args) catch unreachable;
+        if (self.capture_writer) |writer| {
+            // Write to capture buffer
+            writer.print(scope_prefix ++ format ++ "\n", args) catch return;
         } else {
-            // Normal logging to stderr when not capturing
-            std.debug.lockStdErr();
-            defer std.debug.unlockStdErr();
-            const stderr = std.io.getStdErr().writer();
-            stderr.print(scope_prefix ++ format ++ "\n", args) catch unreachable;
+            // Write to stderr (no locking needed, std.debug.print handles it)
+            std.debug.print(scope_prefix ++ format ++ "\n", args);
         }
     }
 
-    pub fn startCapture(self: *@This(), buffer: *std.ArrayList(u8)) void {
+    pub fn startCapture(self: *@This(), writer: *std.Io.Writer) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        self.captured_log_buffer = buffer;
+        self.capture_writer = writer;
     }
 
     pub fn stopCapture(self: *@This()) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        self.captured_log_buffer = null;
+        self.capture_writer = null;
     }
 };
 
 var log_capture = LogCapture{};
 
-// Custom log function that delegates to the LogCapture instance
-pub fn testLogFn(
+pub fn customLogFn(
     comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @TypeOf(.enum_literal),
     comptime format: []const u8,
     args: anytype,
 ) void {
     log_capture.logFn(level, scope, format, args);
 }
-
-// Override std.log with our custom function
-pub const std_options: std.Options = .{
-    .log_level = .debug,
-    .logFn = testLogFn,
-};
-
-const BORDER = "=" ** 80;
 
 // use in custom panic handler
 var current_test: ?[]const u8 = null;
@@ -103,24 +88,22 @@ pub fn main() !void {
     var skip: usize = 0;
     var leak: usize = 0;
 
-    const printer = Printer.init();
-    printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
-
-    // Initialize log buffer for capturing test output
-    var log_buffer = std.ArrayList(u8).init(allocator);
+    var log_buffer: std.Io.Writer.Allocating = .init(allocator);
     defer log_buffer.deinit();
+
+    Printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
 
     for (builtin.test_functions) |t| {
         if (isSetup(t)) {
             t.func() catch |err| {
-                printer.status(.fail, "\nsetup \"{s}\" failed: {}\n", .{ t.name, err });
+                Printer.status(.fail, "\nsetup \"{s}\" failed: {}\n", .{ t.name, err });
                 return err;
             };
         }
     }
 
     for (builtin.test_functions) |t| {
-        if (isSetup(t) or isTeardown(t) or isPerTestSetup(t)) {
+        if (isSetup(t) or isTeardown(t)) {
             continue;
         }
 
@@ -140,38 +123,27 @@ pub fn main() !void {
         std.testing.allocator_instance = .{};
 
         if (env.do_log_capture) {
-            // Clear log buffer and start capturing logs for this test
             log_buffer.clearRetainingCapacity();
-            log_capture.startCapture(&log_buffer);
+            log_capture.startCapture(&log_buffer.writer);
         }
 
-        // Run per-test setup functions
-        for (builtin.test_functions) |setup_t| {
-            if (isPerTestSetup(setup_t)) {
-                setup_t.func() catch |err| {
-                    printer.status(.fail, "\nper-test setup \"{s}\" failed: {}\n", .{ setup_t.name, err });
-                    return err;
-                };
-            }
-        }
         const result = t.func();
-        current_test = null;
 
         if (env.do_log_capture) {
-            // Stop capturing logs
             log_capture.stopCapture();
         }
+
+        current_test = null;
 
         const ns_taken = slowest.endTiming(friendly_name);
 
         if (std.testing.allocator_instance.deinit() == .leak) {
             leak += 1;
-            printer.status(.fail, "\n{s}\n\"{s}\" - Memory Leak\n{s}\n", .{ BORDER, friendly_name, BORDER });
+            Printer.status(.fail, "\n{s}\n\"{s}\" - Memory Leak\n{s}\n", .{ BORDER, friendly_name, BORDER });
         }
 
         if (result) |_| {
             pass += 1;
-            // For successful tests, we don't print the captured logs
         } else |err| switch (err) {
             error.SkipZigTest => {
                 skip += 1;
@@ -180,15 +152,14 @@ pub fn main() !void {
             else => {
                 status = .fail;
                 fail += 1;
-
-                printer.status(.fail, "\n{s}\n\"{s}\" - {s}\n", .{ BORDER, friendly_name, @errorName(err) });
+                Printer.status(.fail, "\n{s}\n\"{s}\" - {s}\n", .{ BORDER, friendly_name, @errorName(err) });
 
                 // Print captured logs for failed tests
-                if (log_buffer.items.len > 0) {
-                    printer.fmt("Test output:\n{s}", .{log_buffer.items});
+                if (log_buffer.written().len > 0) {
+                    Printer.fmt("Test output:\n{s}", .{log_buffer.written()});
                 }
 
-                printer.fmt("{s}\n", .{BORDER});
+                Printer.fmt("{s}\n", .{BORDER});
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);
                 }
@@ -200,16 +171,16 @@ pub fn main() !void {
 
         if (env.verbose) {
             const ms = @as(f64, @floatFromInt(ns_taken)) / 1_000_000.0;
-            printer.status(status, "{s} ({d:.2}ms)\n", .{ friendly_name, ms });
+            Printer.status(status, "{s} ({d:.2}ms)\n", .{ friendly_name, ms });
         } else {
-            printer.status(status, ".", .{});
+            Printer.status(status, ".", .{});
         }
     }
 
     for (builtin.test_functions) |t| {
         if (isTeardown(t)) {
             t.func() catch |err| {
-                printer.status(.fail, "\nteardown \"{s}\" failed: {}\n", .{ t.name, err });
+                Printer.status(.fail, "\nteardown \"{s}\" failed: {}\n", .{ t.name, err });
                 return err;
             };
         }
@@ -217,43 +188,32 @@ pub fn main() !void {
 
     const total_tests = pass + fail;
     const status = if (fail == 0) Status.pass else Status.fail;
-    printer.status(status, "\n{d} of {d} test{s} passed\n", .{ pass, total_tests, if (total_tests != 1) "s" else "" });
+    Printer.status(status, "\n{d} of {d} test{s} passed\n", .{ pass, total_tests, if (total_tests != 1) "s" else "" });
     if (skip > 0) {
-        printer.status(.skip, "{d} test{s} skipped\n", .{ skip, if (skip != 1) "s" else "" });
+        Printer.status(.skip, "{d} test{s} skipped\n", .{ skip, if (skip != 1) "s" else "" });
     }
     if (leak > 0) {
-        printer.status(.fail, "{d} test{s} leaked\n", .{ leak, if (leak != 1) "s" else "" });
+        Printer.status(.fail, "{d} test{s} leaked\n", .{ leak, if (leak != 1) "s" else "" });
     }
-    printer.fmt("\n", .{});
-    try slowest.display(printer);
-    printer.fmt("\n", .{});
+    Printer.fmt("\n", .{});
+    try slowest.display();
+    Printer.fmt("\n", .{});
     std.posix.exit(if (fail == 0) 0 else 1);
 }
 
 const Printer = struct {
-    out: std.fs.File.Writer,
-
-    fn init() Printer {
-        return .{
-            .out = std.io.getStdErr().writer(),
-        };
+    fn fmt(comptime format: []const u8, args: anytype) void {
+        std.debug.print(format, args);
     }
 
-    fn fmt(self: Printer, comptime format: []const u8, args: anytype) void {
-        std.fmt.format(self.out, format, args) catch unreachable;
-    }
-
-    fn status(self: Printer, s: Status, comptime format: []const u8, args: anytype) void {
-        const color = switch (s) {
-            .pass => "\x1b[32m",
-            .fail => "\x1b[31m",
-            .skip => "\x1b[33m",
-            else => "",
-        };
-        const out = self.out;
-        out.writeAll(color) catch @panic("writeAll failed?!");
-        std.fmt.format(out, format, args) catch @panic("std.fmt.format failed?!");
-        self.fmt("\x1b[0m", .{});
+    fn status(s: Status, comptime format: []const u8, args: anytype) void {
+        switch (s) {
+            .pass => std.debug.print("\x1b[32m", .{}),
+            .fail => std.debug.print("\x1b[31m", .{}),
+            .skip => std.debug.print("\x1b[33m", .{}),
+            else => {},
+        }
+        std.debug.print(format ++ "\x1b[0m", args);
     }
 };
 
@@ -323,13 +283,13 @@ const SlowTracker = struct {
         return ns;
     }
 
-    fn display(self: *SlowTracker, printer: Printer) !void {
+    fn display(self: *SlowTracker) !void {
         var slowest = self.slowest;
         const count = slowest.count();
-        printer.fmt("Slowest {d} test{s}: \n", .{ count, if (count != 1) "s" else "" });
+        Printer.fmt("Slowest {d} test{s}: \n", .{ count, if (count != 1) "s" else "" });
         while (slowest.removeMinOrNull()) |info| {
             const ms = @as(f64, @floatFromInt(info.ns)) / 1_000_000.0;
-            printer.fmt("  {d:.2}ms\t{s}\n", .{ ms, info.name });
+            Printer.fmt("  {d:.2}ms\t{s}\n", .{ ms, info.name });
         }
     }
 
@@ -401,8 +361,4 @@ fn isSetup(t: std.builtin.TestFn) bool {
 
 fn isTeardown(t: std.builtin.TestFn) bool {
     return std.mem.endsWith(u8, t.name, "tests:afterAll");
-}
-
-fn isPerTestSetup(t: std.builtin.TestFn) bool {
-    return std.mem.endsWith(u8, t.name, "tests:beforeEach");
 }
