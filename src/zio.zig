@@ -10,7 +10,7 @@ pub const CoroutineOptions = coroutines.CoroutineOptions;
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const ZioError = runtime.ZioError;
-pub const Task = runtime.Task;
+pub const JoinHandle = runtime.JoinHandle;
 
 // Re-export I/O functionality
 pub const File = @import("file.zig").File;

@@ -90,17 +90,21 @@ pub fn main() !void {
     var buffer = BoundedBuffer.init(&runtime);
 
     // Start 2 producers and 2 consumers
-    var producers: [2]zio.Task(void) = undefined;
-    var consumers: [2]zio.Task(void) = undefined;
+    var producers: [2]zio.JoinHandle(void) = undefined;
+    var consumers: [2]zio.JoinHandle(void) = undefined;
+    var producer_count: usize = 0;
+    var consumer_count: usize = 0;
+
+    defer {
+        for (producers[0..producer_count]) |*task| task.deinit();
+        for (consumers[0..consumer_count]) |*task| task.deinit();
+    }
 
     for (0..2) |i| {
         producers[i] = try runtime.spawn(producer, .{ &runtime, &buffer, @as(u32, @intCast(i)) }, .{});
+        producer_count += 1;
         consumers[i] = try runtime.spawn(consumer, .{ &runtime, &buffer, @as(u32, @intCast(i)) }, .{});
-    }
-
-    defer {
-        for (&producers) |*task| task.deinit();
-        for (&consumers) |*task| task.deinit();
+        consumer_count += 1;
     }
 
     try runtime.run();

@@ -108,7 +108,7 @@ pub fn main() !void {
     for (client_messages, 0..) |message, i| {
         client_tasks[i] = try runtime.spawn(udpClient, .{ &runtime, server_port, @as(u32, @intCast(i + 1)), message }, .{});
     }
-    defer for (client_tasks) |task| task.deinit();
+    defer for (client_tasks) |*task| task.deinit();
 
     // Run the event loop
     try runtime.run();

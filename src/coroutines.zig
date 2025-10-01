@@ -3,6 +3,7 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const FutureResult = @import("future_result.zig").FutureResult;
 
 threadlocal var current_coroutine: ?*Coroutine = null;
 
@@ -23,55 +24,6 @@ pub const CoroutineState = enum(u8) {
     waiting = 2,
     dead = 3,
 };
-
-pub const AnyCoroutineResult = union(enum) {
-    pending: void, // Coroutine hasn't finished yet
-    success: *anyopaque, // Pointer to coroutine result
-    failure: anyerror, // Coroutine failed with this error
-};
-
-pub fn CoroutineResult(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        any_result: *AnyCoroutineResult,
-
-        pub fn get(self: Self) T {
-            switch (self.any_result.*) {
-                .pending => {
-                    @panic("Coroutine is still pending");
-                },
-                .success => |ptr| {
-                    if (T == void) {
-                        return {};
-                    } else {
-                        const type_info = @typeInfo(T);
-                        if (type_info == .error_union) {
-                            // For error unions, we stored only the payload, so return it directly
-                            const payload_type = type_info.error_union.payload;
-                            if (payload_type == void) {
-                                return {};
-                            } else {
-                                const typed_ptr: *payload_type = @ptrCast(@alignCast(ptr));
-                                return typed_ptr.*;
-                            }
-                        } else {
-                            const typed_ptr: *T = @ptrCast(@alignCast(ptr));
-                            return typed_ptr.*;
-                        }
-                    }
-                },
-                .failure => |err| {
-                    const type_info = @typeInfo(T);
-                    if (type_info == .error_union) {
-                        return @errorCast(err);
-                    } else {
-                        @panic("Coroutine failed but result type cannot represent errors");
-                    }
-                },
-            }
-        }
-    };
-}
 
 pub const stack_alignment = 16;
 pub const Stack = []align(stack_alignment) u8;
@@ -205,47 +157,24 @@ pub const Coroutine = struct {
     parent_context_ptr: *Context,
     stack: Stack,
     state: CoroutineState,
-    result: AnyCoroutineResult,
+    result_ptr: ?*anyopaque,
 
-    pub fn init(allocator: std.mem.Allocator, comptime func: anytype, args: anytype, options: CoroutineOptions) !Coroutine {
+    pub fn init(allocator: std.mem.Allocator, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result), options: CoroutineOptions) !Coroutine {
         const Args = @TypeOf(args);
-        const ReturnType = @TypeOf(@call(.always_inline, func, args));
-
-        // For error unions, store only the payload type
-        const StoredReturnType = switch (@typeInfo(ReturnType)) {
-            .error_union => |info| info.payload,
-            else => ReturnType,
-        };
 
         const CoroutineData = struct {
             func: *const fn (*anyopaque) callconv(.c) noreturn,
             args: Args,
-            result: StoredReturnType,
 
             fn wrapper(self_ptr: *anyopaque) callconv(.c) noreturn {
                 const self: *@This() = @ptrCast(@alignCast(self_ptr));
                 const coro = current_coroutine orelse unreachable;
                 coro.state = .running;
 
-                // Handle both void and error union return types
-                const return_info = @typeInfo(ReturnType);
-                if (return_info == .error_union) {
-                    if (@call(.always_inline, func, self.args)) |result| {
-                        self.result = result;
-                        coro.result = .{ .success = &self.result };
-                    } else |err| {
-                        coro.result = .{ .failure = err };
-                    }
-                } else {
-                    // Non-void, non-error return type - call and store result
-                    if (ReturnType == void) {
-                        @call(.always_inline, func, self.args);
-                        // For void, we still need to point to something valid
-                        coro.result = .{ .success = &self.result };
-                    } else {
-                        self.result = @call(.always_inline, func, self.args);
-                        coro.result = .{ .success = &self.result };
-                    }
+                const result = @call(.always_inline, func, self.args);
+                if (coro.result_ptr) |ptr| {
+                    const typed_result_ptr: *FutureResult(Result) = @ptrCast(@alignCast(ptr));
+                    typed_result_ptr.set(result);
                 }
 
                 coro.state = .dead;
@@ -276,7 +205,7 @@ pub const Coroutine = struct {
             .stack = stack,
             .state = .ready,
             .parent_context_ptr = undefined, // Will be set when switchTo is called
-            .result = .pending,
+            .result_ptr = result_ptr,
         };
     }
 
@@ -296,9 +225,5 @@ pub const Coroutine = struct {
     pub fn waitForReady(self: *Coroutine) void {
         self.state = .waiting;
         yield();
-    }
-
-    pub fn getResult(self: *Coroutine, comptime T: type) CoroutineResult(T) {
-        return CoroutineResult(T){ .any_result = &self.result };
     }
 };

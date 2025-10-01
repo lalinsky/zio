@@ -33,11 +33,13 @@ pub fn main() !void {
     };
 
     // Spawn multiple tasks that increment shared counter
-    var tasks: [4]zio.Task(void) = undefined;
+    var tasks: [4]zio.JoinHandle(void) = undefined;
+    var task_count: usize = 0;
+    defer for (tasks[0..task_count]) |*task| task.deinit();
     for (0..4) |i| {
         tasks[i] = try runtime.spawn(incrementTask, .{ &runtime, &shared_data, @as(u32, @intCast(i)) }, .{});
+        task_count += 1;
     }
-    defer for (&tasks) |*task| task.deinit();
 
     try runtime.run();
 
