@@ -11,6 +11,7 @@ const CoroutineState = coroutines.CoroutineState;
 const CoroutineOptions = coroutines.CoroutineOptions;
 // const Error = coroutines.Error;
 const RefCounter = @import("ref_counter.zig").RefCounter;
+const FutureResult = @import("future_result.zig").FutureResult;
 
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
@@ -72,72 +73,43 @@ pub const AnyTask = struct {
     coro: Coroutine,
     waiting_list: AnyTaskList = .{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
+    destroy_fn: *const fn (*Runtime, *AnyTask) void,
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 };
 
-// Typed task wrapper that provides type-safe wait() method
+// Typed task that contains the AnyTask and FutureResult
 pub fn Task(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        task: *AnyTask,
+        any_task: AnyTask,
+        future_result: FutureResult(T),
         runtime: *Runtime,
-        detached: bool = false,
 
-        pub fn init(task: *AnyTask, runtime: *Runtime) Self {
-            // Increment reference count when creating a Task(T) handle
-            task.ref_count.incr();
-            return Self{
-                .task = task,
-                .runtime = runtime,
-            };
+        fn destroyFn(runtime: *Runtime, any_task: *AnyTask) void {
+            const self: *Self = @fieldParentPtr("any_task", any_task);
+            any_task.coro.deinit(runtime.allocator);
+            runtime.allocator.destroy(self);
         }
 
         pub fn deinit(self: *Self) void {
-            self.detach();
+            self.runtime.releaseTask(&self.any_task);
         }
 
-        pub fn detach(self: *Self) void {
-            if (self.detached) return;
-            // Decrement reference count for this Task(T) handle
-            if (self.task.ref_count.decr()) {
-                // Reference count reached zero, destroy the task
-                self.task.coro.deinit(self.runtime.allocator);
-                self.runtime.allocator.destroy(self.task);
-            }
-            self.detached = true;
-        }
-
-        pub fn join(self: Self) T {
-            // Use the task directly to check if already completed
-            if (self.task.coro.result != .pending) {
-                return self.task.coro.getResult(T).get();
+        pub fn join(self: *Self) T {
+            // Check if already completed
+            if (self.future_result.get()) |res| {
+                return res;
             }
 
             // Use runtime's wait method for the waiting logic
-            self.runtime.wait(self.task.id);
+            self.runtime.wait(self.any_task.id);
 
-            const coro_result = self.task.coro.getResult(T);
-            return coro_result.get();
+            return self.future_result.get() orelse unreachable;
         }
 
-        pub fn result(self: Self) T {
-            const coro_result = self.task.coro.result;
-            switch (coro_result) {
-                .pending => std.debug.panic("Task has not completed yet", .{}),
-                .success => {
-                    const typed_result = self.task.coro.getResult(T);
-                    return typed_result.get();
-                },
-                .failure => |err| {
-                    const type_info = @typeInfo(T);
-                    if (type_info == .error_union) {
-                        return @as(T, @errorCast(err));
-                    } else {
-                        std.debug.panic("Task failed with error: {}", .{err});
-                    }
-                },
-            }
+        pub fn result(self: *Self) T {
+            return self.join();
         }
     };
 }
@@ -304,7 +276,7 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !Task(ReturnType(func)) {
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !*Task(ReturnType(func)) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
@@ -320,28 +292,40 @@ pub const Runtime = struct {
         }
         errdefer self.tasks.removeByPtr(entry.key_ptr);
 
-        var task = try self.allocator.create(AnyTask);
+        const Result = ReturnType(func);
+        const task = try self.allocator.create(Task(Result));
         errdefer self.allocator.destroy(task);
 
         task.* = .{
-            .id = id,
-            .coro = undefined,
+            .any_task = .{
+                .id = id,
+                .coro = undefined,
+                .destroy_fn = &Task(Result).destroyFn,
+            },
+            .future_result = .{},
+            .runtime = self,
         };
 
-        task.coro = try Coroutine.init(self.allocator, func, args, options);
-        errdefer task.coro.deinit(self.allocator);
+        task.any_task.coro = try Coroutine.init(self.allocator, Result, func, args, &task.future_result, options);
+        errdefer task.any_task.coro.deinit(self.allocator);
 
-        entry.value_ptr.* = task;
+        entry.value_ptr.* = &task.any_task;
 
-        self.ready_queue.append(task);
+        self.ready_queue.append(&task.any_task);
 
-        task.ref_count.incr();
-        return .{ .task = task, .runtime = self };
+        task.any_task.ref_count.incr();
+        return task;
     }
 
     pub fn yield(self: *Runtime) void {
         _ = self;
         coroutines.yield();
+    }
+
+    fn releaseTask(self: *Runtime, any_task: *AnyTask) void {
+        if (any_task.ref_count.decr()) {
+            any_task.destroy_fn(self, any_task);
+        }
     }
 
     pub fn getWaiter(self: *Runtime) Waiter {
@@ -444,7 +428,7 @@ pub const Runtime = struct {
 
     pub fn wait(self: *Runtime, task_id: u64) void {
         const task = self.tasks.get(task_id) orelse return;
-        if (task.coro.result != .pending) {
+        if (task.coro.state == .dead) {
             return;
         }
         const current_coro = coroutines.getCurrent() orelse std.debug.panic("not in coroutine", .{});
