@@ -66,15 +66,35 @@ fn markReadyFromXevCallback(
     return .disarm;
 }
 
-// Task for runtime scheduling
+// Awaitable kind - distinguishes different awaitable types
+pub const AwaitableKind = enum {
+    coro,
+};
+
+// Awaitable - base type for anything that can be waited on
+pub const Awaitable = struct {
+    kind: AwaitableKind,
+    next: ?*Awaitable = null,
+    waiting_list: AwaitableList = .{},
+    ref_count: RefCounter(u32) = RefCounter(u32).init(),
+    destroy_fn: *const fn (*Runtime, *Awaitable) void,
+    in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+};
+
+// Task for runtime scheduling - coroutine-based tasks
 pub const AnyTask = struct {
-    next: ?*AnyTask = null,
+    awaitable: Awaitable,
     id: u64,
     coro: Coroutine,
-    waiting_list: AnyTaskList = .{},
-    ref_count: RefCounter(u32) = RefCounter(u32).init(),
-    destroy_fn: *const fn (*Runtime, *AnyTask) void,
-    in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+
+    pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
+        assert(awaitable.kind == .coro);
+        return @fieldParentPtr("awaitable", awaitable);
+    }
+
+    pub inline fn fromCoroutine(coro: *Coroutine) *AnyTask {
+        return @fieldParentPtr("coro", coro);
+    }
 };
 
 // Typed task that contains the AnyTask and FutureResult
@@ -86,14 +106,15 @@ pub fn Task(comptime T: type) type {
         future_result: FutureResult(T),
         runtime: *Runtime,
 
-        fn destroyFn(runtime: *Runtime, any_task: *AnyTask) void {
+        fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
+            const any_task = AnyTask.fromAwaitable(awaitable);
             const self: *Self = @fieldParentPtr("any_task", any_task);
             any_task.coro.deinit(runtime.allocator);
             runtime.allocator.destroy(self);
         }
 
         fn deinit(self: *Self) void {
-            self.runtime.releaseTask(&self.any_task);
+            self.runtime.releaseAwaitable(&self.any_task.awaitable);
         }
 
         fn join(self: *Self) T {
@@ -145,27 +166,27 @@ fn ReturnType(comptime func: anytype) type {
     return if (@typeInfo(@TypeOf(func)).@"fn".return_type) |ret| ret else void;
 }
 
-// Simple singly-linked list of tasks
-pub const AnyTaskList = struct {
-    head: ?*AnyTask = null,
-    tail: ?*AnyTask = null,
+// Simple singly-linked list of awaitables
+pub const AwaitableList = struct {
+    head: ?*Awaitable = null,
+    tail: ?*Awaitable = null,
 
-    pub fn push(self: *AnyTaskList, task: *AnyTask) void {
+    pub fn push(self: *AwaitableList, awaitable: *Awaitable) void {
         if (builtin.mode == .Debug) {
-            std.debug.assert(!task.in_list);
-            task.in_list = true;
+            std.debug.assert(!awaitable.in_list);
+            awaitable.in_list = true;
         }
-        task.next = null;
+        awaitable.next = null;
         if (self.tail) |tail| {
-            tail.next = task;
-            self.tail = task;
+            tail.next = awaitable;
+            self.tail = awaitable;
         } else {
-            self.head = task;
-            self.tail = task;
+            self.head = awaitable;
+            self.tail = awaitable;
         }
     }
 
-    pub fn pop(self: *AnyTaskList) ?*AnyTask {
+    pub fn pop(self: *AwaitableList) ?*Awaitable {
         const head = self.head orelse return null;
         if (builtin.mode == .Debug) {
             head.in_list = false;
@@ -178,11 +199,11 @@ pub const AnyTaskList = struct {
         return head;
     }
 
-    pub fn append(self: *AnyTaskList, task: *AnyTask) void {
-        self.push(task);
+    pub fn append(self: *AwaitableList, awaitable: *Awaitable) void {
+        self.push(awaitable);
     }
 
-    pub fn concatByMoving(self: *AnyTaskList, other: *AnyTaskList) void {
+    pub fn concatByMoving(self: *AwaitableList, other: *AwaitableList) void {
         if (other.head == null) return;
 
         if (self.tail) |tail| {
@@ -197,37 +218,37 @@ pub const AnyTaskList = struct {
         other.tail = null;
     }
 
-    pub fn remove(self: *AnyTaskList, task: *AnyTask) bool {
+    pub fn remove(self: *AwaitableList, awaitable: *Awaitable) bool {
         // Handle empty list
         if (self.head == null) return false;
 
         // Handle removing head
-        if (self.head == task) {
+        if (self.head == awaitable) {
             if (builtin.mode == .Debug) {
-                std.debug.assert(task.in_list);
-                task.in_list = false;
+                std.debug.assert(awaitable.in_list);
+                awaitable.in_list = false;
             }
-            self.head = task.next;
+            self.head = awaitable.next;
             if (self.head == null) {
                 self.tail = null;
             }
-            task.next = null;
+            awaitable.next = null;
             return true;
         }
 
-        // Search for task in the list
+        // Search for awaitable in the list
         var current = self.head;
         while (current) |curr| {
-            if (curr.next == task) {
+            if (curr.next == awaitable) {
                 if (builtin.mode == .Debug) {
-                    std.debug.assert(task.in_list);
-                    task.in_list = false;
+                    std.debug.assert(awaitable.in_list);
+                    awaitable.in_list = false;
                 }
-                curr.next = task.next;
-                if (task == self.tail) {
+                curr.next = awaitable.next;
+                if (awaitable == self.tail) {
                     self.tail = curr;
                 }
-                task.next = null;
+                awaitable.next = null;
                 return true;
             }
             current = curr.next;
@@ -247,8 +268,8 @@ pub const Runtime = struct {
 
     tasks: std.AutoHashMapUnmanaged(u64, *AnyTask) = .{},
 
-    ready_queue: AnyTaskList = .{},
-    cleanup_queue: AnyTaskList = .{},
+    ready_queue: AwaitableList = .{},
+    cleanup_queue: AwaitableList = .{},
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
         // Initialize ThreadPool if enabled
@@ -289,7 +310,7 @@ pub const Runtime = struct {
         var iter = self.tasks.iterator();
         while (iter.next()) |entry| {
             const task = entry.value_ptr.*;
-            self.releaseTask(task);
+            self.releaseAwaitable(&task.awaitable);
         }
         self.tasks.deinit(self.allocator);
 
@@ -324,9 +345,12 @@ pub const Runtime = struct {
 
         task.* = .{
             .any_task = .{
+                .awaitable = .{
+                    .kind = .coro,
+                    .destroy_fn = &Task(Result).destroyFn,
+                },
                 .id = id,
                 .coro = undefined,
-                .destroy_fn = &Task(Result).destroyFn,
             },
             .future_result = .{},
             .runtime = self,
@@ -337,9 +361,9 @@ pub const Runtime = struct {
 
         entry.value_ptr.* = &task.any_task;
 
-        self.ready_queue.append(&task.any_task);
+        self.ready_queue.append(&task.any_task.awaitable);
 
-        task.any_task.ref_count.incr();
+        task.any_task.awaitable.ref_count.incr();
         return JoinHandle(Result){ .kind = .{ .coro = task } };
     }
 
@@ -348,10 +372,14 @@ pub const Runtime = struct {
         coroutines.yield();
     }
 
-    fn releaseTask(self: *Runtime, any_task: *AnyTask) void {
-        if (any_task.ref_count.decr()) {
-            any_task.destroy_fn(self, any_task);
+    fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
+        if (awaitable.ref_count.decr()) {
+            awaitable.destroy_fn(self, awaitable);
         }
+    }
+
+    pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
+        return &task.awaitable;
     }
 
     pub fn getWaiter(self: *Runtime) Waiter {
@@ -385,18 +413,20 @@ pub const Runtime = struct {
 
     pub fn run(self: *Runtime) !void {
         while (true) {
-            var reschedule: AnyTaskList = .{};
+            var reschedule: AwaitableList = .{};
 
             // Cleanup dead coroutines
-            while (self.cleanup_queue.pop()) |task| {
+            while (self.cleanup_queue.pop()) |awaitable| {
+                const task = AnyTask.fromAwaitable(awaitable);
                 _ = self.tasks.remove(task.id);
                 // Runtime releases its reference when removing from hashmap
-                self.releaseTask(task);
+                self.releaseAwaitable(awaitable);
                 // If ref_count > 0, Task(T) handles still exist, keep the task alive
             }
 
             // Process all ready coroutines (once)
-            while (self.ready_queue.pop()) |task| {
+            while (self.ready_queue.pop()) |awaitable| {
+                const task = AnyTask.fromAwaitable(awaitable);
                 task.coro.state = .running;
                 task.coro.switchTo(&self.main_context);
 
@@ -406,12 +436,13 @@ pub const Runtime = struct {
                 }
 
                 switch (task.coro.state) {
-                    .ready => reschedule.append(task),
+                    .ready => reschedule.append(awaitable),
                     .dead => {
-                        while (task.waiting_list.pop()) |waiting_task| {
+                        while (awaitable.waiting_list.pop()) |waiting_awaitable| {
+                            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
                             self.markReady(&waiting_task.coro);
                         }
-                        self.cleanup_queue.append(task);
+                        self.cleanup_queue.append(awaitable);
                     },
                     else => {},
                 }
@@ -431,16 +462,11 @@ pub const Runtime = struct {
         }
     }
 
-    pub inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTask {
-        const task: *AnyTask = @fieldParentPtr("coro", coro);
-        return task;
-    }
-
     pub fn markReady(self: *Runtime, coro: *Coroutine) void {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
-        const task = taskPtrFromCoroPtr(coro);
-        self.ready_queue.append(task);
+        const task = AnyTask.fromCoroutine(coro);
+        self.ready_queue.append(&task.awaitable);
     }
 
     pub fn wait(self: *Runtime, task_id: u64) void {
@@ -449,11 +475,11 @@ pub const Runtime = struct {
             return;
         }
         const current_coro = coroutines.getCurrent() orelse std.debug.panic("not in coroutine", .{});
-        const current_task = taskPtrFromCoroPtr(current_coro);
+        const current_task = AnyTask.fromCoroutine(current_coro);
         if (current_task == task) {
             std.debug.panic("a task cannot wait on itself", .{});
         }
-        task.waiting_list.append(current_task);
+        task.awaitable.waiting_list.append(&current_task.awaitable);
         current_coro.waitForReady();
     }
 };
