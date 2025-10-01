@@ -25,55 +25,6 @@ pub const CoroutineState = enum(u8) {
     dead = 3,
 };
 
-pub const AnyCoroutineResult = union(enum) {
-    pending: void, // Coroutine hasn't finished yet
-    success: *anyopaque, // Pointer to coroutine result
-    failure: anyerror, // Coroutine failed with this error
-};
-
-pub fn CoroutineResult(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        any_result: *AnyCoroutineResult,
-
-        pub fn get(self: Self) T {
-            switch (self.any_result.*) {
-                .pending => {
-                    @panic("Coroutine is still pending");
-                },
-                .success => |ptr| {
-                    if (T == void) {
-                        return {};
-                    } else {
-                        const type_info = @typeInfo(T);
-                        if (type_info == .error_union) {
-                            // For error unions, we stored only the payload, so return it directly
-                            const payload_type = type_info.error_union.payload;
-                            if (payload_type == void) {
-                                return {};
-                            } else {
-                                const typed_ptr: *payload_type = @ptrCast(@alignCast(ptr));
-                                return typed_ptr.*;
-                            }
-                        } else {
-                            const typed_ptr: *T = @ptrCast(@alignCast(ptr));
-                            return typed_ptr.*;
-                        }
-                    }
-                },
-                .failure => |err| {
-                    const type_info = @typeInfo(T);
-                    if (type_info == .error_union) {
-                        return @errorCast(err);
-                    } else {
-                        @panic("Coroutine failed but result type cannot represent errors");
-                    }
-                },
-            }
-        }
-    };
-}
-
 pub const stack_alignment = 16;
 pub const Stack = []align(stack_alignment) u8;
 pub const StackPtr = [*]align(stack_alignment) u8;
@@ -274,9 +225,5 @@ pub const Coroutine = struct {
     pub fn waitForReady(self: *Coroutine) void {
         self.state = .waiting;
         yield();
-    }
-
-    pub fn getResult(self: *Coroutine, comptime T: type) CoroutineResult(T) {
-        return CoroutineResult(T){ .any_result = &self.result };
     }
 };

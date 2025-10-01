@@ -409,11 +409,6 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn getResult(self: *Runtime, comptime T: type, id: u64) ?coroutines.CoroutineResult(T) {
-        const task = self.tasks.get(id) orelse return null;
-        return task.coro.getResult(T);
-    }
-
     pub inline fn taskPtrFromCoroPtr(coro: *Coroutine) *AnyTask {
         const task: *AnyTask = @fieldParentPtr("coro", coro);
         return task;
