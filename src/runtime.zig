@@ -92,11 +92,11 @@ pub fn Task(comptime T: type) type {
             runtime.allocator.destroy(self);
         }
 
-        pub fn deinit(self: *Self) void {
+        fn deinit(self: *Self) void {
             self.runtime.releaseTask(&self.any_task);
         }
 
-        pub fn join(self: *Self) T {
+        fn join(self: *Self) T {
             // Check if already completed
             if (self.future_result.get()) |res| {
                 return res;
@@ -106,6 +106,33 @@ pub fn Task(comptime T: type) type {
             self.runtime.wait(self.any_task.id);
 
             return self.future_result.get() orelse unreachable;
+        }
+
+        fn result(self: *Self) T {
+            return self.join();
+        }
+    };
+}
+
+// Public handle for spawned tasks
+pub fn JoinHandle(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        kind: union(enum) {
+            coro: *Task(T),
+        },
+
+        pub fn deinit(self: *Self) void {
+            switch (self.kind) {
+                .coro => |task| task.deinit(),
+            }
+        }
+
+        pub fn join(self: *Self) T {
+            return switch (self.kind) {
+                .coro => |task| task.join(),
+            };
         }
 
         pub fn result(self: *Self) T {
@@ -275,7 +302,7 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !*Task(ReturnType(func)) {
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(ReturnType(func)) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
@@ -313,7 +340,7 @@ pub const Runtime = struct {
         self.ready_queue.append(&task.any_task);
 
         task.any_task.ref_count.incr();
-        return task;
+        return JoinHandle(Result){ .kind = .{ .coro = task } };
     }
 
     pub fn yield(self: *Runtime) void {
