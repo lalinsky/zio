@@ -1,13 +1,14 @@
 const std = @import("std");
 const Runtime = @import("runtime.zig").Runtime;
 const coroutines = @import("coroutines.zig");
-const AnyTaskList = @import("runtime.zig").AnyTaskList;
+const AwaitableList = @import("runtime.zig").AwaitableList;
+const Awaitable = @import("runtime.zig").Awaitable;
 const AnyTask = @import("runtime.zig").AnyTask;
 const xev = @import("xev");
 
 pub const Mutex = struct {
     owner: std.atomic.Value(?*coroutines.Coroutine) = std.atomic.Value(?*coroutines.Coroutine).init(null),
-    wait_queue: AnyTaskList = .{},
+    wait_queue: AwaitableList = .{},
     runtime: *Runtime,
 
     pub fn init(runtime: *Runtime) Mutex {
@@ -28,8 +29,8 @@ pub const Mutex = struct {
         if (self.tryLock()) return;
 
         // Slow path: add current task to wait queue and suspend
-        const task_node = Runtime.taskPtrFromCoroPtr(current);
-        self.wait_queue.append(task_node);
+        const task = AnyTask.fromCoroutine(current);
+        self.wait_queue.append(&task.awaitable);
 
         // Suspend until woken by unlock()
         current.waitForReady();
@@ -44,11 +45,12 @@ pub const Mutex = struct {
         std.debug.assert(self.owner.load(.monotonic) == current);
 
         // Check if there are waiters
-        if (self.wait_queue.pop()) |task_node| {
+        if (self.wait_queue.pop()) |awaitable| {
+            const task = AnyTask.fromAwaitable(awaitable);
             // Transfer ownership directly to next waiter
-            self.owner.store(&task_node.coro, .release);
+            self.owner.store(&task.coro, .release);
             // Wake them up (they already own the lock)
-            self.runtime.markReady(&task_node.coro);
+            self.runtime.markReady(&task.coro);
         } else {
             // No waiters, release the lock completely
             self.owner.store(null, .release);
@@ -57,7 +59,7 @@ pub const Mutex = struct {
 };
 
 pub const Condition = struct {
-    wait_queue: AnyTaskList = .{},
+    wait_queue: AwaitableList = .{},
     runtime: *Runtime,
 
     pub fn init(runtime: *Runtime) Condition {
@@ -66,10 +68,10 @@ pub const Condition = struct {
 
     pub fn wait(self: *Condition, mutex: *Mutex) void {
         const current = coroutines.getCurrent() orelse unreachable;
-        const task_node = Runtime.taskPtrFromCoroPtr(current);
+        const task = AnyTask.fromCoroutine(current);
 
         // Add to wait queue before releasing mutex
-        self.wait_queue.append(task_node);
+        self.wait_queue.append(&task.awaitable);
 
         // Atomically release mutex and wait
         mutex.unlock();
@@ -81,9 +83,9 @@ pub const Condition = struct {
 
     pub fn timedWait(self: *Condition, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
         const current = coroutines.getCurrent() orelse unreachable;
-        const task_node = Runtime.taskPtrFromCoroPtr(current);
+        const task = AnyTask.fromCoroutine(current);
 
-        self.wait_queue.append(task_node);
+        self.wait_queue.append(&task.awaitable);
 
         // Setup timer for timeout
         var timed_out = false;
@@ -93,7 +95,7 @@ pub const Condition = struct {
         const TimeoutContext = struct {
             runtime: *Runtime,
             condition: *Condition,
-            task_node: *AnyTask,
+            awaitable: *Awaitable,
             coroutine: *coroutines.Coroutine,
             timed_out: *bool,
         };
@@ -101,7 +103,7 @@ pub const Condition = struct {
         var timeout_ctx = TimeoutContext{
             .runtime = self.runtime,
             .condition = self,
-            .task_node = task_node,
+            .awaitable = &task.awaitable,
             .coroutine = current,
             .timed_out = &timed_out,
         };
@@ -124,7 +126,7 @@ pub const Condition = struct {
                     _ = c;
                     _ = result catch {};
                     if (ctx) |context| {
-                        if (context.condition.wait_queue.remove(context.task_node)) {
+                        if (context.condition.wait_queue.remove(context.awaitable)) {
                             context.timed_out.* = true;
                             context.runtime.markReady(context.coroutine);
                         }
@@ -148,14 +150,16 @@ pub const Condition = struct {
     }
 
     pub fn signal(self: *Condition) void {
-        if (self.wait_queue.pop()) |task_node| {
-            self.runtime.markReady(&task_node.coro);
+        if (self.wait_queue.pop()) |awaitable| {
+            const task = AnyTask.fromAwaitable(awaitable);
+            self.runtime.markReady(&task.coro);
         }
     }
 
     pub fn broadcast(self: *Condition) void {
-        while (self.wait_queue.pop()) |task_node| {
-            self.runtime.markReady(&task_node.coro);
+        while (self.wait_queue.pop()) |awaitable| {
+            const task = AnyTask.fromAwaitable(awaitable);
+            self.runtime.markReady(&task.coro);
         }
     }
 };
@@ -165,7 +169,7 @@ pub const Condition = struct {
 /// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return.
 pub const ResetEvent = struct {
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.unset),
-    wait_queue: AnyTaskList = .{},
+    wait_queue: AwaitableList = .{},
     runtime: *Runtime,
 
     const State = enum(u8) {
@@ -199,8 +203,9 @@ pub const ResetEvent = struct {
 
         // Only wake waiters if previous state was waiting (there were waiters)
         if (prev_state == .waiting) {
-            while (self.wait_queue.pop()) |task_node| {
-                self.runtime.markReady(&task_node.coro);
+            while (self.wait_queue.pop()) |awaitable| {
+                const task = AnyTask.fromAwaitable(awaitable);
+                self.runtime.markReady(&task.coro);
             }
         }
     }
@@ -225,8 +230,8 @@ pub const ResetEvent = struct {
         // If we're now in waiting state, add to queue and block
         if (state == .waiting) {
             const current = coroutines.getCurrent() orelse unreachable;
-            const task_node = Runtime.taskPtrFromCoroPtr(current);
-            self.wait_queue.append(task_node);
+            const task = AnyTask.fromCoroutine(current);
+            self.wait_queue.append(&task.awaitable);
 
             // Suspend until woken by set()
             current.waitForReady();
@@ -254,9 +259,9 @@ pub const ResetEvent = struct {
         // We're now in waiting state, add to queue and setup timeout
         std.debug.assert(state == .waiting);
         const current = coroutines.getCurrent() orelse unreachable;
-        const task_node = Runtime.taskPtrFromCoroPtr(current);
+        const task = AnyTask.fromCoroutine(current);
 
-        self.wait_queue.append(task_node);
+        self.wait_queue.append(&task.awaitable);
 
         // Setup timer for timeout
         var timed_out = false;
@@ -266,7 +271,7 @@ pub const ResetEvent = struct {
         const TimeoutContext = struct {
             runtime: *Runtime,
             reset_event: *ResetEvent,
-            task_node: *AnyTask,
+            awaitable: *Awaitable,
             coroutine: *coroutines.Coroutine,
             timed_out: *bool,
         };
@@ -274,7 +279,7 @@ pub const ResetEvent = struct {
         var timeout_ctx = TimeoutContext{
             .runtime = self.runtime,
             .reset_event = self,
-            .task_node = task_node,
+            .awaitable = &task.awaitable,
             .coroutine = current,
             .timed_out = &timed_out,
         };
@@ -297,7 +302,7 @@ pub const ResetEvent = struct {
                     _ = c;
                     _ = result catch {};
                     if (ctx) |context| {
-                        if (context.reset_event.wait_queue.remove(context.task_node)) {
+                        if (context.reset_event.wait_queue.remove(context.awaitable)) {
                             context.timed_out.* = true;
                             context.runtime.markReady(context.coroutine);
                         }
