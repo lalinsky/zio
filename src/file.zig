@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
@@ -67,7 +68,9 @@ pub const File = struct {
     }
 
     pub fn write(self: *File, data: []const u8) !usize {
+        std.log.info("File.write: Starting write of {} bytes", .{data.len});
         var waiter = self.runtime.getWaiter();
+        std.log.info("File.write: Got waiter", .{});
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -97,6 +100,7 @@ pub const File = struct {
 
         var result_data: Result = .{ .waiter = waiter };
 
+        std.log.info("File.write: About to call xev_file.write", .{});
         self.xev_file.write(
             &self.runtime.loop,
             &completion,
@@ -106,8 +110,10 @@ pub const File = struct {
             Result.callback,
         );
 
+        std.log.info("File.write: Called xev_file.write, now waiting for ready", .{});
         waiter.waitForReady();
 
+        std.log.info("File.write: Wait completed, returning result", .{});
         return result_data.result;
     }
 
@@ -253,35 +259,50 @@ pub const File = struct {
 test "File: basic read and write" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    const fs = @import("fs.zig");
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
-            var tmp_dir = testing.tmpDir(.{});
-            defer tmp_dir.cleanup();
+            std.log.info("TestTask: Starting file test", .{});
 
-            const file = try tmp_dir.dir.createFile("test.txt", .{ .read = true });
-            defer file.close();
-
-            var zio_file = try File.init(rt, file);
+            // Create a test file using the new fs module
+            const file_path = "test_file_basic.txt";
+            var zio_file = try fs.createFile(rt, file_path, .{});
             defer zio_file.deinit();
+            defer std.fs.cwd().deleteFile(file_path) catch {};
+            std.log.info("TestTask: Created file using fs module", .{});
 
             // Write test
             const write_data = "Hello, zio!";
+            std.log.info("TestTask: About to write data", .{});
             const bytes_written = try zio_file.write(write_data);
-            try testing.expect(bytes_written == write_data.len);
+            std.log.info("TestTask: Wrote {} bytes", .{bytes_written});
+            try testing.expectEqual(write_data.len, bytes_written);
 
-            // Read test - seek back to beginning first
-            try file.seekTo(0);
+            // Close file before reopening for read
+            try zio_file.close();
+            std.log.info("TestTask: Closed file after write", .{});
+
+            // Read test - reopen the file for reading
+            var read_file = try fs.openFile(rt, file_path, .{ .mode = .read_only });
+            defer read_file.deinit();
+            defer read_file.close() catch |err| {
+                std.log.warn("Failed to close read file: {}", .{err});
+            };
+            std.log.info("TestTask: Reopened file for reading", .{});
+
             var buffer: [100]u8 = undefined;
-            const bytes_read = try zio_file.read(&buffer);
+            const bytes_read = try read_file.read(&buffer);
+            std.log.info("TestTask: Read {} bytes", .{bytes_read});
             try testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+            std.log.info("TestTask: File test completed successfully", .{});
         }
     };
 
-    const task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
+    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
     try runtime.run();
@@ -293,40 +314,40 @@ test "File: basic read and write" {
 test "File: positional read and write" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    const fs = @import("fs.zig");
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
-            var tmp_dir = testing.tmpDir(.{});
-            defer tmp_dir.cleanup();
-
-            const file = try tmp_dir.dir.createFile("test.txt", .{ .read = true });
-            defer file.close();
-
-            var zio_file = try File.init(rt, file);
+            const file_path = "test_file_positional.txt";
+            var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
             defer zio_file.deinit();
+            defer zio_file.close() catch |err| {
+                std.log.warn("Failed to close positional test file: {}", .{err});
+            };
+            defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write at different positions
-            try testing.expect(5 == try zio_file.pwrite("HELLO", 0));
-            try testing.expect(5 == try zio_file.pwrite("WORLD", 10));
+            try testing.expectEqual(5, try zio_file.pwrite("HELLO", 0));
+            try testing.expectEqual(5, try zio_file.pwrite("WORLD", 10));
 
             // Read from positions
             var buf: [5]u8 = undefined;
-            try testing.expect(5 == try zio_file.pread(&buf, 0));
+            try testing.expectEqual(5, try zio_file.pread(&buf, 0));
             try testing.expectEqualStrings("HELLO", &buf);
 
-            try testing.expect(5 == try zio_file.pread(&buf, 10));
+            try testing.expectEqual(5, try zio_file.pread(&buf, 10));
             try testing.expectEqualStrings("WORLD", &buf);
 
             // Test reading from gap (should be zeros or random data)
             var gap_buf: [3]u8 = undefined;
-            try testing.expect(3 == try zio_file.pread(&gap_buf, 5));
+            try testing.expectEqual(3, try zio_file.pread(&gap_buf, 5));
         }
     };
 
-    const task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
+    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
     try runtime.run();
@@ -337,24 +358,21 @@ test "File: positional read and write" {
 test "File: close operation" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    const fs = @import("fs.zig");
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
-            var tmp_dir = testing.tmpDir(.{});
-            defer tmp_dir.cleanup();
-
-            const file = try tmp_dir.dir.createFile("test.txt", .{ .read = true });
-            // Don't defer file.close() here since we're testing zio_file.close()
-
-            var zio_file = try File.init(rt, file);
+            const file_path = "test_file_close.txt";
+            var zio_file = try fs.createFile(rt, file_path, .{});
             defer zio_file.deinit();
+            defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write some data
             const bytes_written = try zio_file.write("test data");
-            try testing.expect(bytes_written == 9);
+            try testing.expectEqual(9, bytes_written);
 
             // Close the file using zio
             try zio_file.close();
@@ -363,7 +381,7 @@ test "File: close operation" {
         }
     };
 
-    const task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
+    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
     defer task.deinit();
 
     try runtime.run();

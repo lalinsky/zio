@@ -10,10 +10,11 @@ pub const CoroutineOptions = coroutines.CoroutineOptions;
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const ZioError = runtime.ZioError;
-pub const Task = runtime.Task;
+pub const JoinHandle = runtime.JoinHandle;
 
 // Re-export I/O functionality
 pub const File = @import("file.zig").File;
+pub const fs = @import("fs.zig");
 
 // Re-export network functionality
 pub const TcpListener = @import("tcp.zig").TcpListener;
@@ -25,8 +26,8 @@ pub const Address = @import("address.zig").Address;
 // Re-export synchronization functionality
 pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
+pub const ResetEvent = @import("sync.zig").ResetEvent;
 
 test {
-    _ = Mutex;
-    _ = Condition;
+    std.testing.refAllDecls(@This());
 }

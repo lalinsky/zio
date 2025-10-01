@@ -26,17 +26,10 @@ fn udpEchoServer(rt: *zio.Runtime, port: u16) !void {
         const recv_result = try socket.recvFrom(&buffer);
 
         const elapsed = getTimestamp() - start_time;
-        print("[{}ms] [Server] Received '{s}' from {}\n", .{
-            elapsed,
-            buffer[0..recv_result.bytes_read],
-            recv_result.sender_addr
-        });
+        print("[{}ms] [Server] Received '{s}' from {}\n", .{ elapsed, buffer[0..recv_result.bytes_read], recv_result.sender_addr });
 
         // Echo back to sender
-        const bytes_sent = try socket.sendTo(
-            buffer[0..recv_result.bytes_read],
-            recv_result.sender_addr
-        );
+        const bytes_sent = try socket.sendTo(buffer[0..recv_result.bytes_read], recv_result.sender_addr);
 
         print("[Server] Echoed {} bytes back\n", .{bytes_sent});
     }
@@ -63,18 +56,14 @@ fn udpClient(rt: *zio.Runtime, server_port: u16, client_id: u32, message: []cons
     // Send message to server
     const bytes_sent = try socket.sendTo(message, server_addr);
     const elapsed_sent = getTimestamp() - start_time;
-    print("[{}ms] [Client-{}] Sent '{s}' ({} bytes)\n", .{
-        elapsed_sent, client_id, message, bytes_sent
-    });
+    print("[{}ms] [Client-{}] Sent '{s}' ({} bytes)\n", .{ elapsed_sent, client_id, message, bytes_sent });
 
     // Wait for echo response
     var buffer: [1024]u8 = undefined;
     const recv_result = try socket.recvFrom(&buffer);
 
     const elapsed_recv = getTimestamp() - start_time;
-    print("[{}ms] [Client-{}] Received echo: '{s}'\n", .{
-        elapsed_recv, client_id, buffer[0..recv_result.bytes_read]
-    });
+    print("[{}ms] [Client-{}] Received echo: '{s}'\n", .{ elapsed_recv, client_id, buffer[0..recv_result.bytes_read] });
 
     // Verify echo is correct
     if (!std.mem.eql(u8, message, buffer[0..recv_result.bytes_read])) {
@@ -92,7 +81,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Initialize zio runtime
-    var runtime = try zio.Runtime.init(allocator);
+    var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     print("=== ZIO UDP Echo Demo ===\n", .{});
@@ -117,11 +106,9 @@ pub fn main() !void {
     var client_tasks: [client_messages.len]@TypeOf(try runtime.spawn(udpClient, .{ &runtime, server_port, @as(u32, 1), "test" }, .{})) = undefined;
 
     for (client_messages, 0..) |message, i| {
-        client_tasks[i] = try runtime.spawn(udpClient, .{
-            &runtime, server_port, @as(u32, @intCast(i + 1)), message
-        }, .{});
+        client_tasks[i] = try runtime.spawn(udpClient, .{ &runtime, server_port, @as(u32, @intCast(i + 1)), message }, .{});
     }
-    defer for (client_tasks) |task| task.deinit();
+    defer for (client_tasks) |*task| task.deinit();
 
     // Run the event loop
     try runtime.run();

@@ -4,6 +4,8 @@ const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
 const Address = @import("address.zig").Address;
 
+const TEST_PORT = 45001;
+
 pub const UdpReadResult = struct {
     bytes_read: usize,
     sender_addr: Address,
@@ -178,27 +180,27 @@ test "UDP: basic send and receive" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator);
+    var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const ServerTask = struct {
         fn run(rt: *Runtime, server_port: *u16) !void {
-            const bind_addr = try Address.parseIp4("127.0.0.1", 0);
+            const bind_addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var socket = try UdpSocket.init(rt, bind_addr);
             defer socket.close();
 
             try socket.bind(bind_addr);
 
-            // Get the actual bound port (when using port 0)
-            server_port.* = 9999; // For this test, we'll use a fixed port
+            // Set the server port for the client to connect to
+            server_port.* = TEST_PORT;
 
             // Wait for and echo one message
             var buffer: [1024]u8 = undefined;
             const recv_result = try socket.read(&buffer);
 
             // Echo back to sender
-            const bytes_sent = try socket.write(buffer[0..recv_result.bytes_read], recv_result.sender_addr);
-            try testing.expect(bytes_sent == recv_result.bytes_read);
+            const bytes_sent = try socket.write(recv_result.sender_addr, buffer[0..recv_result.bytes_read]);
+            try testing.expectEqual(recv_result.bytes_read, bytes_sent);
         }
     };
 
@@ -216,7 +218,7 @@ test "UDP: basic send and receive" {
             const test_data = "Hello, UDP!";
             const server_addr = try Address.parseIp4("127.0.0.1", server_port.*);
             const bytes_sent = try socket.write(server_addr, test_data);
-            try testing.expect(bytes_sent == test_data.len);
+            try testing.expectEqual(test_data.len, bytes_sent);
 
             // Receive echo
             var buffer: [1024]u8 = undefined;
@@ -225,12 +227,12 @@ test "UDP: basic send and receive" {
         }
     };
 
-    var server_port: u16 = 9999;
+    var server_port: u16 = TEST_PORT;
 
-    const server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_port }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_port }, .{});
     defer server_task.deinit();
 
-    const client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_port }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_port }, .{});
     defer client_task.deinit();
 
     try runtime.run();

@@ -432,6 +432,12 @@ pub const Loop = struct {
                     // the offset in the fd.
                     @bitCast(@as(i64, -1)),
                 ),
+
+                .vectors => |vecs| sqe.prep_readv(
+                    v.fd,
+                    vecs.data[0..vecs.len],
+                    @bitCast(@as(i64, -1)),
+                ),
             },
 
             .pread => |*v| switch (v.buffer) {
@@ -444,6 +450,12 @@ pub const Loop = struct {
                 .slice => |buf| sqe.prep_read(
                     v.fd,
                     buf,
+                    v.offset,
+                ),
+
+                .vectors => |vecs| sqe.prep_readv(
+                    v.fd,
+                    vecs.data[0..vecs.len],
                     v.offset,
                 ),
             },
@@ -459,6 +471,12 @@ pub const Loop = struct {
                     v.fd,
                     buf,
                     0,
+                ),
+
+                .vectors => |vecs| sqe.prep_readv(
+                    v.fd,
+                    vecs.data[0..vecs.len],
+                    @bitCast(@as(i64, -1)),
                 ),
             },
 
@@ -481,6 +499,12 @@ pub const Loop = struct {
                     v.fd,
                     buf,
                     0,
+                ),
+
+                .vectors => |vecs| sqe.prep_writev(
+                    v.fd,
+                    vecs.data[0..vecs.len],
+                    @bitCast(@as(i64, -1)),
                 ),
             },
 
@@ -534,6 +558,12 @@ pub const Loop = struct {
                     // the offset in the fd.
                     @bitCast(@as(i64, -1)),
                 ),
+
+                .vectors => |vecs| sqe.prep_writev(
+                    v.fd,
+                    vecs.data[0..vecs.len],
+                    @bitCast(@as(i64, -1)),
+                ),
             },
 
             .pwrite => |*v| switch (v.buffer) {
@@ -546,6 +576,12 @@ pub const Loop = struct {
                 .slice => |buf| sqe.prep_write(
                     v.fd,
                     buf,
+                    v.offset,
+                ),
+
+                .vectors => |vecs| sqe.prep_writev(
+                    v.fd,
+                    vecs.data[0..vecs.len],
                     v.offset,
                 ),
             },
@@ -818,6 +854,7 @@ pub const Completion = struct {
             return switch (active.buffer) {
                 .slice => |b| if (b.len == 0) 0 else ReadError.EOF,
                 .array => ReadError.EOF,
+                .vectors => ReadError.EOF,
             };
         }
 
@@ -1027,7 +1064,29 @@ pub const ReadBuffer = union(enum) {
     /// for future fields.
     array: [32]u8,
 
-    // TODO: future will have vectors
+    /// Read into multiple buffers using vectored I/O (readv).
+    /// Contains up to 2 iovecs for efficient syscall usage.
+    vectors: struct {
+        data: [2]posix.iovec,
+        len: usize,
+    },
+
+    /// Create a ReadBuffer from a slice of byte slices, automatically
+    /// choosing the optimal representation (slice for single buffer,
+    /// vectors for multiple buffers).
+    pub fn fromSlices(slices: [][]u8) ReadBuffer {
+        std.debug.assert(slices.len <= 2);
+        if (slices.len == 0) return .{ .slice = &.{} };
+        if (slices.len == 1) return .{ .slice = slices[0] };
+
+        // Convert to platform-specific iovec format for vectored I/O
+        var data: [2]posix.iovec = undefined;
+        const len = @min(slices.len, 2);
+        for (slices[0..len], 0..) |slice, i| {
+            data[i] = .{ .base = slice.ptr, .len = slice.len };
+        }
+        return .{ .vectors = .{ .data = data, .len = len } };
+    }
 };
 
 /// WriteBuffer are the various options for writing.
@@ -1041,7 +1100,29 @@ pub const WriteBuffer = union(enum) {
         len: usize,
     },
 
-    // TODO: future will have vectors
+    /// Write from multiple buffers using vectored I/O (writev).
+    /// Contains up to 2 iovecs for efficient syscall usage.
+    vectors: struct {
+        data: [2]posix.iovec_const,
+        len: usize,
+    },
+
+    /// Create a WriteBuffer from a slice of byte slices, automatically
+    /// choosing the optimal representation (slice for single buffer,
+    /// vectors for multiple buffers).
+    pub fn fromSlices(slices: []const []const u8) WriteBuffer {
+        std.debug.assert(slices.len <= 2);
+        if (slices.len == 0) return .{ .slice = "" };
+        if (slices.len == 1) return .{ .slice = slices[0] };
+
+        // Convert to platform-specific iovec format for vectored I/O
+        var data: [2]posix.iovec_const = undefined;
+        const len = @min(slices.len, 2);
+        for (slices[0..len], 0..) |slice, i| {
+            data[i] = .{ .base = slice.ptr, .len = slice.len };
+        }
+        return .{ .vectors = .{ .data = data, .len = len } };
+    }
 };
 
 pub const AcceptError = error{

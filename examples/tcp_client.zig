@@ -32,7 +32,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator);
+    var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     var task = try runtime.spawn(clientTask, .{&runtime}, .{});

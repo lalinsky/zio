@@ -24,6 +24,12 @@ jobs:
 
     - name: Build
       run: zig build
+      timeout-minutes: 5
 
     - name: Run tests
       run: zig build test
+      timeout-minutes: 5
+
+    - name: Run xev tests
+      run: cd vendor/libxev && zig build test
+      timeout-minutes: 5
