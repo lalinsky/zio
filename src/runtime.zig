@@ -262,8 +262,7 @@ pub const Runtime = struct {
         var iter = self.tasks.iterator();
         while (iter.next()) |entry| {
             const task = entry.value_ptr.*;
-            task.coro.deinit(self.allocator);
-            self.allocator.destroy(task);
+            self.releaseTask(task);
         }
         self.tasks.deinit(self.allocator);
 
@@ -365,11 +364,7 @@ pub const Runtime = struct {
             while (self.cleanup_queue.pop()) |task| {
                 _ = self.tasks.remove(task.id);
                 // Runtime releases its reference when removing from hashmap
-                if (task.ref_count.decr()) {
-                    // No more references, safe to deallocate
-                    task.coro.deinit(self.allocator);
-                    self.allocator.destroy(task);
-                }
+                self.releaseTask(task);
                 // If ref_count > 0, Task(T) handles still exist, keep the task alive
             }
 
