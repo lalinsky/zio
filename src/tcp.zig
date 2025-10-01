@@ -32,7 +32,6 @@ fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
     }
 }
 
-
 pub const TcpListener = struct {
     xev_tcp: xev.TCP,
     runtime: *Runtime,
@@ -400,6 +399,97 @@ pub const TcpStream = struct {
         }
     }
 
+    /// Reads into multiple buffers using vectored I/O.
+    /// Returns total bytes read. xev supports max 2 buffers.
+    pub fn readVec(self: *const TcpStream, iovecs: [][]u8) !usize {
+        if (iovecs.len == 0) return 0;
+
+        const usable = @min(iovecs.len, 2);
+        const read_buf = xev.ReadBuffer.fromSlices(iovecs[0..usable]);
+
+        var waiter = self.runtime.getWaiter();
+        var completion: xev.Completion = undefined;
+
+        const Result = struct {
+            waiter: Waiter,
+            result: xev.ReadError!usize = undefined,
+        };
+        var result_data: Result = .{ .waiter = waiter };
+
+        self.xev_tcp.read(
+            &self.runtime.loop,
+            &completion,
+            read_buf,
+            Result,
+            &result_data,
+            (struct {
+                fn callback(
+                    result_ptr: ?*Result,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: xev.TCP,
+                    _: xev.ReadBuffer,
+                    result: xev.ReadError!usize,
+                ) xev.CallbackAction {
+                    result_ptr.?.result = result;
+                    result_ptr.?.waiter.markReady();
+                    return .disarm;
+                }
+            }).callback,
+        );
+
+        waiter.waitForReady();
+
+        return result_data.result catch |err| switch (err) {
+            error.EOF => 0,
+            else => err,
+        };
+    }
+
+    /// Writes from multiple buffers using vectored I/O.
+    /// xev supports max 2 buffers.
+    pub fn writeVec(self: *const TcpStream, iovecs: []const []const u8) !usize {
+        if (iovecs.len == 0) return 0;
+
+        const usable = @min(iovecs.len, 2);
+        const write_buf = xev.WriteBuffer.fromSlices(iovecs[0..usable]);
+
+        var waiter = self.runtime.getWaiter();
+        var completion: xev.Completion = undefined;
+
+        const Result = struct {
+            waiter: Waiter,
+            result: xev.WriteError!usize = undefined,
+        };
+        var result_data: Result = .{ .waiter = waiter };
+
+        self.xev_tcp.write(
+            &self.runtime.loop,
+            &completion,
+            write_buf,
+            Result,
+            &result_data,
+            (struct {
+                fn callback(
+                    result_ptr: ?*Result,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: xev.TCP,
+                    _: xev.WriteBuffer,
+                    result: xev.WriteError!usize,
+                ) xev.CallbackAction {
+                    result_ptr.?.result = result;
+                    result_ptr.?.waiter.markReady();
+                    return .disarm;
+                }
+            }).callback,
+        );
+
+        waiter.waitForReady();
+
+        return result_data.result;
+    }
+
     /// Shuts down the write side of the TCP connection.
     /// This sends a FIN packet to signal that no more data will be sent.
     pub fn shutdown(self: *TcpStream) !void {
@@ -499,9 +589,9 @@ pub const TcpStream = struct {
                 .tcp_stream = tcp_stream,
                 .interface = .{
                     .vtable = &.{
-                        .stream = stream,
-                        .discard = discard,
-                        .readVec = readVec,
+                        .stream = Reader.stream,
+                        .discard = Reader.discard,
+                        .readVec = Reader.readVec,
                     },
                     .buffer = buffer,
                     .seek = 0,
@@ -513,11 +603,13 @@ pub const TcpStream = struct {
         fn stream(io_reader: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
             const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
             const dest = limit.slice(try w.writableSliceGreedy(1));
-            const n = r.tcp_stream.read(dest) catch |err| switch (err) {
-                error.EOF => return error.EndOfStream,
+            var data: [1][]u8 = .{dest};
+
+            const n = r.tcp_stream.readVec(&data) catch |err| switch (err) {
                 else => return error.ReadFailed,
             };
             if (n == 0) return error.EndOfStream;
+
             w.advance(n);
             return n;
         }
@@ -543,22 +635,16 @@ pub const TcpStream = struct {
         fn readVec(io_reader: *std.io.Reader, data: [][]u8) std.io.Reader.Error!usize {
             const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
 
-            // Use writableVector to properly manage buffer and data vectors
-            var vecs: [32][]u8 = undefined; // Reasonable limit for vectored I/O
+            var vecs: [2][]u8 = undefined;
             const dest_n, const data_size = try io_reader.writableVector(&vecs, data);
-            const dest = vecs[0..dest_n];
+            if (dest_n == 0) return 0;
 
-            if (dest.len == 0) return 0;
-
-            // Read into the first available buffer
-            std.debug.assert(dest[0].len != 0);
-            const n = r.tcp_stream.read(dest[0]) catch |err| switch (err) {
-                error.EOF => return error.EndOfStream,
+            const n = r.tcp_stream.readVec(vecs[0..dest_n]) catch |err| switch (err) {
                 else => return error.ReadFailed,
             };
             if (n == 0) return error.EndOfStream;
 
-            // If we read into the internal buffer, update end pointer
+            // Update buffer end pointer if we read into internal buffer
             if (n > data_size) {
                 io_reader.end += n - data_size;
                 return data_size;
@@ -576,8 +662,8 @@ pub const TcpStream = struct {
                 .tcp_stream = tcp_stream,
                 .interface = .{
                     .vtable = &.{
-                        .drain = drain,
-                        .flush = flush,
+                        .drain = Writer.drain,
+                        .flush = Writer.flush,
                     },
                     .buffer = buffer,
                     .end = 0,
@@ -589,31 +675,31 @@ pub const TcpStream = struct {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_writer));
             const buffered = io_writer.buffered();
 
-            // First, write any buffered data
-            if (buffered.len != 0) {
-                const n = w.tcp_stream.write(buffered) catch |err| switch (err) {
-                    else => return error.WriteFailed,
-                };
-                return io_writer.consume(n);
+            // First flush any buffered data
+            if (buffered.len > 0) {
+                const n = w.tcp_stream.write(buffered) catch return error.WriteFailed;
+
+                if (n < buffered.len) {
+                    // Partial write - shift remaining data to front
+                    std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
+                    io_writer.end = buffered.len - n;
+                    return 0;
+                }
+
+                io_writer.end = 0;
             }
 
-            // Then write the provided data
-            for (data[0..data.len -| 1]) |slice| {
+            // Write from data slices (all but last)
+            for (data[0 .. data.len - 1]) |slice| {
                 if (slice.len == 0) continue;
-                const n = w.tcp_stream.write(slice) catch |err| switch (err) {
-                    else => return error.WriteFailed,
-                };
-                return io_writer.consume(n);
+                return w.tcp_stream.write(slice) catch return error.WriteFailed;
             }
 
             // Handle splat pattern (last element repeated)
             const pattern = data[data.len - 1];
             if (pattern.len == 0 or splat == 0) return 0;
 
-            const n = w.tcp_stream.write(pattern) catch |err| switch (err) {
-                else => return error.WriteFailed,
-            };
-            return io_writer.consume(n);
+            return w.tcp_stream.write(pattern) catch return error.WriteFailed;
         }
 
         fn flush(io_writer: *std.io.Writer) std.io.Writer.Error!void {
@@ -621,11 +707,17 @@ pub const TcpStream = struct {
 
             while (io_writer.end > 0) {
                 const buffered = io_writer.buffered();
-                const n = w.tcp_stream.write(buffered) catch |err| switch (err) {
-                    else => return error.WriteFailed,
-                };
-                if (n == 0) return error.WriteFailed; // No progress made
-                _ = io_writer.consume(n);
+                const n = w.tcp_stream.write(buffered) catch return error.WriteFailed;
+
+                if (n == 0) return error.WriteFailed; // No progress
+
+                if (n < buffered.len) {
+                    // Partial write - shift remaining
+                    std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
+                    io_writer.end -= n;
+                } else {
+                    io_writer.end = 0;
+                }
             }
         }
     };
