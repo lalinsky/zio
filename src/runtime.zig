@@ -66,9 +66,50 @@ fn markReadyFromXevCallback(
     return .disarm;
 }
 
+// Thread pool callback for blocking tasks
+fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
+    const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
+
+    // Execute the user's blocking function
+    any_blocking_task.execute_fn(any_blocking_task);
+
+    // Push to completion queue (thread-safe MPSC)
+    any_blocking_task.runtime.blocking_completions.push(&any_blocking_task.awaitable);
+
+    // Wake up main loop
+    any_blocking_task.runtime.async_wakeup.notify() catch {};
+}
+
+// Async callback to drain completed blocking tasks
+fn drainBlockingCompletions(
+    runtime: ?*Runtime,
+    loop: *xev.Loop,
+    c: *xev.Completion,
+    result: xev.Async.WaitError!void,
+) xev.CallbackAction {
+    _ = result catch unreachable;
+    _ = loop;
+    _ = c;
+    const self = runtime.?;
+
+    // Drain all completed blocking tasks
+    while (self.blocking_completions.pop()) |awaitable| {
+        // Wake up all coroutines waiting on this blocking task
+        while (awaitable.waiting_list.pop()) |waiting_awaitable| {
+            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
+            self.markReady(&waiting_task.coro);
+        }
+        // Release the blocking task's reference (initial ref from init)
+        self.releaseAwaitable(awaitable);
+    }
+
+    return .rearm;
+}
+
 // Awaitable kind - distinguishes different awaitable types
 pub const AwaitableKind = enum {
     coro,
+    blocking_task,
 };
 
 // Awaitable - base type for anything that can be waited on
@@ -94,6 +135,19 @@ pub const AnyTask = struct {
 
     pub inline fn fromCoroutine(coro: *Coroutine) *AnyTask {
         return @fieldParentPtr("coro", coro);
+    }
+};
+
+// Blocking task for runtime scheduling - thread pool based tasks
+pub const AnyBlockingTask = struct {
+    awaitable: Awaitable,
+    thread_pool_task: xev.ThreadPool.Task,
+    runtime: *Runtime,
+    execute_fn: *const fn (*AnyBlockingTask) void,
+
+    pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
+        assert(awaitable.kind == .blocking_task);
+        return @fieldParentPtr("awaitable", awaitable);
     }
 };
 
@@ -135,6 +189,97 @@ pub fn Task(comptime T: type) type {
     };
 }
 
+// Typed blocking task that contains the AnyBlockingTask and FutureResult
+pub fn BlockingTask(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        any_blocking_task: AnyBlockingTask,
+        future_result: FutureResult(T),
+        runtime: *Runtime,
+
+        pub fn init(
+            runtime: *Runtime,
+            allocator: Allocator,
+            comptime func: anytype,
+            args: anytype,
+        ) !*Self {
+            const Args = @TypeOf(args);
+
+            const TaskData = struct {
+                blocking_task: Self,
+                args: Args,
+
+                fn execute(any_blocking_task: *AnyBlockingTask) void {
+                    const blocking_task: *Self = @fieldParentPtr("any_blocking_task", any_blocking_task);
+                    const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
+
+                    const res = @call(.always_inline, func, self.args);
+                    self.blocking_task.future_result.set(res);
+                }
+
+                fn destroy(runtime_ptr: *Runtime, awaitable: *Awaitable) void {
+                    const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
+                    const blocking_task: *Self = @fieldParentPtr("any_blocking_task", any_blocking_task);
+                    const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
+                    runtime_ptr.allocator.destroy(self);
+                }
+            };
+
+            const task_data = try allocator.create(TaskData);
+            errdefer allocator.destroy(task_data);
+
+            task_data.* = .{
+                .blocking_task = .{
+                    .any_blocking_task = .{
+                        .awaitable = .{
+                            .kind = .blocking_task,
+                            .destroy_fn = &TaskData.destroy,
+                        },
+                        .thread_pool_task = .{ .callback = threadPoolCallback },
+                        .runtime = runtime,
+                        .execute_fn = &TaskData.execute,
+                    },
+                    .future_result = FutureResult(T){},
+                    .runtime = runtime,
+                },
+                .args = args,
+            };
+
+            // Increment ref count for the JoinHandle
+            task_data.blocking_task.any_blocking_task.awaitable.ref_count.incr();
+
+            runtime.thread_pool.?.schedule(
+                xev.ThreadPool.Batch.from(&task_data.blocking_task.any_blocking_task.thread_pool_task),
+            );
+
+            return &task_data.blocking_task;
+        }
+
+        fn deinit(self: *Self) void {
+            self.runtime.releaseAwaitable(&self.any_blocking_task.awaitable);
+        }
+
+        fn join(self: *Self) T {
+            if (self.future_result.get()) |res| {
+                return res;
+            }
+
+            const current_coro = coroutines.getCurrent() orelse unreachable;
+            const current_task = AnyTask.fromCoroutine(current_coro);
+
+            self.any_blocking_task.awaitable.waiting_list.append(&current_task.awaitable);
+            current_coro.waitForReady();
+
+            return self.future_result.get() orelse unreachable;
+        }
+
+        fn result(self: *Self) T {
+            return self.join();
+        }
+    };
+}
+
 // Public handle for spawned tasks
 pub fn JoinHandle(comptime T: type) type {
     return struct {
@@ -142,17 +287,20 @@ pub fn JoinHandle(comptime T: type) type {
 
         kind: union(enum) {
             coro: *Task(T),
+            blocking: *BlockingTask(T),
         },
 
         pub fn deinit(self: *Self) void {
             switch (self.kind) {
                 .coro => |task| task.deinit(),
+                .blocking => |task| task.deinit(),
             }
         }
 
         pub fn join(self: *Self) T {
             return switch (self.kind) {
                 .coro => |task| task.join(),
+                .blocking => |task| task.join(),
             };
         }
 
@@ -271,6 +419,12 @@ pub const Runtime = struct {
     ready_queue: AwaitableList = .{},
     cleanup_queue: AwaitableList = .{},
 
+    // Blocking task support
+    blocking_completions: xev.queue_mpsc.Intrusive(Awaitable) = undefined,
+    async_wakeup: xev.Async = undefined,
+    async_completion: xev.Completion = undefined,
+    blocking_initialized: bool = false,
+
     pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
         // Initialize ThreadPool if enabled
         var thread_pool: ?*xev.ThreadPool = null;
@@ -313,6 +467,11 @@ pub const Runtime = struct {
             self.releaseAwaitable(&task.awaitable);
         }
         self.tasks.deinit(self.allocator);
+
+        // Clean up blocking task support
+        if (self.blocking_initialized) {
+            self.async_wakeup.deinit();
+        }
 
         self.loop.deinit();
 
@@ -411,6 +570,42 @@ pub const Runtime = struct {
         waiter.waitForReady();
     }
 
+    fn ensureBlockingInitialized(self: *Runtime) !void {
+        if (self.blocking_initialized) return;
+        if (self.thread_pool == null) return error.ThreadPoolRequired;
+
+        self.blocking_completions.init();
+        self.async_wakeup = try xev.Async.init();
+
+        // Register async completion to drain blocking tasks
+        self.async_wakeup.wait(
+            &self.loop,
+            &self.async_completion,
+            Runtime,
+            self,
+            drainBlockingCompletions,
+        );
+
+        self.blocking_initialized = true;
+    }
+
+    pub fn spawnBlocking(
+        self: *Runtime,
+        comptime func: anytype,
+        args: anytype,
+    ) !JoinHandle(ReturnType(func)) {
+        try self.ensureBlockingInitialized();
+
+        const task = try BlockingTask(ReturnType(func)).init(
+            self,
+            self.allocator,
+            func,
+            args,
+        );
+
+        return JoinHandle(ReturnType(func)){ .kind = .{ .blocking = task } };
+    }
+
     pub fn run(self: *Runtime) !void {
         while (true) {
             var reschedule: AwaitableList = .{};
@@ -457,8 +652,13 @@ pub const Runtime = struct {
                 break;
             }
 
-            // Wait for I/O events to make coroutines ready again
-            try self.loop.run(.once);
+            // Check for I/O events without blocking if we have pending work
+            const mode: xev.RunMode = if (self.cleanup_queue.head != null or self.ready_queue.head != null)
+                .no_wait
+            else
+                .once;
+
+            try self.loop.run(mode);
         }
     }
 
@@ -500,4 +700,33 @@ test "runtime with thread pool smoke test" {
 
     // Run empty runtime (should exit immediately)
     try runtime.run();
+}
+
+test "runtime: spawnBlocking smoke test" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{
+        .thread_pool = .{ .enabled = true },
+    });
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn blockingWork(x: i32) i32 {
+            return x * 2;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var handle = try rt.spawnBlocking(blockingWork, .{21});
+            defer handle.deinit();
+
+            const result = handle.join();
+            try testing.expectEqual(@as(i32, 42), result);
+        }
+    };
+
+    var handle = try runtime.spawn(TestContext.asyncTask, .{&runtime}, .{});
+    defer handle.deinit();
+
+    try runtime.run();
+    try handle.result();
 }
