@@ -530,16 +530,15 @@ pub const TcpStream = struct {
 
             // Build write buffer using vectored I/O
             // xev supports max 2 vectors, so we need to handle this carefully
-            var vec1: []const u8 = &.{};
-            var vec2: []const u8 = &.{};
+            var vecs: [2][]const u8 = undefined;
             var vec_count: usize = 0;
 
-            // Strategy: Try to include buffered data + first data slice in vec1,
-            // then pattern (potentially repeated) in vec2
+            // Strategy: Try to include buffered data + first data slice in vecs[0],
+            // then pattern (potentially repeated) in vecs[1]
 
             if (buffered.len > 0) {
-                vec1 = buffered;
-                vec_count = 1;
+                vecs[vec_count] = buffered;
+                vec_count += 1;
             }
 
             // Try to add first non-empty data slice
@@ -547,12 +546,9 @@ pub const TcpStream = struct {
             for (data[0 .. data.len - 1], 0..) |slice, i| {
                 if (slice.len == 0) continue;
                 first_slice_idx = i;
-                if (vec_count == 0) {
-                    vec1 = slice;
-                    vec_count = 1;
-                } else if (vec_count == 1) {
-                    vec2 = slice;
-                    vec_count = 2;
+                if (vec_count < 2) {
+                    vecs[vec_count] = slice;
+                    vec_count += 1;
                 }
                 break;
             }
@@ -560,22 +556,14 @@ pub const TcpStream = struct {
             const pattern = data[data.len - 1];
 
             // Add pattern for splat if we have room
-            if (splat > 0 and pattern.len > 0) {
-                if (vec_count == 0) {
-                    vec1 = pattern;
-                    vec_count = 1;
-                } else if (vec_count == 1) {
-                    vec2 = pattern;
-                    vec_count = 2;
-                }
+            if (splat > 0 and pattern.len > 0 and vec_count < 2) {
+                vecs[vec_count] = pattern;
+                vec_count += 1;
             }
 
             // If we have vectors to write, do the write
             if (vec_count > 0) {
-                const write_buf: xev.WriteBuffer = if (vec_count == 1)
-                    .{ .slice = vec1 }
-                else
-                    .{ .vectors = .{ .data = .{ .{ .base = vec1.ptr, .len = vec1.len }, .{ .base = vec2.ptr, .len = vec2.len } }, .len = 2 } };
+                const write_buf = xev.WriteBuffer.fromSlices(vecs[0..vec_count]);
 
                 const n = try w.tcp_stream.writeBuf(write_buf);
 
