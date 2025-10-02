@@ -528,31 +528,115 @@ pub const TcpStream = struct {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_writer));
             const buffered = io_writer.buffered();
 
-            // First flush any buffered data
-            if (buffered.len > 0) {
-                const n = try w.tcp_stream.writeBuf(.{ .slice = buffered });
+            // Build write buffer using vectored I/O
+            // xev supports max 2 vectors, so we need to handle this carefully
+            var vec1: []const u8 = &.{};
+            var vec2: []const u8 = &.{};
+            var vec_count: usize = 0;
 
-                if (n < buffered.len) {
-                    // Partial write - shift remaining data to front
-                    std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
-                    io_writer.end = buffered.len - n;
-                    return 0;
+            // Strategy: Try to include buffered data + first data slice in vec1,
+            // then pattern (potentially repeated) in vec2
+
+            if (buffered.len > 0) {
+                vec1 = buffered;
+                vec_count = 1;
+            }
+
+            // Try to add first non-empty data slice
+            var first_slice_idx: ?usize = null;
+            for (data[0 .. data.len - 1], 0..) |slice, i| {
+                if (slice.len == 0) continue;
+                first_slice_idx = i;
+                if (vec_count == 0) {
+                    vec1 = slice;
+                    vec_count = 1;
+                } else if (vec_count == 1) {
+                    vec2 = slice;
+                    vec_count = 2;
+                }
+                break;
+            }
+
+            const pattern = data[data.len - 1];
+
+            // Add pattern for splat if we have room
+            if (splat > 0 and pattern.len > 0) {
+                if (vec_count == 0) {
+                    vec1 = pattern;
+                    vec_count = 1;
+                } else if (vec_count == 1) {
+                    vec2 = pattern;
+                    vec_count = 2;
+                }
+            }
+
+            // If we have vectors to write, do the write
+            if (vec_count > 0) {
+                const write_buf: xev.WriteBuffer = if (vec_count == 1)
+                    .{ .slice = vec1 }
+                else
+                    .{ .vectors = .{ .data = .{ .{ .base = vec1.ptr, .len = vec1.len }, .{ .base = vec2.ptr, .len = vec2.len } }, .len = 2 } };
+
+                const n = try w.tcp_stream.writeBuf(write_buf);
+
+                // Handle partial write of buffered data
+                if (buffered.len > 0) {
+                    if (n < buffered.len) {
+                        std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
+                        io_writer.end = buffered.len - n;
+                        return 0;
+                    }
+                    io_writer.end = 0;
+                    const consumed = n - buffered.len;
+                    if (consumed == 0) return 0;
+
+                    // Check if we wrote into first data slice
+                    if (first_slice_idx) |idx| {
+                        const slice = data[idx];
+                        if (consumed < slice.len) {
+                            // Partial write of first slice - can't continue from here
+                            return consumed;
+                        }
+                        // Wrote full first slice, check pattern
+                        if (consumed >= slice.len and pattern.len > 0) {
+                            const pattern_written = consumed - slice.len;
+                            if (pattern_written > 0) {
+                                // Wrote some of pattern, need to track splat progress
+                                // For simplicity, return what we wrote
+                                return consumed;
+                            }
+                        }
+                    }
+                    return consumed;
                 }
 
-                io_writer.end = 0;
+                // No buffered data - wrote directly from data slices
+                return n;
             }
 
-            // Write from data slices (all but last)
+            // No vectors written - handle remaining slices and splat sequentially
+            // This handles case where we need to write multiple data slices or splat > 1
+
+            var written: usize = 0;
+
+            // Write remaining data slices
             for (data[0 .. data.len - 1]) |slice| {
                 if (slice.len == 0) continue;
-                return try w.tcp_stream.writeBuf(.{ .slice = slice });
+                const n = try w.tcp_stream.writeBuf(.{ .slice = slice });
+                written += n;
+                if (n < slice.len) return written; // Partial write
             }
 
-            // Handle splat pattern (last element repeated)
-            const pattern = data[data.len - 1];
-            if (pattern.len == 0 or splat == 0) return 0;
+            // Handle splat - write pattern splat times
+            if (pattern.len > 0) {
+                for (0..splat) |_| {
+                    const n = try w.tcp_stream.writeBuf(.{ .slice = pattern });
+                    written += n;
+                    if (n < pattern.len) return written; // Partial write
+                }
+            }
 
-            return try w.tcp_stream.writeBuf(.{ .slice = pattern });
+            return written;
         }
 
         fn flush(io_writer: *std.io.Writer) std.io.Writer.Error!void {
@@ -609,6 +693,102 @@ test "TCP: basic echo server and client" {
             var buffer: [1024]u8 = undefined;
             const bytes_read = try stream.readAll(&buffer);
             try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
+        }
+    };
+
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    defer server_task.deinit();
+
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    defer client_task.deinit();
+
+    try runtime.run();
+
+    try server_task.result();
+    try client_task.result();
+}
+
+test "TCP: Writer splat handling" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    var server_ready = ResetEvent.init(&runtime);
+
+    const ClientTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
+
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(&write_buffer);
+
+            // Test splat: "ba" + "na" repeated 3 times = "bananana"
+            const data: []const []const u8 = &.{ "ba", "na" };
+            const splat: usize = 3;
+            _ = try writer.interface.writeSplat(data, splat);
+            try writer.interface.flush();
+            try stream.shutdown();
+
+            // Read back echoed data
+            var read_buffer: [1024]u8 = undefined;
+            const bytes_read = try stream.readAll(&read_buffer);
+
+            const expected = "bananana";
+            try testing.expectEqualStrings(expected, read_buffer[0..bytes_read]);
+        }
+    };
+
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    defer server_task.deinit();
+
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    defer client_task.deinit();
+
+    try runtime.run();
+
+    try server_task.result();
+    try client_task.result();
+}
+
+test "TCP: Writer splat with single element" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    var server_ready = ResetEvent.init(&runtime);
+
+    const ClientTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
+
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(&write_buffer);
+
+            // Test single element splat: "hello" repeated 3 times
+            const data: []const []const u8 = &.{"hello"};
+            const splat: usize = 3;
+            _ = try writer.interface.writeSplat(data, splat);
+            try writer.interface.flush();
+            try stream.shutdown();
+
+            // Read back echoed data
+            var read_buffer: [1024]u8 = undefined;
+            const bytes_read = try stream.readAll(&read_buffer);
+
+            const expected = "hellohellohello";
+            try testing.expectEqualStrings(expected, read_buffer[0..bytes_read]);
         }
     };
 
