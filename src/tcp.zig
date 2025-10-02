@@ -233,48 +233,7 @@ pub const TcpStream = struct {
     /// Writes data to the stream. Returns the number of bytes written,
     /// which may be less than the length of data.
     pub fn write(self: *const TcpStream, data: []const u8) !usize {
-        var waiter = self.runtime.getWaiter();
-        var completion: xev.Completion = undefined;
-
-        const Result = struct {
-            waiter: Waiter,
-            result: xev.WriteError!usize = undefined,
-
-            pub fn callback(
-                result_data_ptr: ?*@This(),
-                loop: *xev.Loop,
-                completion_inner: *xev.Completion,
-                socket: xev.TCP,
-                buffer_inner: xev.WriteBuffer,
-                result: xev.WriteError!usize,
-            ) xev.CallbackAction {
-                _ = loop;
-                _ = completion_inner;
-                _ = socket;
-                _ = buffer_inner;
-
-                const result_data = result_data_ptr.?;
-                result_data.result = result;
-                result_data.waiter.markReady();
-
-                return .disarm;
-            }
-        };
-
-        var result_data: Result = .{ .waiter = waiter };
-
-        self.xev_tcp.write(
-            &self.runtime.loop,
-            &completion,
-            .{ .slice = data },
-            Result,
-            &result_data,
-            Result.callback,
-        );
-
-        waiter.waitForReady();
-
-        return result_data.result;
+        return self.writeBuf(.{ .slice = data });
     }
 
     /// Writes all data to the stream, looping until the entire buffer is written.
@@ -288,34 +247,6 @@ pub const TcpStream = struct {
         }
     }
 
-    /// Writes data from the provided iovecs to the stream.
-    /// Returns the number of bytes written from the first non-empty buffer.
-    /// See https://github.com/ziglang/zig/issues/7699
-    pub fn writev(self: *const TcpStream, iovecs: []const std.posix.iovec_const) anyerror!usize {
-        // Find the first non-empty buffer
-        for (iovecs) |iovec| {
-            if (iovec.len == 0) continue;
-
-            const buffer = iovec.base[0..iovec.len];
-            return try self.write(buffer);
-        }
-        return 0; // All iovecs are empty
-    }
-
-    /// Writes all data from the provided iovecs to the stream, looping until
-    /// all buffers are completely written.
-    /// See https://github.com/ziglang/zig/issues/7699
-    /// See equivalent function: `std.fs.File.writevAll`.
-    pub fn writevAll(self: *const TcpStream, iovecs: []const std.posix.iovec_const) anyerror!void {
-        for (iovecs) |iovec| {
-            var buffer = iovec.base[0..iovec.len];
-            while (buffer.len > 0) {
-                const bytes_written = try self.write(buffer);
-                buffer = buffer[bytes_written..];
-            }
-        }
-    }
-
     /// Reads into multiple buffers using vectored I/O.
     /// Returns total bytes read. xev supports max 2 buffers.
     pub fn readVec(self: *const TcpStream, iovecs: [][]u8) std.io.Reader.Error!usize {
@@ -326,46 +257,10 @@ pub const TcpStream = struct {
 
     /// Writes from multiple buffers using vectored I/O.
     /// xev supports max 2 buffers.
-    pub fn writeVec(self: *const TcpStream, iovecs: []const []const u8) !usize {
+    pub fn writeVec(self: *const TcpStream, iovecs: []const []const u8) std.io.Writer.Error!usize {
         if (iovecs.len == 0) return 0;
 
-        const usable = @min(iovecs.len, 2);
-        const write_buf = xev.WriteBuffer.fromSlices(iovecs[0..usable]);
-
-        var waiter = self.runtime.getWaiter();
-        var completion: xev.Completion = undefined;
-
-        const Result = struct {
-            waiter: Waiter,
-            result: xev.WriteError!usize = undefined,
-        };
-        var result_data: Result = .{ .waiter = waiter };
-
-        self.xev_tcp.write(
-            &self.runtime.loop,
-            &completion,
-            write_buf,
-            Result,
-            &result_data,
-            (struct {
-                fn callback(
-                    result_ptr: ?*Result,
-                    _: *xev.Loop,
-                    _: *xev.Completion,
-                    _: xev.TCP,
-                    _: xev.WriteBuffer,
-                    result: xev.WriteError!usize,
-                ) xev.CallbackAction {
-                    result_ptr.?.result = result;
-                    result_ptr.?.waiter.markReady();
-                    return .disarm;
-                }
-            }).callback,
-        );
-
-        waiter.waitForReady();
-
-        return result_data.result;
+        return self.writeBuf(xev.WriteBuffer.fromSlices(iovecs));
     }
 
     /// Shuts down the write side of the TCP connection.
@@ -410,6 +305,45 @@ pub const TcpStream = struct {
         waiter.waitForReady();
 
         return result_data.result;
+    }
+
+    /// Private low-level write function that all other write operations use.
+    /// Accepts xev.WriteBuffer directly and returns std.io.Writer compatible errors.
+    fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) std.io.Writer.Error!usize {
+        var waiter = self.runtime.getWaiter();
+        var completion: xev.Completion = undefined;
+
+        const Result = struct {
+            waiter: Waiter,
+            result: xev.WriteError!usize = undefined,
+        };
+        var result_data: Result = .{ .waiter = waiter };
+
+        self.xev_tcp.write(
+            &self.runtime.loop,
+            &completion,
+            buffer,
+            Result,
+            &result_data,
+            (struct {
+                fn callback(
+                    result_ptr: ?*Result,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: xev.TCP,
+                    _: xev.WriteBuffer,
+                    result: xev.WriteError!usize,
+                ) xev.CallbackAction {
+                    result_ptr.?.result = result;
+                    result_ptr.?.waiter.markReady();
+                    return .disarm;
+                }
+            }).callback,
+        );
+
+        waiter.waitForReady();
+
+        return result_data.result catch return error.WriteFailed;
     }
 
     /// Private low-level read function that all other read operations use.
@@ -596,7 +530,7 @@ pub const TcpStream = struct {
 
             // First flush any buffered data
             if (buffered.len > 0) {
-                const n = w.tcp_stream.write(buffered) catch return error.WriteFailed;
+                const n = try w.tcp_stream.writeBuf(.{ .slice = buffered });
 
                 if (n < buffered.len) {
                     // Partial write - shift remaining data to front
@@ -611,14 +545,14 @@ pub const TcpStream = struct {
             // Write from data slices (all but last)
             for (data[0 .. data.len - 1]) |slice| {
                 if (slice.len == 0) continue;
-                return w.tcp_stream.write(slice) catch return error.WriteFailed;
+                return try w.tcp_stream.writeBuf(.{ .slice = slice });
             }
 
             // Handle splat pattern (last element repeated)
             const pattern = data[data.len - 1];
             if (pattern.len == 0 or splat == 0) return 0;
 
-            return w.tcp_stream.write(pattern) catch return error.WriteFailed;
+            return try w.tcp_stream.writeBuf(.{ .slice = pattern });
         }
 
         fn flush(io_writer: *std.io.Writer) std.io.Writer.Error!void {
@@ -626,7 +560,7 @@ pub const TcpStream = struct {
 
             while (io_writer.end > 0) {
                 const buffered = io_writer.buffered();
-                const n = w.tcp_stream.write(buffered) catch return error.WriteFailed;
+                const n = try w.tcp_stream.writeBuf(.{ .slice = buffered });
 
                 if (n == 0) return error.WriteFailed; // No progress
 
@@ -686,108 +620,6 @@ test "TCP: basic echo server and client" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
-}
-
-test "TCP: writev writes first buffer only" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var runtime = try Runtime.init(allocator, .{});
-    defer runtime.deinit();
-
-    var server_ready = ResetEvent.init(&runtime);
-
-    const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
-
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
-
-            const data1 = "Hello";
-            const data2 = ", ";
-            const data3 = "World!";
-
-            var iovecs = [_]std.posix.iovec_const{
-                .{ .base = data1.ptr, .len = data1.len },
-                .{ .base = data2.ptr, .len = data2.len },
-                .{ .base = data3.ptr, .len = data3.len },
-            };
-
-            const bytes_written = try stream.writev(&iovecs);
-            try stream.shutdown();
-            try testing.expectEqual(5, bytes_written);
-
-            var buffer: [20]u8 = undefined;
-            const bytes_read = try stream.read(&buffer);
-            try testing.expect(bytes_read >= 5);
-            try testing.expectEqualStrings("Hello", buffer[0..5]);
-        }
-    };
-
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
-    defer server_task.deinit();
-
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
-    defer client_task.deinit();
-
-    try runtime.run();
-    try server_task.result();
-    try client_task.result();
-}
-
-test "TCP: writevAll writes all buffers" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var runtime = try Runtime.init(allocator, .{});
-    defer runtime.deinit();
-
-    var server_ready = ResetEvent.init(&runtime);
-
-    const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
-
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
-
-            const data1 = "Hello";
-            const data2 = ", ";
-            const data3 = "World!";
-
-            var iovecs = [_]std.posix.iovec_const{
-                .{ .base = data1.ptr, .len = data1.len },
-                .{ .base = data2.ptr, .len = data2.len },
-                .{ .base = data3.ptr, .len = data3.len },
-            };
-
-            try stream.writevAll(&iovecs);
-            try stream.shutdown();
-
-            var buffer: [20]u8 = undefined;
-            var total_read: usize = 0;
-            while (total_read < 13) {
-                const n = try stream.read(buffer[total_read..]);
-                if (n == 0) break;
-                total_read += n;
-            }
-            try testing.expectEqual(13, total_read);
-            try testing.expectEqualStrings("Hello, World!", buffer[0..total_read]);
-        }
-    };
-
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
-    defer server_task.deinit();
-
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
-    defer client_task.deinit();
-
-    try runtime.run();
     try server_task.result();
     try client_task.result();
 }
