@@ -7,10 +7,10 @@ pub fn StreamReader(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        stream: *const T,
+        stream: *T,
         interface: std.io.Reader,
 
-        pub fn init(stream: *const T, buffer: []u8) Self {
+        pub fn init(stream: *T, buffer: []u8) Self {
             return .{
                 .stream = stream,
                 .interface = .{
@@ -30,7 +30,8 @@ pub fn StreamReader(comptime T: type) type {
             const r: *Self = @alignCast(@fieldParentPtr("interface", io_reader));
             const dest = limit.slice(try w.writableSliceGreedy(1));
 
-            const n = try r.stream.readBuf(.{ .slice = dest });
+            var buf: xev.ReadBuffer = .{ .slice = dest };
+            const n = try r.stream.readBuf(&buf);
 
             w.advance(n);
             return n;
@@ -44,7 +45,8 @@ pub fn StreamReader(comptime T: type) type {
 
             while (total_discarded < remaining) {
                 const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
-                const n = r.stream.readBuf(.{ .slice = io_reader.buffer[0..to_read] }) catch |err| switch (err) {
+                var buf: xev.ReadBuffer = .{ .slice = io_reader.buffer[0..to_read] };
+                const n = r.stream.readBuf(&buf) catch |err| switch (err) {
                     error.EndOfStream => break,
                     else => return error.ReadFailed,
                 };
@@ -65,7 +67,7 @@ pub fn StreamReader(comptime T: type) type {
             buf.vectors.len = dest_n;
             if (dest_n == 0) return 0;
 
-            const n = try r.stream.readBuf(buf);
+            const n = try r.stream.readBuf(&buf);
 
             // Update buffer end pointer if we read into internal buffer
             if (n > data_size) {
@@ -82,10 +84,10 @@ pub fn StreamWriter(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        stream: *const T,
+        stream: *T,
         interface: std.io.Writer,
 
-        pub fn init(stream: *const T, buffer: []u8) Self {
+        pub fn init(stream: *T, buffer: []u8) Self {
             return .{
                 .stream = stream,
                 .interface = .{
@@ -182,4 +184,336 @@ pub fn StreamWriter(comptime T: type) type {
             }
         }
     };
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+/// Mock stream type for testing StreamReader/StreamWriter.
+/// Uses an in-memory buffer to simulate readBuf/writeBuf operations.
+const BufferStream = struct {
+    allocator: std.mem.Allocator,
+    buffer: std.ArrayList(u8),
+    read_pos: usize = 0,
+
+    fn init(allocator: std.mem.Allocator) BufferStream {
+        return .{ .allocator = allocator, .buffer = .empty };
+    }
+
+    fn deinit(self: *BufferStream) void {
+        self.buffer.deinit(self.allocator);
+    }
+
+    fn reset(self: *BufferStream) void {
+        self.buffer.clearRetainingCapacity();
+        self.read_pos = 0;
+    }
+
+    /// Implements readBuf for StreamReader compatibility.
+    /// Returns error.EndOfStream when no more data available (NOT 0).
+    fn readBuf(self: *BufferStream, buf: *xev.ReadBuffer) std.io.Reader.Error!usize {
+        const available = self.buffer.items[self.read_pos..];
+        if (available.len == 0) return error.EndOfStream;
+
+        const n = switch (buf.*) {
+            .slice => |dest| blk: {
+                const to_copy = @min(dest.len, available.len);
+                @memcpy(dest[0..to_copy], available[0..to_copy]);
+                break :blk to_copy;
+            },
+            .array => |*arr| blk: {
+                const to_copy = @min(arr.len, available.len);
+                @memcpy(arr[0..to_copy], available[0..to_copy]);
+                break :blk to_copy;
+            },
+            .vectors => |vecs| blk: {
+                var copied: usize = 0;
+                for (vecs.data[0..vecs.len]) |vec| {
+                    if (copied >= available.len) break;
+                    const dest_ptr: [*]u8 = if (builtin.os.tag == .windows) vec.buf else @ptrCast(vec.base);
+                    const dest_len: usize = if (builtin.os.tag == .windows) vec.len else @intCast(vec.len);
+                    const to_copy = @min(dest_len, available.len - copied);
+                    @memcpy(dest_ptr[0..to_copy], available[copied..][0..to_copy]);
+                    copied += to_copy;
+                }
+                break :blk copied;
+            },
+        };
+
+        self.read_pos += n;
+        return n;
+    }
+
+    /// Implements writeBuf for StreamWriter compatibility.
+    fn writeBuf(self: *BufferStream, buf: xev.WriteBuffer) std.io.Writer.Error!usize {
+        return switch (buf) {
+            .slice => |src| blk: {
+                self.buffer.appendSlice(self.allocator, src) catch return error.WriteFailed;
+                break :blk src.len;
+            },
+            .array => |arr| blk: {
+                self.buffer.appendSlice(self.allocator, arr.array[0..arr.len]) catch return error.WriteFailed;
+                break :blk arr.len;
+            },
+            .vectors => |vecs| blk: {
+                var written: usize = 0;
+                for (vecs.data[0..vecs.len]) |vec| {
+                    const src_ptr: [*]const u8 = if (builtin.os.tag == .windows) vec.buf else @ptrCast(vec.base);
+                    const src_len: usize = if (builtin.os.tag == .windows) vec.len else @intCast(vec.len);
+                    self.buffer.appendSlice(self.allocator, src_ptr[0..src_len]) catch return error.WriteFailed;
+                    written += src_len;
+                }
+                break :blk written;
+            },
+        };
+    }
+};
+
+test "StreamWriter/Reader: basic write and read" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    // Write data
+    {
+        var write_buffer: [256]u8 = undefined;
+        var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+
+        try writer.interface.writeAll("Hello, ");
+        try writer.interface.writeAll("World!");
+        try writer.interface.flush();
+    }
+
+    // Read data back
+    {
+        var read_buffer: [256]u8 = undefined;
+        var reader = StreamReader(BufferStream).init(&stream, &read_buffer);
+
+        var result: [20]u8 = undefined;
+        const n = try reader.interface.readSliceShort(&result);
+
+        try testing.expectEqual(13, n);
+        try testing.expectEqualStrings("Hello, World!", result[0..n]);
+    }
+}
+
+test "StreamWriter: writeSplat pattern" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    var write_buffer: [256]u8 = undefined;
+    var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+
+    // Test splat: "ba" + "na" repeated 3 times = "bananana"
+    var data = [_][]const u8{ "ba", "na" };
+    try writer.interface.writeSplatAll(&data, 3);
+    try writer.interface.flush();
+
+    try testing.expectEqualStrings("bananana", stream.buffer.items);
+}
+
+test "StreamWriter: writeSplat single element" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    var write_buffer: [256]u8 = undefined;
+    var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+
+    // Test single element splat: "hello" repeated 3 times
+    var data = [_][]const u8{"hello"};
+    try writer.interface.writeSplatAll(&data, 3);
+    try writer.interface.flush();
+
+    try testing.expectEqualStrings("hellohellohello", stream.buffer.items);
+}
+
+test "StreamWriter: writeSplat single character optimization" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    var write_buffer: [256]u8 = undefined;
+    var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+
+    // Test single-character splat: "x" repeated 50 times
+    // This should use the @memset optimization
+    var data = [_][]const u8{"x"};
+    try writer.interface.writeSplatAll(&data, 50);
+    try writer.interface.flush();
+
+    try testing.expectEqual(50, stream.buffer.items.len);
+    for (stream.buffer.items) |c| {
+        try testing.expectEqual('x', c);
+    }
+}
+
+test "StreamWriter: writeVec multiple slices" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    var write_buffer: [256]u8 = undefined;
+    var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+
+    // Write multiple slices at once
+    const slices = &[_][]const u8{ "Hello", ", ", "World", "!" };
+    _ = try writer.interface.writeVec(slices);
+    try writer.interface.flush();
+
+    try testing.expectEqualStrings("Hello, World!", stream.buffer.items);
+}
+
+test "StreamWriter: flush drains buffer" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    var write_buffer: [16]u8 = undefined;
+    var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+
+    // Write less than buffer size
+    try writer.interface.writeAll("Hello");
+    try testing.expectEqual(5, writer.interface.end);
+    try testing.expectEqual(0, stream.buffer.items.len);
+
+    // Flush should drain to stream
+    try writer.interface.flush();
+    try testing.expectEqual(0, writer.interface.end);
+    try testing.expectEqualStrings("Hello", stream.buffer.items);
+}
+
+test "StreamReader: EndOfStream error on empty buffer" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    var read_buffer: [256]u8 = undefined;
+    var reader = StreamReader(BufferStream).init(&stream, &read_buffer);
+
+    var result: [10]u8 = undefined;
+
+    // readSliceShort catches EndOfStream and returns 0 bytes read
+    const n = try reader.interface.readSliceShort(&result);
+    try testing.expectEqual(0, n);
+}
+
+test "StreamReader: partial read then EOF" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    try stream.buffer.appendSlice(allocator, "Hello");
+
+    var read_buffer: [256]u8 = undefined;
+    var reader = StreamReader(BufferStream).init(&stream, &read_buffer);
+
+    // First read succeeds
+    var result: [10]u8 = undefined;
+    const n = try reader.interface.readSliceShort(&result);
+    try testing.expectEqual(5, n);
+    try testing.expectEqualStrings("Hello", result[0..n]);
+
+    // Second read hits EOF - readSliceShort returns 0 bytes
+    const n2 = try reader.interface.readSliceShort(&result);
+    try testing.expectEqual(0, n2);
+}
+
+test "StreamReader: discard bytes" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    try stream.buffer.appendSlice(allocator, "Hello, World!");
+
+    var read_buffer: [256]u8 = undefined;
+    var reader = StreamReader(BufferStream).init(&stream, &read_buffer);
+
+    // Discard first 7 bytes
+    const discarded = try reader.interface.discard(.limited(7));
+    try testing.expectEqual(7, discarded);
+
+    // Read remaining
+    var result: [10]u8 = undefined;
+    const n = try reader.interface.readSliceShort(&result);
+    try testing.expectEqual(6, n);
+    try testing.expectEqualStrings("World!", result[0..n]);
+}
+
+test "StreamWriter/Reader: interleaved operations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    // Write some data
+    {
+        var write_buffer: [256]u8 = undefined;
+        var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+        try writer.interface.writeAll("First ");
+        try writer.interface.flush();
+    }
+
+    // Read it
+    {
+        var read_buffer: [256]u8 = undefined;
+        var reader = StreamReader(BufferStream).init(&stream, &read_buffer);
+        var result: [10]u8 = undefined;
+        const n = try reader.interface.readSliceShort(&result);
+        try testing.expectEqualStrings("First ", result[0..n]);
+    }
+
+    // Write more
+    {
+        var write_buffer: [256]u8 = undefined;
+        var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+        try writer.interface.writeAll("Second");
+        try writer.interface.flush();
+    }
+
+    // Read it
+    {
+        var read_buffer: [256]u8 = undefined;
+        var reader = StreamReader(BufferStream).init(&stream, &read_buffer);
+        var result: [10]u8 = undefined;
+        const n = try reader.interface.readSliceShort(&result);
+        try testing.expectEqualStrings("Second", result[0..n]);
+    }
+}
+
+test "StreamWriter: empty write" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    var write_buffer: [256]u8 = undefined;
+    var writer = StreamWriter(BufferStream).init(&stream, &write_buffer);
+
+    try writer.interface.writeAll("");
+    try writer.interface.flush();
+
+    try testing.expectEqual(0, stream.buffer.items.len);
 }

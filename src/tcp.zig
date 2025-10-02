@@ -212,7 +212,8 @@ pub const TcpStream = struct {
     /// Returns the number of bytes read, which may be less than buffer.len.
     /// A return value of 0 indicates end-of-stream.
     pub fn read(self: *const TcpStream, buffer: []u8) !usize {
-        return self.readBuf(.{ .slice = buffer }) catch |err| switch (err) {
+        var buf: xev.ReadBuffer = .{ .slice = buffer };
+        return self.readBuf(&buf) catch |err| switch (err) {
             error.EndOfStream => 0,
             else => err,
         };
@@ -349,20 +350,21 @@ pub const TcpStream = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *const TcpStream, buffer: xev.ReadBuffer) std.io.Reader.Error!usize {
+    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) std.io.Reader.Error!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
             waiter: Waiter,
+            buffer: *xev.ReadBuffer,
             result: xev.ReadError!usize = undefined,
         };
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .waiter = waiter, .buffer = buffer };
 
         self.xev_tcp.read(
             &self.runtime.loop,
             &completion,
-            buffer,
+            buffer.*,
             Result,
             &result_data,
             (struct {
@@ -371,11 +373,16 @@ pub const TcpStream = struct {
                     _: *xev.Loop,
                     _: *xev.Completion,
                     _: xev.TCP,
-                    _: xev.ReadBuffer,
+                    buf: xev.ReadBuffer,
                     result: xev.ReadError!usize,
                 ) xev.CallbackAction {
-                    result_ptr.?.result = result;
-                    result_ptr.?.waiter.markReady();
+                    const r = result_ptr.?;
+                    r.result = result;
+                    // Copy array data back to caller's buffer
+                    if (buf == .array) {
+                        r.buffer.array = buf.array;
+                    }
+                    r.waiter.markReady();
                     return .disarm;
                 }
             }).callback,
@@ -442,11 +449,11 @@ pub const TcpStream = struct {
 
     // Zig 0.15+ interface methods
     pub fn reader(self: *const TcpStream, buffer: []u8) Reader {
-        return Reader.init(self, buffer);
+        return Reader.init(@constCast(self), buffer);
     }
 
     pub fn writer(self: *const TcpStream, buffer: []u8) Writer {
-        return Writer.init(self, buffer);
+        return Writer.init(@constCast(self), buffer);
     }
 };
 

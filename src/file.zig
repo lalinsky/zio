@@ -212,20 +212,21 @@ pub const File = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *const File, buffer: xev.ReadBuffer) std.io.Reader.Error!usize {
+    pub fn readBuf(self: *const File, buffer: *xev.ReadBuffer) std.io.Reader.Error!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
             waiter: Waiter,
+            buffer: *xev.ReadBuffer,
             result: xev.ReadError!usize = undefined,
         };
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .waiter = waiter, .buffer = buffer };
 
         self.xev_file.read(
             &self.runtime.loop,
             &completion,
-            buffer,
+            buffer.*,
             Result,
             &result_data,
             (struct {
@@ -234,11 +235,16 @@ pub const File = struct {
                     _: *xev.Loop,
                     _: *xev.Completion,
                     _: xev.File,
-                    _: xev.ReadBuffer,
+                    buf: xev.ReadBuffer,
                     result: xev.ReadError!usize,
                 ) xev.CallbackAction {
-                    result_ptr.?.result = result;
-                    result_ptr.?.waiter.markReady();
+                    const r = result_ptr.?;
+                    r.result = result;
+                    // Copy array data back to caller's buffer
+                    if (buf == .array) {
+                        r.buffer.array = buf.array;
+                    }
+                    r.waiter.markReady();
                     return .disarm;
                 }
             }).callback,
@@ -338,11 +344,11 @@ pub const File = struct {
     pub const Writer = io.StreamWriter(File);
 
     pub fn reader(self: *const File, buffer: []u8) Reader {
-        return Reader.init(self, buffer);
+        return Reader.init(@constCast(self), buffer);
     }
 
     pub fn writer(self: *const File, buffer: []u8) Writer {
-        return Writer.init(self, buffer);
+        return Writer.init(@constCast(self), buffer);
     }
 
     pub fn deinit(self: *const File) void {
