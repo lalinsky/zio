@@ -44,6 +44,9 @@ fn runTlsTask(rt: *zio.Runtime) !void {
 
     std.log.info("Sending HTTPS request...", .{});
     try tls_client.writer.writeAll(request);
+    // Need to flush both TLS layer (encrypts data to TCP buffer) and TCP layer (sends over network)
+    try tls_client.writer.flush();
+    try tcp_writer.interface.flush();
     std.log.info("Sent {} bytes over TLS", .{request.len});
 
     // Read HTTPS response
