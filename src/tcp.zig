@@ -678,9 +678,9 @@ test "TCP: Writer splat handling" {
             var writer = stream.writer(&write_buffer);
 
             // Test splat: "ba" + "na" repeated 3 times = "bananana"
-            const data: []const []const u8 = &.{ "ba", "na" };
+            var data = [_][]const u8{ "ba", "na" };
             const splat: usize = 3;
-            _ = try writer.interface.writeSplat(data, splat);
+            try writer.interface.writeSplatAll(&data, splat);
             try writer.interface.flush();
             try stream.shutdown();
 
@@ -726,9 +726,9 @@ test "TCP: Writer splat with single element" {
             var writer = stream.writer(&write_buffer);
 
             // Test single element splat: "hello" repeated 3 times
-            const data: []const []const u8 = &.{"hello"};
+            var data = [_][]const u8{"hello"};
             const splat: usize = 3;
-            _ = try writer.interface.writeSplat(data, splat);
+            try writer.interface.writeSplatAll(&data, splat);
             try writer.interface.flush();
             try stream.shutdown();
 
@@ -737,6 +737,54 @@ test "TCP: Writer splat with single element" {
             const bytes_read = try stream.readAll(&read_buffer);
 
             const expected = "hellohellohello";
+            try testing.expectEqualStrings(expected, read_buffer[0..bytes_read]);
+        }
+    };
+
+    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    defer server_task.deinit();
+
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    defer client_task.deinit();
+
+    try runtime.run();
+
+    try server_task.result();
+    try client_task.result();
+}
+
+test "TCP: Writer splat with single character" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    var server_ready = ResetEvent.init(&runtime);
+
+    const ClientTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait();
+
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(&write_buffer);
+
+            // Test single-character splat optimization: "x" repeated 50 times
+            var data = [_][]const u8{"x"};
+            const splat: usize = 50;
+            try writer.interface.writeSplatAll(&data, splat);
+            try writer.interface.flush();
+            try stream.shutdown();
+
+            // Read back echoed data
+            var read_buffer: [1024]u8 = undefined;
+            const bytes_read = try stream.readAll(&read_buffer);
+
+            const expected = "x" ** 50;
             try testing.expectEqualStrings(expected, read_buffer[0..bytes_read]);
         }
     };
