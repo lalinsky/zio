@@ -64,8 +64,6 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    // try runTlsTask(&runtime);
-
     var tls_task = try runtime.spawn(runTlsTask, .{&runtime}, .{ .stack_size = 4 * 1024 * 1024 }); // Test 4MB stack
     defer tls_task.deinit();
 

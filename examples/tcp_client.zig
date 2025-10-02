@@ -16,8 +16,8 @@ fn clientTask(rt: *zio.Runtime) !void {
 
     const message = "Hello, server!";
 
-    _ = try writer.interface.write(message);
-    _ = try writer.interface.write("\n");
+    try writer.interface.writeAll(message);
+    try writer.interface.writeAll("\n");
 
     std.log.info("Sent: {s}", .{message});
 

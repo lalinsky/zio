@@ -23,8 +23,8 @@ fn handleClient(in_stream: zio.TcpStream) !void {
         };
 
         std.log.info("Received: {s}", .{line});
-        _ = try writer.interface.write(line);
-        _ = try writer.interface.write("\n");
+        try writer.interface.writeAll(line);
+        try writer.interface.writeAll("\n");
     }
 }
 
