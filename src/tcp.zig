@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
@@ -23,13 +24,18 @@ fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
         stream.close();
     }
 
-    var buffer: [1024]u8 = undefined;
-    while (true) {
-        const bytes_read = try stream.read(&buffer);
-        if (bytes_read == 0) break;
+    var read_buffer: [1024]u8 = undefined;
+    var write_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(&read_buffer);
+    var writer = stream.writer(&write_buffer);
 
-        try stream.writeAll(buffer[0..bytes_read]);
+    while (true) {
+        _ = reader.interface.stream(&writer.interface, .unlimited) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
     }
+    try writer.interface.flush();
 }
 
 pub const TcpListener = struct {
@@ -205,110 +211,21 @@ pub const TcpStream = struct {
     /// Returns the number of bytes read, which may be less than buffer.len.
     /// A return value of 0 indicates end-of-stream.
     pub fn read(self: *const TcpStream, buffer: []u8) !usize {
-        var waiter = self.runtime.getWaiter();
-        var completion: xev.Completion = undefined;
-
-        const Result = struct {
-            waiter: Waiter,
-            result: xev.ReadError!usize = undefined,
-
-            pub fn callback(
-                result_data_ptr: ?*@This(),
-                loop: *xev.Loop,
-                completion_inner: *xev.Completion,
-                socket: xev.TCP,
-                buffer_inner: xev.ReadBuffer,
-                result: xev.ReadError!usize,
-            ) xev.CallbackAction {
-                _ = loop;
-                _ = completion_inner;
-                _ = socket;
-                _ = buffer_inner;
-
-                const result_data = result_data_ptr.?;
-                result_data.result = result;
-                result_data.waiter.markReady();
-
-                return .disarm;
-            }
-        };
-
-        var result_data: Result = .{ .waiter = waiter };
-
-        self.xev_tcp.read(
-            &self.runtime.loop,
-            &completion,
-            .{ .slice = buffer },
-            Result,
-            &result_data,
-            Result.callback,
-        );
-
-        waiter.waitForReady();
-
-        return result_data.result catch |err| switch (err) {
-            error.EOF => 0,
+        return self.readBuf(.{ .slice = buffer }) catch |err| switch (err) {
+            error.EndOfStream => 0,
             else => err,
         };
-    }
-
-    /// Reads data from the stream into the provided iovecs.
-    /// Returns the number of bytes read from the first non-empty buffer.
-    /// This differs from POSIX readv by only filling the first buffer.
-    pub fn readv(self: *const TcpStream, iovecs: []std.posix.iovec) anyerror!usize {
-        // Find the first non-empty buffer
-        for (iovecs) |iovec| {
-            if (iovec.len == 0) continue;
-
-            const buffer = iovec.base[0..iovec.len];
-            return try self.read(buffer);
-        }
-        return 0; // All iovecs are empty
-    }
-
-    /// Reads data from the stream into all provided iovecs until they are filled
-    /// or EOF is reached. Returns the total number of bytes read across all buffers.
-    /// Unlike readv, this function attempts to fill all buffers completely.
-    pub fn readvAll(self: *const TcpStream, iovecs: []std.posix.iovec) anyerror!usize {
-        var total_read: usize = 0;
-
-        for (iovecs) |iovec| {
-            var buffer = iovec.base[0..iovec.len];
-
-            while (buffer.len > 0) {
-                const bytes_read = try self.read(buffer);
-
-                if (bytes_read == 0) {
-                    return total_read; // EOF reached
-                }
-
-                buffer = buffer[bytes_read..];
-                total_read += bytes_read;
-            }
-        }
-
-        return total_read;
     }
 
     /// Returns the number of bytes read. If the number read is smaller than
     /// `buffer.len`, it means the stream reached the end. Reaching the end of
     /// a stream is not an error condition.
-    pub fn readAll(self: *const TcpStream, buffer: []u8) anyerror!usize {
-        return self.readAtLeast(buffer, buffer.len);
-    }
-
-    /// Returns the number of bytes read, calling the underlying read function
-    /// the minimal number of times until the buffer has at least `len` bytes
-    /// filled. If the number read is less than `len` it means the stream
-    /// reached the end. Reaching the end of the stream is not an error
-    /// condition.
-    pub fn readAtLeast(self: *const TcpStream, buffer: []u8, len: usize) anyerror!usize {
-        std.debug.assert(len <= buffer.len);
+    pub fn readAll(self: *const TcpStream, buffer: []u8) !usize {
         var index: usize = 0;
-        while (index < len) {
-            const amt = try self.read(buffer[index..]);
-            if (amt == 0) break;
-            index += amt;
+        while (index < buffer.len) {
+            const n = try self.read(buffer[index..]);
+            if (n == 0) break;
+            index += n;
         }
         return index;
     }
@@ -401,49 +318,10 @@ pub const TcpStream = struct {
 
     /// Reads into multiple buffers using vectored I/O.
     /// Returns total bytes read. xev supports max 2 buffers.
-    pub fn readVec(self: *const TcpStream, iovecs: [][]u8) !usize {
+    pub fn readVec(self: *const TcpStream, iovecs: [][]u8) std.io.Reader.Error!usize {
         if (iovecs.len == 0) return 0;
 
-        const usable = @min(iovecs.len, 2);
-        const read_buf = xev.ReadBuffer.fromSlices(iovecs[0..usable]);
-
-        var waiter = self.runtime.getWaiter();
-        var completion: xev.Completion = undefined;
-
-        const Result = struct {
-            waiter: Waiter,
-            result: xev.ReadError!usize = undefined,
-        };
-        var result_data: Result = .{ .waiter = waiter };
-
-        self.xev_tcp.read(
-            &self.runtime.loop,
-            &completion,
-            read_buf,
-            Result,
-            &result_data,
-            (struct {
-                fn callback(
-                    result_ptr: ?*Result,
-                    _: *xev.Loop,
-                    _: *xev.Completion,
-                    _: xev.TCP,
-                    _: xev.ReadBuffer,
-                    result: xev.ReadError!usize,
-                ) xev.CallbackAction {
-                    result_ptr.?.result = result;
-                    result_ptr.?.waiter.markReady();
-                    return .disarm;
-                }
-            }).callback,
-        );
-
-        waiter.waitForReady();
-
-        return result_data.result catch |err| switch (err) {
-            error.EOF => 0,
-            else => err,
-        };
+        return self.readBuf(xev.ReadBuffer.fromSlices(iovecs));
     }
 
     /// Writes from multiple buffers using vectored I/O.
@@ -534,6 +412,50 @@ pub const TcpStream = struct {
         return result_data.result;
     }
 
+    /// Private low-level read function that all other read operations use.
+    /// Accepts xev.ReadBuffer directly and returns std.io.Reader compatible errors.
+    fn readBuf(self: *const TcpStream, buffer: xev.ReadBuffer) std.io.Reader.Error!usize {
+        var waiter = self.runtime.getWaiter();
+        var completion: xev.Completion = undefined;
+
+        const Result = struct {
+            waiter: Waiter,
+            result: xev.ReadError!usize = undefined,
+        };
+        var result_data: Result = .{ .waiter = waiter };
+
+        self.xev_tcp.read(
+            &self.runtime.loop,
+            &completion,
+            buffer,
+            Result,
+            &result_data,
+            (struct {
+                fn callback(
+                    result_ptr: ?*Result,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: xev.TCP,
+                    _: xev.ReadBuffer,
+                    result: xev.ReadError!usize,
+                ) xev.CallbackAction {
+                    result_ptr.?.result = result;
+                    result_ptr.?.waiter.markReady();
+                    return .disarm;
+                }
+            }).callback,
+        );
+
+        waiter.waitForReady();
+
+        const n = result_data.result catch |err| switch (err) {
+            error.EOF => return error.EndOfStream,
+            else => return error.ReadFailed,
+        };
+        if (n == 0) return error.EndOfStream;
+        return n;
+    }
+
     /// Closes the TCP stream and releases associated resources.
     /// This operation is asynchronous but returns immediately.
     pub fn close(self: *TcpStream) void {
@@ -603,12 +525,8 @@ pub const TcpStream = struct {
         fn stream(io_reader: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
             const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
             const dest = limit.slice(try w.writableSliceGreedy(1));
-            var data: [1][]u8 = .{dest};
 
-            const n = r.tcp_stream.readVec(&data) catch |err| switch (err) {
-                else => return error.ReadFailed,
-            };
-            if (n == 0) return error.EndOfStream;
+            const n = try r.tcp_stream.readBuf(.{ .slice = dest });
 
             w.advance(n);
             return n;
@@ -622,11 +540,10 @@ pub const TcpStream = struct {
 
             while (total_discarded < remaining) {
                 const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
-                const n = r.tcp_stream.read(io_reader.buffer[0..to_read]) catch |err| switch (err) {
-                    error.EOF => return error.EndOfStream,
+                const n = r.tcp_stream.readBuf(.{ .slice = io_reader.buffer[0..to_read] }) catch |err| switch (err) {
+                    error.EndOfStream => break,
                     else => return error.ReadFailed,
                 };
-                if (n == 0) break;
                 total_discarded += n;
             }
             return total_discarded;
@@ -635,14 +552,16 @@ pub const TcpStream = struct {
         fn readVec(io_reader: *std.io.Reader, data: [][]u8) std.io.Reader.Error!usize {
             const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
 
-            var vecs: [2][]u8 = undefined;
-            const dest_n, const data_size = try io_reader.writableVector(&vecs, data);
+            var buf: xev.ReadBuffer = .{ .vectors = .{ .data = undefined, .len = 0 } };
+            const dest_n, const data_size = if (builtin.os.tag == .windows)
+                try io_reader.writableVectorWsa(&buf.vectors.data, data)
+            else
+                try io_reader.writableVectorPosix(&buf.vectors.data, data);
+
+            buf.vectors.len = dest_n;
             if (dest_n == 0) return 0;
 
-            const n = r.tcp_stream.readVec(vecs[0..dest_n]) catch |err| switch (err) {
-                else => return error.ReadFailed,
-            };
-            if (n == 0) return error.EndOfStream;
+            const n = try r.tcp_stream.readBuf(buf);
 
             // Update buffer end pointer if we read into internal buffer
             if (n > data_size) {
@@ -771,102 +690,6 @@ test "TCP: basic echo server and client" {
     try client_task.result();
 }
 
-test "TCP: readv reads first buffer only" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var runtime = try Runtime.init(allocator, .{});
-    defer runtime.deinit();
-
-    var server_ready = ResetEvent.init(&runtime);
-
-    const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
-
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
-
-            try stream.writeAll("Hello, World!");
-            try stream.shutdown();
-
-            var buf1: [5]u8 = undefined;
-            var buf2: [5]u8 = undefined;
-            var buf3: [10]u8 = undefined;
-
-            var iovecs = [_]std.posix.iovec{
-                .{ .base = buf1[0..].ptr, .len = buf1.len },
-                .{ .base = buf2[0..].ptr, .len = buf2.len },
-                .{ .base = buf3[0..].ptr, .len = buf3.len },
-            };
-
-            const bytes_read = try stream.readv(&iovecs);
-            try testing.expectEqual(5, bytes_read);
-            try testing.expectEqualStrings("Hello", &buf1);
-        }
-    };
-
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
-    defer server_task.deinit();
-
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
-    defer client_task.deinit();
-
-    try runtime.run();
-    try server_task.result();
-    try client_task.result();
-}
-
-test "TCP: readvAll reads all buffers" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var runtime = try Runtime.init(allocator, .{});
-    defer runtime.deinit();
-
-    var server_ready = ResetEvent.init(&runtime);
-
-    const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
-
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
-
-            try stream.writeAll("Hello, World!");
-            try stream.shutdown();
-
-            var buf1: [5]u8 = undefined;
-            var buf2: [2]u8 = undefined;
-            var buf3: [6]u8 = undefined;
-
-            var iovecs = [_]std.posix.iovec{
-                .{ .base = buf1[0..].ptr, .len = buf1.len },
-                .{ .base = buf2[0..].ptr, .len = buf2.len },
-                .{ .base = buf3[0..].ptr, .len = buf3.len },
-            };
-
-            const bytes_read = try stream.readvAll(&iovecs);
-            try testing.expectEqual(13, bytes_read);
-            try testing.expectEqualStrings("Hello", &buf1);
-            try testing.expectEqualStrings(", ", &buf2);
-            try testing.expectEqualStrings("World!", &buf3);
-        }
-    };
-
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
-    defer server_task.deinit();
-
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
-    defer client_task.deinit();
-
-    try runtime.run();
-    try server_task.result();
-    try client_task.result();
-}
-
 test "TCP: writev writes first buffer only" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -899,7 +722,7 @@ test "TCP: writev writes first buffer only" {
             try testing.expectEqual(5, bytes_written);
 
             var buffer: [20]u8 = undefined;
-            const bytes_read = try stream.readAll(&buffer);
+            const bytes_read = try stream.read(&buffer);
             try testing.expect(bytes_read >= 5);
             try testing.expectEqualStrings("Hello", buffer[0..5]);
         }
@@ -947,90 +770,14 @@ test "TCP: writevAll writes all buffers" {
             try stream.shutdown();
 
             var buffer: [20]u8 = undefined;
-            const bytes_read = try stream.readAll(&buffer);
-            try testing.expectEqual(13, bytes_read);
-            try testing.expectEqualStrings("Hello, World!", buffer[0..bytes_read]);
-        }
-    };
-
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
-    defer server_task.deinit();
-
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
-    defer client_task.deinit();
-
-    try runtime.run();
-    try server_task.result();
-    try client_task.result();
-}
-
-test "TCP: readAtLeast reads minimum bytes" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var runtime = try Runtime.init(allocator, .{});
-    defer runtime.deinit();
-
-    var server_ready = ResetEvent.init(&runtime);
-
-    const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
-
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
-
-            try stream.writeAll("Hello, World!");
-            try stream.shutdown();
-
-            var buffer: [20]u8 = undefined;
-            const bytes_read = try stream.readAtLeast(&buffer, 5);
-            try testing.expect(bytes_read >= 5);
-            try testing.expectEqualStrings("Hello", buffer[0..5]);
-
-            if (bytes_read < 13) {
-                const remaining = try stream.readAtLeast(buffer[bytes_read..], 2);
-                try testing.expect(remaining >= 2);
+            var total_read: usize = 0;
+            while (total_read < 13) {
+                const n = try stream.read(buffer[total_read..]);
+                if (n == 0) break;
+                total_read += n;
             }
-        }
-    };
-
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
-    defer server_task.deinit();
-
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
-    defer client_task.deinit();
-
-    try runtime.run();
-    try server_task.result();
-    try client_task.result();
-}
-
-test "TCP: readAll reads entire buffer" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var runtime = try Runtime.init(allocator, .{});
-    defer runtime.deinit();
-
-    var server_ready = ResetEvent.init(&runtime);
-
-    const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
-
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
-
-            try stream.writeAll("Hello, World!");
-            try stream.shutdown();
-
-            var buffer: [13]u8 = undefined;
-            const bytes_read = try stream.readAll(&buffer);
-            try testing.expectEqual(13, bytes_read);
-            try testing.expectEqualStrings("Hello, World!", &buffer);
+            try testing.expectEqual(13, total_read);
+            try testing.expectEqualStrings("Hello, World!", buffer[0..total_read]);
         }
     };
 
