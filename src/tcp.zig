@@ -528,7 +528,11 @@ pub const TcpStream = struct {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_writer));
             const buffered = io_writer.buffered();
 
-            var vecs: [2][]const u8 = undefined;
+            const max_vecs = @typeInfo(std.meta.fieldInfo(
+                std.meta.fieldInfo(xev.WriteBuffer, .vectors).type,
+                .data,
+            ).type).array.len;
+            var vecs: [max_vecs][]const u8 = undefined;
             var len: usize = 0;
 
             // Add buffered data first
