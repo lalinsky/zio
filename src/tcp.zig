@@ -528,103 +528,60 @@ pub const TcpStream = struct {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_writer));
             const buffered = io_writer.buffered();
 
-            // Build write buffer using vectored I/O
-            // xev supports max 2 vectors, so we need to handle this carefully
             var vecs: [2][]const u8 = undefined;
-            var vec_count: usize = 0;
+            var len: usize = 0;
 
-            // Strategy: Try to include buffered data + first data slice in vecs[0],
-            // then pattern (potentially repeated) in vecs[1]
-
+            // Add buffered data first
             if (buffered.len > 0) {
-                vecs[vec_count] = buffered;
-                vec_count += 1;
+                vecs[len] = buffered;
+                len += 1;
             }
 
-            // Try to add first non-empty data slice
-            var first_slice_idx: ?usize = null;
-            for (data[0 .. data.len - 1], 0..) |slice, i| {
-                if (slice.len == 0) continue;
-                first_slice_idx = i;
-                if (vec_count < 2) {
-                    vecs[vec_count] = slice;
-                    vec_count += 1;
-                }
-                break;
+            // Add data slices
+            for (data[0 .. data.len - 1]) |d| {
+                if (d.len == 0) continue;
+                vecs[len] = d;
+                len += 1;
+                if (len == vecs.len) break;
             }
 
+            // Add splat pattern
             const pattern = data[data.len - 1];
+            if (len < vecs.len) switch (splat) {
+                0 => {},
+                1 => if (pattern.len != 0) {
+                    vecs[len] = pattern;
+                    len += 1;
+                },
+                else => switch (pattern.len) {
+                    0 => {},
+                    1 => {
+                        // Optimize single-character splat by using a temporary buffer
+                        const splat_buffer_candidate = io_writer.buffer[io_writer.end..];
+                        var backup_buffer: [64]u8 = undefined;
+                        const splat_buffer = if (splat_buffer_candidate.len >= backup_buffer.len)
+                            splat_buffer_candidate
+                        else
+                            &backup_buffer;
+                        const memset_len = @min(splat_buffer.len, splat);
+                        const buf = splat_buffer[0..memset_len];
+                        @memset(buf, pattern[0]);
+                        vecs[len] = buf;
+                        len += 1;
+                    },
+                    else => {
+                        // Multi-character pattern, just write it once
+                        vecs[len] = pattern;
+                        len += 1;
+                    },
+                },
+            };
 
-            // Add pattern for splat if we have room
-            if (splat > 0 and pattern.len > 0 and vec_count < 2) {
-                vecs[vec_count] = pattern;
-                vec_count += 1;
-            }
+            if (len == 0) return 0;
 
-            // If we have vectors to write, do the write
-            if (vec_count > 0) {
-                const write_buf = xev.WriteBuffer.fromSlices(vecs[0..vec_count]);
-
-                const n = try w.tcp_stream.writeBuf(write_buf);
-
-                // Handle partial write of buffered data
-                if (buffered.len > 0) {
-                    if (n < buffered.len) {
-                        std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
-                        io_writer.end = buffered.len - n;
-                        return 0;
-                    }
-                    io_writer.end = 0;
-                    const consumed = n - buffered.len;
-                    if (consumed == 0) return 0;
-
-                    // Check if we wrote into first data slice
-                    if (first_slice_idx) |idx| {
-                        const slice = data[idx];
-                        if (consumed < slice.len) {
-                            // Partial write of first slice - can't continue from here
-                            return consumed;
-                        }
-                        // Wrote full first slice, check pattern
-                        if (consumed >= slice.len and pattern.len > 0) {
-                            const pattern_written = consumed - slice.len;
-                            if (pattern_written > 0) {
-                                // Wrote some of pattern, need to track splat progress
-                                // For simplicity, return what we wrote
-                                return consumed;
-                            }
-                        }
-                    }
-                    return consumed;
-                }
-
-                // No buffered data - wrote directly from data slices
-                return n;
-            }
-
-            // No vectors written - handle remaining slices and splat sequentially
-            // This handles case where we need to write multiple data slices or splat > 1
-
-            var written: usize = 0;
-
-            // Write remaining data slices
-            for (data[0 .. data.len - 1]) |slice| {
-                if (slice.len == 0) continue;
-                const n = try w.tcp_stream.writeBuf(.{ .slice = slice });
-                written += n;
-                if (n < slice.len) return written; // Partial write
-            }
-
-            // Handle splat - write pattern splat times
-            if (pattern.len > 0) {
-                for (0..splat) |_| {
-                    const n = try w.tcp_stream.writeBuf(.{ .slice = pattern });
-                    written += n;
-                    if (n < pattern.len) return written; // Partial write
-                }
-            }
-
-            return written;
+            const write_buf = xev.WriteBuffer.fromSlices(vecs[0..len]);
+            const n = try w.tcp_stream.writeBuf(write_buf);
+            return io_writer.consume(n);
         }
 
         fn flush(io_writer: *std.io.Writer) std.io.Writer.Error!void {
