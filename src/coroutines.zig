@@ -139,8 +139,7 @@ pub fn switchContext(
               .rflags = true,
               .dirflag = true,
               .memory = true,
-            }
-        ),
+            }),
         .aarch64 => asm volatile (
             \\ adr x9, 0f
             \\ str x9, [x0, #16]
@@ -240,8 +239,7 @@ pub fn switchContext(
               .fpsr = true,
               .ffr = true,
               .memory = true,
-            }
-        ),
+            }),
         else => @compileError("unsupported architecture"),
     }
 }

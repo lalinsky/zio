@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
+const io = @import("io.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Waiter = @import("runtime.zig").Waiter;
 
@@ -209,6 +210,87 @@ pub const File = struct {
         return result_data.result;
     }
 
+    /// Low-level read function that accepts xev.ReadBuffer directly.
+    /// Returns std.io.Reader compatible errors.
+    pub fn readBuf(self: *const File, buffer: xev.ReadBuffer) std.io.Reader.Error!usize {
+        var waiter = self.runtime.getWaiter();
+        var completion: xev.Completion = undefined;
+
+        const Result = struct {
+            waiter: Waiter,
+            result: xev.ReadError!usize = undefined,
+        };
+        var result_data: Result = .{ .waiter = waiter };
+
+        self.xev_file.read(
+            &self.runtime.loop,
+            &completion,
+            buffer,
+            Result,
+            &result_data,
+            (struct {
+                fn callback(
+                    result_ptr: ?*Result,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: xev.File,
+                    _: xev.ReadBuffer,
+                    result: xev.ReadError!usize,
+                ) xev.CallbackAction {
+                    result_ptr.?.result = result;
+                    result_ptr.?.waiter.markReady();
+                    return .disarm;
+                }
+            }).callback,
+        );
+
+        waiter.waitForReady();
+
+        return result_data.result catch |err| switch (err) {
+            error.EOF => return error.EndOfStream,
+            else => return error.ReadFailed,
+        };
+    }
+
+    /// Low-level write function that accepts xev.WriteBuffer directly.
+    /// Returns std.io.Writer compatible errors.
+    pub fn writeBuf(self: *const File, buffer: xev.WriteBuffer) std.io.Writer.Error!usize {
+        var waiter = self.runtime.getWaiter();
+        var completion: xev.Completion = undefined;
+
+        const Result = struct {
+            waiter: Waiter,
+            result: xev.WriteError!usize = undefined,
+        };
+        var result_data: Result = .{ .waiter = waiter };
+
+        self.xev_file.write(
+            &self.runtime.loop,
+            &completion,
+            buffer,
+            Result,
+            &result_data,
+            (struct {
+                fn callback(
+                    result_ptr: ?*Result,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: xev.File,
+                    _: xev.WriteBuffer,
+                    result: xev.WriteError!usize,
+                ) xev.CallbackAction {
+                    result_ptr.?.result = result;
+                    result_ptr.?.waiter.markReady();
+                    return .disarm;
+                }
+            }).callback,
+        );
+
+        waiter.waitForReady();
+
+        return result_data.result catch return error.WriteFailed;
+    }
+
     pub fn close(self: *File) !void {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
@@ -249,6 +331,18 @@ pub const File = struct {
         waiter.waitForReady();
 
         return result_data.result;
+    }
+
+    // Zig 0.15+ streaming interface
+    pub const Reader = io.StreamReader(File);
+    pub const Writer = io.StreamWriter(File);
+
+    pub fn reader(self: *const File, buffer: []u8) Reader {
+        return Reader.init(self, buffer);
+    }
+
+    pub fn writer(self: *const File, buffer: []u8) Writer {
+        return Writer.init(self, buffer);
     }
 
     pub fn deinit(self: *const File) void {
@@ -378,6 +472,62 @@ test "File: close operation" {
             try zio_file.close();
 
             // File should now be closed
+        }
+    };
+
+    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
+    defer task.deinit();
+
+    try runtime.run();
+
+    try task.result();
+}
+
+test "File: reader and writer interface" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const fs = @import("fs.zig");
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    const TestTask = struct {
+        fn run(rt: *Runtime) !void {
+            const file_path = "test_file_rw_interface.txt";
+            defer std.fs.cwd().deleteFile(file_path) catch {};
+
+            // Write using writer interface
+            {
+                var file = try fs.createFile(rt, file_path, .{});
+                defer file.deinit();
+
+                var write_buffer: [256]u8 = undefined;
+                var writer = file.writer(&write_buffer);
+
+                // Test writeSplatAll with single-character pattern
+                var data = [_][]const u8{"x"};
+                try writer.interface.writeSplatAll(&data, 10);
+                try writer.interface.flush();
+
+                try file.close();
+            }
+
+            // Read using reader interface
+            {
+                var file = try fs.openFile(rt, file_path, .{});
+                defer file.deinit();
+
+                var read_buffer: [256]u8 = undefined;
+                var reader = file.reader(&read_buffer);
+
+                var result: [20]u8 = undefined;
+                const bytes_read = try reader.interface.readSliceShort(&result);
+
+                try testing.expectEqual(10, bytes_read);
+                try testing.expectEqualStrings("xxxxxxxxxx", result[0..bytes_read]);
+
+                try file.close();
+            }
         }
     };
 
