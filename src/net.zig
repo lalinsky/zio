@@ -46,7 +46,7 @@ pub fn tcpConnectToHost(
             else => return err,
         };
     }
-    return std.posix.ConnectError.ConnectionRefused;
+    return error.ConnectionRefused;
 }
 
 /// Async TCP connection to a specific address.
