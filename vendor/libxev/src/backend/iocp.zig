@@ -549,6 +549,11 @@ pub const Loop = struct {
                 if (result != 0) {
                     const err = windows.ws2_32.WSAGetLastError();
                     break :action switch (err) {
+                        .WSA_OPERATION_ABORTED, .WSAECONNABORTED => .{ .result = .{ .connect = error.Canceled } },
+                        .WSAECONNREFUSED => .{ .result = .{ .connect = error.ConnectionRefused } },
+                        .WSAECONNRESET => .{ .result = .{ .connect = error.ConnectionResetByPeer } },
+                        .WSAETIMEDOUT => .{ .result = .{ .connect = error.ConnectionTimedOut } },
+                        .WSAEHOSTUNREACH, .WSAENETUNREACH => .{ .result = .{ .connect = error.NetworkUnreachable } },
                         else => .{ .result = .{ .connect = windows.unexpectedWSAError(err) } },
                     };
                 }
@@ -1430,6 +1435,10 @@ pub const CloseError = error{
 
 pub const ConnectError = error{
     Canceled,
+    ConnectionRefused,
+    ConnectionResetByPeer,
+    ConnectionTimedOut,
+    NetworkUnreachable,
     Unexpected,
 };
 
