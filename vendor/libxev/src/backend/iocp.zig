@@ -1086,8 +1086,9 @@ pub const Completion = struct {
                 if (result == windows.FALSE) {
                     const err = windows.kernel32.GetLastError();
                     return .{
-                        .read = switch (err) {
+                        .pread = switch (err) {
                             windows.Win32Error.OPERATION_ABORTED => error.Canceled,
+                            windows.Win32Error.HANDLE_EOF => error.EOF,
                             else => error.Unexpected,
                         },
                     };
@@ -1116,7 +1117,7 @@ pub const Completion = struct {
                 if (result == windows.FALSE) {
                     const err = windows.kernel32.GetLastError();
                     return .{
-                        .write = switch (err) {
+                        .pwrite = switch (err) {
                             windows.Win32Error.OPERATION_ABORTED => error.Canceled,
                             else => error.Unexpected,
                         },
