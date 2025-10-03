@@ -2,9 +2,10 @@ const std = @import("std");
 const print = std.debug.print;
 const zio = @import("zio");
 
-fn clientTask(rt: *zio.Runtime) !void {
-    const addr = try zio.Address.parseIp4("127.0.0.1", 8080);
-    var stream = try zio.TcpStream.connect(rt, addr);
+fn clientTask(rt: *zio.Runtime, allocator: std.mem.Allocator) !void {
+    // Connect using hostname instead of IP address
+    std.log.info("Connecting to localhost:8080...", .{});
+    var stream = try zio.net.tcpConnectToHost(rt, allocator, "localhost", 8080);
     defer stream.close();
 
     defer stream.shutdown() catch |err| std.log.err("Shutdown error: {}", .{err});
@@ -32,10 +33,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{});
+    // Enable thread pool for DNS resolution
+    var runtime = try zio.Runtime.init(allocator, .{
+        .thread_pool = .{ .enabled = true },
+    });
     defer runtime.deinit();
 
-    var task = try runtime.spawn(clientTask, .{&runtime}, .{});
+    var task = try runtime.spawn(clientTask, .{ &runtime, allocator }, .{});
     defer task.deinit();
 
     try runtime.run();
