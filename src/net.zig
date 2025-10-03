@@ -15,14 +15,8 @@ pub fn getAddressList(
     name: []const u8,
     port: u16,
 ) !*AddressList {
-    const blocking_fn = struct {
-        fn call(alloc: std.mem.Allocator, hostname: []const u8, p: u16) !*AddressList {
-            return std.net.getAddressList(alloc, hostname, p);
-        }
-    }.call;
-
     var blocking_task = try runtime.spawnBlocking(
-        blocking_fn,
+        std.net.getAddressList,
         .{ allocator, name, port },
     );
     defer blocking_task.deinit();
