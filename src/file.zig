@@ -8,6 +8,10 @@ const Waiter = @import("runtime.zig").Waiter;
 pub const File = struct {
     xev_file: xev.File,
     runtime: *Runtime,
+    /// File position for sequential read/write operations.
+    /// On Windows with overlapped I/O, we track this ourselves since the OS doesn't.
+    /// Starts at 0, matching POSIX behavior for newly opened files.
+    position: u64 = 0,
 
     pub fn init(runtime: *Runtime, std_file: std.fs.File) !File {
         return File{
@@ -54,10 +58,12 @@ pub const File = struct {
 
         var result_data: Result = .{ .waiter = waiter };
 
-        self.xev_file.read(
+        // Use pread with tracked position for cross-platform compatibility
+        self.xev_file.pread(
             &self.runtime.loop,
             &completion,
             .{ .slice = buffer },
+            self.position,
             Result,
             &result_data,
             Result.callback,
@@ -65,13 +71,13 @@ pub const File = struct {
 
         waiter.waitForReady();
 
-        return result_data.result;
+        const bytes_read = try result_data.result;
+        self.position += bytes_read;
+        return bytes_read;
     }
 
     pub fn write(self: *File, data: []const u8) !usize {
-        std.log.info("File.write: Starting write of {} bytes", .{data.len});
         var waiter = self.runtime.getWaiter();
-        std.log.info("File.write: Got waiter", .{});
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -101,21 +107,46 @@ pub const File = struct {
 
         var result_data: Result = .{ .waiter = waiter };
 
-        std.log.info("File.write: About to call xev_file.write", .{});
-        self.xev_file.write(
+        // Use pwrite with tracked position for cross-platform compatibility
+        self.xev_file.pwrite(
             &self.runtime.loop,
             &completion,
             .{ .slice = data },
+            self.position,
             Result,
             &result_data,
             Result.callback,
         );
 
-        std.log.info("File.write: Called xev_file.write, now waiting for ready", .{});
         waiter.waitForReady();
 
-        std.log.info("File.write: Wait completed, returning result", .{});
-        return result_data.result;
+        const bytes_written = try result_data.result;
+        self.position += bytes_written;
+        return bytes_written;
+    }
+
+    /// Seek to a position in the file.
+    /// Updates the internal position used by read() and write().
+    /// Does not affect pread() or pwrite() operations.
+    pub fn seek(self: *File, offset: i64, whence: std.fs.File.SeekableStream.SeekFrom) !u64 {
+        const new_pos: u64 = switch (whence) {
+            .start => blk: {
+                if (offset < 0) return error.InvalidOffset;
+                break :blk @intCast(offset);
+            },
+            .current => blk: {
+                const current: i64 = @intCast(self.position);
+                const result = current + offset;
+                if (result < 0) return error.InvalidOffset;
+                break :blk @intCast(result);
+            },
+            .end => {
+                // Seeking from end requires getting file size, which we don't support yet
+                return error.Unsupported;
+            },
+        };
+        self.position = new_pos;
+        return new_pos;
     }
 
     pub fn pread(self: *File, buffer: []u8, offset: u64) !usize {
@@ -212,7 +243,7 @@ pub const File = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *const File, buffer: *xev.ReadBuffer) std.io.Reader.Error!usize {
+    pub fn readBuf(self: *File, buffer: *xev.ReadBuffer) std.io.Reader.Error!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -223,10 +254,12 @@ pub const File = struct {
         };
         var result_data: Result = .{ .waiter = waiter, .buffer = buffer };
 
-        self.xev_file.read(
+        // Use pread with tracked position for cross-platform compatibility
+        self.xev_file.pread(
             &self.runtime.loop,
             &completion,
             buffer.*,
+            self.position,
             Result,
             &result_data,
             (struct {
@@ -252,15 +285,17 @@ pub const File = struct {
 
         waiter.waitForReady();
 
-        return result_data.result catch |err| switch (err) {
+        const bytes_read = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
             else => return error.ReadFailed,
         };
+        self.position += bytes_read;
+        return bytes_read;
     }
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *const File, buffer: xev.WriteBuffer) std.io.Writer.Error!usize {
+    pub fn writeBuf(self: *File, buffer: xev.WriteBuffer) std.io.Writer.Error!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -270,10 +305,12 @@ pub const File = struct {
         };
         var result_data: Result = .{ .waiter = waiter };
 
-        self.xev_file.write(
+        // Use pwrite with tracked position for cross-platform compatibility
+        self.xev_file.pwrite(
             &self.runtime.loop,
             &completion,
             buffer,
+            self.position,
             Result,
             &result_data,
             (struct {
@@ -294,7 +331,9 @@ pub const File = struct {
 
         waiter.waitForReady();
 
-        return result_data.result catch return error.WriteFailed;
+        const bytes_written = result_data.result catch return error.WriteFailed;
+        self.position += bytes_written;
+        return bytes_written;
     }
 
     pub fn close(self: *File) !void {
@@ -343,12 +382,12 @@ pub const File = struct {
     pub const Reader = io.StreamReader(File);
     pub const Writer = io.StreamWriter(File);
 
-    pub fn reader(self: *const File, buffer: []u8) Reader {
-        return Reader.init(@constCast(self), buffer);
+    pub fn reader(self: *File, buffer: []u8) Reader {
+        return Reader.init(self, buffer);
     }
 
-    pub fn writer(self: *const File, buffer: []u8) Writer {
-        return Writer.init(@constCast(self), buffer);
+    pub fn writer(self: *File, buffer: []u8) Writer {
+        return Writer.init(self, buffer);
     }
 
     pub fn deinit(self: *const File) void {

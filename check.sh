@@ -71,7 +71,8 @@ if [ -n "$TEST_FILTER" ]; then
 else
     echo "Running all unit tests..."
 fi
-zig build test
+zig build build-tests
+timeout 30s ./zig-out/bin/test
 
 echo "=== Running xev unit tests ==="
 if [ -n "$TEST_FILTER" ]; then
