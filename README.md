@@ -8,30 +8,43 @@ A lightweight async I/O library for Zig, built on top of stackful coroutines and
 const std = @import("std");
 const zio = @import("zio");
 
-fn myTask(rt: *zio.Runtime, name: []const u8) void {
-    std.debug.print("{s}: Starting\n", .{name});
+fn echoClient(rt: *zio.Runtime, allocator: std.mem.Allocator) !void {
+    // Connect to echo server using hostname
+    var stream = try zio.net.tcpConnectToHost(rt, allocator, "localhost", 8080);
+    defer stream.close();
 
-    rt.sleep(1000);
+    // Use buffered reader/writer
+    var read_buffer: [1024]u8 = undefined;
+    var write_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(&read_buffer);
+    var writer = stream.writer(&write_buffer);
 
-    std.debug.print("{s}: Finished\n", .{name});
+    // Send a line
+    try writer.interface.writeAll("Hello, World!\n");
+    try writer.interface.flush();
+
+    // Read response line
+    const response = try reader.interface.takeDelimiterExclusive('\n');
+    std.debug.print("Echo: {s}\n", .{response});
 }
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    // Initialize zio runtime
-    var runtime = try zio.Runtime.init(gpa.allocator());
+    // Initialize runtime with thread pool for DNS resolution
+    var runtime = try zio.Runtime.init(gpa.allocator(), .{
+        .thread_pool = .{ .enabled = true },
+    });
     defer runtime.deinit();
 
-    // Spawn coroutines
-    const task1 = try runtime.spawn(myTask, .{ &runtime, "Task-1" }, .{});
-    defer task1.deinit();
-    const task2 = try runtime.spawn(myTask, .{ &runtime, "Task-2" }, .{});
-    defer task2.deinit();
+    // Spawn coroutine
+    var task = try runtime.spawn(echoClient, .{ &runtime, gpa.allocator() }, .{});
+    defer task.deinit();
 
     // Run the event loop
     try runtime.run();
+    try task.result();
 }
 ```
 
