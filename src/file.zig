@@ -441,13 +441,7 @@ test "File: basic read and write" {
         }
     };
 
-    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
-    defer task.deinit();
-
-    try runtime.run();
-
-    // Clean API to check task result
-    try task.result();
+    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
 }
 
 test "File: positional read and write" {
@@ -486,12 +480,7 @@ test "File: positional read and write" {
         }
     };
 
-    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
-    defer task.deinit();
-
-    try runtime.run();
-
-    try task.result();
+    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
 }
 
 test "File: close operation" {
@@ -520,12 +509,7 @@ test "File: close operation" {
         }
     };
 
-    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
-    defer task.deinit();
-
-    try runtime.run();
-
-    try task.result();
+    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
 }
 
 test "File: reader and writer interface" {
@@ -576,10 +560,5 @@ test "File: reader and writer interface" {
         }
     };
 
-    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
-    defer task.deinit();
-
-    try runtime.run();
-
-    try task.result();
+    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
 }

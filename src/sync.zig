@@ -372,10 +372,7 @@ test "Mutex tryLock" {
     };
 
     var results: [3]bool = undefined;
-    var task = try runtime.spawn(TestFn.testTryLock, .{ &runtime, &mutex, &results }, .{});
-    defer task.deinit();
-
-    try runtime.run();
+    try runtime.runUntilComplete(TestFn.testTryLock, .{ &runtime, &mutex, &results }, .{});
 
     try testing.expect(results[0]); // First tryLock should succeed
     try testing.expect(!results[1]); // Second tryLock should fail
@@ -449,10 +446,7 @@ test "Condition timedWait timeout" {
         }
     };
 
-    var task = try runtime.spawn(TestFn.waiter, .{ &runtime, &mutex, &condition, &timed_out }, .{});
-    defer task.deinit();
-
-    try runtime.run();
+    try runtime.runUntilComplete(TestFn.waiter, .{ &runtime, &mutex, &condition, &timed_out }, .{});
 
     try testing.expect(timed_out);
 }
@@ -587,10 +581,7 @@ test "ResetEvent timedWait timeout" {
         }
     };
 
-    var task = try runtime.spawn(TestFn.waiter, .{ &runtime, &reset_event, &timed_out }, .{});
-    defer task.deinit();
-
-    try runtime.run();
+    try runtime.runUntilComplete(TestFn.waiter, .{ &runtime, &reset_event, &timed_out }, .{});
 
     try testing.expect(timed_out);
     try testing.expect(!reset_event.isSet());
@@ -656,10 +647,7 @@ test "ResetEvent wait on already set event" {
         }
     };
 
-    var task = try runtime.spawn(TestFn.waiter, .{ &runtime, &reset_event, &wait_completed }, .{});
-    defer task.deinit();
-
-    try runtime.run();
+    try runtime.runUntilComplete(TestFn.waiter, .{ &runtime, &reset_event, &wait_completed }, .{});
 
     try testing.expect(wait_completed);
     try testing.expect(reset_event.isSet());

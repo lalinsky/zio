@@ -606,6 +606,24 @@ pub const Runtime = struct {
         return JoinHandle(ReturnType(func)){ .kind = .{ .blocking = task } };
     }
 
+    /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
+    /// This is equivalent to: spawn() + run() + result(), but in a single call.
+    /// Returns an error union that includes errors from spawn(), run(), and the task itself.
+    pub fn runUntilComplete(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !ReturnPayload(func) {
+        var handle = try self.spawn(func, args, options);
+        defer handle.deinit();
+        try self.run();
+        return handle.result();
+    }
+
+    fn ReturnPayload(comptime func: anytype) type {
+        const T = ReturnType(func);
+        return switch (@typeInfo(T)) {
+            .error_union => |eu| eu.payload,
+            else => T,
+        };
+    }
+
     pub fn run(self: *Runtime) !void {
         while (true) {
             var reschedule: AwaitableList = .{};
@@ -724,9 +742,5 @@ test "runtime: spawnBlocking smoke test" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{&runtime}, .{});
-    defer handle.deinit();
-
-    try runtime.run();
-    try handle.result();
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
 }

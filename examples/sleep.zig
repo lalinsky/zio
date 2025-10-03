@@ -16,8 +16,5 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(sleepTask, .{&runtime}, .{});
-    defer handle.deinit();
-
-    try runtime.run();
+    try runtime.runUntilComplete(sleepTask, .{&runtime}, .{});
 }

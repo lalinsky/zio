@@ -208,9 +208,5 @@ test "fs: openFile and createFile with different modes" {
         }
     };
 
-    var task = try runtime.spawn(TestTask.run, .{&runtime}, .{});
-    defer task.deinit();
-
-    try runtime.run();
-    try task.result();
+    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
 }

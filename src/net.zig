@@ -71,11 +71,7 @@ test "getAddressList: localhost" {
         }
     };
 
-    var task = try runtime.spawn(GetAddressListTask.run, .{ &runtime, allocator }, .{});
-    defer task.deinit();
-
-    try runtime.run();
-    try task.result();
+    try runtime.runUntilComplete(GetAddressListTask.run, .{ &runtime, allocator }, .{});
 }
 
 test "getAddressList: numeric IP" {
@@ -95,11 +91,7 @@ test "getAddressList: numeric IP" {
         }
     };
 
-    var task = try runtime.spawn(GetAddressListTask.run, .{ &runtime, allocator }, .{});
-    defer task.deinit();
-
-    try runtime.run();
-    try task.result();
+    try runtime.runUntilComplete(GetAddressListTask.run, .{ &runtime, allocator }, .{});
 }
 
 test "tcpConnectToAddress: basic connection" {
