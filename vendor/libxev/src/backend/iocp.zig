@@ -1086,8 +1086,9 @@ pub const Completion = struct {
                 if (result == windows.FALSE) {
                     const err = windows.kernel32.GetLastError();
                     return .{
-                        .read = switch (err) {
+                        .pread = switch (err) {
                             windows.Win32Error.OPERATION_ABORTED => error.Canceled,
+                            windows.Win32Error.HANDLE_EOF => error.EOF,
                             else => error.Unexpected,
                         },
                     };
@@ -1116,7 +1117,7 @@ pub const Completion = struct {
                 if (result == windows.FALSE) {
                     const err = windows.kernel32.GetLastError();
                     return .{
-                        .write = switch (err) {
+                        .pwrite = switch (err) {
                             windows.Win32Error.OPERATION_ABORTED => error.Canceled,
                             else => error.Unexpected,
                         },
@@ -1556,10 +1557,11 @@ pub const WriteBuffer = union(enum) {
 
         // Convert to Windows-specific WSABUF format for vectored I/O
         // Note: WSABUF has different field order than iovec (len, buf vs base, len)
+        // Note: WSABUF.buf is [*]u8 but we have const data - cast away const for Windows API
         var data: [2]windows.ws2_32.WSABUF = undefined;
         const len = @min(slices.len, 2);
         for (slices[0..len], 0..) |slice, i| {
-            data[i] = .{ .len = @intCast(slice.len), .buf = slice.ptr };
+            data[i] = .{ .len = @intCast(slice.len), .buf = @constCast(slice.ptr) };
         }
         return .{ .vectors = .{ .data = data, .len = len } };
     }

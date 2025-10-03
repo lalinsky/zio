@@ -8,11 +8,14 @@ pub fn build(b: *std.Build) void {
     const xev = b.dependency("libxev", .{ .target = target, .optimize = optimize });
 
     // Create the zio library
-    const zio_lib = b.addStaticLibrary(.{
+    const zio_lib = b.addLibrary(.{
         .name = "zio",
-        .root_source_file = b.path("src/zio.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zio.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .linkage = .static,
     });
     zio_lib.root_module.addImport("xev", xev.module("xev"));
     b.installArtifact(zio_lib);
@@ -40,9 +43,11 @@ pub fn build(b: *std.Build) void {
     for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
-            .root_source_file = b.path(example.file),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(example.file),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         exe.root_module.addImport("zio", zio);
 
@@ -56,9 +61,11 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/zio.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zio.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     lib_unit_tests.root_module.addImport("xev", xev.module("xev"));
@@ -66,4 +73,8 @@ pub fn build(b: *std.Build) void {
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+
+    // Build tests without running them (useful for cross-compilation)
+    const build_tests_step = b.step("build-tests", "Build unit tests without running");
+    build_tests_step.dependOn(&b.addInstallArtifact(lib_unit_tests, .{}).step);
 }

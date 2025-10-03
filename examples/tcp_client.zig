@@ -9,18 +9,20 @@ fn clientTask(rt: *zio.Runtime) !void {
 
     defer stream.shutdown() catch |err| std.log.err("Shutdown error: {}", .{err});
 
-    var reader = stream.reader();
-    var writer = stream.writer();
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
+    var reader = stream.reader(&read_buffer);
+    var writer = stream.writer(&write_buffer);
 
     const message = "Hello, server!";
 
-    try writer.writeAll(message);
-    try writer.writeAll("\n");
+    try writer.interface.writeAll(message);
+    try writer.interface.writeAll("\n");
 
     std.log.info("Sent: {s}", .{message});
 
-    var buffer: [1024]u8 = undefined;
-    const message2 = try reader.readUntilDelimiter(&buffer, '\n');
+    // Use new Reader delimiter method to read until newline
+    const message2 = try reader.interface.takeDelimiterExclusive('\n');
 
     std.log.info("Received: {s}", .{message2});
 }
