@@ -142,6 +142,40 @@ pub const Condition = struct {
         if (timed_out) {
             return error.Timeout;
         }
+
+        // If we didn't timeout, we were signaled - cancel the timer and wait for cancellation
+        var cancel_done = false;
+        var cancel_completion: xev.Completion = undefined;
+        timer.cancel(
+            &runtime.loop,
+            &completion,
+            &cancel_completion,
+            bool,
+            &cancel_done,
+            struct {
+                fn callback(
+                    ctx: ?*bool,
+                    loop: *xev.Loop,
+                    c: *xev.Completion,
+                    result: anyerror!void,
+                ) xev.CallbackAction {
+                    _ = loop;
+                    _ = c;
+                    _ = result catch {};
+                    if (ctx) |done| {
+                        done.* = true;
+                    }
+                    return .disarm;
+                }
+            }.callback,
+        );
+
+        // Wait for cancellation to complete
+        mutex.unlock(runtime);
+        while (!cancel_done) {
+            runtime.loop.run(.no_wait) catch {};
+        }
+        mutex.lock(runtime);
     }
 
     pub fn signal(self: *Condition, runtime: *Runtime) void {
@@ -311,6 +345,38 @@ pub const ResetEvent = struct {
         // Check if we timed out
         if (timed_out) {
             return error.Timeout;
+        }
+
+        // If we didn't timeout, we were signaled - cancel the timer and wait for cancellation
+        var cancel_done = false;
+        var cancel_completion: xev.Completion = undefined;
+        timer.cancel(
+            &runtime.loop,
+            &completion,
+            &cancel_completion,
+            bool,
+            &cancel_done,
+            struct {
+                fn callback(
+                    ctx: ?*bool,
+                    loop: *xev.Loop,
+                    c: *xev.Completion,
+                    result: anyerror!void,
+                ) xev.CallbackAction {
+                    _ = loop;
+                    _ = c;
+                    _ = result catch {};
+                    if (ctx) |done| {
+                        done.* = true;
+                    }
+                    return .disarm;
+                }
+            }.callback,
+        );
+
+        // Wait for cancellation to complete
+        while (!cancel_done) {
+            runtime.loop.run(.no_wait) catch {};
         }
     }
 };
