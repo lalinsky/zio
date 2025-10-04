@@ -658,6 +658,7 @@ pub fn Queue(comptime T: type) type {
         /// Initialize a queue with the provided buffer.
         /// The buffer's length determines the queue capacity.
         pub fn init(buffer: []T) Self {
+            std.debug.assert(buffer.len > 0);
             return .{ .buffer = buffer };
         }
 

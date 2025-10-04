@@ -11,21 +11,22 @@ const BoundedBuffer = struct {
     not_full: zio.Condition,
 
     fn init(runtime: *zio.Runtime) BoundedBuffer {
+        _ = runtime;
         return .{
             .buffer = std.mem.zeroes([8]i32),
-            .mutex = zio.Mutex.init(runtime),
-            .not_empty = zio.Condition.init(runtime),
-            .not_full = zio.Condition.init(runtime),
+            .mutex = zio.Mutex.init,
+            .not_empty = zio.Condition.init,
+            .not_full = zio.Condition.init,
         };
     }
 
-    fn put(self: *BoundedBuffer, item: i32) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    fn put(self: *BoundedBuffer, rt: *zio.Runtime, item: i32) void {
+        self.mutex.lock(rt);
+        defer self.mutex.unlock(rt);
 
         // Wait until buffer is not full
         while (self.count == self.buffer.len) {
-            self.not_full.wait(&self.mutex);
+            self.not_full.wait(rt, &self.mutex);
         }
 
         // Add item to buffer
@@ -36,16 +37,16 @@ const BoundedBuffer = struct {
         std.log.info("Produced: {} (buffer size: {})", .{ item, self.count });
 
         // Signal that buffer is not empty
-        self.not_empty.signal();
+        self.not_empty.signal(rt);
     }
 
-    fn get(self: *BoundedBuffer) i32 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    fn get(self: *BoundedBuffer, rt: *zio.Runtime) i32 {
+        self.mutex.lock(rt);
+        defer self.mutex.unlock(rt);
 
         // Wait until buffer is not empty
         while (self.count == 0) {
-            self.not_empty.wait(&self.mutex);
+            self.not_empty.wait(rt, &self.mutex);
         }
 
         // Remove item from buffer
@@ -56,7 +57,7 @@ const BoundedBuffer = struct {
         std.log.info("Consumed: {} (buffer size: {})", .{ item, self.count });
 
         // Signal that buffer is not full
-        self.not_full.signal();
+        self.not_full.signal(rt);
 
         return item;
     }
@@ -65,7 +66,7 @@ const BoundedBuffer = struct {
 fn producer(rt: *zio.Runtime, buffer: *BoundedBuffer, id: u32) void {
     for (0..5) |i| {
         const item = @as(i32, @intCast(id * 100 + i));
-        buffer.put(item);
+        buffer.put(rt, item);
         rt.sleep(100); // Small delay between productions
     }
     std.log.info("Producer {} finished", .{id});
@@ -73,7 +74,7 @@ fn producer(rt: *zio.Runtime, buffer: *BoundedBuffer, id: u32) void {
 
 fn consumer(rt: *zio.Runtime, buffer: *BoundedBuffer, id: u32) void {
     for (0..5) |_| {
-        const item = buffer.get();
+        const item = buffer.get(rt);
         _ = item;
         rt.sleep(150); // Small delay between consumptions
     }
