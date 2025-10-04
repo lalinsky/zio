@@ -655,12 +655,6 @@ pub fn Queue(comptime T: type) type {
 
         const Self = @This();
 
-        pub const Error = error{
-            QueueClosed,
-            QueueEmpty,
-            QueueFull,
-        };
-
         /// Initialize a queue with the provided buffer.
         /// The buffer's length determines the queue capacity.
         pub fn init(buffer: []T) Self {
@@ -683,7 +677,7 @@ pub fn Queue(comptime T: type) type {
 
         /// Get an item from the queue, blocking if empty.
         /// Returns error.QueueClosed if the queue is closed and empty.
-        pub fn get(self: *Self, rt: *Runtime) Error!T {
+        pub fn get(self: *Self, rt: *Runtime) !T {
             self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
@@ -694,7 +688,7 @@ pub fn Queue(comptime T: type) type {
 
             // If closed and empty, return error
             if (self.closed and self.count == 0) {
-                return Error.QueueClosed;
+                return error.QueueClosed;
             }
 
             // Get item from head
@@ -710,15 +704,15 @@ pub fn Queue(comptime T: type) type {
 
         /// Try to get an item without blocking.
         /// Returns error.QueueEmpty if empty, error.QueueClosed if closed and empty.
-        pub fn tryGet(self: *Self, rt: *Runtime) Error!T {
+        pub fn tryGet(self: *Self, rt: *Runtime) !T {
             self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
             if (self.count == 0) {
                 if (self.closed) {
-                    return Error.QueueClosed;
+                    return error.QueueClosed;
                 }
-                return Error.QueueEmpty;
+                return error.QueueEmpty;
             }
 
             const item = self.buffer[self.head];
@@ -732,12 +726,12 @@ pub fn Queue(comptime T: type) type {
 
         /// Put an item into the queue, blocking if full.
         /// Returns error.QueueClosed if the queue is closed.
-        pub fn put(self: *Self, rt: *Runtime, item: T) Error!void {
+        pub fn put(self: *Self, rt: *Runtime, item: T) !void {
             self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
             if (self.closed) {
-                return Error.QueueClosed;
+                return error.QueueClosed;
             }
 
             // Wait while full
@@ -745,7 +739,7 @@ pub fn Queue(comptime T: type) type {
                 self.not_full.wait(rt, &self.mutex);
                 // Check if closed while waiting
                 if (self.closed) {
-                    return Error.QueueClosed;
+                    return error.QueueClosed;
                 }
             }
 
@@ -760,16 +754,16 @@ pub fn Queue(comptime T: type) type {
 
         /// Try to put an item without blocking.
         /// Returns error.QueueFull if full, error.QueueClosed if closed.
-        pub fn tryPut(self: *Self, rt: *Runtime, item: T) Error!void {
+        pub fn tryPut(self: *Self, rt: *Runtime, item: T) !void {
             self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
             if (self.closed) {
-                return Error.QueueClosed;
+                return error.QueueClosed;
             }
 
             if (self.count == self.buffer.len) {
-                return Error.QueueFull;
+                return error.QueueFull;
             }
 
             self.buffer[self.tail] = item;
@@ -852,7 +846,7 @@ test "Queue: tryPut and tryGet" {
         fn testTry(rt: *Runtime, q: *Queue(u32)) !void {
             // tryGet on empty queue should fail
             const empty_err = q.tryGet(rt);
-            try testing.expectError(Queue(u32).Error.QueueEmpty, empty_err);
+            try testing.expectError(error.QueueEmpty, empty_err);
 
             // tryPut should succeed
             try q.tryPut(rt, 1);
@@ -860,7 +854,7 @@ test "Queue: tryPut and tryGet" {
 
             // tryPut on full queue should fail
             const full_err = q.tryPut(rt, 3);
-            try testing.expectError(Queue(u32).Error.QueueFull, full_err);
+            try testing.expectError(error.QueueFull, full_err);
 
             // tryGet should succeed
             const val1 = try q.tryGet(rt);
@@ -871,7 +865,7 @@ test "Queue: tryPut and tryGet" {
 
             // tryGet on empty queue should fail again
             const empty_err2 = q.tryGet(rt);
-            try testing.expectError(Queue(u32).Error.QueueEmpty, empty_err2);
+            try testing.expectError(error.QueueEmpty, empty_err2);
         }
     };
 
@@ -1069,10 +1063,10 @@ test "Queue: put on closed queue" {
             q.close(rt, false);
 
             const put_err = q.put(rt, 1);
-            try testing.expectError(Queue(u32).Error.QueueClosed, put_err);
+            try testing.expectError(error.QueueClosed, put_err);
 
             const tryput_err = q.tryPut(rt, 2);
-            try testing.expectError(Queue(u32).Error.QueueClosed, tryput_err);
+            try testing.expectError(error.QueueClosed, tryput_err);
         }
     };
 
