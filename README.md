@@ -19,9 +19,9 @@ spawning many of them.
 - Single-threaded event loop (similar to Python's asyncio, but I'm exploring options how to introduce multiple I/O threads)
 - Spawn stackful coroutines, and wait for the results
 - Spawn blocking tasks in a thread pool, and wait for the results
-- File I/O on all platforms, Linux and Windows are truly non-blocking, other platorms are simulated using a thread pool
+- File I/O on all platforms, Linux and Windows are truly non-blocking, other platforms are simulated using a thread pool
 - Network I/O, supports TCP/UDP sockets, DNS resolution currently via thread pool
-- Full `std.Io.Reader` and `std.Io.Writer` support for TCP steams
+- Full `std.Io.Reader` and `std.Io.Writer` support for TCP streams
 - Synchronization primitives matching `std.Thread` API (`Mutex`/`Condition`/`ResetEvent`)
 
 ## TODO
