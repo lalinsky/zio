@@ -144,17 +144,26 @@ pub const Condition = struct {
         }
 
         // If we didn't timeout, we were signaled - cancel the timer and wait for cancellation
-        var cancel_done = false;
+        const CancelContext = struct {
+            runtime: *Runtime,
+            coroutine: *coroutines.Coroutine,
+        };
+
+        var cancel_ctx = CancelContext{
+            .runtime = runtime,
+            .coroutine = current,
+        };
+
         var cancel_completion: xev.Completion = undefined;
         timer.cancel(
             &runtime.loop,
             &completion,
             &cancel_completion,
-            bool,
-            &cancel_done,
+            CancelContext,
+            &cancel_ctx,
             struct {
                 fn callback(
-                    ctx: ?*bool,
+                    ctx: ?*CancelContext,
                     loop: *xev.Loop,
                     c: *xev.Completion,
                     result: anyerror!void,
@@ -162,8 +171,8 @@ pub const Condition = struct {
                     _ = loop;
                     _ = c;
                     _ = result catch {};
-                    if (ctx) |done| {
-                        done.* = true;
+                    if (ctx) |context| {
+                        context.runtime.markReady(context.coroutine);
                     }
                     return .disarm;
                 }
@@ -172,9 +181,7 @@ pub const Condition = struct {
 
         // Wait for cancellation to complete
         mutex.unlock(runtime);
-        while (!cancel_done) {
-            runtime.loop.run(.no_wait) catch {};
-        }
+        current.waitForReady();
         mutex.lock(runtime);
     }
 
@@ -348,17 +355,26 @@ pub const ResetEvent = struct {
         }
 
         // If we didn't timeout, we were signaled - cancel the timer and wait for cancellation
-        var cancel_done = false;
+        const CancelContext = struct {
+            runtime: *Runtime,
+            coroutine: *coroutines.Coroutine,
+        };
+
+        var cancel_ctx = CancelContext{
+            .runtime = runtime,
+            .coroutine = current,
+        };
+
         var cancel_completion: xev.Completion = undefined;
         timer.cancel(
             &runtime.loop,
             &completion,
             &cancel_completion,
-            bool,
-            &cancel_done,
+            CancelContext,
+            &cancel_ctx,
             struct {
                 fn callback(
-                    ctx: ?*bool,
+                    ctx: ?*CancelContext,
                     loop: *xev.Loop,
                     c: *xev.Completion,
                     result: anyerror!void,
@@ -366,8 +382,8 @@ pub const ResetEvent = struct {
                     _ = loop;
                     _ = c;
                     _ = result catch {};
-                    if (ctx) |done| {
-                        done.* = true;
+                    if (ctx) |context| {
+                        context.runtime.markReady(context.coroutine);
                     }
                     return .disarm;
                 }
@@ -375,9 +391,7 @@ pub const ResetEvent = struct {
         );
 
         // Wait for cancellation to complete
-        while (!cancel_done) {
-            runtime.loop.run(.no_wait) catch {};
-        }
+        current.waitForReady();
     }
 };
 
