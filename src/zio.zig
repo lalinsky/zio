@@ -28,6 +28,7 @@ pub const net = @import("net.zig");
 pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
 pub const ResetEvent = @import("sync.zig").ResetEvent;
+pub const Queue = @import("sync.zig").Queue;
 
 test {
     std.testing.refAllDecls(@This());
