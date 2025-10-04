@@ -7,85 +7,140 @@ const AnyTask = @import("runtime.zig").AnyTask;
 const xev = @import("xev");
 
 pub const Mutex = struct {
-    owner: std.atomic.Value(?*coroutines.Coroutine) = std.atomic.Value(?*coroutines.Coroutine).init(null),
-    wait_queue: AwaitableList = .{},
-    runtime: *Runtime,
+    state: State,
 
-    pub fn init(runtime: *Runtime) Mutex {
-        return .{ .runtime = runtime };
-    }
+    pub const State = enum(usize) {
+        locked_once = 0b00,
+        unlocked = 0b01,
+        contended = 0b10,
+        /// Pointer to head of wait queue (*Awaitable)
+        _,
 
-    pub fn tryLock(self: *Mutex) bool {
-        const current = coroutines.getCurrent() orelse return false;
-
-        // Try to atomically set owner from null to current
-        return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
-    }
-
-    pub fn lock(self: *Mutex) void {
-        const current = coroutines.getCurrent() orelse unreachable;
-
-        // Fast path: try to acquire unlocked mutex
-        if (self.tryLock()) return;
-
-        // Slow path: add current task to wait queue and suspend
-        const task = AnyTask.fromCoroutine(current);
-        self.wait_queue.append(&task.awaitable);
-
-        // Suspend until woken by unlock()
-        current.waitForReady();
-
-        // When we wake up, unlock() has already transferred ownership to us
-        const owner = self.owner.load(.acquire);
-        std.debug.assert(owner == current);
-    }
-
-    pub fn unlock(self: *Mutex) void {
-        const current = coroutines.getCurrent() orelse unreachable;
-        std.debug.assert(self.owner.load(.monotonic) == current);
-
-        // Check if there are waiters
-        if (self.wait_queue.pop()) |awaitable| {
-            const task = AnyTask.fromAwaitable(awaitable);
-            // Transfer ownership directly to next waiter
-            self.owner.store(&task.coro, .release);
-            // Wake them up (they already own the lock)
-            self.runtime.markReady(&task.coro);
-        } else {
-            // No waiters, release the lock completely
-            self.owner.store(null, .release);
+        pub fn isUnlocked(state: State) bool {
+            return @intFromEnum(state) & @intFromEnum(State.unlocked) == @intFromEnum(State.unlocked);
         }
+    };
+
+    pub const init: Mutex = .{ .state = .unlocked };
+
+    pub fn tryLock(mutex: *Mutex) bool {
+        const prev_state: State = @enumFromInt(@atomicRmw(
+            usize,
+            @as(*usize, @ptrCast(&mutex.state)),
+            .And,
+            ~@intFromEnum(State.unlocked),
+            .acquire,
+        ));
+        return prev_state.isUnlocked();
+    }
+
+    pub fn lock(mutex: *Mutex, runtime: *Runtime) void {
+        const prev_state: State = @enumFromInt(@atomicRmw(
+            usize,
+            @as(*usize, @ptrCast(&mutex.state)),
+            .And,
+            ~@intFromEnum(State.unlocked),
+            .acquire,
+        ));
+        if (prev_state.isUnlocked()) {
+            @branchHint(.likely);
+            return;
+        }
+
+        // Slow path: contention
+        _ = runtime;
+        const current = coroutines.getCurrent() orelse unreachable;
+        const task = AnyTask.fromCoroutine(current);
+        var state = prev_state;
+
+        while (true) {
+            switch (state) {
+                .unlocked => {
+                    // Try to acquire (might have become unlocked)
+                    state = @cmpxchgWeak(Mutex.State, &mutex.state, .unlocked, .locked_once, .acquire, .acquire) orelse {
+                        return; // Got the lock!
+                    };
+                },
+                else => {
+                    // Build intrusive queue: current.next = state (head)
+                    task.awaitable.next = @ptrFromInt(@intFromEnum(state));
+                    // CAS: if state unchanged, make current the new head
+                    state = @cmpxchgWeak(Mutex.State, &mutex.state, state, @enumFromInt(@intFromPtr(&task.awaitable)), .release, .acquire) orelse {
+                        current.waitForReady();
+                        return;
+                    };
+                },
+            }
+        }
+    }
+
+    pub fn unlock(mutex: *Mutex, runtime: *Runtime) void {
+        const prev_state = @cmpxchgWeak(State, &mutex.state, .locked_once, .unlocked, .release, .acquire) orelse {
+            @branchHint(.likely);
+            return;
+        };
+        std.debug.assert(prev_state != .unlocked); // mutex not locked
+
+        // Slow path: wake waiting coroutine
+        var maybe_waiting: ?*Awaitable = @ptrFromInt(@intFromEnum(prev_state));
+
+        while (if (maybe_waiting) |waiting|
+            @cmpxchgWeak(
+                Mutex.State,
+                &mutex.state,
+                @enumFromInt(@intFromPtr(waiting)),
+                @enumFromInt(@intFromPtr(waiting.next)),
+                .release,
+                .acquire,
+            )
+        else
+            @cmpxchgWeak(Mutex.State, &mutex.state, .locked_once, .unlocked, .release, .acquire) orelse return) |next_state|
+        {
+            maybe_waiting = @ptrFromInt(@intFromEnum(next_state));
+        }
+
+        maybe_waiting.?.next = null;
+        const task = AnyTask.fromAwaitable(maybe_waiting.?);
+        runtime.markReady(&task.coro);
     }
 };
 
 pub const Condition = struct {
-    wait_queue: AwaitableList = .{},
-    runtime: *Runtime,
+    state: u64 = 0,
 
-    pub fn init(runtime: *Runtime) Condition {
-        return .{ .runtime = runtime };
-    }
+    pub const init: Condition = .{};
 
-    pub fn wait(self: *Condition, mutex: *Mutex) void {
+    pub fn wait(self: *Condition, mutex: *Mutex, runtime: *Runtime) void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
-        // Add to wait queue before releasing mutex
-        self.wait_queue.append(&task.awaitable);
+        // Add to wait queue atomically (LIFO - prepend to head)
+        var state = @atomicLoad(u64, &self.state, .acquire);
+        while (true) {
+            task.awaitable.next = if (state == 0) null else @ptrFromInt(state);
+            const new_state = @intFromPtr(&task.awaitable);
+            state = @cmpxchgWeak(u64, &self.state, state, new_state, .release, .acquire) orelse break;
+        }
 
         // Atomically release mutex and wait
-        mutex.unlock();
+        mutex.unlock(runtime);
         current.waitForReady();
 
         // Re-acquire mutex after waking
-        mutex.lock();
+        mutex.lock(runtime);
     }
 
-    pub fn timedWait(self: *Condition, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
+    pub fn timedWait(self: *Condition, mutex: *Mutex, runtime: *Runtime, timeout_ns: u64) error{Timeout}!void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
-        self.wait_queue.append(&task.awaitable);
+        // Add to wait queue atomically (LIFO - prepend to head)
+        var state = @atomicLoad(u64, &self.state, .acquire);
+        while (true) {
+            task.awaitable.next = if (state == 0) null else @ptrFromInt(state);
+            const new_state = @intFromPtr(&task.awaitable);
+            state = @cmpxchgWeak(u64, &self.state, state, new_state, .release, .acquire) orelse break;
+        }
 
         // Setup timer for timeout
         var timed_out = false;
@@ -101,7 +156,7 @@ pub const Condition = struct {
         };
 
         var timeout_ctx = TimeoutContext{
-            .runtime = self.runtime,
+            .runtime = runtime,
             .condition = self,
             .awaitable = &task.awaitable,
             .coroutine = current,
@@ -110,7 +165,7 @@ pub const Condition = struct {
 
         var completion: xev.Completion = undefined;
         timer.run(
-            &self.runtime.loop,
+            &runtime.loop,
             &completion,
             timeout_ns / 1_000_000, // Convert to ms
             TimeoutContext,
@@ -126,7 +181,7 @@ pub const Condition = struct {
                     _ = c;
                     _ = result catch {};
                     if (ctx) |context| {
-                        if (context.condition.wait_queue.remove(context.awaitable)) {
+                        if (context.condition.removeAwaitable(context.awaitable)) {
                             context.timed_out.* = true;
                             context.runtime.markReady(context.coroutine);
                         }
@@ -137,11 +192,11 @@ pub const Condition = struct {
         );
 
         // Release mutex and wait
-        mutex.unlock();
+        mutex.unlock(runtime);
         current.waitForReady();
 
         // Re-acquire mutex first
-        mutex.lock();
+        mutex.lock(runtime);
 
         // Then check if we timed out and cleanup if needed
         if (timed_out) {
@@ -149,18 +204,75 @@ pub const Condition = struct {
         }
     }
 
-    pub fn signal(self: *Condition) void {
-        if (self.wait_queue.pop()) |awaitable| {
-            const task = AnyTask.fromAwaitable(awaitable);
-            self.runtime.markReady(&task.coro);
+    pub fn signal(self: *Condition, runtime: *Runtime) void {
+        var state = @atomicLoad(u64, &self.state, .acquire);
+        while (state != 0) {
+            const head: *Awaitable = @ptrFromInt(state);
+            const next_state = if (head.next) |next| @intFromPtr(next) else 0;
+
+            state = @cmpxchgWeak(u64, &self.state, state, next_state, .release, .acquire) orelse {
+                // Successfully dequeued head, wake it up
+                head.next = null;
+                const task = AnyTask.fromAwaitable(head);
+                runtime.markReady(&task.coro);
+                return;
+            };
         }
     }
 
-    pub fn broadcast(self: *Condition) void {
-        while (self.wait_queue.pop()) |awaitable| {
+    pub fn broadcast(self: *Condition, runtime: *Runtime) void {
+        // Atomically take the entire queue
+        const head_state = @atomicRmw(u64, &self.state, .Xchg, 0, .acquire);
+        if (head_state == 0) return;
+
+        // Wake all waiters in the queue
+        var current: ?*Awaitable = @ptrFromInt(head_state);
+        while (current) |awaitable| {
+            const next = awaitable.next;
+            awaitable.next = null;
             const task = AnyTask.fromAwaitable(awaitable);
-            self.runtime.markReady(&task.coro);
+            runtime.markReady(&task.coro);
+            current = next;
         }
+    }
+
+    // Helper function to remove a specific awaitable from the queue
+    // Returns true if the awaitable was found and removed
+    fn removeAwaitable(self: *Condition, target: *Awaitable) bool {
+        var state = @atomicLoad(u64, &self.state, .acquire);
+
+        while (state != 0) {
+            const head: *Awaitable = @ptrFromInt(state);
+
+            // Check if target is the head
+            if (head == target) {
+                const next_state = if (head.next) |next| @intFromPtr(next) else 0;
+                state = @cmpxchgWeak(u64, &self.state, state, next_state, .release, .acquire) orelse {
+                    head.next = null;
+                    return true;
+                };
+                continue;
+            }
+
+            // Scan the list to find the target
+            var prev = head;
+            var current = head.next;
+            while (current) |node| {
+                if (node == target) {
+                    // Found it - unlink from the list
+                    prev.next = node.next;
+                    node.next = null;
+                    return true;
+                }
+                prev = node;
+                current = node.next;
+            }
+
+            // Not found in this snapshot, reload and retry
+            return false;
+        }
+
+        return false;
     }
 };
 
@@ -168,44 +280,56 @@ pub const Condition = struct {
 /// It can also block coroutines until the "bool" is set with cancellation via timed waits.
 /// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return.
 pub const ResetEvent = struct {
-    state: std.atomic.Value(State) = std.atomic.Value(State).init(.unset),
-    wait_queue: AwaitableList = .{},
-    runtime: *Runtime,
+    state: State,
 
-    const State = enum(u8) {
+    pub const State = enum(usize) {
         unset = 0,
-        waiting = 1,
-        is_set = 2,
+        is_set = 1,
+        /// Pointer to head of wait queue (*Awaitable)
+        _,
+
+        pub fn isSet(state: State) bool {
+            return state == .is_set;
+        }
     };
 
-    pub fn init(runtime: *Runtime) ResetEvent {
-        return .{ .runtime = runtime };
-    }
+    pub const init: ResetEvent = .{ .state = .unset };
 
     /// Returns if the ResetEvent was set().
     /// Once reset() is called, this returns false until the next set().
     /// The memory accesses before the set() can be said to happen before isSet() returns true.
     pub fn isSet(self: *const ResetEvent) bool {
-        return self.state.load(.acquire) == .is_set;
+        const state: State = @enumFromInt(@atomicLoad(usize, @as(*usize, @ptrCast(@constCast(&self.state))), .acquire));
+        return state.isSet();
     }
 
     /// Marks the ResetEvent as "set" and unblocks any coroutines in wait() or timedWait() to observe the new state.
     /// The ResetEvent stays "set" until reset() is called, making future set() calls do nothing semantically.
     /// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return successfully.
-    pub fn set(self: *ResetEvent) void {
-        // Quick check if already set to avoid unnecessary atomic operations
-        if (self.state.load(.monotonic) == .is_set) {
+    pub fn set(self: *ResetEvent, runtime: *Runtime) void {
+        // Atomically swap to is_set and get previous state
+        const prev_state: State = @enumFromInt(@atomicRmw(
+            usize,
+            @as(*usize, @ptrCast(&self.state)),
+            .Xchg,
+            @intFromEnum(State.is_set),
+            .release,
+        ));
+
+        // If already set, nothing to do
+        if (prev_state == .is_set) {
             return;
         }
 
-        // Atomically set to is_set and get the previous state
-        const prev_state = self.state.swap(.is_set, .release);
-
-        // Only wake waiters if previous state was waiting (there were waiters)
-        if (prev_state == .waiting) {
-            while (self.wait_queue.pop()) |awaitable| {
+        // If there were waiters (state was a pointer), wake them all
+        if (prev_state != .unset) {
+            var current: ?*Awaitable = @ptrFromInt(@intFromEnum(prev_state));
+            while (current) |awaitable| {
+                const next = awaitable.next;
+                awaitable.next = null;
                 const task = AnyTask.fromAwaitable(awaitable);
-                self.runtime.markReady(&task.coro);
+                runtime.markReady(&task.coro);
+                current = next;
             }
         }
     }
@@ -214,54 +338,75 @@ pub const ResetEvent = struct {
     /// It is undefined behavior if reset() is called while coroutines are blocked in wait() or timedWait().
     /// Concurrent calls to set(), isSet() and reset() are allowed.
     pub fn reset(self: *ResetEvent) void {
-        self.state.store(.unset, .monotonic);
+        @atomicStore(usize, @as(*usize, @ptrCast(&self.state)), @intFromEnum(State.unset), .monotonic);
     }
 
     /// Blocks the caller's coroutine until the ResetEvent is set().
     /// This is effectively a more efficient version of `while (!isSet()) {}`.
     /// The memory accesses before the set() can be said to happen before wait() returns.
-    pub fn wait(self: *ResetEvent) void {
-        // Try to atomically register as a waiter
-        var state = self.state.load(.acquire);
-        if (state == .unset) {
-            state = self.state.cmpxchgStrong(.unset, .waiting, .acquire, .acquire) orelse .waiting;
+    pub fn wait(self: *ResetEvent, runtime: *Runtime) void {
+        _ = runtime;
+        var state: State = @enumFromInt(@atomicLoad(usize, @as(*usize, @ptrCast(&self.state)), .acquire));
+
+        // Fast path: already set
+        if (state == .is_set) {
+            return;
         }
 
-        // If we're now in waiting state, add to queue and block
-        if (state == .waiting) {
-            const current = coroutines.getCurrent() orelse unreachable;
-            const task = AnyTask.fromCoroutine(current);
-            self.wait_queue.append(&task.awaitable);
+        const current = coroutines.getCurrent() orelse unreachable;
+        const task = AnyTask.fromCoroutine(current);
 
-            // Suspend until woken by set()
-            current.waitForReady();
+        while (true) {
+            switch (state) {
+                .is_set => return,
+                .unset => {
+                    // Try to add ourselves as first waiter
+                    task.awaitable.next = null;
+                    state = @cmpxchgWeak(State, &self.state, .unset, @enumFromInt(@intFromPtr(&task.awaitable)), .release, .acquire) orelse {
+                        current.waitForReady();
+                        return;
+                    };
+                },
+                else => {
+                    // Add to existing queue
+                    task.awaitable.next = @ptrFromInt(@intFromEnum(state));
+                    state = @cmpxchgWeak(State, &self.state, state, @enumFromInt(@intFromPtr(&task.awaitable)), .release, .acquire) orelse {
+                        current.waitForReady();
+                        return;
+                    };
+                },
+            }
         }
-
-        // If state is is_set, we return immediately (event already set)
-        std.debug.assert(state == .is_set or state == .waiting);
     }
 
     /// Blocks the caller's coroutine until the ResetEvent is set(), or until the corresponding timeout expires.
     /// If the timeout expires before the ResetEvent is set, `error.Timeout` is returned.
     /// The memory accesses before the set() can be said to happen before timedWait() returns without error.
-    pub fn timedWait(self: *ResetEvent, timeout_ns: u64) error{Timeout}!void {
-        // Try to atomically register as a waiter
-        var state = self.state.load(.acquire);
-        if (state == .unset) {
-            state = self.state.cmpxchgStrong(.unset, .waiting, .acquire, .acquire) orelse .waiting;
-        }
+    pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{Timeout}!void {
+        var state: State = @enumFromInt(@atomicLoad(usize, @as(*usize, @ptrCast(&self.state)), .acquire));
 
-        // If event is already set, return immediately
+        // Fast path: already set
         if (state == .is_set) {
             return;
         }
 
-        // We're now in waiting state, add to queue and setup timeout
-        std.debug.assert(state == .waiting);
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
-        self.wait_queue.append(&task.awaitable);
+        // Add to wait queue
+        while (true) {
+            switch (state) {
+                .is_set => return,
+                .unset => {
+                    task.awaitable.next = null;
+                    state = @cmpxchgWeak(State, &self.state, .unset, @enumFromInt(@intFromPtr(&task.awaitable)), .release, .acquire) orelse break;
+                },
+                else => {
+                    task.awaitable.next = @ptrFromInt(@intFromEnum(state));
+                    state = @cmpxchgWeak(State, &self.state, state, @enumFromInt(@intFromPtr(&task.awaitable)), .release, .acquire) orelse break;
+                },
+            }
+        }
 
         // Setup timer for timeout
         var timed_out = false;
@@ -277,7 +422,7 @@ pub const ResetEvent = struct {
         };
 
         var timeout_ctx = TimeoutContext{
-            .runtime = self.runtime,
+            .runtime = runtime,
             .reset_event = self,
             .awaitable = &task.awaitable,
             .coroutine = current,
@@ -286,7 +431,7 @@ pub const ResetEvent = struct {
 
         var completion: xev.Completion = undefined;
         timer.run(
-            &self.runtime.loop,
+            &runtime.loop,
             &completion,
             timeout_ns / 1_000_000, // Convert to ms
             TimeoutContext,
@@ -302,7 +447,7 @@ pub const ResetEvent = struct {
                     _ = c;
                     _ = result catch {};
                     if (ctx) |context| {
-                        if (context.reset_event.wait_queue.remove(context.awaitable)) {
+                        if (context.reset_event.removeAwaitable(context.awaitable)) {
                             context.timed_out.* = true;
                             context.runtime.markReady(context.coroutine);
                         }
@@ -320,6 +465,50 @@ pub const ResetEvent = struct {
             return error.Timeout;
         }
     }
+
+    // Helper function to remove a specific awaitable from the queue
+    // Returns true if the awaitable was found and removed
+    fn removeAwaitable(self: *ResetEvent, target: *Awaitable) bool {
+        var state: State = @enumFromInt(@atomicLoad(usize, @as(*usize, @ptrCast(&self.state)), .acquire));
+
+        while (true) {
+            switch (state) {
+                .is_set => return false, // Waiter was already woken
+                .unset => return false, // No waiters
+                else => {
+                    // State is a pointer to wait queue
+                    const head: *Awaitable = @ptrFromInt(@intFromEnum(state));
+
+                    // Check if target is the head
+                    if (head == target) {
+                        const next_state: State = if (head.next) |next| @enumFromInt(@intFromPtr(next)) else .unset;
+                        state = @cmpxchgWeak(State, &self.state, state, next_state, .release, .acquire) orelse {
+                            head.next = null;
+                            return true;
+                        };
+                        continue;
+                    }
+
+                    // Scan the list to find the target
+                    var prev = head;
+                    var current = head.next;
+                    while (current) |node| {
+                        if (node == target) {
+                            // Found it - unlink from the list
+                            prev.next = node.next;
+                            node.next = null;
+                            return true;
+                        }
+                        prev = node;
+                        current = node.next;
+                    }
+
+                    // Not found in this snapshot
+                    return false;
+                },
+            }
+        }
+    }
 };
 
 test "Mutex basic lock/unlock" {
@@ -329,14 +518,13 @@ test "Mutex basic lock/unlock" {
     defer runtime.deinit();
 
     var shared_counter: u32 = 0;
-    var mutex = Mutex.init(&runtime);
+    var mutex = Mutex.init;
 
     const TestFn = struct {
         fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) void {
-            _ = rt;
             for (0..100) |_| {
-                mtx.lock();
-                defer mtx.unlock();
+                mtx.lock(rt);
+                defer mtx.unlock(rt);
                 counter.* += 1;
             }
         }
@@ -358,16 +546,15 @@ test "Mutex tryLock" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
+    var mutex = Mutex.init;
 
     const TestFn = struct {
         fn testTryLock(rt: *Runtime, mtx: *Mutex, results: *[3]bool) void {
-            _ = rt;
             results[0] = mtx.tryLock(); // Should succeed
             results[1] = mtx.tryLock(); // Should fail (already locked)
-            mtx.unlock();
+            mtx.unlock(rt);
             results[2] = mtx.tryLock(); // Should succeed again
-            mtx.unlock();
+            mtx.unlock(rt);
         }
     };
 
@@ -385,29 +572,28 @@ test "Condition basic wait/signal" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
-    var condition = Condition.init(&runtime);
+    var mutex = Mutex.init;
+    var condition = Condition.init;
     var ready = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
-            _ = rt;
-            mtx.lock();
-            defer mtx.unlock();
+            mtx.lock(rt);
+            defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(mtx);
+                cond.wait(mtx, rt);
             }
         }
 
         fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
             rt.yield(); // Give waiter time to start waiting
 
-            mtx.lock();
+            mtx.lock(rt);
             ready_flag.* = true;
-            mtx.unlock();
+            mtx.unlock(rt);
 
-            cond.signal();
+            cond.signal(rt);
         }
     };
 
@@ -427,18 +613,17 @@ test "Condition timedWait timeout" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
-    var condition = Condition.init(&runtime);
+    var mutex = Mutex.init;
+    var condition = Condition.init;
     var timed_out = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, timeout_flag: *bool) void {
-            _ = rt;
-            mtx.lock();
-            defer mtx.unlock();
+            mtx.lock(rt);
+            defer mtx.unlock(rt);
 
             // Should timeout after 10ms
-            cond.timedWait(mtx, 10_000_000) catch |err| {
+            cond.timedWait(mtx, rt, 10_000_000) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -457,19 +642,18 @@ test "Condition broadcast" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
-    var condition = Condition.init(&runtime);
+    var mutex = Mutex.init;
+    var condition = Condition.init;
     var ready = false;
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) void {
-            _ = rt;
-            mtx.lock();
-            defer mtx.unlock();
+            mtx.lock(rt);
+            defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(mtx);
+                cond.wait(mtx, rt);
             }
             counter.* += 1;
         }
@@ -480,11 +664,11 @@ test "Condition broadcast" {
             rt.yield();
             rt.yield();
 
-            mtx.lock();
+            mtx.lock(rt);
             ready_flag.* = true;
-            mtx.unlock();
+            mtx.unlock(rt);
 
-            cond.broadcast();
+            cond.broadcast(rt);
         }
     };
 
@@ -509,17 +693,17 @@ test "ResetEvent basic set/reset/isSet" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
 
     // Initially unset
     try testing.expect(!reset_event.isSet());
 
     // Set the event
-    reset_event.set();
+    reset_event.set(&runtime);
     try testing.expect(reset_event.isSet());
 
     // Setting again should be no-op
-    reset_event.set();
+    reset_event.set(&runtime);
     try testing.expect(reset_event.isSet());
 
     // Reset the event
@@ -533,19 +717,18 @@ test "ResetEvent wait/set signaling" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var waiter_finished = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, finished: *bool) void {
-            _ = rt;
-            event.wait();
+            event.wait(rt);
             finished.* = true;
         }
 
         fn setter(rt: *Runtime, event: *ResetEvent) void {
             rt.yield(); // Give waiter time to start waiting
-            event.set();
+            event.set(rt);
         }
     };
 
@@ -566,14 +749,13 @@ test "ResetEvent timedWait timeout" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var timed_out = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, timeout_flag: *bool) void {
-            _ = rt;
             // Should timeout after 10ms
-            event.timedWait(10_000_000) catch |err| {
+            event.timedWait(rt, 10_000_000) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -593,13 +775,12 @@ test "ResetEvent multiple waiters broadcast" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, counter: *u32) void {
-            _ = rt;
-            event.wait();
+            event.wait(rt);
             counter.* += 1;
         }
 
@@ -608,7 +789,7 @@ test "ResetEvent multiple waiters broadcast" {
             rt.yield();
             rt.yield();
             rt.yield();
-            event.set();
+            event.set(rt);
         }
     };
 
@@ -633,16 +814,15 @@ test "ResetEvent wait on already set event" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var wait_completed = false;
 
     // Set event before waiting
-    reset_event.set();
+    reset_event.set(&runtime);
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, completed: *bool) void {
-            _ = rt;
-            event.wait(); // Should return immediately
+            event.wait(rt); // Should return immediately
             completed.* = true;
         }
     };

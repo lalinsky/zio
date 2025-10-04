@@ -104,7 +104,7 @@ test "tcpConnectToAddress: basic connection" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server_ready = ResetEvent.init(&runtime);
+    var server_ready = ResetEvent.init;
 
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
@@ -116,7 +116,7 @@ test "tcpConnectToAddress: basic connection" {
             try listener.bind(addr);
             try listener.listen(1);
 
-            ready_event.set();
+            ready_event.set(rt);
 
             var stream = try listener.accept();
             defer stream.close();
@@ -129,7 +129,7 @@ test "tcpConnectToAddress: basic connection" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
+            ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try tcpConnectToAddress(rt, addr);
@@ -162,7 +162,7 @@ test "tcpConnectToHost: localhost connection" {
     var runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
-    var server_ready = ResetEvent.init(&runtime);
+    var server_ready = ResetEvent.init;
 
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
@@ -174,7 +174,7 @@ test "tcpConnectToHost: localhost connection" {
             try listener.bind(addr);
             try listener.listen(1);
 
-            ready_event.set();
+            ready_event.set(rt);
 
             var stream = try listener.accept();
             defer stream.close();
@@ -187,7 +187,7 @@ test "tcpConnectToHost: localhost connection" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent, alloc: std.mem.Allocator) !void {
-            ready_event.wait();
+            ready_event.wait(rt);
 
             var stream = try tcpConnectToHost(rt, alloc, "localhost", TEST_PORT);
             defer stream.close();

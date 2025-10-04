@@ -17,7 +17,7 @@ fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
     try listener.bind(addr);
     try listener.listen(1);
 
-    ready_event.set();
+    ready_event.set(rt);
 
     var stream = try listener.accept();
     defer {
@@ -464,11 +464,11 @@ test "TCP: basic echo server and client" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server_ready = ResetEvent.init(&runtime);
+    var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
+            ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -503,11 +503,11 @@ test "TCP: Writer splat handling" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server_ready = ResetEvent.init(&runtime);
+    var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
+            ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -551,11 +551,11 @@ test "TCP: Writer splat with single element" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server_ready = ResetEvent.init(&runtime);
+    var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
+            ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -599,11 +599,11 @@ test "TCP: Writer splat with single character" {
     var runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server_ready = ResetEvent.init(&runtime);
+    var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait();
+            ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);

@@ -1,6 +1,34 @@
 # ZIO - Zig I/O Library
 
-A lightweight async I/O library for Zig, built on top of stackful coroutines and libxev.
+An async I/O library for Zig, built on top of stackful coroutines and libxev.
+
+It uses non-blocking I/O in the background, but you can write your application code
+in a blocking fashion, without callbacks or state machines. That results in much
+more readable code. Additionally, you can use external libraries, if they support
+the reader/writer interfaces, they don't even need to be aware they are running
+in a coroutine and using non-blocking I/O.
+
+Coroutines still allocate a fairly large stack, so they are not as cheap as
+async functions in Rust or earlier versions of Zig (where were stackless state machines),
+but they are still much cheaper than threads, you don't need to be afraid of
+spawning many of them.
+
+## Features
+
+- Supports Linux, Windows and macOS
+- Single-threaded event loop (similar to Python's asyncio, but I'm exploring options how to introduce multiple I/O threads)
+- Spawn stackful coroutines, and wait for the results
+- Spawn blocking tasks in a thread pool, and wait for the results
+- File I/O on all platforms, Linux and Windows are truly non-blocking, other platorms are simulated using a thread pool
+- Network I/O, supports TCP/UDP sockets, DNS resolution currently via thread pool
+- Full `std.Io.Reader` and `std.Io.Writer` support for TCP steams
+- Synchronization primitives matching `std.Thread` API (`Mutex`/`Condition`/`ResetEvent`)
+
+## TODO
+
+- Support for async events (for coordinating multiple threads)
+- Support for sub-processes
+- Support for pipes
 
 ## Quick Start
 
