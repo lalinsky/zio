@@ -29,6 +29,7 @@ pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
 pub const ResetEvent = @import("sync.zig").ResetEvent;
 pub const Queue = @import("sync.zig").Queue;
+pub const Semaphore = @import("sync.zig").Semaphore;
 
 test {
     std.testing.refAllDecls(@This());
