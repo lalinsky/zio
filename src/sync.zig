@@ -9,6 +9,9 @@ const xev = @import("xev");
 pub const Mutex = struct {
     state: State,
 
+    // TODO: Waiters are currently LIFO (new waiters prepend to head), should be FIFO for fairness
+    // EventLoop achieves this by storing both head and tail pointers using fiber result space
+
     pub const State = enum(usize) {
         locked_once = 0b00,
         unlocked = 0b01,
@@ -108,9 +111,12 @@ pub const Mutex = struct {
 pub const Condition = struct {
     state: u64 = 0,
 
+    // TODO: Waiters are currently LIFO (new waiters prepend to head), should be FIFO for fairness
+    // EventLoop achieves this by storing both head and tail pointers using fiber result space
+
     pub const init: Condition = .{};
 
-    pub fn wait(self: *Condition, mutex: *Mutex, runtime: *Runtime) void {
+    pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
@@ -130,7 +136,7 @@ pub const Condition = struct {
         mutex.lock(runtime);
     }
 
-    pub fn timedWait(self: *Condition, mutex: *Mutex, runtime: *Runtime, timeout_ns: u64) error{Timeout}!void {
+    pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
@@ -281,6 +287,9 @@ pub const Condition = struct {
 /// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return.
 pub const ResetEvent = struct {
     state: State,
+
+    // TODO: Waiters are currently LIFO (new waiters prepend to head), should be FIFO for fairness
+    // EventLoop achieves this by storing both head and tail pointers using fiber result space
 
     pub const State = enum(usize) {
         unset = 0,
@@ -582,7 +591,7 @@ test "Condition basic wait/signal" {
             defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(mtx, rt);
+                cond.wait(rt, mtx);
             }
         }
 
@@ -623,7 +632,7 @@ test "Condition timedWait timeout" {
             defer mtx.unlock(rt);
 
             // Should timeout after 10ms
-            cond.timedWait(mtx, rt, 10_000_000) catch |err| {
+            cond.timedWait(rt, mtx, 10_000_000) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -653,7 +662,7 @@ test "Condition broadcast" {
             defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(mtx, rt);
+                cond.wait(rt, mtx);
             }
             counter.* += 1;
         }
