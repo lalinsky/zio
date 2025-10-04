@@ -23,6 +23,7 @@ spawning many of them.
 - Network I/O, supports TCP/UDP sockets, DNS resolution currently via thread pool
 - Full `std.Io.Reader` and `std.Io.Writer` support for TCP streams
 - Synchronization primitives matching `std.Thread` API (`Mutex`/`Condition`/`ResetEvent`)
+- `Queue(T)` for producer-consumer patterns across coroutines
 
 ## TODO
 
