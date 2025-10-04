@@ -9,11 +9,8 @@ const xev = @import("xev");
 pub const Mutex = struct {
     owner: std.atomic.Value(?*coroutines.Coroutine) = std.atomic.Value(?*coroutines.Coroutine).init(null),
     wait_queue: AwaitableList = .{},
-    runtime: *Runtime,
 
-    pub fn init(runtime: *Runtime) Mutex {
-        return .{ .runtime = runtime };
-    }
+    pub const init: Mutex = .{};
 
     pub fn tryLock(self: *Mutex) bool {
         const current = coroutines.getCurrent() orelse return false;
@@ -22,7 +19,8 @@ pub const Mutex = struct {
         return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
     }
 
-    pub fn lock(self: *Mutex) void {
+    pub fn lock(self: *Mutex, runtime: *Runtime) void {
+        _ = runtime;
         const current = coroutines.getCurrent() orelse unreachable;
 
         // Fast path: try to acquire unlocked mutex
@@ -40,7 +38,7 @@ pub const Mutex = struct {
         std.debug.assert(owner == current);
     }
 
-    pub fn unlock(self: *Mutex) void {
+    pub fn unlock(self: *Mutex, runtime: *Runtime) void {
         const current = coroutines.getCurrent() orelse unreachable;
         std.debug.assert(self.owner.load(.monotonic) == current);
 
@@ -50,7 +48,7 @@ pub const Mutex = struct {
             // Transfer ownership directly to next waiter
             self.owner.store(&task.coro, .release);
             // Wake them up (they already own the lock)
-            self.runtime.markReady(&task.coro);
+            runtime.markReady(&task.coro);
         } else {
             // No waiters, release the lock completely
             self.owner.store(null, .release);
@@ -60,13 +58,10 @@ pub const Mutex = struct {
 
 pub const Condition = struct {
     wait_queue: AwaitableList = .{},
-    runtime: *Runtime,
 
-    pub fn init(runtime: *Runtime) Condition {
-        return .{ .runtime = runtime };
-    }
+    pub const init: Condition = .{};
 
-    pub fn wait(self: *Condition, mutex: *Mutex) void {
+    pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
@@ -74,14 +69,14 @@ pub const Condition = struct {
         self.wait_queue.append(&task.awaitable);
 
         // Atomically release mutex and wait
-        mutex.unlock();
+        mutex.unlock(runtime);
         current.waitForReady();
 
         // Re-acquire mutex after waking
-        mutex.lock();
+        mutex.lock(runtime);
     }
 
-    pub fn timedWait(self: *Condition, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
+    pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
@@ -101,7 +96,7 @@ pub const Condition = struct {
         };
 
         var timeout_ctx = TimeoutContext{
-            .runtime = self.runtime,
+            .runtime = runtime,
             .condition = self,
             .awaitable = &task.awaitable,
             .coroutine = current,
@@ -110,7 +105,7 @@ pub const Condition = struct {
 
         var completion: xev.Completion = undefined;
         timer.run(
-            &self.runtime.loop,
+            &runtime.loop,
             &completion,
             timeout_ns / 1_000_000, // Convert to ms
             TimeoutContext,
@@ -137,11 +132,11 @@ pub const Condition = struct {
         );
 
         // Release mutex and wait
-        mutex.unlock();
+        mutex.unlock(runtime);
         current.waitForReady();
 
         // Re-acquire mutex first
-        mutex.lock();
+        mutex.lock(runtime);
 
         // Then check if we timed out and cleanup if needed
         if (timed_out) {
@@ -149,17 +144,17 @@ pub const Condition = struct {
         }
     }
 
-    pub fn signal(self: *Condition) void {
+    pub fn signal(self: *Condition, runtime: *Runtime) void {
         if (self.wait_queue.pop()) |awaitable| {
             const task = AnyTask.fromAwaitable(awaitable);
-            self.runtime.markReady(&task.coro);
+            runtime.markReady(&task.coro);
         }
     }
 
-    pub fn broadcast(self: *Condition) void {
+    pub fn broadcast(self: *Condition, runtime: *Runtime) void {
         while (self.wait_queue.pop()) |awaitable| {
             const task = AnyTask.fromAwaitable(awaitable);
-            self.runtime.markReady(&task.coro);
+            runtime.markReady(&task.coro);
         }
     }
 };
@@ -170,7 +165,6 @@ pub const Condition = struct {
 pub const ResetEvent = struct {
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.unset),
     wait_queue: AwaitableList = .{},
-    runtime: *Runtime,
 
     const State = enum(u8) {
         unset = 0,
@@ -178,9 +172,7 @@ pub const ResetEvent = struct {
         is_set = 2,
     };
 
-    pub fn init(runtime: *Runtime) ResetEvent {
-        return .{ .runtime = runtime };
-    }
+    pub const init: ResetEvent = .{};
 
     /// Returns if the ResetEvent was set().
     /// Once reset() is called, this returns false until the next set().
@@ -192,7 +184,7 @@ pub const ResetEvent = struct {
     /// Marks the ResetEvent as "set" and unblocks any coroutines in wait() or timedWait() to observe the new state.
     /// The ResetEvent stays "set" until reset() is called, making future set() calls do nothing semantically.
     /// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return successfully.
-    pub fn set(self: *ResetEvent) void {
+    pub fn set(self: *ResetEvent, runtime: *Runtime) void {
         // Quick check if already set to avoid unnecessary atomic operations
         if (self.state.load(.monotonic) == .is_set) {
             return;
@@ -205,7 +197,7 @@ pub const ResetEvent = struct {
         if (prev_state == .waiting) {
             while (self.wait_queue.pop()) |awaitable| {
                 const task = AnyTask.fromAwaitable(awaitable);
-                self.runtime.markReady(&task.coro);
+                runtime.markReady(&task.coro);
             }
         }
     }
@@ -220,7 +212,8 @@ pub const ResetEvent = struct {
     /// Blocks the caller's coroutine until the ResetEvent is set().
     /// This is effectively a more efficient version of `while (!isSet()) {}`.
     /// The memory accesses before the set() can be said to happen before wait() returns.
-    pub fn wait(self: *ResetEvent) void {
+    pub fn wait(self: *ResetEvent, runtime: *Runtime) void {
+        _ = runtime;
         // Try to atomically register as a waiter
         var state = self.state.load(.acquire);
         if (state == .unset) {
@@ -244,7 +237,7 @@ pub const ResetEvent = struct {
     /// Blocks the caller's coroutine until the ResetEvent is set(), or until the corresponding timeout expires.
     /// If the timeout expires before the ResetEvent is set, `error.Timeout` is returned.
     /// The memory accesses before the set() can be said to happen before timedWait() returns without error.
-    pub fn timedWait(self: *ResetEvent, timeout_ns: u64) error{Timeout}!void {
+    pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{Timeout}!void {
         // Try to atomically register as a waiter
         var state = self.state.load(.acquire);
         if (state == .unset) {
@@ -277,7 +270,7 @@ pub const ResetEvent = struct {
         };
 
         var timeout_ctx = TimeoutContext{
-            .runtime = self.runtime,
+            .runtime = runtime,
             .reset_event = self,
             .awaitable = &task.awaitable,
             .coroutine = current,
@@ -286,7 +279,7 @@ pub const ResetEvent = struct {
 
         var completion: xev.Completion = undefined;
         timer.run(
-            &self.runtime.loop,
+            &runtime.loop,
             &completion,
             timeout_ns / 1_000_000, // Convert to ms
             TimeoutContext,
@@ -329,14 +322,13 @@ test "Mutex basic lock/unlock" {
     defer runtime.deinit();
 
     var shared_counter: u32 = 0;
-    var mutex = Mutex.init(&runtime);
+    var mutex = Mutex.init;
 
     const TestFn = struct {
         fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) void {
-            _ = rt;
             for (0..100) |_| {
-                mtx.lock();
-                defer mtx.unlock();
+                mtx.lock(rt);
+                defer mtx.unlock(rt);
                 counter.* += 1;
             }
         }
@@ -358,16 +350,15 @@ test "Mutex tryLock" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
+    var mutex = Mutex.init;
 
     const TestFn = struct {
         fn testTryLock(rt: *Runtime, mtx: *Mutex, results: *[3]bool) void {
-            _ = rt;
             results[0] = mtx.tryLock(); // Should succeed
             results[1] = mtx.tryLock(); // Should fail (already locked)
-            mtx.unlock();
+            mtx.unlock(rt);
             results[2] = mtx.tryLock(); // Should succeed again
-            mtx.unlock();
+            mtx.unlock(rt);
         }
     };
 
@@ -385,29 +376,28 @@ test "Condition basic wait/signal" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
-    var condition = Condition.init(&runtime);
+    var mutex = Mutex.init;
+    var condition = Condition.init;
     var ready = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
-            _ = rt;
-            mtx.lock();
-            defer mtx.unlock();
+            mtx.lock(rt);
+            defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(mtx);
+                cond.wait(rt, mtx);
             }
         }
 
         fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
             rt.yield(); // Give waiter time to start waiting
 
-            mtx.lock();
+            mtx.lock(rt);
             ready_flag.* = true;
-            mtx.unlock();
+            mtx.unlock(rt);
 
-            cond.signal();
+            cond.signal(rt);
         }
     };
 
@@ -427,18 +417,17 @@ test "Condition timedWait timeout" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
-    var condition = Condition.init(&runtime);
+    var mutex = Mutex.init;
+    var condition = Condition.init;
     var timed_out = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, timeout_flag: *bool) void {
-            _ = rt;
-            mtx.lock();
-            defer mtx.unlock();
+            mtx.lock(rt);
+            defer mtx.unlock(rt);
 
             // Should timeout after 10ms
-            cond.timedWait(mtx, 10_000_000) catch |err| {
+            cond.timedWait(rt, mtx, 10_000_000) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -457,19 +446,18 @@ test "Condition broadcast" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var mutex = Mutex.init(&runtime);
-    var condition = Condition.init(&runtime);
+    var mutex = Mutex.init;
+    var condition = Condition.init;
     var ready = false;
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) void {
-            _ = rt;
-            mtx.lock();
-            defer mtx.unlock();
+            mtx.lock(rt);
+            defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(mtx);
+                cond.wait(rt, mtx);
             }
             counter.* += 1;
         }
@@ -480,11 +468,11 @@ test "Condition broadcast" {
             rt.yield();
             rt.yield();
 
-            mtx.lock();
+            mtx.lock(rt);
             ready_flag.* = true;
-            mtx.unlock();
+            mtx.unlock(rt);
 
-            cond.broadcast();
+            cond.broadcast(rt);
         }
     };
 
@@ -509,17 +497,17 @@ test "ResetEvent basic set/reset/isSet" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
 
     // Initially unset
     try testing.expect(!reset_event.isSet());
 
     // Set the event
-    reset_event.set();
+    reset_event.set(&runtime);
     try testing.expect(reset_event.isSet());
 
     // Setting again should be no-op
-    reset_event.set();
+    reset_event.set(&runtime);
     try testing.expect(reset_event.isSet());
 
     // Reset the event
@@ -533,19 +521,18 @@ test "ResetEvent wait/set signaling" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var waiter_finished = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, finished: *bool) void {
-            _ = rt;
-            event.wait();
+            event.wait(rt);
             finished.* = true;
         }
 
         fn setter(rt: *Runtime, event: *ResetEvent) void {
             rt.yield(); // Give waiter time to start waiting
-            event.set();
+            event.set(rt);
         }
     };
 
@@ -566,14 +553,13 @@ test "ResetEvent timedWait timeout" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var timed_out = false;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, timeout_flag: *bool) void {
-            _ = rt;
             // Should timeout after 10ms
-            event.timedWait(10_000_000) catch |err| {
+            event.timedWait(rt, 10_000_000) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -593,13 +579,12 @@ test "ResetEvent multiple waiters broadcast" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, counter: *u32) void {
-            _ = rt;
-            event.wait();
+            event.wait(rt);
             counter.* += 1;
         }
 
@@ -608,7 +593,7 @@ test "ResetEvent multiple waiters broadcast" {
             rt.yield();
             rt.yield();
             rt.yield();
-            event.set();
+            event.set(rt);
         }
     };
 
@@ -633,16 +618,15 @@ test "ResetEvent wait on already set event" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var reset_event = ResetEvent.init(&runtime);
+    var reset_event = ResetEvent.init;
     var wait_completed = false;
 
     // Set event before waiting
-    reset_event.set();
+    reset_event.set(&runtime);
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, completed: *bool) void {
-            _ = rt;
-            event.wait(); // Should return immediately
+            event.wait(rt); // Should return immediately
             completed.* = true;
         }
     };
@@ -651,4 +635,481 @@ test "ResetEvent wait on already set event" {
 
     try testing.expect(wait_completed);
     try testing.expect(reset_event.isSet());
+}
+
+/// Queue is a coroutine-safe bounded FIFO queue implemented as a ring buffer.
+/// It blocks coroutines when full (put) or empty (get).
+/// NOT safe for use across OS threads - use within a single Runtime only.
+pub fn Queue(comptime T: type) type {
+    return struct {
+        buffer: []T,
+        head: usize = 0,
+        tail: usize = 0,
+        count: usize = 0,
+
+        mutex: Mutex = Mutex.init,
+        not_empty: Condition = Condition.init,
+        not_full: Condition = Condition.init,
+
+        closed: bool = false,
+
+        const Self = @This();
+
+        /// Initialize a queue with the provided buffer.
+        /// The buffer's length determines the queue capacity.
+        pub fn init(buffer: []T) Self {
+            std.debug.assert(buffer.len > 0);
+            return .{ .buffer = buffer };
+        }
+
+        /// Check if the queue is empty.
+        pub fn isEmpty(self: *Self, rt: *Runtime) bool {
+            self.mutex.lock(rt);
+            defer self.mutex.unlock(rt);
+            return self.count == 0;
+        }
+
+        /// Check if the queue is full.
+        pub fn isFull(self: *Self, rt: *Runtime) bool {
+            self.mutex.lock(rt);
+            defer self.mutex.unlock(rt);
+            return self.count == self.buffer.len;
+        }
+
+        /// Get an item from the queue, blocking if empty.
+        /// Returns error.QueueClosed if the queue is closed and empty.
+        pub fn get(self: *Self, rt: *Runtime) !T {
+            self.mutex.lock(rt);
+            defer self.mutex.unlock(rt);
+
+            // Wait while empty and not closed
+            while (self.count == 0 and !self.closed) {
+                self.not_empty.wait(rt, &self.mutex);
+            }
+
+            // If closed and empty, return error
+            if (self.closed and self.count == 0) {
+                return error.QueueClosed;
+            }
+
+            // Get item from head
+            const item = self.buffer[self.head];
+            self.head = (self.head + 1) % self.buffer.len;
+            self.count -= 1;
+
+            // Signal that queue is not full
+            self.not_full.signal(rt);
+
+            return item;
+        }
+
+        /// Try to get an item without blocking.
+        /// Returns error.QueueEmpty if empty, error.QueueClosed if closed and empty.
+        pub fn tryGet(self: *Self, rt: *Runtime) !T {
+            self.mutex.lock(rt);
+            defer self.mutex.unlock(rt);
+
+            if (self.count == 0) {
+                if (self.closed) {
+                    return error.QueueClosed;
+                }
+                return error.QueueEmpty;
+            }
+
+            const item = self.buffer[self.head];
+            self.head = (self.head + 1) % self.buffer.len;
+            self.count -= 1;
+
+            self.not_full.signal(rt);
+
+            return item;
+        }
+
+        /// Put an item into the queue, blocking if full.
+        /// Returns error.QueueClosed if the queue is closed.
+        pub fn put(self: *Self, rt: *Runtime, item: T) !void {
+            self.mutex.lock(rt);
+            defer self.mutex.unlock(rt);
+
+            if (self.closed) {
+                return error.QueueClosed;
+            }
+
+            // Wait while full
+            while (self.count == self.buffer.len) {
+                self.not_full.wait(rt, &self.mutex);
+                // Check if closed while waiting
+                if (self.closed) {
+                    return error.QueueClosed;
+                }
+            }
+
+            // Add item to tail
+            self.buffer[self.tail] = item;
+            self.tail = (self.tail + 1) % self.buffer.len;
+            self.count += 1;
+
+            // Signal that queue is not empty
+            self.not_empty.signal(rt);
+        }
+
+        /// Try to put an item without blocking.
+        /// Returns error.QueueFull if full, error.QueueClosed if closed.
+        pub fn tryPut(self: *Self, rt: *Runtime, item: T) !void {
+            self.mutex.lock(rt);
+            defer self.mutex.unlock(rt);
+
+            if (self.closed) {
+                return error.QueueClosed;
+            }
+
+            if (self.count == self.buffer.len) {
+                return error.QueueFull;
+            }
+
+            self.buffer[self.tail] = item;
+            self.tail = (self.tail + 1) % self.buffer.len;
+            self.count += 1;
+
+            self.not_empty.signal(rt);
+        }
+
+        /// Close the queue.
+        /// If immediate is true, clears all items from the queue.
+        /// After closing, put operations will return error.QueueClosed.
+        /// get operations will drain remaining items, then return error.QueueClosed.
+        pub fn close(self: *Self, rt: *Runtime, immediate: bool) void {
+            self.mutex.lock(rt);
+            defer self.mutex.unlock(rt);
+
+            self.closed = true;
+
+            if (immediate) {
+                // Clear the buffer
+                self.head = 0;
+                self.tail = 0;
+                self.count = 0;
+            }
+
+            // Wake all waiters so they can see the queue is closed
+            self.not_empty.broadcast(rt);
+            self.not_full.broadcast(rt);
+        }
+    };
+}
+
+test "Queue: basic put and get" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [10]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn producer(rt: *Runtime, q: *Queue(u32)) !void {
+            try q.put(rt, 1);
+            try q.put(rt, 2);
+            try q.put(rt, 3);
+        }
+
+        fn consumer(rt: *Runtime, q: *Queue(u32), results: *[3]u32) !void {
+            results[0] = try q.get(rt);
+            results[1] = try q.get(rt);
+            results[2] = try q.get(rt);
+        }
+    };
+
+    var results: [3]u32 = undefined;
+    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &queue }, .{});
+    defer producer_task.deinit();
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &queue, &results }, .{});
+    defer consumer_task.deinit();
+
+    try runtime.run();
+
+    try testing.expectEqual(@as(u32, 1), results[0]);
+    try testing.expectEqual(@as(u32, 2), results[1]);
+    try testing.expectEqual(@as(u32, 3), results[2]);
+}
+
+test "Queue: tryPut and tryGet" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [2]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn testTry(rt: *Runtime, q: *Queue(u32)) !void {
+            // tryGet on empty queue should fail
+            const empty_err = q.tryGet(rt);
+            try testing.expectError(error.QueueEmpty, empty_err);
+
+            // tryPut should succeed
+            try q.tryPut(rt, 1);
+            try q.tryPut(rt, 2);
+
+            // tryPut on full queue should fail
+            const full_err = q.tryPut(rt, 3);
+            try testing.expectError(error.QueueFull, full_err);
+
+            // tryGet should succeed
+            const val1 = try q.tryGet(rt);
+            try testing.expectEqual(@as(u32, 1), val1);
+
+            const val2 = try q.tryGet(rt);
+            try testing.expectEqual(@as(u32, 2), val2);
+
+            // tryGet on empty queue should fail again
+            const empty_err2 = q.tryGet(rt);
+            try testing.expectError(error.QueueEmpty, empty_err2);
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.testTry, .{ &runtime, &queue }, .{});
+}
+
+test "Queue: blocking behavior when empty" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn consumer(rt: *Runtime, q: *Queue(u32), result: *u32) !void {
+            result.* = try q.get(rt); // Blocks until producer adds item
+        }
+
+        fn producer(rt: *Runtime, q: *Queue(u32)) !void {
+            rt.yield(); // Let consumer start waiting
+            try q.put(rt, 42);
+        }
+    };
+
+    var result: u32 = 0;
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &queue, &result }, .{});
+    defer consumer_task.deinit();
+    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &queue }, .{});
+    defer producer_task.deinit();
+
+    try runtime.run();
+
+    try testing.expectEqual(@as(u32, 42), result);
+}
+
+test "Queue: blocking behavior when full" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [2]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn producer(rt: *Runtime, q: *Queue(u32), count: *u32) !void {
+            try q.put(rt, 1);
+            try q.put(rt, 2);
+            try q.put(rt, 3); // Blocks until consumer takes item
+            count.* += 1;
+        }
+
+        fn consumer(rt: *Runtime, q: *Queue(u32)) !void {
+            rt.yield(); // Let producer fill the queue
+            rt.yield();
+            _ = try q.get(rt); // Unblock producer
+        }
+    };
+
+    var count: u32 = 0;
+    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &queue, &count }, .{});
+    defer producer_task.deinit();
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &queue }, .{});
+    defer consumer_task.deinit();
+
+    try runtime.run();
+
+    try testing.expectEqual(@as(u32, 1), count);
+}
+
+test "Queue: multiple producers and consumers" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [10]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn producer(rt: *Runtime, q: *Queue(u32), start: u32) !void {
+            for (0..5) |i| {
+                try q.put(rt, start + @as(u32, @intCast(i)));
+            }
+        }
+
+        fn consumer(rt: *Runtime, q: *Queue(u32), sum: *u32) !void {
+            for (0..5) |_| {
+                const val = try q.get(rt);
+                sum.* += val;
+            }
+        }
+    };
+
+    var sum: u32 = 0;
+    var producer1 = try runtime.spawn(TestFn.producer, .{ &runtime, &queue, @as(u32, 0) }, .{});
+    defer producer1.deinit();
+    var producer2 = try runtime.spawn(TestFn.producer, .{ &runtime, &queue, @as(u32, 100) }, .{});
+    defer producer2.deinit();
+    var consumer1 = try runtime.spawn(TestFn.consumer, .{ &runtime, &queue, &sum }, .{});
+    defer consumer1.deinit();
+    var consumer2 = try runtime.spawn(TestFn.consumer, .{ &runtime, &queue, &sum }, .{});
+    defer consumer2.deinit();
+
+    try runtime.run();
+
+    // Sum should be: (0+1+2+3+4) + (100+101+102+103+104) = 10 + 510 = 520
+    try testing.expectEqual(@as(u32, 520), sum);
+}
+
+test "Queue: close graceful" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn producer(rt: *Runtime, q: *Queue(u32)) !void {
+            try q.put(rt, 1);
+            try q.put(rt, 2);
+            q.close(rt, false); // Graceful close - items remain
+        }
+
+        fn consumer(rt: *Runtime, q: *Queue(u32), results: *[3]?u32) !void {
+            rt.yield(); // Let producer finish
+            results[0] = q.get(rt) catch null;
+            results[1] = q.get(rt) catch null;
+            results[2] = q.get(rt) catch null; // Should fail with QueueClosed
+        }
+    };
+
+    var results: [3]?u32 = .{ null, null, null };
+    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &queue }, .{});
+    defer producer_task.deinit();
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &queue, &results }, .{});
+    defer consumer_task.deinit();
+
+    try runtime.run();
+
+    try testing.expectEqual(@as(?u32, 1), results[0]);
+    try testing.expectEqual(@as(?u32, 2), results[1]);
+    try testing.expectEqual(@as(?u32, null), results[2]); // Closed, no more items
+}
+
+test "Queue: close immediate" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn producer(rt: *Runtime, q: *Queue(u32)) !void {
+            try q.put(rt, 1);
+            try q.put(rt, 2);
+            try q.put(rt, 3);
+            q.close(rt, true); // Immediate close - clears all items
+        }
+
+        fn consumer(rt: *Runtime, q: *Queue(u32), result: *?u32) !void {
+            rt.yield(); // Let producer finish
+            result.* = q.get(rt) catch null; // Should fail immediately
+        }
+    };
+
+    var result: ?u32 = null;
+    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &queue }, .{});
+    defer producer_task.deinit();
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &queue, &result }, .{});
+    defer consumer_task.deinit();
+
+    try runtime.run();
+
+    try testing.expectEqual(@as(?u32, null), result);
+}
+
+test "Queue: put on closed queue" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn testClosed(rt: *Runtime, q: *Queue(u32)) !void {
+            q.close(rt, false);
+
+            const put_err = q.put(rt, 1);
+            try testing.expectError(error.QueueClosed, put_err);
+
+            const tryput_err = q.tryPut(rt, 2);
+            try testing.expectError(error.QueueClosed, tryput_err);
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.testClosed, .{ &runtime, &queue }, .{});
+}
+
+test "Queue: ring buffer wrapping" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [3]u32 = undefined;
+    var queue = Queue(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn testWrap(rt: *Runtime, q: *Queue(u32)) !void {
+            // Fill the queue
+            try q.put(rt, 1);
+            try q.put(rt, 2);
+            try q.put(rt, 3);
+
+            // Empty it
+            _ = try q.get(rt);
+            _ = try q.get(rt);
+            _ = try q.get(rt);
+
+            // Fill it again (should wrap around)
+            try q.put(rt, 4);
+            try q.put(rt, 5);
+            try q.put(rt, 6);
+
+            // Verify items
+            const v1 = try q.get(rt);
+            const v2 = try q.get(rt);
+            const v3 = try q.get(rt);
+
+            try testing.expectEqual(@as(u32, 4), v1);
+            try testing.expectEqual(@as(u32, 5), v2);
+            try testing.expectEqual(@as(u32, 6), v3);
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.testWrap, .{ &runtime, &queue }, .{});
 }
