@@ -133,20 +133,24 @@ const Store = struct {
     }
 
     fn set(self: *Store, key: []const u8, value: []const u8) !void {
-        // Release old value if exists
-        if (self.map.get(key)) |old_ref| {
-            old_ref.release(self.allocator);
-        }
-
         // Create new StringRef
         const value_ref = try StringRef.create(self.allocator, value);
         errdefer value_ref.release(self.allocator);
 
-        // Store with owned key
-        const owned_key = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(owned_key);
+        // Get or put the key
+        const gop = try self.map.getOrPut(self.allocator, key);
+        errdefer if (!gop.found_existing) self.map.removeByPtr(gop.key_ptr);
 
-        try self.map.put(self.allocator, owned_key, value_ref);
+        if (gop.found_existing) {
+            // Release old value
+            gop.value_ptr.*.release(self.allocator);
+        } else {
+            // Allocate owned key for new entry
+            gop.key_ptr.* = try self.allocator.dupe(u8, key);
+        }
+
+        // Set new value
+        gop.value_ptr.* = value_ref;
     }
 
     fn get(self: *Store, key: []const u8) ?[]const u8 {
