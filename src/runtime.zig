@@ -737,16 +737,15 @@ pub const Runtime = struct {
 
         // Increment generation to invalidate any pending callbacks
         task.timer_generation +%= 1;
-        var timed_out = false;
 
         const CallbackContext = struct {
             user_ctx: *TimeoutContext,
-            timed_out: *bool,
+            timed_out: bool,
         };
 
         var ctx = CallbackContext{
             .user_ctx = timeout_ctx,
-            .timed_out = &timed_out,
+            .timed_out = false,
         };
 
         var timer = xev.Timer.init() catch unreachable;
@@ -787,7 +786,7 @@ pub const Runtime = struct {
                     // Generation matches - safe to dereference context
                     const ctx_ptr = unpacked.ptr;
                     if (onTimeout(ctx_ptr.user_ctx)) {
-                        ctx_ptr.timed_out.* = true;
+                        ctx_ptr.timed_out = true;
                         t.runtime.markReady(&t.coro);
                     }
                     return .disarm;
@@ -798,7 +797,7 @@ pub const Runtime = struct {
         // Wait for either timeout or external markReady
         current.waitForReady();
 
-        if (timed_out) {
+        if (ctx.timed_out) {
             return error.Timeout;
         }
 
