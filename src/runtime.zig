@@ -143,6 +143,7 @@ pub const AnyTask = struct {
     coro: Coroutine,
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
+    timer_generation: u64 = 0,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         assert(awaitable.kind == .coro);
@@ -715,6 +716,9 @@ pub const Runtime = struct {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
+        // Increment generation to invalidate any pending callbacks
+        task.timer_generation +%= 1;
+        const expected_generation = task.timer_generation;
         var timed_out = false;
 
         const CallbackContext = struct {
@@ -722,6 +726,7 @@ pub const Runtime = struct {
             coroutine: *coroutines.Coroutine,
             user_ctx: *TimeoutContext,
             timed_out: *bool,
+            expected_generation: u64,
         };
 
         var ctx = CallbackContext{
@@ -729,6 +734,7 @@ pub const Runtime = struct {
             .coroutine = current,
             .user_ctx = timeout_ctx,
             .timed_out = &timed_out,
+            .expected_generation = expected_generation,
         };
 
         var timer = xev.Timer.init() catch unreachable;
@@ -752,12 +758,16 @@ pub const Runtime = struct {
                     _ = l;
                     _ = c;
                     _ = r catch {};
-                    if (context) |ctx_ptr| {
-                        // Call user's timeout handler to check if we should wake
-                        if (onTimeout(ctx_ptr.user_ctx)) {
-                            ctx_ptr.timed_out.* = true;
-                            ctx_ptr.runtime.markReady(ctx_ptr.coroutine);
-                        }
+                    const ctx_ptr = context.?;
+                    const t = AnyTask.fromCoroutine(ctx_ptr.coroutine);
+                    // Check if this callback is from a stale timer (mismatched generation)
+                    if (t.timer_generation != ctx_ptr.expected_generation) {
+                        return .disarm;
+                    }
+                    // Call user's timeout handler to check if we should wake
+                    if (onTimeout(ctx_ptr.user_ctx)) {
+                        ctx_ptr.timed_out.* = true;
+                        ctx_ptr.runtime.markReady(ctx_ptr.coroutine);
                     }
                     return .disarm;
                 }
@@ -776,7 +786,8 @@ pub const Runtime = struct {
             return;
         }
 
-        // Was awakened by external markReady → cancel timer async, no wait needed
+        // Was awakened by external markReady → cancel timer async
+        // The generation check in the callback will ignore any late-firing timer
         timer.cancel(
             &self.loop,
             &task.timer_c,
