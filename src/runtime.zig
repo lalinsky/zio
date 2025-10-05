@@ -765,6 +765,11 @@ pub const Runtime = struct {
             return error.Timeout;
         }
 
+        // Timer already completed, no need to cancel
+        if (task.timer_c.flags.state == .dead) {
+            return;
+        }
+
         // Was awakened by external markReady → cancel timer async, no wait needed
         self.loop.cancel(
             &task.timer_c,
