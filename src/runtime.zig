@@ -550,24 +550,8 @@ pub const Runtime = struct {
     }
 
     pub fn sleep(self: *Runtime, milliseconds: u64) void {
-        var waiter = self.getWaiter();
-
-        var timer = xev.Timer.init() catch unreachable;
-        defer timer.deinit();
-
-        // Start the timer
-        var completion: xev.Completion = undefined;
-        timer.run(
-            &self.loop,
-            &completion,
-            milliseconds,
-            Waiter,
-            &waiter,
-            markReadyFromXevCallback,
-        );
-
-        // Wait for timer to fire
-        waiter.waitForReady();
+        self.timedWaitForReady(milliseconds * 1_000_000) catch return;
+        unreachable; // Should always timeout - waking without timeout is a bug
     }
 
     fn ensureBlockingInitialized(self: *Runtime) !void {
@@ -701,22 +685,34 @@ pub const Runtime = struct {
         current_coro.waitForReady();
     }
 
-    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{Timeout}!void {
+    /// Wait for the current coroutine to be marked ready, with a timeout and custom timeout handler.
+    /// The onTimeout callback is called when the timer fires, and should return true if the
+    /// coroutine should be woken with error.Timeout, or false if it was already signaled by
+    /// another source (in which case the timeout is ignored).
+    pub fn timedWaitForReadyWithCallback(
+        self: *Runtime,
+        timeout_ns: u64,
+        comptime TimeoutContext: type,
+        timeout_ctx: *TimeoutContext,
+        comptime onTimeout: fn (ctx: *TimeoutContext) bool,
+    ) error{Timeout}!void {
         const current = coroutines.getCurrent() orelse unreachable;
 
         var timed_out = false;
         var timer = xev.Timer.init() catch unreachable;
         defer timer.deinit();
 
-        const TimedWaitContext = struct {
+        const CallbackContext = struct {
             runtime: *Runtime,
             coroutine: *coroutines.Coroutine,
+            user_ctx: *TimeoutContext,
             timed_out: *bool,
         };
 
-        var ctx = TimedWaitContext{
+        var ctx = CallbackContext{
             .runtime = self,
             .coroutine = current,
+            .user_ctx = timeout_ctx,
             .timed_out = &timed_out,
         };
 
@@ -725,11 +721,11 @@ pub const Runtime = struct {
             &self.loop,
             &completion,
             timeout_ns / 1_000_000,
-            TimedWaitContext,
+            CallbackContext,
             &ctx,
             struct {
                 fn callback(
-                    c: ?*TimedWaitContext,
+                    c: ?*CallbackContext,
                     loop: *xev.Loop,
                     comp: *xev.Completion,
                     result: anyerror!void,
@@ -738,8 +734,11 @@ pub const Runtime = struct {
                     _ = comp;
                     _ = result catch {};
                     if (c) |context| {
-                        context.timed_out.* = true;
-                        context.runtime.markReady(context.coroutine);
+                        // Call user's timeout handler to check if we should wake
+                        if (onTimeout(context.user_ctx)) {
+                            context.timed_out.* = true;
+                            context.runtime.markReady(context.coroutine);
+                        }
                     }
                     return .disarm;
                 }
@@ -753,17 +752,22 @@ pub const Runtime = struct {
             return error.Timeout;
         }
 
+        // Timer already completed, no need to cancel
+        if (completion.flags.state == .dead) {
+            return;
+        }
+
         // Was awakened by external markReady → cancel timer and wait for cleanup
         var cancel_completion: xev.Completion = undefined;
         timer.cancel(
             &self.loop,
             &completion,
             &cancel_completion,
-            TimedWaitContext,
+            CallbackContext,
             &ctx,
             struct {
                 fn callback(
-                    c: ?*TimedWaitContext,
+                    c: ?*CallbackContext,
                     loop: *xev.Loop,
                     comp: *xev.Completion,
                     result: anyerror!void,
@@ -780,6 +784,21 @@ pub const Runtime = struct {
         );
 
         current.waitForReady(); // Wait for cancellation to complete
+    }
+
+    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{Timeout}!void {
+        const DummyContext = struct {};
+        var dummy: DummyContext = .{};
+        return self.timedWaitForReadyWithCallback(
+            timeout_ns,
+            DummyContext,
+            &dummy,
+            struct {
+                fn onTimeout(_: *DummyContext) bool {
+                    return true;
+                }
+            }.onTimeout,
+        );
     }
 };
 
