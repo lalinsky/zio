@@ -84,6 +84,7 @@ pub fn switchContext(
               .rcx = true,
               .rdx = true,
               .rbx = true,
+              .rdi = true,
               .rsi = true,
               .r8 = true,
               .r9 = true,
@@ -158,6 +159,7 @@ pub fn switchContext(
             : [current] "{x0}" (current_context),
               [new] "{x1}" (new_context),
             : .{
+              .x0 = true,
               .x1 = true,
               .x2 = true,
               .x3 = true,
