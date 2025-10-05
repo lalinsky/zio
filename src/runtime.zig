@@ -700,6 +700,87 @@ pub const Runtime = struct {
         task.awaitable.waiting_list.append(&current_task.awaitable);
         current_coro.waitForReady();
     }
+
+    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{Timeout}!void {
+        const current = coroutines.getCurrent() orelse unreachable;
+
+        var timed_out = false;
+        var timer = xev.Timer.init() catch unreachable;
+        defer timer.deinit();
+
+        const TimedWaitContext = struct {
+            runtime: *Runtime,
+            coroutine: *coroutines.Coroutine,
+            timed_out: *bool,
+        };
+
+        var ctx = TimedWaitContext{
+            .runtime = self,
+            .coroutine = current,
+            .timed_out = &timed_out,
+        };
+
+        var completion: xev.Completion = undefined;
+        timer.run(
+            &self.loop,
+            &completion,
+            timeout_ns / 1_000_000,
+            TimedWaitContext,
+            &ctx,
+            struct {
+                fn callback(
+                    c: ?*TimedWaitContext,
+                    loop: *xev.Loop,
+                    comp: *xev.Completion,
+                    result: anyerror!void,
+                ) xev.CallbackAction {
+                    _ = loop;
+                    _ = comp;
+                    _ = result catch {};
+                    if (c) |context| {
+                        context.timed_out.* = true;
+                        context.runtime.markReady(context.coroutine);
+                    }
+                    return .disarm;
+                }
+            }.callback,
+        );
+
+        // Wait for either timeout or external markReady
+        current.waitForReady();
+
+        if (timed_out) {
+            return error.Timeout;
+        }
+
+        // Was awakened by external markReady → cancel timer and wait for cleanup
+        var cancel_completion: xev.Completion = undefined;
+        timer.cancel(
+            &self.loop,
+            &completion,
+            &cancel_completion,
+            TimedWaitContext,
+            &ctx,
+            struct {
+                fn callback(
+                    c: ?*TimedWaitContext,
+                    loop: *xev.Loop,
+                    comp: *xev.Completion,
+                    result: anyerror!void,
+                ) xev.CallbackAction {
+                    _ = loop;
+                    _ = comp;
+                    _ = result catch {};
+                    if (c) |context| {
+                        context.runtime.markReady(context.coroutine);
+                    }
+                    return .disarm;
+                }
+            }.callback,
+        );
+
+        current.waitForReady(); // Wait for cancellation to complete
+    }
 };
 
 test "runtime with thread pool smoke test" {
