@@ -66,6 +66,20 @@ fn markReadyFromXevCallback(
     return .disarm;
 }
 
+// Noop callback for async timer cancellation
+fn noopTimerCancelCallback(
+    ud: ?*anyopaque,
+    l: *xev.Loop,
+    c: *xev.Completion,
+    r: xev.CancelError!void,
+) xev.CallbackAction {
+    _ = ud;
+    _ = l;
+    _ = c;
+    _ = r catch {};
+    return .disarm;
+}
+
 // Thread pool callback for blocking tasks
 fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
@@ -127,6 +141,8 @@ pub const AnyTask = struct {
     awaitable: Awaitable,
     id: u64,
     coro: Coroutine,
+    timer_c: xev.Completion = .{},
+    timer_cancel_c: xev.Completion = .{},
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         assert(awaitable.kind == .coro);
@@ -697,10 +713,9 @@ pub const Runtime = struct {
         comptime onTimeout: fn (ctx: *TimeoutContext) bool,
     ) error{Timeout}!void {
         const current = coroutines.getCurrent() orelse unreachable;
+        const task = AnyTask.fromCoroutine(current);
 
         var timed_out = false;
-        var timer = xev.Timer.init() catch unreachable;
-        defer timer.deinit();
 
         const CallbackContext = struct {
             runtime: *Runtime,
@@ -716,33 +731,31 @@ pub const Runtime = struct {
             .timed_out = &timed_out,
         };
 
-        var completion: xev.Completion = undefined;
-        timer.run(
-            &self.loop,
-            &completion,
+        // Use timer_reset which handles both initial start and restart after cancel
+        self.loop.timer_reset(
+            &task.timer_c,
+            &task.timer_cancel_c,
             timeout_ns / 1_000_000,
-            CallbackContext,
             &ctx,
-            struct {
+            (struct {
                 fn callback(
-                    c: ?*CallbackContext,
-                    loop: *xev.Loop,
-                    comp: *xev.Completion,
-                    result: anyerror!void,
+                    ud: ?*anyopaque,
+                    l: *xev.Loop,
+                    c: *xev.Completion,
+                    r: xev.Result,
                 ) xev.CallbackAction {
-                    _ = loop;
-                    _ = comp;
-                    _ = result catch {};
-                    if (c) |context| {
-                        // Call user's timeout handler to check if we should wake
-                        if (onTimeout(context.user_ctx)) {
-                            context.timed_out.* = true;
-                            context.runtime.markReady(context.coroutine);
-                        }
+                    _ = l;
+                    _ = c;
+                    _ = r;
+                    const context = @as(*CallbackContext, @ptrCast(@alignCast(ud.?)));
+                    // Call user's timeout handler to check if we should wake
+                    if (onTimeout(context.user_ctx)) {
+                        context.timed_out.* = true;
+                        context.runtime.markReady(context.coroutine);
                     }
                     return .disarm;
                 }
-            }.callback,
+            }).callback,
         );
 
         // Wait for either timeout or external markReady
@@ -752,38 +765,14 @@ pub const Runtime = struct {
             return error.Timeout;
         }
 
-        // Timer already completed, no need to cancel
-        if (completion.flags.state == .dead) {
-            return;
-        }
-
-        // Was awakened by external markReady → cancel timer and wait for cleanup
-        var cancel_completion: xev.Completion = undefined;
-        timer.cancel(
-            &self.loop,
-            &completion,
-            &cancel_completion,
-            CallbackContext,
-            &ctx,
-            struct {
-                fn callback(
-                    c: ?*CallbackContext,
-                    loop: *xev.Loop,
-                    comp: *xev.Completion,
-                    result: anyerror!void,
-                ) xev.CallbackAction {
-                    _ = loop;
-                    _ = comp;
-                    _ = result catch {};
-                    if (c) |context| {
-                        context.runtime.markReady(context.coroutine);
-                    }
-                    return .disarm;
-                }
-            }.callback,
+        // Was awakened by external markReady → cancel timer async, no wait needed
+        self.loop.cancel(
+            &task.timer_c,
+            &task.timer_cancel_c,
+            anyopaque,
+            null,
+            noopTimerCancelCallback,
         );
-
-        current.waitForReady(); // Wait for cancellation to complete
     }
 
     pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{Timeout}!void {
