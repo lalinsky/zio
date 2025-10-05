@@ -141,9 +141,10 @@ pub const AnyTask = struct {
     awaitable: Awaitable,
     id: u64,
     coro: Coroutine,
+    runtime: *Runtime,
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
-    timer_generation: u64 = 0,
+    timer_generation: u2 = 0,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         assert(awaitable.kind == .coro);
@@ -175,7 +176,6 @@ pub fn Task(comptime T: type) type {
 
         any_task: AnyTask,
         future_result: FutureResult(T),
-        runtime: *Runtime,
 
         fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
@@ -185,7 +185,7 @@ pub fn Task(comptime T: type) type {
         }
 
         fn deinit(self: *Self) void {
-            self.runtime.releaseAwaitable(&self.any_task.awaitable);
+            self.any_task.runtime.releaseAwaitable(&self.any_task.awaitable);
         }
 
         fn join(self: *Self) T {
@@ -195,7 +195,7 @@ pub fn Task(comptime T: type) type {
             }
 
             // Use runtime's wait method for the waiting logic
-            self.runtime.wait(self.any_task.id);
+            self.any_task.runtime.wait(self.any_task.id);
 
             return self.future_result.get() orelse unreachable;
         }
@@ -527,9 +527,9 @@ pub const Runtime = struct {
                 },
                 .id = id,
                 .coro = undefined,
+                .runtime = self,
             },
             .future_result = .{},
-            .runtime = self,
         };
 
         task.any_task.coro = try Coroutine.init(self.allocator, Result, func, args, &task.future_result, options);
@@ -702,6 +702,25 @@ pub const Runtime = struct {
         current_coro.waitForReady();
     }
 
+    /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
+    /// Uses lower 2 bits for generation (pointers are aligned).
+    inline fn packTimerUserdata(comptime T: type, ptr: *T, generation: u2) ?*anyopaque {
+        const addr = @intFromPtr(ptr);
+        const tagged = addr | @as(usize, generation);
+        return @ptrFromInt(tagged);
+    }
+
+    /// Unpack a tagged pointer into the original pointer and generation.
+    inline fn unpackTimerUserdata(comptime T: type, userdata: ?*anyopaque) struct { ptr: *T, generation: u2 } {
+        const addr = @intFromPtr(userdata);
+        const generation: u2 = @truncate(addr & 0x3);
+        const ptr_addr = addr & ~@as(usize, 0x3);
+        return .{
+            .ptr = @ptrFromInt(ptr_addr),
+            .generation = generation,
+        };
+    }
+
     /// Wait for the current coroutine to be marked ready, with a timeout and custom timeout handler.
     /// The onTimeout callback is called when the timer fires, and should return true if the
     /// coroutine should be woken with error.Timeout, or false if it was already signaled by
@@ -718,56 +737,58 @@ pub const Runtime = struct {
 
         // Increment generation to invalidate any pending callbacks
         task.timer_generation +%= 1;
-        const expected_generation = task.timer_generation;
         var timed_out = false;
 
         const CallbackContext = struct {
-            runtime: *Runtime,
-            coroutine: *coroutines.Coroutine,
             user_ctx: *TimeoutContext,
             timed_out: *bool,
-            expected_generation: u64,
         };
 
         var ctx = CallbackContext{
-            .runtime = self,
-            .coroutine = current,
             .user_ctx = timeout_ctx,
             .timed_out = &timed_out,
-            .expected_generation = expected_generation,
         };
 
         var timer = xev.Timer.init() catch unreachable;
         defer timer.deinit();
 
         // Use timer reset which handles both initial start and restart after cancel
+        // Pack context pointer with generation in lower 2 bits
+        const tagged_userdata = packTimerUserdata(CallbackContext, &ctx, task.timer_generation);
         timer.reset(
             &self.loop,
             &task.timer_c,
             &task.timer_cancel_c,
             timeout_ns / 1_000_000,
-            CallbackContext,
-            &ctx,
+            anyopaque,
+            tagged_userdata,
             struct {
                 fn callback(
-                    context: ?*CallbackContext,
+                    userdata: ?*anyopaque,
                     l: *xev.Loop,
                     c: *xev.Completion,
                     r: xev.Timer.RunError!void,
                 ) xev.CallbackAction {
                     _ = l;
-                    _ = c;
                     _ = r catch {};
-                    const ctx_ptr = context.?;
-                    const t = AnyTask.fromCoroutine(ctx_ptr.coroutine);
-                    // Check if this callback is from a stale timer (mismatched generation)
-                    if (t.timer_generation != ctx_ptr.expected_generation) {
+
+                    // Get task safely from completion (always valid)
+                    const t: *AnyTask = @fieldParentPtr("timer_c", c);
+
+                    // Unpack generation from tagged pointer (no deref yet!)
+                    const unpacked = unpackTimerUserdata(CallbackContext, userdata);
+
+                    // Check if this callback is from a stale timer
+                    if (t.timer_generation != unpacked.generation) {
+                        // Stale callback - context is freed, don't touch it!
                         return .disarm;
                     }
-                    // Call user's timeout handler to check if we should wake
+
+                    // Generation matches - safe to dereference context
+                    const ctx_ptr = unpacked.ptr;
                     if (onTimeout(ctx_ptr.user_ctx)) {
                         ctx_ptr.timed_out.* = true;
-                        ctx_ptr.runtime.markReady(ctx_ptr.coroutine);
+                        t.runtime.markReady(&t.coro);
                     }
                     return .disarm;
                 }
