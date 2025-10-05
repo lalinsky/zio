@@ -13,6 +13,10 @@ async functions in Rust or earlier versions of Zig (where were stackless state m
 but they are still much cheaper than threads, you don't need to be afraid of
 spawning many of them.
 
+NOTE: This library is very similar to the future `std.Io` interface. Depending on
+how the Zig standard library progresses in the future, we will either implement
+the interface, or deprecate this library.
+
 ## Features
 
 - Supports Linux, Windows and macOS
