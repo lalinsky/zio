@@ -35,7 +35,29 @@ the interface, or deprecate this library.
 - Support for sub-processes
 - Support for pipes
 
-## Quick Start
+## Installation
+
+1) Add zio as a dependency in your `build.zig.zon`:
+
+```bash
+zig fetch --save "git+https://github.com/lalinsky/zio?ref=v0.1.0"
+```
+
+2) In your `build.zig`, add the `zio` module as a dependency you your program:
+
+```zig
+const zio = b.dependency("zio", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+// the executable from your call to b.addExecutable(...)
+exe.root_module.addImport("zio", zio.module("zio"));
+```
+
+## Usage
+
+Basic TCP client:
 
 ```zig
 const std = @import("std");
@@ -71,15 +93,12 @@ pub fn main() !void {
     });
     defer runtime.deinit();
 
-    // Spawn coroutine
-    var task = try runtime.spawn(echoClient, .{ &runtime, gpa.allocator() }, .{});
-    defer task.deinit();
-
-    // Run the event loop
-    try runtime.run();
-    try task.result();
+    // Run the client and wait until it completes
+    try runtime.runUntilComplete(echoClient, .{ &runtime, gpa.allocator() }, .{});
 }
 ```
+
+See `examples/*.zig` for more.
 
 ## Building
 
