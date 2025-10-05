@@ -68,10 +68,10 @@ fn markReadyFromXevCallback(
 
 // Noop callback for async timer cancellation
 fn noopTimerCancelCallback(
-    ud: ?*anyopaque,
+    ud: ?*void,
     l: *xev.Loop,
     c: *xev.Completion,
-    r: xev.CancelError!void,
+    r: xev.Timer.CancelError!void,
 ) xev.CallbackAction {
     _ = ud;
     _ = l;
@@ -731,31 +731,37 @@ pub const Runtime = struct {
             .timed_out = &timed_out,
         };
 
-        // Use timer_reset which handles both initial start and restart after cancel
-        self.loop.timer_reset(
+        var timer = xev.Timer.init() catch unreachable;
+        defer timer.deinit();
+
+        // Use timer reset which handles both initial start and restart after cancel
+        timer.reset(
+            &self.loop,
             &task.timer_c,
             &task.timer_cancel_c,
             timeout_ns / 1_000_000,
+            CallbackContext,
             &ctx,
-            (struct {
+            struct {
                 fn callback(
-                    ud: ?*anyopaque,
+                    context: ?*CallbackContext,
                     l: *xev.Loop,
                     c: *xev.Completion,
-                    r: xev.Result,
+                    r: xev.Timer.RunError!void,
                 ) xev.CallbackAction {
                     _ = l;
                     _ = c;
-                    _ = r;
-                    const context = @as(*CallbackContext, @ptrCast(@alignCast(ud.?)));
-                    // Call user's timeout handler to check if we should wake
-                    if (onTimeout(context.user_ctx)) {
-                        context.timed_out.* = true;
-                        context.runtime.markReady(context.coroutine);
+                    _ = r catch {};
+                    if (context) |ctx_ptr| {
+                        // Call user's timeout handler to check if we should wake
+                        if (onTimeout(ctx_ptr.user_ctx)) {
+                            ctx_ptr.timed_out.* = true;
+                            ctx_ptr.runtime.markReady(ctx_ptr.coroutine);
+                        }
                     }
                     return .disarm;
                 }
-            }).callback,
+            }.callback,
         );
 
         // Wait for either timeout or external markReady
@@ -766,15 +772,16 @@ pub const Runtime = struct {
         }
 
         // Timer already completed, no need to cancel
-        if (task.timer_c.flags.state == .dead) {
+        if (task.timer_c.state() == .dead) {
             return;
         }
 
         // Was awakened by external markReady → cancel timer async, no wait needed
-        self.loop.cancel(
+        timer.cancel(
+            &self.loop,
             &task.timer_c,
             &task.timer_cancel_c,
-            anyopaque,
+            void,
             null,
             noopTimerCancelCallback,
         );
