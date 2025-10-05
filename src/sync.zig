@@ -82,107 +82,32 @@ pub const Condition = struct {
 
         self.wait_queue.append(&task.awaitable);
 
-        // Setup timer for timeout
-        var timed_out = false;
-        var timer = xev.Timer.init() catch unreachable;
-        defer timer.deinit();
-
         const TimeoutContext = struct {
-            runtime: *Runtime,
-            condition: *Condition,
+            wait_queue: *AwaitableList,
             awaitable: *Awaitable,
-            coroutine: *coroutines.Coroutine,
-            timed_out: *bool,
         };
 
         var timeout_ctx = TimeoutContext{
-            .runtime = runtime,
-            .condition = self,
+            .wait_queue = &self.wait_queue,
             .awaitable = &task.awaitable,
-            .coroutine = current,
-            .timed_out = &timed_out,
         };
 
-        var completion: xev.Completion = undefined;
-        timer.run(
-            &runtime.loop,
-            &completion,
-            timeout_ns / 1_000_000, // Convert to ms
+        // Atomically release mutex and wait
+        mutex.unlock(runtime);
+        defer mutex.lock(runtime);
+
+        try runtime.timedWaitForReadyWithCallback(
+            timeout_ns,
             TimeoutContext,
             &timeout_ctx,
             struct {
-                fn callback(
-                    ctx: ?*TimeoutContext,
-                    loop: *xev.Loop,
-                    c: *xev.Completion,
-                    result: anyerror!void,
-                ) xev.CallbackAction {
-                    _ = loop;
-                    _ = c;
-                    _ = result catch {};
-                    if (ctx) |context| {
-                        if (context.condition.wait_queue.remove(context.awaitable)) {
-                            context.timed_out.* = true;
-                            context.runtime.markReady(context.coroutine);
-                        }
-                    }
-                    return .disarm;
+                fn onTimeout(ctx: *TimeoutContext) bool {
+                    // Try to remove from wait queue - if successful, we timed out
+                    // If failed, we were already signaled
+                    return ctx.wait_queue.remove(ctx.awaitable);
                 }
-            }.callback,
+            }.onTimeout,
         );
-
-        // Release mutex and wait
-        mutex.unlock(runtime);
-        current.waitForReady();
-
-        // Re-acquire mutex first
-        mutex.lock(runtime);
-
-        // Then check if we timed out and cleanup if needed
-        if (timed_out) {
-            return error.Timeout;
-        }
-
-        // If we didn't timeout, we were signaled - cancel the timer and wait for cancellation
-        const CancelContext = struct {
-            runtime: *Runtime,
-            coroutine: *coroutines.Coroutine,
-        };
-
-        var cancel_ctx = CancelContext{
-            .runtime = runtime,
-            .coroutine = current,
-        };
-
-        var cancel_completion: xev.Completion = undefined;
-        timer.cancel(
-            &runtime.loop,
-            &completion,
-            &cancel_completion,
-            CancelContext,
-            &cancel_ctx,
-            struct {
-                fn callback(
-                    ctx: ?*CancelContext,
-                    loop: *xev.Loop,
-                    c: *xev.Completion,
-                    result: anyerror!void,
-                ) xev.CallbackAction {
-                    _ = loop;
-                    _ = c;
-                    _ = result catch {};
-                    if (ctx) |context| {
-                        context.runtime.markReady(context.coroutine);
-                    }
-                    return .disarm;
-                }
-            }.callback,
-        );
-
-        // Wait for cancellation to complete
-        mutex.unlock(runtime);
-        current.waitForReady();
-        mutex.lock(runtime);
     }
 
     pub fn signal(self: *Condition, runtime: *Runtime) void {
@@ -290,108 +215,35 @@ pub const ResetEvent = struct {
             return;
         }
 
-        // We're now in waiting state, add to queue and setup timeout
+        // We're now in waiting state, add to queue and wait with timeout
         std.debug.assert(state == .waiting);
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
         self.wait_queue.append(&task.awaitable);
 
-        // Setup timer for timeout
-        var timed_out = false;
-        var timer = xev.Timer.init() catch unreachable;
-        defer timer.deinit();
-
         const TimeoutContext = struct {
-            runtime: *Runtime,
-            reset_event: *ResetEvent,
+            wait_queue: *AwaitableList,
             awaitable: *Awaitable,
-            coroutine: *coroutines.Coroutine,
-            timed_out: *bool,
         };
 
         var timeout_ctx = TimeoutContext{
-            .runtime = runtime,
-            .reset_event = self,
+            .wait_queue = &self.wait_queue,
             .awaitable = &task.awaitable,
-            .coroutine = current,
-            .timed_out = &timed_out,
         };
 
-        var completion: xev.Completion = undefined;
-        timer.run(
-            &runtime.loop,
-            &completion,
-            timeout_ns / 1_000_000, // Convert to ms
+        try runtime.timedWaitForReadyWithCallback(
+            timeout_ns,
             TimeoutContext,
             &timeout_ctx,
             struct {
-                fn callback(
-                    ctx: ?*TimeoutContext,
-                    loop: *xev.Loop,
-                    c: *xev.Completion,
-                    result: anyerror!void,
-                ) xev.CallbackAction {
-                    _ = loop;
-                    _ = c;
-                    _ = result catch {};
-                    if (ctx) |context| {
-                        if (context.reset_event.wait_queue.remove(context.awaitable)) {
-                            context.timed_out.* = true;
-                            context.runtime.markReady(context.coroutine);
-                        }
-                    }
-                    return .disarm;
+                fn onTimeout(ctx: *TimeoutContext) bool {
+                    // Try to remove from wait queue - if successful, we timed out
+                    // If failed, we were already signaled
+                    return ctx.wait_queue.remove(ctx.awaitable);
                 }
-            }.callback,
+            }.onTimeout,
         );
-
-        // Suspend until woken by set() or timeout
-        current.waitForReady();
-
-        // Check if we timed out
-        if (timed_out) {
-            return error.Timeout;
-        }
-
-        // If we didn't timeout, we were signaled - cancel the timer and wait for cancellation
-        const CancelContext = struct {
-            runtime: *Runtime,
-            coroutine: *coroutines.Coroutine,
-        };
-
-        var cancel_ctx = CancelContext{
-            .runtime = runtime,
-            .coroutine = current,
-        };
-
-        var cancel_completion: xev.Completion = undefined;
-        timer.cancel(
-            &runtime.loop,
-            &completion,
-            &cancel_completion,
-            CancelContext,
-            &cancel_ctx,
-            struct {
-                fn callback(
-                    ctx: ?*CancelContext,
-                    loop: *xev.Loop,
-                    c: *xev.Completion,
-                    result: anyerror!void,
-                ) xev.CallbackAction {
-                    _ = loop;
-                    _ = c;
-                    _ = result catch {};
-                    if (ctx) |context| {
-                        context.runtime.markReady(context.coroutine);
-                    }
-                    return .disarm;
-                }
-            }.callback,
-        );
-
-        // Wait for cancellation to complete
-        current.waitForReady();
     }
 };
 
