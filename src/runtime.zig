@@ -735,9 +735,6 @@ pub const Runtime = struct {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
-        // Increment generation to invalidate any pending callbacks
-        task.timer_generation +%= 1;
-
         const CallbackContext = struct {
             user_ctx: *TimeoutContext,
             timed_out: bool,
@@ -806,8 +803,9 @@ pub const Runtime = struct {
             return;
         }
 
-        // Was awakened by external markReady → cancel timer async
-        // The generation check in the callback will ignore any late-firing timer
+        // Was awakened by external markReady → increment generation to invalidate
+        // any pending timer callback, then cancel async
+        task.timer_generation +%= 1;
         timer.cancel(
             &self.loop,
             &task.timer_c,
