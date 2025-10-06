@@ -1077,10 +1077,8 @@ pub const Completion = struct {
                             .flags = 0,
                         };
                         const result = std.os.linux.recvmsg(op.fd, &msg, 0);
-                        break :blk if (result > 0)
+                        break :blk if (result >= 0)
                             result
-                        else if (result == 0)
-                            error.EOF
                         else switch (posix.errno(result)) {
                             else => |err| posix.unexpectedErrno(err),
                         };

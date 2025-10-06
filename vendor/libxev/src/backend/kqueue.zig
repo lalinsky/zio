@@ -1266,10 +1266,8 @@ pub const Completion = struct {
                             .flags = 0,
                         };
                         const result = std.c.recvmsg(op.fd, &msg, 0);
-                        break :blk if (result > 0)
+                        break :blk if (result >= 0)
                             @intCast(result)
-                        else if (result == 0)
-                            error.EOF
                         else switch (posix.errno(result)) {
                             else => |err| posix.unexpectedErrno(err),
                         };
@@ -1305,10 +1303,8 @@ pub const Completion = struct {
                         };
                         const result = std.c.recvmsg(op.fd, &msg, 0);
                         op.addr_size = msg.namelen;
-                        break :blk if (result > 0)
+                        break :blk if (result >= 0)
                             @intCast(result)
-                        else if (result == 0)
-                            error.EOF
                         else switch (posix.errno(result)) {
                             else => |err| posix.unexpectedErrno(err),
                         };
