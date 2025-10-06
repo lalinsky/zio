@@ -786,7 +786,10 @@ test "TCP: readBuf with different ReadBuffer variants" {
                 var unused_buffer: [1]u8 = undefined;
                 var read_buf: xev.ReadBuffer = .{
                     .vectors = .{
-                        .data = .{
+                        .data = if (builtin.os.tag == .windows) .{
+                            .{ .buf = &buffer, .len = buffer.len },
+                            .{ .buf = &unused_buffer, .len = 0 }, // Second vector unused but must be valid
+                        } else .{
                             .{ .base = &buffer, .len = buffer.len },
                             .{ .base = &unused_buffer, .len = 0 }, // Second vector unused but must be valid
                         },
@@ -802,7 +805,10 @@ test "TCP: readBuf with different ReadBuffer variants" {
             {
                 var buffer1: [2]u8 = undefined;
                 var buffer2: [2]u8 = undefined;
-                var read_buf: xev.ReadBuffer = .{ .vectors = .{ .data = .{
+                var read_buf: xev.ReadBuffer = .{ .vectors = .{ .data = if (builtin.os.tag == .windows) .{
+                    .{ .buf = &buffer1, .len = buffer1.len },
+                    .{ .buf = &buffer2, .len = buffer2.len },
+                } else .{
                     .{ .base = &buffer1, .len = buffer1.len },
                     .{ .base = &buffer2, .len = buffer2.len },
                 }, .len = 2 } };
