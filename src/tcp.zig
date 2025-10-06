@@ -730,3 +730,98 @@ test "TCP: Reader takeByte with RESP protocol" {
     try server_task.result();
     try client_task.result();
 }
+
+test "TCP: readBuf with different ReadBuffer variants" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    var server_ready = ResetEvent.init;
+
+    const ServerTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var listener = try TcpListener.init(rt, addr);
+            defer listener.close();
+
+            try listener.bind(addr);
+            try listener.listen(1);
+
+            ready_event.set(rt);
+
+            var stream = try listener.accept();
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
+
+            // Send test data: "Hello World!"
+            const test_data = "Hello World!";
+            try stream.writeAll(test_data);
+        }
+    };
+
+    const ClientTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait(rt);
+
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            // Test 1: ReadBuffer with .slice
+            {
+                var buffer: [5]u8 = undefined;
+                var read_buf: xev.ReadBuffer = .{ .slice = &buffer };
+                const n = try stream.readBuf(&read_buf);
+                try testing.expectEqual(5, n);
+                try testing.expectEqualStrings("Hello", buffer[0..n]);
+            }
+
+            // Test 2: ReadBuffer with .vectors containing 1 iovec
+            {
+                var buffer: [3]u8 = undefined;
+                var unused_buffer: [1]u8 = undefined;
+                var read_buf: xev.ReadBuffer = .{
+                    .vectors = .{
+                        .data = .{
+                            .{ .base = &buffer, .len = buffer.len },
+                            .{ .base = &unused_buffer, .len = 0 }, // Second vector unused but must be valid
+                        },
+                        .len = 1,
+                    },
+                };
+                const n = try stream.readBuf(&read_buf);
+                try testing.expectEqual(3, n);
+                try testing.expectEqualStrings(" Wo", buffer[0..n]);
+            }
+
+            // Test 3: ReadBuffer with .vectors containing 2 iovecs
+            {
+                var buffer1: [2]u8 = undefined;
+                var buffer2: [2]u8 = undefined;
+                var read_buf: xev.ReadBuffer = .{ .vectors = .{ .data = .{
+                    .{ .base = &buffer1, .len = buffer1.len },
+                    .{ .base = &buffer2, .len = buffer2.len },
+                }, .len = 2 } };
+                const n = try stream.readBuf(&read_buf);
+                try testing.expectEqual(4, n);
+                try testing.expectEqualStrings("rl", buffer1[0..]);
+                try testing.expectEqualStrings("d!", buffer2[0..]);
+            }
+        }
+    };
+
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    defer server_task.deinit();
+
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    defer client_task.deinit();
+
+    try runtime.run();
+
+    try server_task.result();
+    try client_task.result();
+}

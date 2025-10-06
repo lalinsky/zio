@@ -1025,7 +1025,19 @@ pub const Completion = struct {
                 .send = switch (op.buffer) {
                     .slice => |v| posix.send(op.fd, v, 0),
                     .array => |*v| posix.send(op.fd, v.array[0..v.len], 0),
-                    .vectors => |v| posix.writev(op.fd, v.data[0..v.len]),
+                    .vectors => |v| blk: {
+                        // Use sendmsg for vectored I/O instead of writev
+                        var msg: posix.msghdr_const = .{
+                            .name = null,
+                            .namelen = 0,
+                            .iov = v.data[0..v.len].ptr,
+                            .iovlen = v.len,
+                            .control = null,
+                            .controllen = 0,
+                            .flags = 0,
+                        };
+                        break :blk posix.sendmsg(op.fd, &msg, 0);
+                    },
                 },
             },
 
@@ -1053,7 +1065,26 @@ pub const Completion = struct {
                 const n_ = switch (op.buffer) {
                     .slice => |v| posix.recv(op.fd, v, 0),
                     .array => |*v| posix.recv(op.fd, v, 0),
-                    .vectors => |v| posix.readv(op.fd, v.data[0..v.len]),
+                    .vectors => |v| blk: {
+                        // Use recvmsg for vectored I/O instead of readv
+                        var msg: posix.msghdr = .{
+                            .name = null,
+                            .namelen = 0,
+                            .iov = @ptrCast(@constCast(v.data[0..v.len].ptr)),
+                            .iovlen = v.len,
+                            .control = null,
+                            .controllen = 0,
+                            .flags = 0,
+                        };
+                        const result = std.os.linux.recvmsg(op.fd, &msg, 0);
+                        break :blk if (result > 0)
+                            result
+                        else if (result == 0)
+                            error.EOF
+                        else switch (posix.errno(result)) {
+                            else => |err| posix.unexpectedErrno(err),
+                        };
+                    },
                 };
 
                 break :res .{

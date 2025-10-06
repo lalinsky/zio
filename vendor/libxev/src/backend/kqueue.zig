@@ -1172,7 +1172,19 @@ pub const Completion = struct {
                 .send = switch (op.buffer) {
                     .slice => |v| posix.send(op.fd, v, 0),
                     .array => |*v| posix.send(op.fd, v.array[0..v.len], 0),
-                    .vectors => |v| posix.writev(op.fd, v.data[0..v.len]),
+                    .vectors => |v| blk: {
+                        // Use sendmsg for vectored I/O instead of writev
+                        var msg: posix.msghdr_const = .{
+                            .name = null,
+                            .namelen = 0,
+                            .iov = v.data[0..v.len].ptr,
+                            .iovlen = @intCast(v.len),
+                            .control = null,
+                            .controllen = 0,
+                            .flags = 0,
+                        };
+                        break :blk posix.sendmsg(op.fd, &msg, 0);
+                    },
                 },
             },
 
@@ -1180,7 +1192,19 @@ pub const Completion = struct {
                 .sendto = switch (op.buffer) {
                     .slice => |v| posix.sendto(op.fd, v, 0, &op.addr.any, op.addr.getOsSockLen()),
                     .array => |*v| posix.sendto(op.fd, v.array[0..v.len], 0, &op.addr.any, op.addr.getOsSockLen()),
-                    .vectors => |v| posix.writev(op.fd, v.data[0..v.len]),
+                    .vectors => |v| blk: {
+                        // Use sendmsg for vectored I/O instead of writev
+                        var msg: posix.msghdr_const = .{
+                            .name = &op.addr.any,
+                            .namelen = op.addr.getOsSockLen(),
+                            .iov = v.data[0..v.len].ptr,
+                            .iovlen = @intCast(v.len),
+                            .control = null,
+                            .controllen = 0,
+                            .flags = 0,
+                        };
+                        break :blk posix.sendmsg(op.fd, &msg, 0);
+                    },
                 },
             },
 
@@ -1230,7 +1254,19 @@ pub const Completion = struct {
                         break :empty @intCast(ev.data);
                     } else posix.recv(op.fd, v, 0),
                     .array => |*v| posix.recv(op.fd, v, 0),
-                    .vectors => |v| posix.readv(op.fd, v.data[0..v.len]),
+                    .vectors => |v| blk: {
+                        // Use recvmsg for vectored I/O instead of readv
+                        var msg: posix.msghdr = .{
+                            .name = null,
+                            .namelen = 0,
+                            .iov = @ptrCast(@constCast(v.data[0..v.len].ptr)),
+                            .iovlen = @intCast(v.len),
+                            .control = null,
+                            .controllen = 0,
+                            .flags = 0,
+                        };
+                        break :blk posix.recvmsg(op.fd, &msg, 0);
+                    },
                 };
 
                 break :res .{
@@ -1249,7 +1285,21 @@ pub const Completion = struct {
                         break :empty @intCast(ev.data);
                     } else posix.recvfrom(op.fd, v, 0, &op.addr, &op.addr_size),
                     .array => |*v| posix.recvfrom(op.fd, v, 0, &op.addr, &op.addr_size),
-                    .vectors => |v| posix.readv(op.fd, v.data[0..v.len]),
+                    .vectors => |v| blk: {
+                        // Use recvmsg for vectored I/O instead of readv
+                        var msg: posix.msghdr = .{
+                            .name = @ptrCast(&op.addr),
+                            .namelen = op.addr_size,
+                            .iov = @ptrCast(@constCast(v.data[0..v.len].ptr)),
+                            .iovlen = @intCast(v.len),
+                            .control = null,
+                            .controllen = 0,
+                            .flags = 0,
+                        };
+                        const result = posix.recvmsg(op.fd, &msg, 0);
+                        op.addr_size = msg.namelen;
+                        break :blk result;
+                    },
                 };
 
                 break :res .{

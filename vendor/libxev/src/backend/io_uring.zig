@@ -473,11 +473,23 @@ pub const Loop = struct {
                     0,
                 ),
 
-                .vectors => |vecs| sqe.prep_readv(
-                    v.fd,
-                    vecs.data[0..vecs.len],
-                    @bitCast(@as(i64, -1)),
-                ),
+                .vectors => |*vecs| {
+                    // Use recvmsg for vectored I/O instead of readv
+                    v.msghdr = .{
+                        .name = null,
+                        .namelen = 0,
+                        .iov = @ptrCast(@constCast(vecs.data[0..vecs.len].ptr)),
+                        .iovlen = vecs.len,
+                        .control = null,
+                        .controllen = 0,
+                        .flags = 0,
+                    };
+                    sqe.prep_recvmsg(
+                        v.fd,
+                        &v.msghdr,
+                        0,
+                    );
+                },
             },
 
             .recvmsg => |*v| {
@@ -501,11 +513,23 @@ pub const Loop = struct {
                     0,
                 ),
 
-                .vectors => |vecs| sqe.prep_writev(
-                    v.fd,
-                    vecs.data[0..vecs.len],
-                    @bitCast(@as(i64, -1)),
-                ),
+                .vectors => |*vecs| {
+                    // Use sendmsg for vectored I/O instead of writev
+                    v.msghdr = .{
+                        .name = null,
+                        .namelen = 0,
+                        .iov = vecs.data[0..vecs.len].ptr,
+                        .iovlen = vecs.len,
+                        .control = null,
+                        .controllen = 0,
+                        .flags = 0,
+                    };
+                    sqe.prep_sendmsg(
+                        v.fd,
+                        &v.msghdr,
+                        0,
+                    );
+                },
             },
 
             .sendmsg => |*v| {
@@ -986,11 +1010,17 @@ pub const Operation = union(OperationType) {
     recv: struct {
         fd: posix.fd_t,
         buffer: ReadBuffer,
+
+        /// Internal storage for msghdr when using vectored recv
+        msghdr: posix.msghdr = undefined,
     },
 
     send: struct {
         fd: posix.fd_t,
         buffer: WriteBuffer,
+
+        /// Internal storage for msghdr when using vectored send
+        msghdr: posix.msghdr_const = undefined,
     },
 
     sendmsg: struct {
