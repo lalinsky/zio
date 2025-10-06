@@ -1265,7 +1265,14 @@ pub const Completion = struct {
                             .controllen = 0,
                             .flags = 0,
                         };
-                        break :blk posix.recvmsg(op.fd, &msg, 0);
+                        const result = std.c.recvmsg(op.fd, &msg, 0);
+                        break :blk if (result > 0)
+                            @intCast(result)
+                        else if (result == 0)
+                            error.EOF
+                        else switch (posix.errno(result)) {
+                            else => |err| posix.unexpectedErrno(err),
+                        };
                     },
                 };
 
@@ -1296,9 +1303,15 @@ pub const Completion = struct {
                             .controllen = 0,
                             .flags = 0,
                         };
-                        const result = posix.recvmsg(op.fd, &msg, 0);
+                        const result = std.c.recvmsg(op.fd, &msg, 0);
                         op.addr_size = msg.namelen;
-                        break :blk result;
+                        break :blk if (result > 0)
+                            @intCast(result)
+                        else if (result == 0)
+                            error.EOF
+                        else switch (posix.errno(result)) {
+                            else => |err| posix.unexpectedErrno(err),
+                        };
                     },
                 };
 
