@@ -639,3 +639,94 @@ test "TCP: Writer splat with single character" {
     try server_task.result();
     try client_task.result();
 }
+
+test "TCP: Reader takeByte with RESP protocol" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var runtime = try Runtime.init(allocator, .{});
+    defer runtime.deinit();
+
+    var server_ready = ResetEvent.init;
+
+    const ServerTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var listener = try TcpListener.init(rt, addr);
+            defer listener.close();
+
+            try listener.bind(addr);
+            try listener.listen(1);
+
+            ready_event.set(rt);
+
+            var stream = try listener.accept();
+            defer {
+                stream.shutdown() catch {};
+                stream.close();
+            }
+
+            var read_buffer: [1024]u8 = undefined;
+            var write_buffer: [1024]u8 = undefined;
+            var reader = stream.reader(&read_buffer);
+            var writer = stream.writer(&write_buffer);
+
+            // Read RESP protocol data using takeByte
+            const first_byte = try reader.interface.takeByte();
+            try testing.expectEqual(@as(u8, '*'), first_byte);
+
+            const line1 = try reader.interface.takeDelimiterExclusive('\r');
+            try testing.expectEqualStrings("1", line1);
+            _ = try reader.interface.takeDelimiterExclusive('\n');
+
+            const line2 = try reader.interface.takeDelimiterExclusive('\r');
+            try testing.expectEqualStrings("$4", line2);
+            _ = try reader.interface.takeDelimiterExclusive('\n');
+
+            const line3 = try reader.interface.takeDelimiterExclusive('\r');
+            try testing.expectEqualStrings("PING", line3);
+            _ = try reader.interface.takeDelimiterExclusive('\n');
+
+            // Echo back
+            try writer.interface.writeAll(&[_]u8{first_byte});
+            try writer.interface.writeAll(line1);
+            try writer.interface.writeAll("\r\n");
+            try writer.interface.writeAll(line2);
+            try writer.interface.writeAll("\r\n");
+            try writer.interface.writeAll(line3);
+            try writer.interface.writeAll("\r\n");
+            try writer.interface.flush();
+        }
+    };
+
+    const ClientTask = struct {
+        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+            ready_event.wait(rt);
+
+            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            var stream = try TcpStream.connect(rt, addr);
+            defer stream.close();
+
+            // Send RESP PING command
+            const test_data = "*1\r\n$4\r\nPING\r\n";
+            try stream.writeAll(test_data);
+            try stream.shutdown();
+
+            // Read back echoed data
+            var buffer: [1024]u8 = undefined;
+            const bytes_read = try stream.readAll(&buffer);
+            try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
+        }
+    };
+
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    defer server_task.deinit();
+
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    defer client_task.deinit();
+
+    try runtime.run();
+
+    try server_task.result();
+    try client_task.result();
+}

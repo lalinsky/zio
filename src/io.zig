@@ -460,6 +460,33 @@ test "StreamReader: discard bytes" {
     try testing.expectEqualStrings("World!", result[0..n]);
 }
 
+test "StreamReader: takeByte reads first byte correctly" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var stream = BufferStream.init(allocator);
+    defer stream.deinit();
+
+    // Add test data that resembles RESP protocol
+    try stream.buffer.appendSlice(allocator, "*1\r\n$4\r\nPING\r\n");
+
+    var read_buffer: [256]u8 = undefined;
+    var reader = StreamReader(BufferStream).init(&stream, &read_buffer);
+
+    // Read first byte - should be '*'
+    const first_byte = try reader.interface.takeByte();
+    try testing.expectEqual(@as(u8, '*'), first_byte);
+
+    // Read rest of first line
+    const line1 = try reader.interface.takeDelimiterExclusive('\r');
+    try testing.expectEqualStrings("1", line1);
+    _ = try reader.interface.takeDelimiterExclusive('\n');
+
+    // Read second line
+    const line2 = try reader.interface.takeDelimiterExclusive('\r');
+    try testing.expectEqualStrings("$4", line2);
+}
+
 test "StreamWriter/Reader: interleaved operations" {
     const testing = std.testing;
     const allocator = testing.allocator;
