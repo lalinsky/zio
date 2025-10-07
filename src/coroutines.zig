@@ -16,7 +16,7 @@ pub inline fn yield() void {
     switchContext(&coro.context, coro.parent_context_ptr);
 }
 
-const DEFAULT_STACK_SIZE = 4 * 1024 * 1024;
+const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 1024 * 1024; // 2MB on Windows, 1MB elsewhere
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
@@ -295,29 +295,26 @@ pub const CoroutineOptions = struct {
 };
 
 pub const Coroutine = struct {
-    context: Context,
+    context: Context = undefined,
     parent_context_ptr: *Context,
-    stack: Stack,
+    stack: ?Stack,
     state: CoroutineState,
-    result_ptr: ?*anyopaque,
 
-    pub fn init(allocator: std.mem.Allocator, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result), options: CoroutineOptions) !Coroutine {
+    pub fn setup(self: *Coroutine, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result)) void {
         const Args = @TypeOf(args);
 
         const CoroutineData = struct {
             func: *const fn (*anyopaque) callconv(.c) noreturn,
             args: Args,
+            result_ptr: *FutureResult(Result),
 
-            fn wrapper(self_ptr: *anyopaque) callconv(.c) noreturn {
-                const self: *@This() = @ptrCast(@alignCast(self_ptr));
+            fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
+                const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
                 const coro = current_coroutine orelse unreachable;
                 coro.state = .running;
 
-                const result = @call(.always_inline, func, self.args);
-                if (coro.result_ptr) |ptr| {
-                    const typed_result_ptr: *FutureResult(Result) = @ptrCast(@alignCast(ptr));
-                    typed_result_ptr.set(result);
-                }
+                const result = @call(.always_inline, func, coro_data.args);
+                coro_data.result_ptr.set(result);
 
                 coro.state = .dead;
                 switchContext(&coro.context, coro.parent_context_ptr);
@@ -325,43 +322,30 @@ pub const Coroutine = struct {
             }
         };
 
-        // Allocate stack
-        const stack_size = std.mem.alignForward(usize, options.stack_size + @sizeOf(CoroutineData), stack_alignment);
-        const stack = try allocator.alignedAlloc(u8, @enumFromInt(stack_alignment), stack_size);
-        errdefer allocator.free(stack);
-
         // Convert the stack pointer to ints for calculations
+        const stack = self.stack.?; // Stack must be non-null during setup
         const stack_base = @intFromPtr(stack.ptr);
         const stack_end = stack_base + stack.len;
 
         // Store function pointer, args, and result space as a contiguous block at the end of stack
         const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
 
-        // Set up function pointer and args
+        // Set up function pointer, args, and result_ptr
         const data: *CoroutineData = @ptrFromInt(data_ptr);
         data.func = &CoroutineData.wrapper;
         data.args = args;
+        data.result_ptr = result_ptr;
 
-        return Coroutine{
-            .context = initContext(@ptrCast(@alignCast(data)), &coroEntry),
-            .stack = stack,
-            .state = .ready,
-            .parent_context_ptr = undefined, // Will be set when switchTo is called
-            .result_ptr = result_ptr,
-        };
+        // Initialize the context with the entry point
+        self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);
     }
 
-    pub fn deinit(self: *Coroutine, allocator: std.mem.Allocator) void {
-        allocator.free(self.stack);
-    }
-
-    pub fn switchTo(self: *Coroutine, parent_context_ptr: *Context) void {
+    pub fn switchTo(self: *Coroutine) void {
         const old_coro = current_coroutine;
         current_coroutine = self;
         defer current_coroutine = old_coro;
 
-        self.parent_context_ptr = parent_context_ptr;
-        switchContext(parent_context_ptr, &self.context);
+        switchContext(self.parent_context_ptr, &self.context);
     }
 
     pub fn waitForReady(self: *Coroutine) void {
