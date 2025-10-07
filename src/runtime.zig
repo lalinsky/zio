@@ -12,6 +12,9 @@ const CoroutineOptions = coroutines.CoroutineOptions;
 // const Error = coroutines.Error;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 const FutureResult = @import("future_result.zig").FutureResult;
+const stack_pool = @import("stack_pool.zig");
+const StackPool = stack_pool.StackPool;
+const StackPoolOptions = stack_pool.StackPoolOptions;
 
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
@@ -21,6 +24,7 @@ fn backendNeedsThreadPool() bool {
 // Runtime configuration options
 pub const RuntimeOptions = struct {
     thread_pool: ThreadPoolOptions = .{},
+    stack_pool: StackPoolOptions = .{},
 
     pub const ThreadPoolOptions = struct {
         enabled: bool = backendNeedsThreadPool(),
@@ -179,7 +183,7 @@ pub fn Task(comptime T: type) type {
         fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
             const self: *Self = @fieldParentPtr("any_task", any_task);
-            rt.allocator.free(any_task.coro.stack); // TODO return to a pool
+            rt.stack_pool.release(any_task.coro.stack);
             rt.allocator.destroy(self);
         }
 
@@ -430,6 +434,7 @@ pub const AwaitableList = struct {
 pub const Runtime = struct {
     loop: xev.Loop,
     thread_pool: ?*xev.ThreadPool = null,
+    stack_pool: StackPool,
     count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -444,6 +449,10 @@ pub const Runtime = struct {
     async_wakeup: xev.Async = undefined,
     async_completion: xev.Completion = undefined,
     blocking_initialized: bool = false,
+
+    // Stack pool cleanup tracking
+    cleanup_interval_ms: i64,
+    last_cleanup_ms: i64 = 0,
 
     /// Get the Runtime instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Runtime {
@@ -484,6 +493,8 @@ pub const Runtime = struct {
             .allocator = allocator,
             .loop = loop,
             .thread_pool = thread_pool,
+            .stack_pool = StackPool.init(allocator, options.stack_pool),
+            .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
             .main_context = undefined,
         };
     }
@@ -513,6 +524,9 @@ pub const Runtime = struct {
             tp.deinit();
             self.allocator.destroy(tp);
         }
+
+        // Clean up stack pool
+        self.stack_pool.deinit();
     }
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(ReturnType(func)) {
@@ -537,10 +551,9 @@ pub const Runtime = struct {
         const task = try self.allocator.create(TypedTask);
         errdefer self.allocator.destroy(task);
 
-        // Allocate stack for the coroutine
-        // TODO delegate this to a stack pool that can reuse previous stacks
-        const stack = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(coroutines.stack_alignment), options.stack_size);
-        errdefer self.allocator.free(stack);
+        // Acquire stack from pool
+        const stack = try self.stack_pool.acquire(options.stack_size);
+        errdefer self.stack_pool.release(stack);
 
         task.* = .{
             .any_task = .{
@@ -652,6 +665,13 @@ pub const Runtime = struct {
 
     pub fn run(self: *Runtime) !void {
         while (true) {
+            // Time-based stack pool cleanup
+            const now = std.time.milliTimestamp();
+            if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
+                self.stack_pool.cleanup();
+                self.last_cleanup_ms = now;
+            }
+
             var reschedule: AwaitableList = .{};
 
             // Cleanup dead coroutines

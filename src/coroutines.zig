@@ -16,7 +16,7 @@ pub inline fn yield() void {
     switchContext(&coro.context, coro.parent_context_ptr);
 }
 
-const DEFAULT_STACK_SIZE = 4 * 1024 * 1024;
+const DEFAULT_STACK_SIZE = 1024 * 1024; // 1MB
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
