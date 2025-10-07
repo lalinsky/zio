@@ -297,7 +297,7 @@ pub const CoroutineOptions = struct {
 pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
-    stack: Stack,
+    stack: ?Stack,
     state: CoroutineState,
 
     pub fn setup(self: *Coroutine, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result)) void {
@@ -323,8 +323,9 @@ pub const Coroutine = struct {
         };
 
         // Convert the stack pointer to ints for calculations
-        const stack_base = @intFromPtr(self.stack.ptr);
-        const stack_end = stack_base + self.stack.len;
+        const stack = self.stack.?; // Stack must be non-null during setup
+        const stack_base = @intFromPtr(stack.ptr);
+        const stack_end = stack_base + stack.len;
 
         // Store function pointer, args, and result space as a contiguous block at the end of stack
         const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);

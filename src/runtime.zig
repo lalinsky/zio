@@ -183,7 +183,10 @@ pub fn Task(comptime T: type) type {
         fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
             const self: *Self = @fieldParentPtr("any_task", any_task);
-            rt.stack_pool.release(any_task.coro.stack);
+            // Stack should already be released when coroutine became dead, but check defensively
+            if (any_task.coro.stack) |stack| {
+                rt.stack_pool.release(stack);
+            }
             rt.allocator.destroy(self);
         }
 
@@ -697,6 +700,12 @@ pub const Runtime = struct {
                 switch (task.coro.state) {
                     .ready => reschedule.append(awaitable),
                     .dead => {
+                        // Release stack immediately since coroutine execution is complete
+                        if (task.coro.stack) |stack| {
+                            self.stack_pool.release(stack);
+                            task.coro.stack = null;
+                        }
+
                         while (awaitable.waiting_list.pop()) |waiting_awaitable| {
                             const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
                             self.markReady(&waiting_task.coro);
