@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const linux = std.os.linux;
 const posix = std.posix;
+const posix_ext = @import("../posix.zig");
 const queue = @import("../queue.zig");
 const queue_mpsc = @import("../queue_mpsc.zig");
 const heap = @import("../heap.zig");
@@ -1048,17 +1049,11 @@ pub const Completion = struct {
                     err,
             },
 
-            .recvmsg => |*op| res: {
-                const res = std.os.linux.recvmsg(op.fd, op.msghdr, 0);
-                break :res .{
-                    .recvmsg = if (res == 0)
-                        error.EOF
-                    else if (res > 0)
-                        res
-                    else switch (posix.errno(res)) {
-                        else => |err| posix.unexpectedErrno(err),
-                    },
-                };
+            .recvmsg => |*op| .{
+                .recvmsg = if (posix_ext.recvmsg(op.fd, op.msghdr, 0)) |n|
+                    if (n == 0) error.EOF else n
+                else |err|
+                    err,
             },
 
             .recv => |*op| res: {
@@ -1076,12 +1071,7 @@ pub const Completion = struct {
                             .controllen = 0,
                             .flags = 0,
                         };
-                        const result = std.os.linux.recvmsg(op.fd, &msg, 0);
-                        break :blk if (result >= 0)
-                            result
-                        else switch (posix.errno(result)) {
-                            else => |err| posix.unexpectedErrno(err),
-                        };
+                        break :blk posix_ext.recvmsg(op.fd, &msg, 0);
                     },
                 };
 
@@ -1425,6 +1415,7 @@ pub const ReadError = ThreadPoolError || posix.EpollCtlError ||
     posix.ReadError ||
     posix.PReadError ||
     posix.RecvFromError ||
+    posix_ext.RecvMsgError ||
     error{
         DupFailed,
         EOF,

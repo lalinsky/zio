@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const posix = std.posix;
+const posix_ext = @import("../posix.zig");
 const darwin = @import("../darwin.zig");
 const queue = @import("../queue.zig");
 const queue_mpsc = @import("../queue_mpsc.zig");
@@ -1265,12 +1266,7 @@ pub const Completion = struct {
                             .controllen = 0,
                             .flags = 0,
                         };
-                        const result = std.c.recvmsg(op.fd, &msg, 0);
-                        break :blk if (result >= 0)
-                            @intCast(result)
-                        else switch (posix.errno(result)) {
-                            else => |err| posix.unexpectedErrno(err),
-                        };
+                        break :blk posix_ext.recvmsg(op.fd, &msg, 0);
                     },
                 };
 
@@ -1301,13 +1297,9 @@ pub const Completion = struct {
                             .controllen = 0,
                             .flags = 0,
                         };
-                        const result = std.c.recvmsg(op.fd, &msg, 0);
+                        const result = posix_ext.recvmsg(op.fd, &msg, 0);
                         op.addr_size = msg.namelen;
-                        break :blk if (result >= 0)
-                            @intCast(result)
-                        else switch (posix.errno(result)) {
-                            else => |err| posix.unexpectedErrno(err),
-                        };
+                        break :blk result;
                     },
                 };
 
@@ -1724,6 +1716,7 @@ pub const ReadError = posix.KEventError ||
     posix.ReadError ||
     posix.PReadError ||
     posix.RecvFromError ||
+    posix_ext.RecvMsgError ||
     error{
         EOF,
         Canceled,
