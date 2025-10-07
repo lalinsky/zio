@@ -299,7 +299,6 @@ pub const Coroutine = struct {
     parent_context_ptr: *Context,
     stack: Stack,
     state: CoroutineState,
-    result_ptr: ?*anyopaque,
 
     pub fn init(allocator: std.mem.Allocator, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result), options: CoroutineOptions) !Coroutine {
         const Args = @TypeOf(args);
@@ -307,6 +306,7 @@ pub const Coroutine = struct {
         const CoroutineData = struct {
             func: *const fn (*anyopaque) callconv(.c) noreturn,
             args: Args,
+            result_ptr: *FutureResult(Result),
 
             fn wrapper(self_ptr: *anyopaque) callconv(.c) noreturn {
                 const self: *@This() = @ptrCast(@alignCast(self_ptr));
@@ -314,10 +314,7 @@ pub const Coroutine = struct {
                 coro.state = .running;
 
                 const result = @call(.always_inline, func, self.args);
-                if (coro.result_ptr) |ptr| {
-                    const typed_result_ptr: *FutureResult(Result) = @ptrCast(@alignCast(ptr));
-                    typed_result_ptr.set(result);
-                }
+                self.result_ptr.set(result);
 
                 coro.state = .dead;
                 switchContext(&coro.context, coro.parent_context_ptr);
@@ -337,17 +334,17 @@ pub const Coroutine = struct {
         // Store function pointer, args, and result space as a contiguous block at the end of stack
         const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
 
-        // Set up function pointer and args
+        // Set up function pointer, args, and result_ptr
         const data: *CoroutineData = @ptrFromInt(data_ptr);
         data.func = &CoroutineData.wrapper;
         data.args = args;
+        data.result_ptr = result_ptr;
 
         return Coroutine{
             .context = initContext(@ptrCast(@alignCast(data)), &coroEntry),
             .stack = stack,
             .state = .ready,
             .parent_context_ptr = undefined, // Will be set when switchTo is called
-            .result_ptr = result_ptr,
         };
     }
 
