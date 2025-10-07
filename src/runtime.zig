@@ -141,7 +141,6 @@ pub const AnyTask = struct {
     awaitable: Awaitable,
     id: u64,
     coro: Coroutine,
-    runtime: *Runtime,
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
@@ -177,15 +176,19 @@ pub fn Task(comptime T: type) type {
         any_task: AnyTask,
         future_result: FutureResult(T),
 
-        fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
+        fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
             const self: *Self = @fieldParentPtr("any_task", any_task);
-            any_task.coro.deinit(runtime.allocator);
-            runtime.allocator.destroy(self);
+            any_task.coro.deinit(rt.allocator);
+            rt.allocator.destroy(self);
         }
 
         fn deinit(self: *Self) void {
-            self.any_task.runtime.releaseAwaitable(&self.any_task.awaitable);
+            self.runtime().releaseAwaitable(&self.any_task.awaitable);
+        }
+
+        fn runtime(self: *Self) *Runtime {
+            return Runtime.fromCoroutine(&self.any_task.coro);
         }
 
         fn join(self: *Self) T {
@@ -195,7 +198,7 @@ pub fn Task(comptime T: type) type {
             }
 
             // Use runtime's wait method for the waiting logic
-            self.any_task.runtime.wait(self.any_task.id);
+            self.runtime().wait(self.any_task.id);
 
             return self.future_result.get() orelse unreachable;
         }
@@ -442,6 +445,19 @@ pub const Runtime = struct {
     async_completion: xev.Completion = undefined,
     blocking_initialized: bool = false,
 
+    /// Get the Runtime instance from any coroutine that belongs to it
+    pub fn fromCoroutine(coro: *Coroutine) *Runtime {
+        return @fieldParentPtr("main_context", coro.parent_context_ptr);
+    }
+
+    /// Get the current Runtime from within a coroutine
+    pub fn getCurrent() ?*Runtime {
+        if (coroutines.getCurrent()) |coro| {
+            return fromCoroutine(coro);
+        }
+        return null;
+    }
+
     pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
         // Initialize ThreadPool if enabled
         var thread_pool: ?*xev.ThreadPool = null;
@@ -527,12 +543,11 @@ pub const Runtime = struct {
                 },
                 .id = id,
                 .coro = undefined,
-                .runtime = self,
             },
             .future_result = .{},
         };
 
-        task.any_task.coro = try Coroutine.init(self.allocator, Result, func, args, &task.future_result, options);
+        task.any_task.coro = try Coroutine.init(self.allocator, Result, func, args, &task.future_result, &self.main_context, options);
         errdefer task.any_task.coro.deinit(self.allocator);
 
         entry.value_ptr.* = &task.any_task;
@@ -642,7 +657,7 @@ pub const Runtime = struct {
             while (self.ready_queue.pop()) |awaitable| {
                 const task = AnyTask.fromAwaitable(awaitable);
                 task.coro.state = .running;
-                task.coro.switchTo(&self.main_context);
+                task.coro.switchTo();
 
                 // If the coroutines just yielded, it will end up in running state, so mark it as ready
                 if (task.coro.state == .running) {
@@ -784,7 +799,7 @@ pub const Runtime = struct {
                     const ctx_ptr = unpacked.ptr;
                     if (onTimeout(ctx_ptr.user_ctx)) {
                         ctx_ptr.timed_out = true;
-                        t.runtime.markReady(&t.coro);
+                        Runtime.fromCoroutine(&t.coro).markReady(&t.coro);
                     }
                     return .disarm;
                 }

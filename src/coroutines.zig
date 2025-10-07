@@ -300,7 +300,7 @@ pub const Coroutine = struct {
     stack: Stack,
     state: CoroutineState,
 
-    pub fn init(allocator: std.mem.Allocator, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result), options: CoroutineOptions) !Coroutine {
+    pub fn init(allocator: std.mem.Allocator, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result), parent_context_ptr: *Context, options: CoroutineOptions) !Coroutine {
         const Args = @TypeOf(args);
 
         const CoroutineData = struct {
@@ -344,7 +344,7 @@ pub const Coroutine = struct {
             .context = initContext(@ptrCast(@alignCast(data)), &coroEntry),
             .stack = stack,
             .state = .ready,
-            .parent_context_ptr = undefined, // Will be set when switchTo is called
+            .parent_context_ptr = parent_context_ptr,
         };
     }
 
@@ -352,13 +352,12 @@ pub const Coroutine = struct {
         allocator.free(self.stack);
     }
 
-    pub fn switchTo(self: *Coroutine, parent_context_ptr: *Context) void {
+    pub fn switchTo(self: *Coroutine) void {
         const old_coro = current_coroutine;
         current_coroutine = self;
         defer current_coroutine = old_coro;
 
-        self.parent_context_ptr = parent_context_ptr;
-        switchContext(parent_context_ptr, &self.context);
+        switchContext(self.parent_context_ptr, &self.context);
     }
 
     pub fn waitForReady(self: *Coroutine) void {
