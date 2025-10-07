@@ -16,7 +16,7 @@ pub inline fn yield() void {
     switchContext(&coro.context, coro.parent_context_ptr);
 }
 
-const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 1024 * 1024; // 2MB on Windows, 1MB elsewhere
+const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
@@ -30,7 +30,16 @@ pub const Stack = []align(stack_alignment) u8;
 pub const StackPtr = [*]align(stack_alignment) u8;
 
 pub const Context = switch (builtin.cpu.arch) {
-    .x86_64 => extern struct {
+    .x86_64 => if (builtin.os.tag == .windows) extern struct {
+        rsp: u64,
+        rbp: u64,
+        rip: u64,
+        // Windows TIB (Thread Information Block) fields
+        fiber_data: u64, // gs:[0x20]
+        stack_base: u64, // gs:[0x08]
+        stack_limit: u64, // gs:[0x10]
+        deallocation_stack: u64, // gs:[0x1478]
+    } else extern struct {
         rsp: u64,
         rbp: u64,
         rip: u64,
@@ -47,7 +56,15 @@ pub const EntryPointFn = fn () callconv(.naked) noreturn;
 
 pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Context {
     return switch (builtin.cpu.arch) {
-        .x86_64 => .{
+        .x86_64 => if (builtin.os.tag == .windows) .{
+            .rsp = @intFromPtr(stack_ptr),
+            .rbp = 0,
+            .rip = @intFromPtr(entry_point),
+            .fiber_data = 0,
+            .stack_base = 0,
+            .stack_limit = 0,
+            .deallocation_stack = 0,
+        } else .{
             .rsp = @intFromPtr(stack_ptr),
             .rbp = 0,
             .rip = @intFromPtr(entry_point),
@@ -67,7 +84,103 @@ pub fn switchContext(
     noalias new_context: *Context,
 ) void {
     switch (builtin.cpu.arch) {
-        .x86_64 => asm volatile (
+        .x86_64 => if (builtin.os.tag == .windows) asm volatile (
+            \\ leaq 0f(%%rip), %%rdx
+            \\ movq %%rsp, 0(%%rax)
+            \\ movq %%rbp, 8(%%rax)
+            \\ movq %%rdx, 16(%%rax)
+            \\
+            \\ // Save current TIB fields
+            \\ movq %%gs:0x20, %%r11
+            \\ movq %%r11, 24(%%rax)
+            \\ movq %%gs:0x08, %%r11
+            \\ movq %%r11, 32(%%rax)
+            \\ movq %%gs:0x10, %%r11
+            \\ movq %%r11, 40(%%rax)
+            \\ movq %%gs:0x1478, %%r11
+            \\ movq %%r11, 48(%%rax)
+            \\
+            \\ // Restore stack pointer and base pointer
+            \\ movq 0(%%rcx), %%rsp
+            \\ movq 8(%%rcx), %%rbp
+            \\
+            \\ // Restore new TIB fields
+            \\ movq 24(%%rcx), %%r11
+            \\ movq %%r11, %%gs:0x20
+            \\ movq 32(%%rcx), %%r11
+            \\ movq %%r11, %%gs:0x08
+            \\ movq 40(%%rcx), %%r11
+            \\ movq %%r11, %%gs:0x10
+            \\ movq 48(%%rcx), %%r11
+            \\ movq %%r11, %%gs:0x1478
+            \\
+            \\ jmpq *16(%%rcx)
+            \\0:
+            :
+            : [current] "{rax}" (current_context),
+              [new] "{rcx}" (new_context),
+            : .{
+              .rax = true,
+              .rcx = true,
+              .rdx = true,
+              .r11 = true,
+              .rbx = true,
+              .rdi = true,
+              .rsi = true,
+              .r8 = true,
+              .r9 = true,
+              .r10 = true,
+              .r12 = true,
+              .r13 = true,
+              .r14 = true,
+              .r15 = true,
+              .mm0 = true,
+              .mm1 = true,
+              .mm2 = true,
+              .mm3 = true,
+              .mm4 = true,
+              .mm5 = true,
+              .mm6 = true,
+              .mm7 = true,
+              .zmm0 = true,
+              .zmm1 = true,
+              .zmm2 = true,
+              .zmm3 = true,
+              .zmm4 = true,
+              .zmm5 = true,
+              .zmm6 = true,
+              .zmm7 = true,
+              .zmm8 = true,
+              .zmm9 = true,
+              .zmm10 = true,
+              .zmm11 = true,
+              .zmm12 = true,
+              .zmm13 = true,
+              .zmm14 = true,
+              .zmm15 = true,
+              .zmm16 = true,
+              .zmm17 = true,
+              .zmm18 = true,
+              .zmm19 = true,
+              .zmm20 = true,
+              .zmm21 = true,
+              .zmm22 = true,
+              .zmm23 = true,
+              .zmm24 = true,
+              .zmm25 = true,
+              .zmm26 = true,
+              .zmm27 = true,
+              .zmm28 = true,
+              .zmm29 = true,
+              .zmm30 = true,
+              .zmm31 = true,
+              .fpsr = true,
+              .fpcr = true,
+              .mxcsr = true,
+              .rflags = true,
+              .dirflag = true,
+              .memory = true,
+            }) else asm volatile (
             \\ leaq 0f(%%rip), %%rdx
             \\ movq %%rsp, 0(%%rax)
             \\ movq %%rbp, 8(%%rax)
@@ -338,6 +451,14 @@ pub const Coroutine = struct {
 
         // Initialize the context with the entry point
         self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);
+
+        // Initialize Windows TIB fields for the coroutine stack
+        if (builtin.os.tag == .windows and builtin.cpu.arch == .x86_64) {
+            self.context.fiber_data = 0; // No fiber data for our coroutines
+            self.context.stack_base = stack_end; // Top of stack (high address)
+            self.context.stack_limit = stack_base; // Bottom of stack (low address)
+            self.context.deallocation_stack = stack_base; // Allocation base
+        }
     }
 
     pub fn switchTo(self: *Coroutine) void {
