@@ -7,3 +7,4 @@
 
 Extra notes:
 - use `zig env` to get the path to the Zig standard library, if you need to check something
+- to test Windows builds on Linux: `zig build build-tests -Dtarget=x86_64-windows && wine zig-out/bin/test.exe`
