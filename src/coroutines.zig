@@ -379,10 +379,12 @@ fn coroEntry() callconv(.naked) noreturn {
         .x86_64 => {
             if (builtin.os.tag == .windows) {
                 // Windows x64 ABI: first integer arg in RCX
+                // Allocate shadow space before return address to match call convention
                 asm volatile (
+                    \\ subq $32, %%rsp
                     \\ pushq $0
-                    \\ leaq 8(%%rsp), %%rcx
-                    \\ jmpq *8(%%rsp)
+                    \\ leaq 40(%%rsp), %%rcx
+                    \\ jmpq *40(%%rsp)
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
