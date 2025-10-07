@@ -15,6 +15,9 @@ const FutureResult = @import("future_result.zig").FutureResult;
 const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
+const task_pool = @import("task_pool.zig");
+const TaskPool = task_pool.TaskPool;
+const TaskPoolOptions = task_pool.TaskPoolOptions;
 
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
@@ -25,6 +28,7 @@ fn backendNeedsThreadPool() bool {
 pub const RuntimeOptions = struct {
     thread_pool: ThreadPoolOptions = .{},
     stack_pool: StackPoolOptions = .{},
+    task_pool: TaskPoolOptions = .{},
 
     pub const ThreadPoolOptions = struct {
         enabled: bool = backendNeedsThreadPool(),
@@ -148,6 +152,9 @@ pub const AnyTask = struct {
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
+    // Reserve 256 bytes for inline result storage
+    // Use 8-byte alignment to accommodate most FutureResult(T) types
+    result_data: [256]u8 align(8) = undefined,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         assert(awaitable.kind == .coro);
@@ -165,6 +172,9 @@ pub const AnyBlockingTask = struct {
     thread_pool_task: xev.ThreadPool.Task,
     runtime: *Runtime,
     execute_fn: *const fn (*AnyBlockingTask) void,
+    // Reserve 256 bytes for inline result storage
+    // Use 8-byte alignment to accommodate most FutureResult(T) types
+    result_data: [256]u8 align(8) = undefined,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
@@ -178,16 +188,26 @@ pub fn Task(comptime T: type) type {
         const Self = @This();
 
         any_task: AnyTask,
-        future_result: FutureResult(T),
+
+        fn futureResult(self: *Self) *FutureResult(T) {
+            comptime {
+                if (@sizeOf(FutureResult(T)) > 256) {
+                    @compileError("FutureResult(T) size exceeds 256 bytes reserved in AnyTask");
+                }
+                if (@alignOf(FutureResult(T)) > 8) {
+                    @compileError("FutureResult(T) alignment exceeds 8-byte alignment reserved in AnyTask");
+                }
+            }
+            return @ptrCast(&self.any_task.result_data);
+        }
 
         fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
-            const self: *Self = @fieldParentPtr("any_task", any_task);
             // Stack should already be released when coroutine became dead, but check defensively
             if (any_task.coro.stack) |stack| {
                 rt.stack_pool.release(stack);
             }
-            rt.allocator.destroy(self);
+            rt.task_pool.releaseAnyTask(any_task);
         }
 
         fn deinit(self: *Self) void {
@@ -200,14 +220,14 @@ pub fn Task(comptime T: type) type {
 
         fn join(self: *Self) T {
             // Check if already completed
-            if (self.future_result.get()) |res| {
+            if (self.futureResult().get()) |res| {
                 return res;
             }
 
             // Use runtime's wait method for the waiting logic
             self.runtime().wait(self.any_task.id);
 
-            return self.future_result.get() orelse unreachable;
+            return self.futureResult().get() orelse unreachable;
         }
 
         fn result(self: *Self) T {
@@ -222,8 +242,19 @@ pub fn BlockingTask(comptime T: type) type {
         const Self = @This();
 
         any_blocking_task: AnyBlockingTask,
-        future_result: FutureResult(T),
         runtime: *Runtime,
+
+        fn futureResult(self: *Self) *FutureResult(T) {
+            comptime {
+                if (@sizeOf(FutureResult(T)) > 256) {
+                    @compileError("FutureResult(T) size exceeds 256 bytes reserved in AnyBlockingTask");
+                }
+                if (@alignOf(FutureResult(T)) > 8) {
+                    @compileError("FutureResult(T) alignment exceeds 8-byte alignment reserved in AnyBlockingTask");
+                }
+            }
+            return @ptrCast(&self.any_blocking_task.result_data);
+        }
 
         pub fn init(
             runtime: *Runtime,
@@ -242,7 +273,7 @@ pub fn BlockingTask(comptime T: type) type {
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
 
                     const res = @call(.always_inline, func, self.args);
-                    self.blocking_task.future_result.set(res);
+                    self.blocking_task.futureResult().set(res);
                 }
 
                 fn destroy(runtime_ptr: *Runtime, awaitable: *Awaitable) void {
@@ -253,6 +284,9 @@ pub fn BlockingTask(comptime T: type) type {
                 }
             };
 
+            // For blocking tasks, we still allocate TaskData normally because it contains Args
+            // which can be of variable size. We only pool the base AnyTask/AnyBlockingTask structures
+            // for regular tasks where we control the full allocation.
             const task_data = try allocator.create(TaskData);
             errdefer allocator.destroy(task_data);
 
@@ -267,11 +301,13 @@ pub fn BlockingTask(comptime T: type) type {
                         .runtime = runtime,
                         .execute_fn = &TaskData.execute,
                     },
-                    .future_result = FutureResult(T){},
                     .runtime = runtime,
                 },
                 .args = args,
             };
+
+            // Initialize FutureResult in result_data
+            task_data.blocking_task.futureResult().* = FutureResult(T){};
 
             // Increment ref count for the JoinHandle
             task_data.blocking_task.any_blocking_task.awaitable.ref_count.incr();
@@ -288,7 +324,7 @@ pub fn BlockingTask(comptime T: type) type {
         }
 
         fn join(self: *Self) T {
-            if (self.future_result.get()) |res| {
+            if (self.futureResult().get()) |res| {
                 return res;
             }
 
@@ -298,7 +334,7 @@ pub fn BlockingTask(comptime T: type) type {
             self.any_blocking_task.awaitable.waiting_list.append(&current_task.awaitable);
             current_coro.waitForReady();
 
-            return self.future_result.get() orelse unreachable;
+            return self.futureResult().get() orelse unreachable;
         }
 
         fn result(self: *Self) T {
@@ -438,6 +474,7 @@ pub const Runtime = struct {
     loop: xev.Loop,
     thread_pool: ?*xev.ThreadPool = null,
     stack_pool: StackPool,
+    task_pool: TaskPool,
     count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -497,6 +534,7 @@ pub const Runtime = struct {
             .loop = loop,
             .thread_pool = thread_pool,
             .stack_pool = StackPool.init(allocator, options.stack_pool),
+            .task_pool = TaskPool.init(allocator, options.task_pool),
             .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
             .main_context = undefined,
         };
@@ -530,6 +568,9 @@ pub const Runtime = struct {
 
         // Clean up stack pool
         self.stack_pool.deinit();
+
+        // Clean up task pool
+        self.task_pool.deinit();
     }
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(ReturnType(func)) {
@@ -551,8 +592,12 @@ pub const Runtime = struct {
         const Result = ReturnType(func);
         const TypedTask = Task(Result);
 
-        const task = try self.allocator.create(TypedTask);
-        errdefer self.allocator.destroy(task);
+        // Acquire task from pool
+        const any_task_ptr = try self.task_pool.acquireAnyTask();
+        errdefer self.task_pool.releaseAnyTask(any_task_ptr);
+
+        // Cast to typed task (Task(T) only contains any_task field)
+        const task: *TypedTask = @ptrCast(any_task_ptr);
 
         // Acquire stack from pool
         const stack = try self.stack_pool.acquire(options.stack_size);
@@ -571,10 +616,12 @@ pub const Runtime = struct {
                     .state = .ready,
                 },
             },
-            .future_result = .{},
         };
 
-        task.any_task.coro.setup(Result, func, args, &task.future_result);
+        // Initialize FutureResult in result_data
+        task.futureResult().* = FutureResult(Result){};
+
+        task.any_task.coro.setup(Result, func, args, task.futureResult());
 
         entry.value_ptr.* = &task.any_task;
 
@@ -668,10 +715,11 @@ pub const Runtime = struct {
 
     pub fn run(self: *Runtime) !void {
         while (true) {
-            // Time-based stack pool cleanup
+            // Time-based pool cleanup
             const now = std.time.milliTimestamp();
             if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
                 self.stack_pool.cleanup();
+                self.task_pool.cleanup();
                 self.last_cleanup_ms = now;
             }
 
