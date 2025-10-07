@@ -16,7 +16,7 @@ pub inline fn yield() void {
     switchContext(&coro.context, coro.parent_context_ptr);
 }
 
-const DEFAULT_STACK_SIZE = 1024 * 1024; // 1MB
+const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 1024 * 1024; // 2MB on Windows, 1MB elsewhere
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
