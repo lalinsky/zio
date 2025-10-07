@@ -15,6 +15,9 @@ const FutureResult = @import("future_result.zig").FutureResult;
 const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
+const task_pool = @import("task_pool.zig");
+const TaskPool = task_pool.TaskPool;
+const TaskPoolOptions = task_pool.TaskPoolOptions;
 
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
@@ -25,6 +28,7 @@ fn backendNeedsThreadPool() bool {
 pub const RuntimeOptions = struct {
     thread_pool: ThreadPoolOptions = .{},
     stack_pool: StackPoolOptions = .{},
+    task_pool: TaskPoolOptions = .{},
 
     pub const ThreadPoolOptions = struct {
         enabled: bool = backendNeedsThreadPool(),
@@ -178,7 +182,23 @@ pub fn Task(comptime T: type) type {
         const Self = @This();
 
         any_task: AnyTask,
-        future_result: FutureResult(T),
+
+        // FutureResult(T) is placed dynamically after AnyTask in the 512-byte allocation
+        fn futureResult(self: *Self) *FutureResult(T) {
+            comptime {
+                const result_offset = std.mem.alignForward(usize, @sizeOf(AnyTask), @alignOf(FutureResult(T)));
+                const total_size = result_offset + @sizeOf(FutureResult(T));
+                if (total_size > task_pool.TASK_ALLOCATION_SIZE) {
+                    @compileError(std.fmt.comptimePrint(
+                        "Task(T) allocation too large: {} bytes (max {})",
+                        .{ total_size, task_pool.TASK_ALLOCATION_SIZE },
+                    ));
+                }
+            }
+            const base: [*]u8 = @ptrCast(self);
+            const result_offset = std.mem.alignForward(usize, @sizeOf(AnyTask), @alignOf(FutureResult(T)));
+            return @ptrCast(@alignCast(base + result_offset));
+        }
 
         fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
@@ -187,7 +207,8 @@ pub fn Task(comptime T: type) type {
             if (any_task.coro.stack) |stack| {
                 rt.stack_pool.release(stack);
             }
-            rt.allocator.destroy(self);
+            const allocation: [*]align(task_pool.TASK_ALLOCATION_ALIGNMENT) u8 = @ptrCast(@alignCast(self));
+            rt.task_pool.release(allocation);
         }
 
         fn deinit(self: *Self) void {
@@ -200,14 +221,14 @@ pub fn Task(comptime T: type) type {
 
         fn join(self: *Self) T {
             // Check if already completed
-            if (self.future_result.get()) |res| {
+            if (self.futureResult().get()) |res| {
                 return res;
             }
 
             // Use runtime's wait method for the waiting logic
             self.runtime().wait(self.any_task.id);
 
-            return self.future_result.get() orelse unreachable;
+            return self.futureResult().get() orelse unreachable;
         }
 
         fn result(self: *Self) T {
@@ -222,8 +243,14 @@ pub fn BlockingTask(comptime T: type) type {
         const Self = @This();
 
         any_blocking_task: AnyBlockingTask,
-        future_result: FutureResult(T),
         runtime: *Runtime,
+
+        // FutureResult(T) is placed dynamically after the base struct
+        fn futureResult(self: *Self) *FutureResult(T) {
+            const base: [*]u8 = @ptrCast(self);
+            const result_offset = std.mem.alignForward(usize, @sizeOf(Self), @alignOf(FutureResult(T)));
+            return @ptrCast(@alignCast(base + result_offset));
+        }
 
         pub fn init(
             runtime: *Runtime,
@@ -235,43 +262,105 @@ pub fn BlockingTask(comptime T: type) type {
 
             const TaskData = struct {
                 blocking_task: Self,
-                args: Args,
+                // FutureResult(T) placed dynamically after blocking_task
+                // Args placed dynamically after FutureResult(T)
+
+                fn futureResultOffset() usize {
+                    return std.mem.alignForward(usize, @sizeOf(Self), @alignOf(FutureResult(T)));
+                }
+
+                fn argsOffset() usize {
+                    const result_offset = futureResultOffset();
+                    return std.mem.alignForward(usize, result_offset + @sizeOf(FutureResult(T)), @alignOf(Args));
+                }
+
+                fn futureResultPtr(self: *@This()) *FutureResult(T) {
+                    const base: [*]u8 = @ptrCast(self);
+                    return @ptrCast(@alignCast(base + futureResultOffset()));
+                }
+
+                fn argsPtr(self: *@This()) *Args {
+                    const base: [*]u8 = @ptrCast(self);
+                    return @ptrCast(@alignCast(base + argsOffset()));
+                }
 
                 fn execute(any_blocking_task: *AnyBlockingTask) void {
                     const blocking_task: *Self = @fieldParentPtr("any_blocking_task", any_blocking_task);
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
 
-                    const res = @call(.always_inline, func, self.args);
-                    self.blocking_task.future_result.set(res);
+                    const res = @call(.always_inline, func, self.argsPtr().*);
+                    self.futureResultPtr().set(res);
                 }
 
                 fn destroy(runtime_ptr: *Runtime, awaitable: *Awaitable) void {
                     const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
                     const blocking_task: *Self = @fieldParentPtr("any_blocking_task", any_blocking_task);
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
-                    runtime_ptr.allocator.destroy(self);
+
+                    // Check at compile time if we used task pool
+                    const total_size = comptime argsOffset() + @sizeOf(Args);
+                    if (comptime total_size <= task_pool.TASK_ALLOCATION_SIZE) {
+                        const allocation: [*]align(task_pool.TASK_ALLOCATION_ALIGNMENT) u8 = @ptrCast(@alignCast(self));
+                        runtime_ptr.task_pool.release(allocation);
+                    } else {
+                        // Too large for pool, use regular allocator
+                        runtime_ptr.allocator.destroy(self);
+                    }
                 }
             };
 
-            const task_data = try allocator.create(TaskData);
-            errdefer allocator.destroy(task_data);
+            // Check if we can use task pool
+            comptime {
+                const total_size = TaskData.argsOffset() + @sizeOf(Args);
+                if (total_size > task_pool.TASK_ALLOCATION_SIZE) {
+                    // Too large for pool, use regular allocator
+                    const task_data = try allocator.create(TaskData);
+                    errdefer allocator.destroy(task_data);
 
-            task_data.* = .{
-                .blocking_task = .{
-                    .any_blocking_task = .{
-                        .awaitable = .{
-                            .kind = .blocking_task,
-                            .destroy_fn = &TaskData.destroy,
+                    task_data.blocking_task = .{
+                        .any_blocking_task = .{
+                            .awaitable = .{
+                                .kind = .blocking_task,
+                                .destroy_fn = &TaskData.destroy,
+                            },
+                            .thread_pool_task = .{ .callback = threadPoolCallback },
+                            .runtime = runtime,
+                            .execute_fn = &TaskData.execute,
                         },
-                        .thread_pool_task = .{ .callback = threadPoolCallback },
                         .runtime = runtime,
-                        .execute_fn = &TaskData.execute,
+                    };
+                    task_data.futureResultPtr().* = FutureResult(T){};
+                    task_data.argsPtr().* = args;
+
+                    // Increment ref count for the JoinHandle
+                    task_data.blocking_task.any_blocking_task.awaitable.ref_count.incr();
+
+                    runtime.thread_pool.?.schedule(
+                        xev.ThreadPool.Batch.from(&task_data.blocking_task.any_blocking_task.thread_pool_task),
+                    );
+
+                    return &task_data.blocking_task;
+                }
+            }
+
+            // Use task pool
+            const allocation = try runtime.task_pool.acquire();
+            const task_data: *TaskData = @ptrCast(@alignCast(allocation));
+
+            task_data.blocking_task = .{
+                .any_blocking_task = .{
+                    .awaitable = .{
+                        .kind = .blocking_task,
+                        .destroy_fn = &TaskData.destroy,
                     },
-                    .future_result = FutureResult(T){},
+                    .thread_pool_task = .{ .callback = threadPoolCallback },
                     .runtime = runtime,
+                    .execute_fn = &TaskData.execute,
                 },
-                .args = args,
+                .runtime = runtime,
             };
+            task_data.futureResultPtr().* = FutureResult(T){};
+            task_data.argsPtr().* = args;
 
             // Increment ref count for the JoinHandle
             task_data.blocking_task.any_blocking_task.awaitable.ref_count.incr();
@@ -288,7 +377,7 @@ pub fn BlockingTask(comptime T: type) type {
         }
 
         fn join(self: *Self) T {
-            if (self.future_result.get()) |res| {
+            if (self.futureResult().get()) |res| {
                 return res;
             }
 
@@ -298,7 +387,7 @@ pub fn BlockingTask(comptime T: type) type {
             self.any_blocking_task.awaitable.waiting_list.append(&current_task.awaitable);
             current_coro.waitForReady();
 
-            return self.future_result.get() orelse unreachable;
+            return self.futureResult().get() orelse unreachable;
         }
 
         fn result(self: *Self) T {
@@ -438,6 +527,7 @@ pub const Runtime = struct {
     loop: xev.Loop,
     thread_pool: ?*xev.ThreadPool = null,
     stack_pool: StackPool,
+    task_pool: TaskPool,
     count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -497,6 +587,7 @@ pub const Runtime = struct {
             .loop = loop,
             .thread_pool = thread_pool,
             .stack_pool = StackPool.init(allocator, options.stack_pool),
+            .task_pool = TaskPool.init(allocator, options.task_pool),
             .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
             .main_context = undefined,
         };
@@ -528,8 +619,9 @@ pub const Runtime = struct {
             self.allocator.destroy(tp);
         }
 
-        // Clean up stack pool
+        // Clean up stack pool and task pool
         self.stack_pool.deinit();
+        self.task_pool.deinit();
     }
 
     pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(ReturnType(func)) {
@@ -551,30 +643,32 @@ pub const Runtime = struct {
         const Result = ReturnType(func);
         const TypedTask = Task(Result);
 
-        const task = try self.allocator.create(TypedTask);
-        errdefer self.allocator.destroy(task);
+        // Acquire allocation from task pool
+        const allocation = try self.task_pool.acquire();
+        const task: *TypedTask = @ptrCast(@alignCast(allocation));
+        errdefer self.task_pool.release(allocation);
 
         // Acquire stack from pool
         const stack = try self.stack_pool.acquire(options.stack_size);
         errdefer self.stack_pool.release(stack);
 
-        task.* = .{
-            .any_task = .{
-                .id = id,
-                .awaitable = .{
-                    .kind = .coro,
-                    .destroy_fn = &TypedTask.destroyFn,
-                },
-                .coro = .{
-                    .stack = stack,
-                    .parent_context_ptr = &self.main_context,
-                    .state = .ready,
-                },
+        task.any_task = .{
+            .id = id,
+            .awaitable = .{
+                .kind = .coro,
+                .destroy_fn = &TypedTask.destroyFn,
             },
-            .future_result = .{},
+            .coro = .{
+                .stack = stack,
+                .parent_context_ptr = &self.main_context,
+                .state = .ready,
+            },
         };
 
-        task.any_task.coro.setup(Result, func, args, &task.future_result);
+        // Initialize FutureResult in the dynamic location
+        task.futureResult().* = .{};
+
+        task.any_task.coro.setup(Result, func, args, task.futureResult());
 
         entry.value_ptr.* = &task.any_task;
 
@@ -668,10 +762,11 @@ pub const Runtime = struct {
 
     pub fn run(self: *Runtime) !void {
         while (true) {
-            // Time-based stack pool cleanup
+            // Time-based stack pool and task pool cleanup
             const now = std.time.milliTimestamp();
             if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
                 self.stack_pool.cleanup();
+                self.task_pool.cleanup();
                 self.last_cleanup_ms = now;
             }
 
