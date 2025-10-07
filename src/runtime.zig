@@ -183,7 +183,7 @@ pub fn Task(comptime T: type) type {
 
         any_task: AnyTask,
 
-        // FutureResult(T) is placed dynamically after AnyTask in the 512-byte allocation
+        // FutureResult(T) is placed dynamically after AnyTask in the 1024-byte allocation
         fn futureResult(self: *Self) *FutureResult(T) {
             comptime {
                 const result_offset = std.mem.alignForward(usize, @sizeOf(AnyTask), @alignOf(FutureResult(T)));

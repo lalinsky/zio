@@ -7,7 +7,7 @@ const AnyBlockingTask = runtime.AnyBlockingTask;
 
 // Task pool allocates fixed-size blocks that can hold either AnyTask or AnyBlockingTask
 // plus space for FutureResult(T) and Args (for blocking tasks)
-pub const TASK_ALLOCATION_SIZE = 512;
+pub const TASK_ALLOCATION_SIZE = 1024;
 pub const TASK_ALLOCATION_ALIGNMENT = 16;
 
 const FreeListNode = struct {
@@ -47,7 +47,7 @@ pub const TaskPool = struct {
         self.count = 0;
     }
 
-    /// Acquire a 512-byte aligned block for task allocation
+    /// Acquire a 1024-byte aligned block for task allocation
     pub fn acquire(self: *TaskPool) ![*]align(TASK_ALLOCATION_ALIGNMENT) u8 {
         // Pop from head (LIFO)
         if (self.head) |node| {
