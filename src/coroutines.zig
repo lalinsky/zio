@@ -295,12 +295,12 @@ pub const CoroutineOptions = struct {
 };
 
 pub const Coroutine = struct {
-    context: Context,
+    context: Context = undefined,
     parent_context_ptr: *Context,
     stack: Stack,
     state: CoroutineState,
 
-    pub fn init(allocator: std.mem.Allocator, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result), parent_context_ptr: *Context, options: CoroutineOptions) !Coroutine {
+    pub fn setup(self: *Coroutine, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result)) void {
         const Args = @TypeOf(args);
 
         const CoroutineData = struct {
@@ -308,13 +308,13 @@ pub const Coroutine = struct {
             args: Args,
             result_ptr: *FutureResult(Result),
 
-            fn wrapper(self_ptr: *anyopaque) callconv(.c) noreturn {
-                const self: *@This() = @ptrCast(@alignCast(self_ptr));
+            fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
+                const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
                 const coro = current_coroutine orelse unreachable;
                 coro.state = .running;
 
-                const result = @call(.always_inline, func, self.args);
-                self.result_ptr.set(result);
+                const result = @call(.always_inline, func, coro_data.args);
+                coro_data.result_ptr.set(result);
 
                 coro.state = .dead;
                 switchContext(&coro.context, coro.parent_context_ptr);
@@ -322,14 +322,9 @@ pub const Coroutine = struct {
             }
         };
 
-        // Allocate stack
-        const stack_size = std.mem.alignForward(usize, options.stack_size + @sizeOf(CoroutineData), stack_alignment);
-        const stack = try allocator.alignedAlloc(u8, @enumFromInt(stack_alignment), stack_size);
-        errdefer allocator.free(stack);
-
         // Convert the stack pointer to ints for calculations
-        const stack_base = @intFromPtr(stack.ptr);
-        const stack_end = stack_base + stack.len;
+        const stack_base = @intFromPtr(self.stack.ptr);
+        const stack_end = stack_base + self.stack.len;
 
         // Store function pointer, args, and result space as a contiguous block at the end of stack
         const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
@@ -340,16 +335,8 @@ pub const Coroutine = struct {
         data.args = args;
         data.result_ptr = result_ptr;
 
-        return Coroutine{
-            .context = initContext(@ptrCast(@alignCast(data)), &coroEntry),
-            .stack = stack,
-            .state = .ready,
-            .parent_context_ptr = parent_context_ptr,
-        };
-    }
-
-    pub fn deinit(self: *Coroutine, allocator: std.mem.Allocator) void {
-        allocator.free(self.stack);
+        // Initialize the context with the entry point
+        self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);
     }
 
     pub fn switchTo(self: *Coroutine) void {

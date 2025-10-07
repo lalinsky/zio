@@ -179,7 +179,7 @@ pub fn Task(comptime T: type) type {
         fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
             const self: *Self = @fieldParentPtr("any_task", any_task);
-            any_task.coro.deinit(rt.allocator);
+            rt.allocator.free(any_task.coro.stack); // TODO return to a pool
             rt.allocator.destroy(self);
         }
 
@@ -532,23 +532,33 @@ pub const Runtime = struct {
         errdefer self.tasks.removeByPtr(entry.key_ptr);
 
         const Result = ReturnType(func);
-        const task = try self.allocator.create(Task(Result));
+        const TypedTask = Task(Result);
+
+        const task = try self.allocator.create(TypedTask);
         errdefer self.allocator.destroy(task);
+
+        // Allocate stack for the coroutine
+        // TODO delegate this to a stack pool that can reuse previous stacks
+        const stack = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(coroutines.stack_alignment), options.stack_size);
+        errdefer self.allocator.free(stack);
 
         task.* = .{
             .any_task = .{
+                .id = id,
                 .awaitable = .{
                     .kind = .coro,
-                    .destroy_fn = &Task(Result).destroyFn,
+                    .destroy_fn = &TypedTask.destroyFn,
                 },
-                .id = id,
-                .coro = undefined,
+                .coro = .{
+                    .stack = stack,
+                    .parent_context_ptr = &self.main_context,
+                    .state = .ready,
+                },
             },
             .future_result = .{},
         };
 
-        task.any_task.coro = try Coroutine.init(self.allocator, Result, func, args, &task.future_result, &self.main_context, options);
-        errdefer task.any_task.coro.deinit(self.allocator);
+        task.any_task.coro.setup(Result, func, args, &task.future_result);
 
         entry.value_ptr.* = &task.any_task;
 
