@@ -98,7 +98,7 @@ pub fn main() !void {
 }
 ```
 
-See `examples/*.zig` for more.
+See `examples/*.zig` for [mini-redis](https://github.com/lalinsky/zio-mini-redis) more examples.
 
 ## Building
 
