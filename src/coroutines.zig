@@ -429,7 +429,7 @@ pub const Coroutine = struct {
                 coro.state = .running;
 
                 const result = @call(.always_inline, func, coro_data.args);
-                coro_data.result_ptr.set(result);
+                _ = coro_data.result_ptr.set(result);
 
                 coro.state = .dead;
                 switchContext(&coro.context, coro.parent_context_ptr);

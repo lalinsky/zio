@@ -128,6 +128,7 @@ fn drainBlockingCompletions(
 pub const AwaitableKind = enum {
     coro,
     blocking_task,
+    future,
 };
 
 // Awaitable - base type for anything that can be waited on
@@ -168,6 +169,17 @@ pub const AnyBlockingTask = struct {
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
+        return @fieldParentPtr("awaitable", awaitable);
+    }
+};
+
+// Future for runtime - not backed by computation, can be set from callbacks
+pub const AnyFuture = struct {
+    awaitable: Awaitable,
+    runtime: *Runtime,
+
+    pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyFuture {
+        assert(awaitable.kind == .future);
         return @fieldParentPtr("awaitable", awaitable);
     }
 };
@@ -216,6 +228,76 @@ pub fn Task(comptime T: type) type {
     };
 }
 
+// Typed future that can be set from callbacks
+pub fn Future(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        any_future: AnyFuture,
+        future_result: FutureResult(T),
+
+        fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
+            const any_future = AnyFuture.fromAwaitable(awaitable);
+            const self: *Self = @fieldParentPtr("any_future", any_future);
+            rt.allocator.destroy(self);
+        }
+
+        pub fn init(runtime: *Runtime, allocator: Allocator) !*Self {
+            const self = try allocator.create(Self);
+            self.* = .{
+                .any_future = .{
+                    .awaitable = .{
+                        .kind = .future,
+                        .destroy_fn = destroyFn,
+                    },
+                    .runtime = runtime,
+                },
+                .future_result = FutureResult(T){},
+            };
+
+            // ref_count starts at 1 by default via RefCounter.init()
+
+            return self;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.any_future.runtime.releaseAwaitable(&self.any_future.awaitable);
+        }
+
+        pub fn set(self: *Self, value: T) void {
+            const was_set = self.future_result.set(value);
+            if (!was_set) {
+                // Value was already set, ignore
+                return;
+            }
+
+            // Wake up all coroutines waiting on this future
+            while (self.any_future.awaitable.waiting_list.pop()) |waiting_awaitable| {
+                const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
+                const runtime = Runtime.fromCoroutine(&waiting_task.coro);
+                runtime.markReady(&waiting_task.coro);
+            }
+        }
+
+        pub fn wait(self: *Self) T {
+            // Check if already set
+            if (self.future_result.get()) |res| {
+                return res;
+            }
+
+            const current_coro = coroutines.getCurrent() orelse unreachable;
+            const current_task = AnyTask.fromCoroutine(current_coro);
+
+            self.any_future.awaitable.waiting_list.append(&current_task.awaitable);
+
+            current_coro.state = .waiting;
+            coroutines.yield();
+
+            return self.future_result.get() orelse unreachable;
+        }
+    };
+}
+
 // Typed blocking task that contains the AnyBlockingTask and FutureResult
 pub fn BlockingTask(comptime T: type) type {
     return struct {
@@ -242,7 +324,7 @@ pub fn BlockingTask(comptime T: type) type {
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
 
                     const res = @call(.always_inline, func, self.args);
-                    self.blocking_task.future_result.set(res);
+                    _ = self.blocking_task.future_result.set(res);
                 }
 
                 fn destroy(runtime_ptr: *Runtime, awaitable: *Awaitable) void {
@@ -307,7 +389,7 @@ pub fn BlockingTask(comptime T: type) type {
     };
 }
 
-// Public handle for spawned tasks
+// Public handle for spawned tasks and futures
 pub fn JoinHandle(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -315,12 +397,14 @@ pub fn JoinHandle(comptime T: type) type {
         kind: union(enum) {
             coro: *Task(T),
             blocking: *BlockingTask(T),
+            future: *Future(T),
         },
 
         pub fn deinit(self: *Self) void {
             switch (self.kind) {
                 .coro => |task| task.deinit(),
                 .blocking => |task| task.deinit(),
+                .future => |future| future.deinit(),
             }
         }
 
@@ -328,6 +412,7 @@ pub fn JoinHandle(comptime T: type) type {
             return switch (self.kind) {
                 .coro => |task| task.join(),
                 .blocking => |task| task.join(),
+                .future => |future| future.wait(),
             };
         }
 
@@ -923,6 +1008,113 @@ test "runtime: spawnBlocking smoke test" {
 
             const result = handle.join();
             try testing.expectEqual(@as(i32, 42), result);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: Future basic set and get" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn asyncTask(rt: *Runtime) !void {
+            const future = try Future(i32).init(rt, testing.allocator);
+            defer future.deinit();
+
+            // Set value
+            future.set(42);
+
+            // Get value (should return immediately since already set)
+            const result = future.wait();
+            try testing.expectEqual(@as(i32, 42), result);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: Future await from coroutine" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn setterTask(future: *Future(i32)) !void {
+            // Simulate async work
+            coroutines.yield();
+            coroutines.yield();
+            future.set(123);
+        }
+
+        fn getterTask(future: *Future(i32)) !i32 {
+            // This will block until setter sets the value
+            return future.wait();
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            const future = try Future(i32).init(rt, testing.allocator);
+            defer future.deinit();
+
+            // Spawn setter coroutine
+            var setter_handle = try rt.spawn(setterTask, .{future}, .{});
+            defer setter_handle.deinit();
+
+            // Spawn getter coroutine
+            var getter_handle = try rt.spawn(getterTask, .{future}, .{});
+            defer getter_handle.deinit();
+
+            const result = getter_handle.join();
+            try testing.expectEqual(@as(i32, 123), result);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: Future multiple waiters" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+    const TestContext = struct {
+        fn waiterTask(future: *Future(i32), expected: i32) !void {
+            const result = future.wait();
+            try testing.expectEqual(expected, result);
+        }
+
+        fn setterTask(future: *Future(i32)) !void {
+            // Let waiters block first
+            coroutines.yield();
+            coroutines.yield();
+            future.set(999);
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            const future = try Future(i32).init(rt, testing.allocator);
+            defer future.deinit();
+
+            // Spawn multiple waiters
+            var waiter1 = try rt.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
+            defer waiter1.deinit();
+            var waiter2 = try rt.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
+            defer waiter2.deinit();
+            var waiter3 = try rt.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
+            defer waiter3.deinit();
+
+            // Spawn setter
+            var setter = try rt.spawn(setterTask, .{future}, .{});
+            defer setter.deinit();
+
+            // Let everything complete
+            coroutines.yield();
+            coroutines.yield();
+            coroutines.yield();
+            coroutines.yield();
         }
     };
 

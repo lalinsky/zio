@@ -8,12 +8,14 @@ pub fn FutureResult(comptime T: type) type {
         state: std.atomic.Value(State) = std.atomic.Value(State).init(.not_set),
         result: T = undefined,
 
-        pub fn set(self: *Self, value: T) void {
+        pub fn set(self: *Self, value: T) bool {
             const prev = self.state.cmpxchgStrong(.not_set, .setting, .release, .monotonic);
             if (prev == null) {
                 self.result = value;
                 self.state.store(.set, .release);
+                return true;
             }
+            return false;
         }
 
         pub fn get(self: *const Self) ?T {
