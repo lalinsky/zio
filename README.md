@@ -40,7 +40,7 @@ the interface, or deprecate this library.
 1) Add zio as a dependency in your `build.zig.zon`:
 
 ```bash
-zig fetch --save "git+https://github.com/lalinsky/zio?ref=v0.1.0"
+zig fetch --save "git+https://github.com/lalinsky/zio"
 ```
 
 2) In your `build.zig`, add the `zio` module as a dependency you your program:
