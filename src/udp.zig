@@ -73,7 +73,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         const bytes_read = try result_data.result;
         return UdpReadResult{
@@ -127,7 +127,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         return result_data.result;
     }
@@ -169,7 +169,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

@@ -69,7 +69,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         const bytes_read = try result_data.result;
         self.position += bytes_read;
@@ -118,7 +118,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         const bytes_written = try result_data.result;
         self.position += bytes_written;
@@ -190,7 +190,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         return result_data.result;
     }
@@ -236,7 +236,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         return result_data.result;
     }
@@ -283,7 +283,7 @@ pub const File = struct {
             }).callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         const bytes_read = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -329,7 +329,7 @@ pub const File = struct {
             }).callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         const bytes_written = result_data.result catch return error.WriteFailed;
         self.position += bytes_written;
@@ -373,7 +373,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         return result_data.result;
     }
