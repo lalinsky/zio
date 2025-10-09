@@ -15,27 +15,51 @@ permits: usize = 0,
 const Semaphore = @This();
 
 /// Block until a permit is available, then decrement the permit count.
+/// If cancelled after acquiring a permit, the permit is properly released before returning error.
 pub fn wait(self: *Semaphore, rt: *Runtime) Cancellable!void {
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
+    var was_cancelled = false;
+
     while (self.permits == 0) {
-        try self.cond.wait(rt, &self.mutex);
+        self.cond.wait(rt, &self.mutex) catch {
+            // Cancelled while waiting - remember this but continue to check if permit available
+            was_cancelled = true;
+            break;
+        };
     }
 
-    self.permits -= 1;
+    // If we got here, either permits > 0 or we were cancelled
     if (self.permits > 0) {
-        self.cond.signal(rt);
+        // Permit is available - acquire it
+        self.permits -= 1;
+        if (self.permits > 0) {
+            self.cond.signal(rt);
+        }
+
+        // If we were cancelled, release the permit before returning error
+        if (was_cancelled) {
+            self.permits += 1;
+            self.cond.signal(rt);
+            return error.Cancelled;
+        }
+    } else {
+        // No permit available and we were cancelled
+        return error.Cancelled;
     }
 }
 
 /// Block until a permit is available or timeout expires.
 /// Returns error.Timeout if the timeout expires before a permit becomes available.
+/// If cancelled after acquiring a permit, the permit is properly released before returning error.
 pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout, Cancelled }!void {
     var timeout_timer = std.time.Timer.start() catch unreachable;
 
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
+
+    var was_cancelled = false;
 
     while (self.permits == 0) {
         const elapsed = timeout_timer.read();
@@ -44,22 +68,57 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout
         }
 
         const local_timeout_ns = timeout_ns - elapsed;
-        try self.cond.timedWait(rt, &self.mutex, local_timeout_ns);
+        self.cond.timedWait(rt, &self.mutex, local_timeout_ns) catch |err| {
+            if (err == error.Timeout) {
+                return error.Timeout;
+            }
+            // Must be Cancelled - remember this but continue to check if permit available
+            was_cancelled = true;
+            break;
+        };
     }
 
-    self.permits -= 1;
+    // If we got here, either permits > 0 or we were cancelled
     if (self.permits > 0) {
-        self.cond.signal(rt);
+        // Permit is available - acquire it
+        self.permits -= 1;
+        if (self.permits > 0) {
+            self.cond.signal(rt);
+        }
+
+        // If we were cancelled, release the permit before returning error
+        if (was_cancelled) {
+            self.permits += 1;
+            self.cond.signal(rt);
+            return error.Cancelled;
+        }
+    } else {
+        // No permit available and we were cancelled
+        return error.Cancelled;
     }
 }
 
 /// Increment the permit count and wake one waiting coroutine.
-pub fn post(self: *Semaphore, rt: *Runtime) void {
-    self.mutex.lock(rt) catch unreachable; // post should never be cancelled
+/// Retries if cancelled to ensure the permit is posted, then returns error.Cancelled.
+pub fn post(self: *Semaphore, rt: *Runtime) Cancellable!void {
+    var was_cancelled = false;
+
+    // Retry lock if cancelled - we must post the permit
+    while (true) {
+        self.mutex.lock(rt) catch {
+            was_cancelled = true;
+            continue; // Retry if cancelled
+        };
+        break;
+    }
     defer self.mutex.unlock(rt);
 
     self.permits += 1;
     self.cond.signal(rt);
+
+    if (was_cancelled) {
+        return error.Cancelled;
+    }
 }
 
 test "Semaphore: basic wait/post" {
@@ -74,7 +133,7 @@ test "Semaphore: basic wait/post" {
         fn worker(rt: *Runtime, s: *Semaphore, n: *i32) !void {
             try s.wait(rt);
             n.* += 1;
-            s.post(rt);
+            try s.post(rt);
         }
     };
 
@@ -133,7 +192,7 @@ test "Semaphore: timedWait success" {
 
         fn poster(rt: *Runtime, s: *Semaphore) !void {
             try rt.yield(.ready);
-            s.post(rt);
+            try s.post(rt);
         }
     };
 
