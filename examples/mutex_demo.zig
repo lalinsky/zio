@@ -6,13 +6,13 @@ const SharedData = struct {
     mutex: zio.Mutex,
 };
 
-fn incrementTask(rt: *zio.Runtime, data: *SharedData, id: u32) void {
+fn incrementTask(rt: *zio.Runtime, data: *SharedData, id: u32) !void {
     for (0..1000) |_| {
-        data.mutex.lock(rt);
+        try data.mutex.lock(rt);
         defer data.mutex.unlock(rt);
 
         const old = data.counter;
-        rt.yield(.ready); // Yield to simulate preemption
+        try rt.yield(.ready); // Yield to simulate preemption
         data.counter = old + 1;
 
         if (@rem(data.counter, 100) == 0) {
@@ -33,13 +33,14 @@ pub fn main() !void {
     };
 
     // Spawn multiple tasks that increment shared counter
-    var tasks: [4]zio.JoinHandle(void) = undefined;
-    var task_count: usize = 0;
-    defer for (tasks[0..task_count]) |*task| task.deinit();
-    for (0..4) |i| {
-        tasks[i] = try runtime.spawn(incrementTask, .{ &runtime, &shared_data, @as(u32, @intCast(i)) }, .{});
-        task_count += 1;
-    }
+    var task0 = try runtime.spawn(incrementTask, .{ &runtime, &shared_data, 0 }, .{});
+    defer task0.deinit();
+    var task1 = try runtime.spawn(incrementTask, .{ &runtime, &shared_data, 1 }, .{});
+    defer task1.deinit();
+    var task2 = try runtime.spawn(incrementTask, .{ &runtime, &shared_data, 2 }, .{});
+    defer task2.deinit();
+    var task3 = try runtime.spawn(incrementTask, .{ &runtime, &shared_data, 3 }, .{});
+    defer task3.deinit();
 
     try runtime.run();
 

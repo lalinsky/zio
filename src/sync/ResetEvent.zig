@@ -84,7 +84,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancellable!void {
 /// Blocks the caller's coroutine until the ResetEvent is set(), or until the corresponding timeout expires.
 /// If the timeout expires before the ResetEvent is set, `error.Timeout` is returned.
 /// The memory accesses before the set() can be said to happen before timedWait() returns without error.
-pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Cancelled }!void {
+pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {

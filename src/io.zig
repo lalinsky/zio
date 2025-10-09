@@ -32,8 +32,8 @@ pub fn StreamReader(comptime T: type) type {
 
             var buf: xev.ReadBuffer = .{ .slice = dest };
             const n = r.stream.readBuf(&buf) catch |err| {
-                // Convert Cancelled to ReadFailed since std.io.Reader doesn't support cancellation
-                return if (err == error.Cancelled) error.ReadFailed else @errorCast(err);
+                // Convert Canceled to ReadFailed since std.io.Reader doesn't support cancellation
+                return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
 
             w.advance(n);
@@ -71,8 +71,8 @@ pub fn StreamReader(comptime T: type) type {
             if (dest_n == 0) return 0;
 
             const n = r.stream.readBuf(&buf) catch |err| {
-                // Convert Cancelled to ReadFailed since std.io.Reader doesn't support cancellation
-                return if (err == error.Cancelled) error.ReadFailed else @errorCast(err);
+                // Convert Canceled to ReadFailed since std.io.Reader doesn't support cancellation
+                return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
 
             // Update buffer end pointer if we read into internal buffer
@@ -168,7 +168,7 @@ pub fn StreamWriter(comptime T: type) type {
 
             const write_buf = xev.WriteBuffer.fromSlices(vecs[0..len]);
             const n = w.stream.writeBuf(write_buf) catch |err| {
-                if (err == error.Cancelled) return error.WriteFailed;
+                if (err == error.Canceled) return error.WriteFailed;
                 return error.WriteFailed;
             };
             return io_writer.consume(n);
@@ -180,7 +180,7 @@ pub fn StreamWriter(comptime T: type) type {
             while (io_writer.end > 0) {
                 const buffered = io_writer.buffered();
                 const n = w.stream.writeBuf(.{ .slice = buffered }) catch |err| {
-                    if (err == error.Cancelled) return error.WriteFailed;
+                    if (err == error.Canceled) return error.WriteFailed;
                     return error.WriteFailed;
                 };
 

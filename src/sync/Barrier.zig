@@ -29,7 +29,7 @@ pub fn init(count: usize) Barrier {
 /// Returns true if this coroutine was the last to arrive (the "leader"),
 /// false otherwise. This can be useful for having one coroutine perform
 /// cleanup or initialization for the next phase.
-pub fn wait(self: *Barrier, runtime: *Runtime) error{Cancelled}!bool {
+pub fn wait(self: *Barrier, runtime: *Runtime) error{Canceled}!bool {
     try self.mutex.lock(runtime);
     defer self.mutex.unlock(runtime);
 

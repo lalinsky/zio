@@ -28,7 +28,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancellable!void
     try mutex.lock(runtime);
 }
 
-pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{ Timeout, Cancelled }!void {
+pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{ Timeout, Canceled }!void {
     const current = coroutines.getCurrent() orelse unreachable;
     const task = AnyTask.fromCoroutine(current);
 
@@ -44,11 +44,12 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         .awaitable = &task.awaitable,
     };
 
+    var was_cancelled = false;
+
     // Atomically release mutex and wait
     mutex.unlock(runtime);
-    errdefer mutex.lock(runtime) catch {};
 
-    try runtime.timedWaitForReadyWithCallback(
+    const result = runtime.timedWaitForReadyWithCallback(
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
@@ -61,8 +62,21 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         }.onTimeout,
     );
 
-    // Re-acquire mutex after waking
-    try mutex.lock(runtime);
+    // Re-acquire mutex before returning - retry if cancelled
+    while (true) {
+        mutex.lock(runtime) catch {
+            was_cancelled = true;
+            continue;
+        };
+        break;
+    }
+
+    // Cancellation has priority over timeout
+    if (was_cancelled) {
+        return error.Canceled;
+    }
+
+    try result;
 }
 
 pub fn signal(self: *Condition, runtime: *Runtime) void {

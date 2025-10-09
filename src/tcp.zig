@@ -311,7 +311,7 @@ pub const TcpStream = struct {
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (error{Cancelled} || std.io.Writer.Error)!usize {
+    pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (error{Canceled} || std.io.Writer.Error)!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -350,7 +350,7 @@ pub const TcpStream = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (error{Cancelled} || std.io.Reader.Error)!usize {
+    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (error{Canceled} || std.io.Reader.Error)!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
