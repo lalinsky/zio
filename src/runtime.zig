@@ -139,18 +139,20 @@ pub const Awaitable = struct {
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 
     // Universal state for both coroutines and threads
-    // 0 = pending/not ready, 1 = complete/ready, 2 = cancelled
+    // 0 = pending/not ready, 1 = complete/ready
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+    // Cancellation flag - set to request cancellation, consumed by yield()
+    cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     /// Wait for this awaitable to complete. Works from both coroutines and threads.
     /// When called from a coroutine, suspends the coroutine.
     /// When called from a thread, parks the thread using futex.
-    /// Returns error.Cancelled if the awaitable was cancelled.
+    /// Returns error.Cancelled if the coroutine was cancelled during the wait.
     pub fn waitForComplete(self: *Awaitable) Cancellable!void {
-        // Fast path: check if already complete or cancelled
+        // Fast path: check if already complete
         const fast_state = self.state.load(.acquire);
         if (fast_state == 1) return;
-        if (fast_state == 2) return error.Cancelled;
 
         if (coroutines.getCurrent()) |current| {
             // Coroutine path: add to wait queue and suspend
@@ -159,10 +161,9 @@ pub const Awaitable = struct {
 
             // Double-check state before suspending (avoid lost wakeup)
             const double_check_state = self.state.load(.acquire);
-            if (double_check_state != 0) {
-                // Completed or cancelled while we were adding to queue, remove ourselves
+            if (double_check_state == 1) {
+                // Completed while we were adding to queue, remove ourselves
                 _ = self.waiting_list.remove(&task.awaitable);
-                if (double_check_state == 2) return error.Cancelled;
                 return;
             }
 
@@ -173,15 +174,12 @@ pub const Awaitable = struct {
                 return err;
             };
 
-            // Check final state after waking
-            const final_state = self.state.load(.acquire);
-            if (final_state == 2) return error.Cancelled;
+            // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: park on the state using futex
             while (true) {
                 const current_state = self.state.load(.acquire);
                 if (current_state == 1) return;
-                if (current_state == 2) return error.Cancelled;
                 std.Thread.Futex.wait(&self.state, 0);
             }
         }
@@ -189,14 +187,13 @@ pub const Awaitable = struct {
 
     /// Wait for this awaitable to complete with a timeout. Works from both coroutines and threads.
     /// Returns error.Timeout if the timeout expires before completion.
-    /// Returns error.Cancelled if the awaitable was cancelled.
+    /// Returns error.Cancelled if the coroutine was cancelled during the wait.
     /// For coroutines, uses runtime timer infrastructure.
     /// For threads, uses futex timedWait directly.
     pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{ Timeout, Cancelled }!void {
-        // Fast path: check if already complete or cancelled
+        // Fast path: check if already complete
         const fast_state = self.state.load(.acquire);
         if (fast_state == 1) return;
-        if (fast_state == 2) return error.Cancelled;
 
         if (coroutines.getCurrent()) |current| {
             // Coroutine path: get runtime and use timer infrastructure
@@ -206,9 +203,8 @@ pub const Awaitable = struct {
             self.waiting_list.push(&task.awaitable);
 
             const double_check_state = self.state.load(.acquire);
-            if (double_check_state != 0) {
+            if (double_check_state == 1) {
                 _ = self.waiting_list.remove(&task.awaitable);
-                if (double_check_state == 2) return error.Cancelled;
                 return;
             }
 
@@ -239,15 +235,12 @@ pub const Awaitable = struct {
                 return err;
             };
 
-            // Check final state after waking
-            const final_state = self.state.load(.acquire);
-            if (final_state == 2) return error.Cancelled;
+            // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: use futex timedWait
             while (true) {
                 const current_state = self.state.load(.acquire);
                 if (current_state == 1) return;
-                if (current_state == 2) return error.Cancelled;
                 try std.Thread.Futex.timedWait(&self.state, 0, timeout_ns);
             }
         }
@@ -268,20 +261,10 @@ pub const Awaitable = struct {
         std.Thread.Futex.wake(&self.state, std.math.maxInt(u32));
     }
 
-    /// Mark this awaitable as cancelled and wake all waiters (both coroutines and threads).
-    /// Waiters will receive error.Cancelled when they check the state.
-    pub fn markCancelled(self: *Awaitable, runtime: *Runtime) void {
-        // Set state to cancelled (release semantics for memory ordering)
-        self.state.store(2, .release);
-
-        // Wake all waiting coroutines
-        while (self.waiting_list.pop()) |waiting_awaitable| {
-            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-            runtime.markReady(&waiting_task.coro);
-        }
-
-        // Wake all waiting threads
-        std.Thread.Futex.wake(&self.state, std.math.maxInt(u32));
+    /// Request cancellation of this awaitable.
+    /// The cancellation flag will be consumed by the next yield() call.
+    pub fn requestCancellation(self: *Awaitable) void {
+        self.cancelled.store(true, .release);
     }
 };
 
@@ -859,9 +842,10 @@ pub const Runtime = struct {
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
-        // Check if current task has been cancelled before yielding
-        const state = current_task.awaitable.state.load(.acquire);
-        if (state == 2) {
+        // Check and consume cancellation flag before yielding
+        // cmpxchgStrong returns null on success, current value on failure
+        if (current_task.awaitable.cancelled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
+            // CAS succeeded: we consumed true, return cancelled
             return error.Cancelled;
         }
 
@@ -888,8 +872,7 @@ pub const Runtime = struct {
         std.debug.assert(coroutines.getCurrent() == current_coro);
 
         // Check again after resuming in case we were cancelled while suspended
-        const resumed_state = current_task.awaitable.state.load(.acquire);
-        if (resumed_state == 2) {
+        if (current_task.awaitable.cancelled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
             return error.Cancelled;
         }
     }
