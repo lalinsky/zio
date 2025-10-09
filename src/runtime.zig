@@ -276,6 +276,7 @@ pub const AnyTask = struct {
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
+    shield_count: u32 = 0,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         assert(awaitable.kind == .coro);
@@ -842,11 +843,13 @@ pub const Runtime = struct {
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
-        // Check and consume cancellation flag before yielding
-        // cmpxchgStrong returns null on success, current value on failure
-        if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-            // CAS succeeded: we consumed true, return canceled
-            return error.Canceled;
+        // Check and consume cancellation flag before yielding (unless shielded)
+        if (current_task.shield_count == 0) {
+            // cmpxchgStrong returns null on success, current value on failure
+            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
+                // CAS succeeded: we consumed true, return canceled
+                return error.Canceled;
+            }
         }
 
         current_coro.state = desired_state;
@@ -871,10 +874,34 @@ pub const Runtime = struct {
 
         std.debug.assert(coroutines.getCurrent() == current_coro);
 
-        // Check again after resuming in case we were canceled while suspended
-        if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-            return error.Canceled;
+        // Check again after resuming in case we were canceled while suspended (unless shielded)
+        if (current_task.shield_count == 0) {
+            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
+                return error.Canceled;
+            }
         }
+    }
+
+    /// Begin a cancellation shield.
+    /// While shielded, yield() will not check or consume the cancellation flag.
+    /// The flag remains set for when the shield ends.
+    /// This is useful for cleanup operations (like close()) that must complete even if canceled.
+    /// Must be paired with endShield().
+    pub fn beginShield(self: *Runtime) void {
+        _ = self;
+        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        current_task.shield_count += 1;
+    }
+
+    /// End a cancellation shield.
+    /// Must be paired with beginShield().
+    pub fn endShield(self: *Runtime) void {
+        _ = self;
+        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        std.debug.assert(current_task.shield_count > 0);
+        current_task.shield_count -= 1;
     }
 
     fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {

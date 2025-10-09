@@ -133,6 +133,10 @@ pub const UdpSocket = struct {
     }
 
     pub fn close(self: *UdpSocket) void {
+        // Shield close operation from cancellation
+        self.runtime.beginShield();
+        defer self.runtime.endShield();
+
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -169,7 +173,8 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting) catch unreachable; // close should never be canceled
+        // Shield ensures this never returns error.Canceled
+        waiter.runtime.yield(.waiting) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

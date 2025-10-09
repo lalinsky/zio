@@ -339,7 +339,11 @@ pub const File = struct {
         return bytes_written;
     }
 
-    pub fn close(self: *File) !void {
+    pub fn close(self: *File) void {
+        // Shield close operation from cancellation
+        self.runtime.beginShield();
+        defer self.runtime.endShield();
+
         const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -376,9 +380,11 @@ pub const File = struct {
             Result.callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        // Shield ensures this never returns error.Canceled
+        self.runtime.waitForXevCompletion(&completion) catch unreachable;
 
-        return result_data.result;
+        // Ignore close errors, following Zig std lib pattern
+        _ = result_data.result catch {};
     }
 
     // Zig 0.15+ streaming interface
@@ -425,15 +431,13 @@ test "File: basic read and write" {
             try testing.expectEqual(write_data.len, bytes_written);
 
             // Close file before reopening for read
-            try zio_file.close();
+            zio_file.close();
             std.log.info("TestTask: Closed file after write", .{});
 
             // Read test - reopen the file for reading
             var read_file = try fs.openFile(rt, file_path, .{ .mode = .read_only });
             defer read_file.deinit();
-            defer read_file.close() catch |err| {
-                std.log.warn("Failed to close read file: {}", .{err});
-            };
+            defer read_file.close();
             std.log.info("TestTask: Reopened file for reading", .{});
 
             var buffer: [100]u8 = undefined;
@@ -460,9 +464,7 @@ test "File: positional read and write" {
             const file_path = "test_file_positional.txt";
             var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
             defer zio_file.deinit();
-            defer zio_file.close() catch |err| {
-                std.log.warn("Failed to close positional test file: {}", .{err});
-            };
+            defer zio_file.close();
             defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write at different positions
@@ -506,7 +508,7 @@ test "File: close operation" {
             try testing.expectEqual(9, bytes_written);
 
             // Close the file using zio
-            try zio_file.close();
+            zio_file.close();
 
             // File should now be closed
         }
@@ -541,7 +543,7 @@ test "File: reader and writer interface" {
                 try writer.interface.writeSplatAll(&data, 10);
                 try writer.interface.flush();
 
-                try file.close();
+                file.close();
             }
 
             // Read using reader interface
@@ -558,7 +560,7 @@ test "File: reader and writer interface" {
                 try testing.expectEqual(10, bytes_read);
                 try testing.expectEqualStrings("xxxxxxxxxx", result[0..bytes_read]);
 
-                try file.close();
+                file.close();
             }
         }
     };
