@@ -49,6 +49,11 @@ pub const ZioError = error{
     NotInCoroutine,
 };
 
+// Cancellable error set
+pub const Cancellable = error{
+    Cancelled,
+};
+
 // Timer callback for libxev
 fn markReadyFromXevCallback(
     userdata: ?*Waiter,
@@ -134,15 +139,18 @@ pub const Awaitable = struct {
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 
     // Universal state for both coroutines and threads
-    // 0 = pending/not ready, 1 = complete/ready
+    // 0 = pending/not ready, 1 = complete/ready, 2 = cancelled
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     /// Wait for this awaitable to complete. Works from both coroutines and threads.
     /// When called from a coroutine, suspends the coroutine.
     /// When called from a thread, parks the thread using futex.
-    pub fn waitForComplete(self: *Awaitable) void {
-        // Fast path: already complete?
-        if (self.state.load(.acquire) == 1) return;
+    /// Returns error.Cancelled if the awaitable was cancelled.
+    pub fn waitForComplete(self: *Awaitable) Cancellable!void {
+        // Fast path: check if already complete or cancelled
+        const fast_state = self.state.load(.acquire);
+        if (fast_state == 1) return;
+        if (fast_state == 2) return error.Cancelled;
 
         if (coroutines.getCurrent()) |current| {
             // Coroutine path: add to wait queue and suspend
@@ -150,17 +158,30 @@ pub const Awaitable = struct {
             self.waiting_list.push(&task.awaitable);
 
             // Double-check state before suspending (avoid lost wakeup)
-            if (self.state.load(.acquire) == 1) {
-                // Completed while we were adding to queue, remove ourselves
+            const double_check_state = self.state.load(.acquire);
+            if (double_check_state != 0) {
+                // Completed or cancelled while we were adding to queue, remove ourselves
                 _ = self.waiting_list.remove(&task.awaitable);
+                if (double_check_state == 2) return error.Cancelled;
                 return;
             }
 
             const runtime = Runtime.fromCoroutine(current);
-            runtime.yield(.waiting);
+            runtime.yield(.waiting) catch |err| {
+                // If yield itself was cancelled, remove from wait list
+                _ = self.waiting_list.remove(&task.awaitable);
+                return err;
+            };
+
+            // Check final state after waking
+            const final_state = self.state.load(.acquire);
+            if (final_state == 2) return error.Cancelled;
         } else {
             // Thread path: park on the state using futex
-            while (self.state.load(.acquire) == 0) {
+            while (true) {
+                const current_state = self.state.load(.acquire);
+                if (current_state == 1) return;
+                if (current_state == 2) return error.Cancelled;
                 std.Thread.Futex.wait(&self.state, 0);
             }
         }
@@ -168,11 +189,14 @@ pub const Awaitable = struct {
 
     /// Wait for this awaitable to complete with a timeout. Works from both coroutines and threads.
     /// Returns error.Timeout if the timeout expires before completion.
+    /// Returns error.Cancelled if the awaitable was cancelled.
     /// For coroutines, uses runtime timer infrastructure.
     /// For threads, uses futex timedWait directly.
-    pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{Timeout}!void {
-        // Fast path: already complete?
-        if (self.state.load(.acquire) == 1) return;
+    pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{ Timeout, Cancelled }!void {
+        // Fast path: check if already complete or cancelled
+        const fast_state = self.state.load(.acquire);
+        if (fast_state == 1) return;
+        if (fast_state == 2) return error.Cancelled;
 
         if (coroutines.getCurrent()) |current| {
             // Coroutine path: get runtime and use timer infrastructure
@@ -181,8 +205,10 @@ pub const Awaitable = struct {
 
             self.waiting_list.push(&task.awaitable);
 
-            if (self.state.load(.acquire) == 1) {
+            const double_check_state = self.state.load(.acquire);
+            if (double_check_state != 0) {
                 _ = self.waiting_list.remove(&task.awaitable);
+                if (double_check_state == 2) return error.Cancelled;
                 return;
             }
 
@@ -196,7 +222,7 @@ pub const Awaitable = struct {
                 .awaitable = &task.awaitable,
             };
 
-            try rt.timedWaitForReadyWithCallback(
+            rt.timedWaitForReadyWithCallback(
                 timeout_ns,
                 TimeoutContext,
                 &timeout_ctx,
@@ -205,10 +231,23 @@ pub const Awaitable = struct {
                         return ctx.wait_queue.remove(ctx.awaitable);
                     }
                 }.onTimeout,
-            );
+            ) catch |err| {
+                // Handle both timeout and cancellation from yield
+                if (err == error.Cancelled) {
+                    _ = self.waiting_list.remove(&task.awaitable);
+                }
+                return err;
+            };
+
+            // Check final state after waking
+            const final_state = self.state.load(.acquire);
+            if (final_state == 2) return error.Cancelled;
         } else {
             // Thread path: use futex timedWait
-            while (self.state.load(.acquire) == 0) {
+            while (true) {
+                const current_state = self.state.load(.acquire);
+                if (current_state == 1) return;
+                if (current_state == 2) return error.Cancelled;
                 try std.Thread.Futex.timedWait(&self.state, 0, timeout_ns);
             }
         }
@@ -218,6 +257,22 @@ pub const Awaitable = struct {
     pub fn markComplete(self: *Awaitable, runtime: *Runtime) void {
         // Set state first (release semantics for memory ordering)
         self.state.store(1, .release);
+
+        // Wake all waiting coroutines
+        while (self.waiting_list.pop()) |waiting_awaitable| {
+            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
+            runtime.markReady(&waiting_task.coro);
+        }
+
+        // Wake all waiting threads
+        std.Thread.Futex.wake(&self.state, std.math.maxInt(u32));
+    }
+
+    /// Mark this awaitable as cancelled and wake all waiters (both coroutines and threads).
+    /// Waiters will receive error.Cancelled when they check the state.
+    pub fn markCancelled(self: *Awaitable, runtime: *Runtime) void {
+        // Set state to cancelled (release semantics for memory ordering)
+        self.state.store(2, .release);
 
         // Wake all waiting coroutines
         while (self.waiting_list.pop()) |waiting_awaitable| {
@@ -299,7 +354,7 @@ pub fn Task(comptime T: type) type {
             return Runtime.fromCoroutine(&self.any_task.coro);
         }
 
-        fn join(self: *Self) T {
+        fn join(self: *Self) (Cancellable || Self.getErrorSet())!Self.getPayload() {
             // Check if already completed
             if (self.future_result.get()) |res| {
                 return res;
@@ -314,12 +369,28 @@ pub fn Task(comptime T: type) type {
             }
 
             // Wait for task to complete (works from both coroutines and threads)
-            self.any_task.awaitable.waitForComplete();
+            try self.any_task.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
 
-        fn result(self: *Self) T {
+        fn getErrorSet() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.error_set,
+                else => error{},
+            };
+        }
+
+        fn getPayload() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.payload,
+                else => T,
+            };
+        }
+
+        fn result(self: *Self) (Cancellable || Self.getErrorSet())!Self.getPayload() {
             return self.join();
         }
     };
@@ -372,16 +443,32 @@ pub fn Future(comptime T: type) type {
             self.any_future.awaitable.markComplete(self.any_future.runtime);
         }
 
-        pub fn wait(self: *Self) T {
+        pub fn wait(self: *Self) (Cancellable || Self.getErrorSet())!Self.getPayload() {
             // Check if already set
             if (self.future_result.get()) |res| {
                 return res;
             }
 
             // Wait for future to be set (works from both coroutines and threads)
-            self.any_future.awaitable.waitForComplete();
+            try self.any_future.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
+        }
+
+        fn getErrorSet() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.error_set,
+                else => error{},
+            };
+        }
+
+        fn getPayload() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.payload,
+                else => T,
+            };
         }
     };
 }
@@ -463,7 +550,8 @@ pub fn BlockingTask(comptime T: type) type {
             }
 
             // Wait for blocking task to complete (works from both coroutines and threads)
-            self.any_blocking_task.awaitable.waitForComplete();
+            // Blocking tasks should never be cancelled
+            self.any_blocking_task.awaitable.waitForComplete() catch unreachable;
 
             return self.future_result.get() orelse unreachable;
         }
@@ -493,16 +581,32 @@ pub fn JoinHandle(comptime T: type) type {
             }
         }
 
-        pub fn join(self: *Self) T {
+        pub fn join(self: *Self) (Cancellable || Self.getErrorSet())!Self.getPayload() {
             return switch (self.kind) {
-                .coro => |task| task.join(),
-                .blocking => |task| task.join(),
-                .future => |future| future.wait(),
+                .coro => |task| try task.join(),
+                .blocking => |task| task.join(), // Blocking tasks ignore cancellation
+                .future => |future| try future.wait(),
             };
         }
 
-        pub fn result(self: *Self) T {
+        pub fn result(self: *Self) (Cancellable || Self.getErrorSet())!Self.getPayload() {
             return self.join();
+        }
+
+        fn getErrorSet() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.error_set,
+                else => error{},
+            };
+        }
+
+        fn getPayload() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.payload,
+                else => T,
+            };
         }
     };
 }
@@ -751,9 +855,15 @@ pub const Runtime = struct {
         return JoinHandle(Result){ .kind = .{ .coro = task } };
     }
 
-    pub fn yield(self: *Runtime, desired_state: CoroutineState) void {
+    pub fn yield(self: *Runtime, desired_state: CoroutineState) Cancellable!void {
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
+
+        // Check if current task has been cancelled before yielding
+        const state = current_task.awaitable.state.load(.acquire);
+        if (state == 2) {
+            return error.Cancelled;
+        }
 
         current_coro.state = desired_state;
         if (desired_state == .ready) {
@@ -776,6 +886,12 @@ pub const Runtime = struct {
         }
 
         std.debug.assert(coroutines.getCurrent() == current_coro);
+
+        // Check again after resuming in case we were cancelled while suspended
+        const resumed_state = current_task.awaitable.state.load(.acquire);
+        if (resumed_state == 2) {
+            return error.Cancelled;
+        }
     }
 
     fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
@@ -928,7 +1044,7 @@ pub const Runtime = struct {
         self.ready_queue.push(&task.awaitable);
     }
 
-    pub fn wait(self: *Runtime, task_id: u64) void {
+    pub fn wait(self: *Runtime, task_id: u64) Cancellable!void {
         const task = self.tasks.get(task_id) orelse return;
         if (task.coro.state == .dead) {
             return;
@@ -939,7 +1055,7 @@ pub const Runtime = struct {
             std.debug.panic("a task cannot wait on itself", .{});
         }
         task.awaitable.waiting_list.push(&current_task.awaitable);
-        self.yield(.waiting);
+        try self.yield(.waiting);
     }
 
     /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
@@ -971,7 +1087,7 @@ pub const Runtime = struct {
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
         comptime onTimeout: fn (ctx: *TimeoutContext) bool,
-    ) error{Timeout}!void {
+    ) error{ Timeout, Cancelled }!void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
@@ -1032,7 +1148,7 @@ pub const Runtime = struct {
         );
 
         // Wait for either timeout or external markReady
-        self.yield(.waiting);
+        try self.yield(.waiting);
 
         if (ctx.timed_out) {
             return error.Timeout;
@@ -1056,7 +1172,7 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{Timeout}!void {
+    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{ Timeout, Cancelled }!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(
@@ -1148,8 +1264,8 @@ test "runtime: Future await from coroutine" {
         fn setterTask(future: *Future(i32)) !void {
             // Simulate async work
             const rt = Runtime.getCurrent().?;
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
             future.set(123);
         }
 
@@ -1192,8 +1308,8 @@ test "runtime: Future multiple waiters" {
         fn setterTask(future: *Future(i32)) !void {
             // Let waiters block first
             const rt = Runtime.getCurrent().?;
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
             future.set(999);
         }
 
@@ -1213,10 +1329,10 @@ test "runtime: Future multiple waiters" {
             var setter = try rt.spawn(setterTask, .{future}, .{});
             defer setter.deinit();
 
-            rt.yield(.ready);
-            rt.yield(.ready);
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
 
             try waiter1.result();
             try waiter2.result();

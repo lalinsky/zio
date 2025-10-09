@@ -29,15 +29,15 @@ pub fn Queue(comptime T: type) type {
         }
 
         /// Check if the queue is empty.
-        pub fn isEmpty(self: *Self, rt: *Runtime) bool {
-            self.mutex.lock(rt);
+        pub fn isEmpty(self: *Self, rt: *Runtime) !bool {
+            try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
             return self.count == 0;
         }
 
         /// Check if the queue is full.
-        pub fn isFull(self: *Self, rt: *Runtime) bool {
-            self.mutex.lock(rt);
+        pub fn isFull(self: *Self, rt: *Runtime) !bool {
+            try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
             return self.count == self.buffer.len;
         }
@@ -45,12 +45,12 @@ pub fn Queue(comptime T: type) type {
         /// Get an item from the queue, blocking if empty.
         /// Returns error.QueueClosed if the queue is closed and empty.
         pub fn get(self: *Self, rt: *Runtime) !T {
-            self.mutex.lock(rt);
+            try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
             // Wait while empty and not closed
             while (self.count == 0 and !self.closed) {
-                self.not_empty.wait(rt, &self.mutex);
+                try self.not_empty.wait(rt, &self.mutex);
             }
 
             // If closed and empty, return error
@@ -72,7 +72,7 @@ pub fn Queue(comptime T: type) type {
         /// Try to get an item without blocking.
         /// Returns error.QueueEmpty if empty, error.QueueClosed if closed and empty.
         pub fn tryGet(self: *Self, rt: *Runtime) !T {
-            self.mutex.lock(rt);
+            try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
             if (self.count == 0) {
@@ -94,7 +94,7 @@ pub fn Queue(comptime T: type) type {
         /// Put an item into the queue, blocking if full.
         /// Returns error.QueueClosed if the queue is closed.
         pub fn put(self: *Self, rt: *Runtime, item: T) !void {
-            self.mutex.lock(rt);
+            try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
             if (self.closed) {
@@ -103,7 +103,7 @@ pub fn Queue(comptime T: type) type {
 
             // Wait while full
             while (self.count == self.buffer.len) {
-                self.not_full.wait(rt, &self.mutex);
+                try self.not_full.wait(rt, &self.mutex);
                 // Check if closed while waiting
                 if (self.closed) {
                     return error.QueueClosed;
@@ -122,7 +122,7 @@ pub fn Queue(comptime T: type) type {
         /// Try to put an item without blocking.
         /// Returns error.QueueFull if full, error.QueueClosed if closed.
         pub fn tryPut(self: *Self, rt: *Runtime, item: T) !void {
-            self.mutex.lock(rt);
+            try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
 
             if (self.closed) {
@@ -145,7 +145,7 @@ pub fn Queue(comptime T: type) type {
         /// After closing, put operations will return error.QueueClosed.
         /// get operations will drain remaining items, then return error.QueueClosed.
         pub fn close(self: *Self, rt: *Runtime, immediate: bool) void {
-            self.mutex.lock(rt);
+            self.mutex.lock(rt) catch unreachable; // close should never be cancelled
             defer self.mutex.unlock(rt);
 
             self.closed = true;
@@ -254,7 +254,7 @@ test "Queue: blocking behavior when empty" {
         }
 
         fn producer(rt: *Runtime, q: *Queue(u32)) !void {
-            rt.yield(.ready); // Let consumer start waiting
+            try rt.yield(.ready); // Let consumer start waiting
             try q.put(rt, 42);
         }
     };
@@ -288,8 +288,8 @@ test "Queue: blocking behavior when full" {
         }
 
         fn consumer(rt: *Runtime, q: *Queue(u32)) !void {
-            rt.yield(.ready); // Let producer fill the queue
-            rt.yield(.ready);
+            try rt.yield(.ready); // Let producer fill the queue
+            try rt.yield(.ready);
             _ = try q.get(rt); // Unblock producer
         }
     };
@@ -362,7 +362,7 @@ test "Queue: close graceful" {
         }
 
         fn consumer(rt: *Runtime, q: *Queue(u32), results: *[3]?u32) !void {
-            rt.yield(.ready); // Let producer finish
+            try rt.yield(.ready); // Let producer finish
             results[0] = q.get(rt) catch null;
             results[1] = q.get(rt) catch null;
             results[2] = q.get(rt) catch null; // Should fail with QueueClosed
@@ -400,7 +400,7 @@ test "Queue: close immediate" {
         }
 
         fn consumer(rt: *Runtime, q: *Queue(u32), result: *?u32) !void {
-            rt.yield(.ready); // Let producer finish
+            try rt.yield(.ready); // Let producer finish
             result.* = q.get(rt) catch null; // Should fail immediately
         }
     };

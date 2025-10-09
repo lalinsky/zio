@@ -129,7 +129,7 @@ test "tcpConnectToAddress: basic connection" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try tcpConnectToAddress(rt, addr);
@@ -187,7 +187,7 @@ test "tcpConnectToHost: localhost connection" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent, alloc: std.mem.Allocator) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             var stream = try tcpConnectToHost(rt, alloc, "localhost", TEST_PORT);
             defer stream.close();

@@ -73,8 +73,8 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// Subscribe a consumer to the channel.
         /// The consumer starts at the current write position (won't receive past messages).
         /// The consumer must remain valid until unsubscribe is called.
-        pub fn subscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) void {
-            self.mutex.lock(runtime);
+        pub fn subscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) !void {
+            try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
 
             consumer.read_pos = self.write_pos;
@@ -82,8 +82,8 @@ pub fn BroadcastChannel(comptime T: type) type {
         }
 
         /// Unsubscribe a consumer from the channel.
-        pub fn unsubscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) void {
-            self.mutex.lock(runtime);
+        pub fn unsubscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) !void {
+            try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
 
             self.consumers.remove(consumer);
@@ -94,7 +94,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// After a Lagged error, the consumer is advanced to the oldest available message.
         /// Returns error.Closed if the channel is closed and no more items are available.
         pub fn receive(self: *Self, runtime: *Runtime, consumer: *Consumer) !T {
-            self.mutex.lock(runtime);
+            try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
 
             // Check if we've been lapped (more than buffer.len behind)
@@ -106,7 +106,7 @@ pub fn BroadcastChannel(comptime T: type) type {
 
             // Wait while caught up and not closed
             while (consumer.read_pos >= self.write_pos and !self.closed) {
-                self.not_empty.wait(runtime, &self.mutex);
+                try self.not_empty.wait(runtime, &self.mutex);
 
                 // Recheck lag after waking (could have happened while waiting)
                 if (consumer.read_pos + self.buffer.len < self.write_pos) {
@@ -131,7 +131,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// Returns error.Lagged if the consumer has fallen too far behind.
         /// Returns error.Closed if the channel is closed and no more items are available.
         pub fn tryReceive(self: *Self, runtime: *Runtime, consumer: *Consumer) !T {
-            self.mutex.lock(runtime);
+            try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
 
             // Check if we've been lapped
@@ -158,7 +158,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// This never blocks, potentially overwriting old values that slow consumers haven't read yet.
         /// Returns error.Closed if the channel has been closed.
         pub fn send(self: *Self, runtime: *Runtime, item: T) !void {
-            self.mutex.lock(runtime);
+            try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
 
             if (self.closed) {
@@ -175,8 +175,8 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// Close the channel.
         /// After closing, send() will return error.Closed.
         /// Consumers can still drain remaining messages, then receive() will return error.Closed.
-        pub fn close(self: *Self, runtime: *Runtime) void {
-            self.mutex.lock(runtime);
+        pub fn close(self: *Self, runtime: *Runtime) !void {
+            try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
 
             self.closed = true;
@@ -199,16 +199,16 @@ test "BroadcastChannel: basic send and receive" {
 
     const TestFn = struct {
         fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = b.wait(rt); // Wait for receiver to subscribe
+            _ = try b.wait(rt); // Wait for receiver to subscribe
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
         }
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[3]u32, b: *Barrier) !void {
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
-            _ = b.wait(rt); // Signal that we're subscribed
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
+            _ = try b.wait(rt); // Signal that we're subscribed
 
             results[0] = try ch.receive(rt, consumer);
             results[1] = try ch.receive(rt, consumer);
@@ -243,16 +243,16 @@ test "BroadcastChannel: multiple consumers receive same messages" {
 
     const TestFn = struct {
         fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = b.wait(rt); // Wait for all consumers to subscribe
+            _ = try b.wait(rt); // Wait for all consumers to subscribe
             try ch.send(rt, 10);
             try ch.send(rt, 20);
             try ch.send(rt, 30);
         }
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, sum: *u32, b: *Barrier) !void {
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
-            _ = b.wait(rt); // Signal that we're subscribed
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
+            _ = try b.wait(rt); // Signal that we're subscribed
 
             sum.* += try ch.receive(rt, consumer);
             sum.* += try ch.receive(rt, consumer);
@@ -295,8 +295,8 @@ test "BroadcastChannel: lagged consumer" {
 
     const TestFn = struct {
         fn test_lag(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
 
             // Send more items than buffer capacity without consuming
             try ch.send(rt, 1);
@@ -336,8 +336,8 @@ test "BroadcastChannel: tryReceive" {
 
     const TestFn = struct {
         fn test_try(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
 
             // tryReceive on empty channel should return WouldBlock
             const err1 = ch.tryReceive(rt, consumer);
@@ -381,8 +381,8 @@ test "BroadcastChannel: new subscriber doesn't receive old messages" {
             try ch.send(rt, 3);
 
             // Now subscribe
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
 
             // Send new message
             try ch.send(rt, 4);
@@ -412,8 +412,8 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
 
     const TestFn = struct {
         fn test_unsubscribe(rt: *Runtime, ch: *BroadcastChannel(u32), c1: *BroadcastChannel(u32).Consumer, c2: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(rt, c1);
-            ch.subscribe(rt, c2);
+            try ch.subscribe(rt, c1);
+            try ch.subscribe(rt, c2);
 
             try ch.send(rt, 1);
             try ch.send(rt, 2);
@@ -423,7 +423,7 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
             try testing.expectEqual(@as(u32, 1), try ch.receive(rt, c2));
 
             // Unsubscribe c1
-            ch.unsubscribe(rt, c1);
+            try ch.unsubscribe(rt, c1);
 
             try ch.send(rt, 3);
 
@@ -453,7 +453,7 @@ test "BroadcastChannel: close prevents new sends" {
             try ch.send(rt, 1);
 
             // Close the channel
-            ch.close(rt);
+            try ch.close(rt);
 
             // Try to send after closing should fail
             const err = ch.send(rt, 2);
@@ -476,17 +476,17 @@ test "BroadcastChannel: consumers can drain after close" {
 
     const TestFn = struct {
         fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = b.wait(rt); // Wait for receiver to subscribe
+            _ = try b.wait(rt); // Wait for receiver to subscribe
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
-            ch.close(rt);
+            try ch.close(rt);
         }
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[4]?u32, b: *Barrier) !void {
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
-            _ = b.wait(rt); // Signal that we're subscribed
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
+            _ = try b.wait(rt); // Signal that we're subscribed
 
             // Should be able to drain all messages
             results[0] = ch.receive(rt, consumer) catch null;
@@ -525,9 +525,9 @@ test "BroadcastChannel: waiting consumers wake on close" {
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, got_closed: *bool, b: *Barrier) !void {
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
-            _ = b.wait(rt); // Signal that we're subscribed and about to wait
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
+            _ = try b.wait(rt); // Signal that we're subscribed and about to wait
 
             // Wait for message (channel is empty, so will block)
             const err = ch.receive(rt, consumer);
@@ -540,9 +540,9 @@ test "BroadcastChannel: waiting consumers wake on close" {
             }
         }
 
-        fn closer(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) void {
-            _ = b.wait(rt); // Wait for waiter to be ready
-            ch.close(rt);
+        fn closer(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
+            _ = try b.wait(rt); // Wait for waiter to be ready
+            try ch.close(rt);
         }
     };
 
@@ -570,11 +570,11 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
 
     const TestFn = struct {
         fn test_try_closed(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer);
+            try ch.subscribe(rt, consumer);
+            defer ch.unsubscribe(rt, consumer) catch {};
 
             // Close the empty channel
-            ch.close(rt);
+            try ch.close(rt);
 
             // tryReceive should return Closed
             const err = ch.tryReceive(rt, consumer);

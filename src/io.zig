@@ -31,7 +31,10 @@ pub fn StreamReader(comptime T: type) type {
             const dest = limit.slice(try w.writableSliceGreedy(1));
 
             var buf: xev.ReadBuffer = .{ .slice = dest };
-            const n = try r.stream.readBuf(&buf);
+            const n = r.stream.readBuf(&buf) catch |err| {
+                // Convert Cancelled to ReadFailed since std.io.Reader doesn't support cancellation
+                return if (err == error.Cancelled) error.ReadFailed else @errorCast(err);
+            };
 
             w.advance(n);
             return n;
@@ -46,9 +49,9 @@ pub fn StreamReader(comptime T: type) type {
             while (total_discarded < remaining) {
                 const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
                 var buf: xev.ReadBuffer = .{ .slice = io_reader.buffer[0..to_read] };
-                const n = r.stream.readBuf(&buf) catch |err| switch (err) {
-                    error.EndOfStream => break,
-                    else => return error.ReadFailed,
+                const n = r.stream.readBuf(&buf) catch |err| {
+                    if (err == error.EndOfStream) break;
+                    return error.ReadFailed;
                 };
                 total_discarded += n;
             }
@@ -67,7 +70,10 @@ pub fn StreamReader(comptime T: type) type {
             buf.vectors.len = dest_n;
             if (dest_n == 0) return 0;
 
-            const n = try r.stream.readBuf(&buf);
+            const n = r.stream.readBuf(&buf) catch |err| {
+                // Convert Cancelled to ReadFailed since std.io.Reader doesn't support cancellation
+                return if (err == error.Cancelled) error.ReadFailed else @errorCast(err);
+            };
 
             // Update buffer end pointer if we read into internal buffer
             if (n > data_size) {
@@ -161,7 +167,10 @@ pub fn StreamWriter(comptime T: type) type {
             if (len == 0) return 0;
 
             const write_buf = xev.WriteBuffer.fromSlices(vecs[0..len]);
-            const n = try w.stream.writeBuf(write_buf);
+            const n = w.stream.writeBuf(write_buf) catch |err| {
+                if (err == error.Cancelled) return error.WriteFailed;
+                return error.WriteFailed;
+            };
             return io_writer.consume(n);
         }
 
@@ -170,7 +179,10 @@ pub fn StreamWriter(comptime T: type) type {
 
             while (io_writer.end > 0) {
                 const buffered = io_writer.buffered();
-                const n = try w.stream.writeBuf(.{ .slice = buffered });
+                const n = w.stream.writeBuf(.{ .slice = buffered }) catch |err| {
+                    if (err == error.Cancelled) return error.WriteFailed;
+                    return error.WriteFailed;
+                };
 
                 if (n == 0) return error.WriteFailed; // No progress
 

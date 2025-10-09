@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Cancellable = @import("../runtime.zig").Cancellable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 
@@ -14,12 +15,12 @@ permits: usize = 0,
 const Semaphore = @This();
 
 /// Block until a permit is available, then decrement the permit count.
-pub fn wait(self: *Semaphore, rt: *Runtime) void {
-    self.mutex.lock(rt);
+pub fn wait(self: *Semaphore, rt: *Runtime) Cancellable!void {
+    try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
     while (self.permits == 0) {
-        self.cond.wait(rt, &self.mutex);
+        try self.cond.wait(rt, &self.mutex);
     }
 
     self.permits -= 1;
@@ -30,10 +31,10 @@ pub fn wait(self: *Semaphore, rt: *Runtime) void {
 
 /// Block until a permit is available or timeout expires.
 /// Returns error.Timeout if the timeout expires before a permit becomes available.
-pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{Timeout}!void {
+pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout, Cancelled }!void {
     var timeout_timer = std.time.Timer.start() catch unreachable;
 
-    self.mutex.lock(rt);
+    try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
     while (self.permits == 0) {
@@ -54,7 +55,7 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{Timeout}
 
 /// Increment the permit count and wake one waiting coroutine.
 pub fn post(self: *Semaphore, rt: *Runtime) void {
-    self.mutex.lock(rt);
+    self.mutex.lock(rt) catch unreachable; // post should never be cancelled
     defer self.mutex.unlock(rt);
 
     self.permits += 1;
@@ -70,8 +71,8 @@ test "Semaphore: basic wait/post" {
     var sem = Semaphore{ .permits = 1 };
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, s: *Semaphore, n: *i32) void {
-            s.wait(rt);
+        fn worker(rt: *Runtime, s: *Semaphore, n: *i32) !void {
+            try s.wait(rt);
             n.* += 1;
             s.post(rt);
         }
@@ -130,8 +131,8 @@ test "Semaphore: timedWait success" {
             flag.* = true;
         }
 
-        fn poster(rt: *Runtime, s: *Semaphore) void {
-            rt.yield(.ready);
+        fn poster(rt: *Runtime, s: *Semaphore) !void {
+            try rt.yield(.ready);
             s.post(rt);
         }
     };
@@ -156,8 +157,8 @@ test "Semaphore: multiple permits" {
     var sem = Semaphore{ .permits = 3 };
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, s: *Semaphore) void {
-            s.wait(rt);
+        fn worker(rt: *Runtime, s: *Semaphore) !void {
+            try s.wait(rt);
             // Don't post - consume the permit
         }
     };

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Cancellable = @import("../runtime.zig").Cancellable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
 const AnyTask = @import("../runtime.zig").AnyTask;
@@ -18,7 +19,7 @@ pub fn tryLock(self: *Mutex) bool {
     return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
 }
 
-pub fn lock(self: *Mutex, runtime: *Runtime) void {
+pub fn lock(self: *Mutex, runtime: *Runtime) Cancellable!void {
     const current = coroutines.getCurrent() orelse unreachable;
 
     // Fast path: try to acquire unlocked mutex
@@ -29,7 +30,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) void {
     self.wait_queue.push(&task.awaitable);
 
     // Suspend until woken by unlock()
-    runtime.yield(.waiting);
+    try runtime.yield(.waiting);
 
     // When we wake up, unlock() has already transferred ownership to us
     const owner = self.owner.load(.acquire);
@@ -63,9 +64,9 @@ test "Mutex basic lock/unlock" {
     var mutex = Mutex.init;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) void {
+        fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) !void {
             for (0..100) |_| {
-                mtx.lock(rt);
+                try mtx.lock(rt);
                 defer mtx.unlock(rt);
                 counter.* += 1;
             }

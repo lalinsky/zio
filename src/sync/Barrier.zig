@@ -29,8 +29,8 @@ pub fn init(count: usize) Barrier {
 /// Returns true if this coroutine was the last to arrive (the "leader"),
 /// false otherwise. This can be useful for having one coroutine perform
 /// cleanup or initialization for the next phase.
-pub fn wait(self: *Barrier, runtime: *Runtime) bool {
-    self.mutex.lock(runtime);
+pub fn wait(self: *Barrier, runtime: *Runtime) error{Cancelled}!bool {
+    try self.mutex.lock(runtime);
     defer self.mutex.unlock(runtime);
 
     const local_gen = self.generation;
@@ -45,7 +45,7 @@ pub fn wait(self: *Barrier, runtime: *Runtime) bool {
     } else {
         // Wait for the barrier to be released
         while (self.generation == local_gen) {
-            self.cond.wait(runtime, &self.mutex);
+            try self.cond.wait(runtime, &self.mutex);
         }
         return false;
     }
@@ -62,12 +62,12 @@ test "Barrier: basic synchronization" {
     var results: [3]u32 = undefined;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, cnt: *u32, result: *u32) void {
+        fn worker(rt: *Runtime, b: *Barrier, cnt: *u32, result: *u32) !void {
             // Increment counter before barrier
             cnt.* += 1;
 
             // Wait at barrier - all should see counter == 3 after this
-            _ = b.wait(rt);
+            _ = try b.wait(rt);
 
             // All coroutines should see the same final counter value
             result.* = cnt.*;
@@ -99,8 +99,8 @@ test "Barrier: leader detection" {
     var leader_count: u32 = 0;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, leader_cnt: *u32) void {
-            const is_leader = b.wait(rt);
+        fn worker(rt: *Runtime, b: *Barrier, leader_cnt: *u32) !void {
+            const is_leader = try b.wait(rt);
             if (is_leader) {
                 leader_cnt.* += 1;
             }
@@ -132,18 +132,18 @@ test "Barrier: reusable for multiple cycles" {
     var phase3_done: u32 = 0;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, p1: *u32, p2: *u32, p3: *u32) void {
+        fn worker(rt: *Runtime, b: *Barrier, p1: *u32, p2: *u32, p3: *u32) !void {
             // Phase 1
             p1.* += 1;
-            _ = b.wait(rt);
+            _ = try b.wait(rt);
 
             // Phase 2
             p2.* += 1;
-            _ = b.wait(rt);
+            _ = try b.wait(rt);
 
             // Phase 3
             p3.* += 1;
-            _ = b.wait(rt);
+            _ = try b.wait(rt);
         }
     };
 
@@ -169,8 +169,8 @@ test "Barrier: single coroutine barrier" {
     var is_leader_result = false;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, leader: *bool) void {
-            const is_leader = b.wait(rt);
+        fn worker(rt: *Runtime, b: *Barrier, leader: *bool) !void {
+            const is_leader = try b.wait(rt);
             leader.* = is_leader;
         }
     };
@@ -192,13 +192,13 @@ test "Barrier: ordering test" {
     var final_order: u32 = 0;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, order: *u32, my_arrival: *u32, final: *u32) void {
+        fn worker(rt: *Runtime, b: *Barrier, order: *u32, my_arrival: *u32, final: *u32) !void {
             // Record arrival order
             my_arrival.* = order.*;
             order.* += 1;
 
             // Wait at barrier
-            _ = b.wait(rt);
+            _ = try b.wait(rt);
 
             // After barrier, store final order value
             final.* = order.*;
@@ -237,9 +237,9 @@ test "Barrier: many coroutines" {
     var final_counts: [5]u32 = undefined;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, cnt: *u32, result: *u32) void {
+        fn worker(rt: *Runtime, b: *Barrier, cnt: *u32, result: *u32) !void {
             cnt.* += 1;
-            _ = b.wait(rt);
+            _ = try b.wait(rt);
             result.* = cnt.*;
         }
     };

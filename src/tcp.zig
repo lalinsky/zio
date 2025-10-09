@@ -93,7 +93,7 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try waiter.runtime.yield(.waiting);
 
         const accepted_tcp = try result_data.result;
         return TcpStream{
@@ -139,7 +139,7 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        waiter.runtime.yield(.waiting) catch unreachable; // close should never be cancelled
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -198,7 +198,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try waiter.runtime.yield(.waiting);
 
         try result_data.result;
 
@@ -304,14 +304,14 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try waiter.runtime.yield(.waiting);
 
         return result_data.result;
     }
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) std.io.Writer.Error!usize {
+    pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (error{Cancelled} || std.io.Writer.Error)!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -343,14 +343,14 @@ pub const TcpStream = struct {
             }).callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try waiter.runtime.yield(.waiting);
 
         return result_data.result catch return error.WriteFailed;
     }
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) std.io.Reader.Error!usize {
+    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (error{Cancelled} || std.io.Reader.Error)!usize {
         var waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -388,7 +388,7 @@ pub const TcpStream = struct {
             }).callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try waiter.runtime.yield(.waiting);
 
         const n = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -437,7 +437,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        waiter.runtime.yield(.waiting) catch unreachable; // close should never be cancelled
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -468,7 +468,7 @@ test "TCP: basic echo server and client" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -507,7 +507,7 @@ test "TCP: Writer splat handling" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -555,7 +555,7 @@ test "TCP: Writer splat with single element" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -603,7 +603,7 @@ test "TCP: Writer splat with single character" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -701,7 +701,7 @@ test "TCP: Reader takeByte with RESP protocol" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -765,7 +765,7 @@ test "TCP: readBuf with different ReadBuffer variants" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
