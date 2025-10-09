@@ -308,6 +308,14 @@ pub fn Task(comptime T: type) type {
                 return res;
             }
 
+            // Disallow self-join from within the same coroutine
+            if (coroutines.getCurrent()) |current| {
+                const current_task = AnyTask.fromCoroutine(current);
+                if (current_task == &self.any_task) {
+                    std.debug.panic("a task cannot join itself", .{});
+                }
+            }
+
             // Wait for task to complete (works from both coroutines and threads)
             self.any_task.awaitable.waitForComplete();
 
