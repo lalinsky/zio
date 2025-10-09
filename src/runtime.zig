@@ -1038,7 +1038,11 @@ pub const Runtime = struct {
             std.debug.panic("a task cannot wait on itself", .{});
         }
         task.awaitable.waiting_list.push(&current_task.awaitable);
-        try self.yield(.waiting);
+        self.yield(.waiting) catch |err| {
+            // On cancellation, remove from wait queue
+            _ = task.awaitable.waiting_list.remove(&current_task.awaitable);
+            return err;
+        };
     }
 
     /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.

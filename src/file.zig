@@ -332,7 +332,10 @@ pub const File = struct {
 
         try waiter.runtime.yield(.waiting);
 
-        const bytes_written = result_data.result catch return error.WriteFailed;
+        const bytes_written = result_data.result catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.WriteFailed,
+        };
         self.position += bytes_written;
         return bytes_written;
     }
