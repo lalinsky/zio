@@ -1411,6 +1411,7 @@ test "BroadcastChannel: basic send and receive" {
 
     const TestFn = struct {
         fn sender(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
+            rt.yield(); // Let receiver subscribe first
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
@@ -1683,6 +1684,7 @@ test "BroadcastChannel: consumers can drain after close" {
 
     const TestFn = struct {
         fn sender(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
+            rt.yield(); // Let receiver subscribe first
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
@@ -1690,7 +1692,6 @@ test "BroadcastChannel: consumers can drain after close" {
         }
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[4]?u32) !void {
-            rt.yield(); // Let sender send and close
             ch.subscribe(rt, consumer);
             defer ch.unsubscribe(rt, consumer);
 
