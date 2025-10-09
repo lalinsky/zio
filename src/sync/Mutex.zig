@@ -1,6 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Cancellable = @import("../runtime.zig").Cancellable;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
 const AnyTask = @import("../runtime.zig").AnyTask;
@@ -19,7 +19,7 @@ pub fn tryLock(self: *Mutex) bool {
     return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
 }
 
-pub fn lock(self: *Mutex, runtime: *Runtime) Cancellable!void {
+pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     const current = coroutines.getCurrent() orelse unreachable;
 
     // Fast path: try to acquire unlocked mutex

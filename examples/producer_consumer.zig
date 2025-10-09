@@ -10,7 +10,7 @@ fn producer(rt: *zio.Runtime, queue: *zio.Queue(i32), id: u32) void {
                 return;
             },
             error.Canceled => {
-                std.log.info("Producer {}: cancelled, exiting", .{id});
+                std.log.info("Producer {}: canceled, exiting", .{id});
                 return;
             },
         };
@@ -28,7 +28,7 @@ fn consumer(rt: *zio.Runtime, queue: *zio.Queue(i32), id: u32) void {
                 return;
             },
             error.Canceled => {
-                std.log.info("Consumer {}: cancelled, exiting", .{id});
+                std.log.info("Consumer {}: canceled, exiting", .{id});
                 return;
             },
         };

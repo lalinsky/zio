@@ -1,6 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Cancellable = @import("../runtime.zig").Cancellable;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
 const Awaitable = @import("../runtime.zig").Awaitable;
@@ -60,7 +60,7 @@ pub fn reset(self: *ResetEvent) void {
 /// Blocks the caller's coroutine until the ResetEvent is set().
 /// This is effectively a more efficient version of `while (!isSet()) {}`.
 /// The memory accesses before the set() can be said to happen before wait() returns.
-pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancellable!void {
+pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -129,7 +129,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
             }
         }.onTimeout,
     ) catch |err| {
-        // Remove from queue if cancelled (timeout already handled by callback)
+        // Remove from queue if canceled (timeout already handled by callback)
         if (err == error.Canceled) {
             _ = self.wait_queue.remove(&task.awaitable);
         }

@@ -169,7 +169,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting) catch unreachable; // close should never be cancelled
+        waiter.runtime.yield(.waiting) catch unreachable; // close should never be canceled
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

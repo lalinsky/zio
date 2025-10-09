@@ -1,6 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Cancellable = @import("../runtime.zig").Cancellable;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
 const Awaitable = @import("../runtime.zig").Awaitable;
@@ -13,7 +13,7 @@ const Condition = @This();
 
 pub const init: Condition = .{};
 
-pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancellable!void {
+pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
     const current = coroutines.getCurrent() orelse unreachable;
     const task = AnyTask.fromCoroutine(current);
 
@@ -25,7 +25,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancellable!void
     runtime.yield(.waiting) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
         _ = self.wait_queue.remove(&task.awaitable);
-        // Must reacquire mutex before returning, retry if cancelled
+        // Must reacquire mutex before returning, retry if canceled
         while (true) {
             mutex.lock(runtime) catch continue;
             break;
@@ -53,7 +53,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         .awaitable = &task.awaitable,
     };
 
-    var was_cancelled = false;
+    var was_canceled = false;
 
     // Atomically release mutex and wait
     mutex.unlock(runtime);
@@ -70,36 +70,36 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
             }
         }.onTimeout,
     ) catch |err| {
-        // Remove from queue if cancelled (timeout already handled by callback)
+        // Remove from queue if canceled (timeout already handled by callback)
         if (err == error.Canceled) {
             _ = self.wait_queue.remove(&task.awaitable);
         }
-        // Re-acquire mutex before returning - retry if cancelled
+        // Re-acquire mutex before returning - retry if canceled
         while (true) {
             mutex.lock(runtime) catch {
-                was_cancelled = true;
+                was_canceled = true;
                 continue;
             };
             break;
         }
         // Cancellation has priority over timeout
-        if (was_cancelled) {
+        if (was_canceled) {
             return error.Canceled;
         }
         return err;
     };
 
-    // Re-acquire mutex before returning - retry if cancelled
+    // Re-acquire mutex before returning - retry if canceled
     while (true) {
         mutex.lock(runtime) catch {
-            was_cancelled = true;
+            was_canceled = true;
             continue;
         };
         break;
     }
 
     // Cancellation has priority
-    if (was_cancelled) {
+    if (was_canceled) {
         return error.Canceled;
     }
 }

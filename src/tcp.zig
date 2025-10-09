@@ -139,7 +139,7 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting) catch unreachable; // close should never be cancelled
+        waiter.runtime.yield(.waiting) catch unreachable; // close should never be canceled
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -437,7 +437,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting) catch unreachable; // close should never be cancelled
+        waiter.runtime.yield(.waiting) catch unreachable; // close should never be canceled
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

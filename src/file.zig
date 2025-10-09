@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const xev = @import("xev");
 const io = @import("io.zig");
 const Runtime = @import("runtime.zig").Runtime;
-const Cancellable = @import("runtime.zig").Cancellable;
+const Cancelable = @import("runtime.zig").Cancelable;
 const Waiter = @import("runtime.zig").Waiter;
 
 pub const File = struct {
@@ -244,7 +244,7 @@ pub const File = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *File, buffer: *xev.ReadBuffer) (Cancellable || std.io.Reader.Error)!usize {
+    pub fn readBuf(self: *File, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
         const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
@@ -296,7 +296,7 @@ pub const File = struct {
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *File, buffer: xev.WriteBuffer) (Cancellable || std.io.Writer.Error)!usize {
+    pub fn writeBuf(self: *File, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
         const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 

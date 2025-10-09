@@ -145,7 +145,7 @@ pub fn Queue(comptime T: type) type {
         /// After closing, put operations will return error.QueueClosed.
         /// get operations will drain remaining items, then return error.QueueClosed.
         pub fn close(self: *Self, rt: *Runtime, immediate: bool) void {
-            self.mutex.lock(rt) catch unreachable; // close should never be cancelled
+            self.mutex.lock(rt) catch unreachable; // close should never be canceled
             defer self.mutex.unlock(rt);
 
             self.closed = true;

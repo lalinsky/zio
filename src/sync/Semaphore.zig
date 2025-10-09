@@ -1,6 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Cancellable = @import("../runtime.zig").Cancellable;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 
@@ -15,22 +15,22 @@ permits: usize = 0,
 const Semaphore = @This();
 
 /// Block until a permit is available, then decrement the permit count.
-/// If cancelled after acquiring a permit, the permit is properly released before returning error.
-pub fn wait(self: *Semaphore, rt: *Runtime) Cancellable!void {
+/// If canceled after acquiring a permit, the permit is properly released before returning error.
+pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
-    var was_cancelled = false;
+    var was_canceled = false;
 
     while (self.permits == 0) {
         self.cond.wait(rt, &self.mutex) catch {
             // Canceled while waiting - remember this but continue to check if permit available
-            was_cancelled = true;
+            was_canceled = true;
             break;
         };
     }
 
-    // If we got here, either permits > 0 or we were cancelled
+    // If we got here, either permits > 0 or we were canceled
     if (self.permits > 0) {
         // Permit is available - acquire it
         self.permits -= 1;
@@ -38,28 +38,28 @@ pub fn wait(self: *Semaphore, rt: *Runtime) Cancellable!void {
             self.cond.signal(rt);
         }
 
-        // If we were cancelled, release the permit before returning error
-        if (was_cancelled) {
+        // If we were canceled, release the permit before returning error
+        if (was_canceled) {
             self.permits += 1;
             self.cond.signal(rt);
             return error.Canceled;
         }
     } else {
-        // No permit available and we were cancelled
+        // No permit available and we were canceled
         return error.Canceled;
     }
 }
 
 /// Block until a permit is available or timeout expires.
 /// Returns error.Timeout if the timeout expires before a permit becomes available.
-/// If cancelled after acquiring a permit, the permit is properly released before returning error.
+/// If canceled after acquiring a permit, the permit is properly released before returning error.
 pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
     var timeout_timer = std.time.Timer.start() catch unreachable;
 
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
-    var was_cancelled = false;
+    var was_canceled = false;
 
     while (self.permits == 0) {
         const elapsed = timeout_timer.read();
@@ -73,12 +73,12 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout
                 return error.Timeout;
             }
             // Must be Canceled - remember this but continue to check if permit available
-            was_cancelled = true;
+            was_canceled = true;
             break;
         };
     }
 
-    // If we got here, either permits > 0 or we were cancelled
+    // If we got here, either permits > 0 or we were canceled
     if (self.permits > 0) {
         // Permit is available - acquire it
         self.permits -= 1;
@@ -86,28 +86,28 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout
             self.cond.signal(rt);
         }
 
-        // If we were cancelled, release the permit before returning error
-        if (was_cancelled) {
+        // If we were canceled, release the permit before returning error
+        if (was_canceled) {
             self.permits += 1;
             self.cond.signal(rt);
             return error.Canceled;
         }
     } else {
-        // No permit available and we were cancelled
+        // No permit available and we were canceled
         return error.Canceled;
     }
 }
 
 /// Increment the permit count and wake one waiting coroutine.
-/// Retries if cancelled to ensure the permit is posted, then returns error.Canceled.
-pub fn post(self: *Semaphore, rt: *Runtime) Cancellable!void {
-    var was_cancelled = false;
+/// Retries if canceled to ensure the permit is posted, then returns error.Canceled.
+pub fn post(self: *Semaphore, rt: *Runtime) Cancelable!void {
+    var was_canceled = false;
 
-    // Retry lock if cancelled - we must post the permit
+    // Retry lock if canceled - we must post the permit
     while (true) {
         self.mutex.lock(rt) catch {
-            was_cancelled = true;
-            continue; // Retry if cancelled
+            was_canceled = true;
+            continue; // Retry if canceled
         };
         break;
     }
@@ -116,7 +116,7 @@ pub fn post(self: *Semaphore, rt: *Runtime) Cancellable!void {
     self.permits += 1;
     self.cond.signal(rt);
 
-    if (was_cancelled) {
+    if (was_canceled) {
         return error.Canceled;
     }
 }
