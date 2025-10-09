@@ -33,16 +33,6 @@ pub const RuntimeOptions = struct {
     };
 };
 
-// Waker interface for asynchronous operations
-pub const Waiter = struct {
-    runtime: *Runtime,
-    coroutine: *Coroutine,
-
-    pub fn markReady(self: Waiter) void {
-        self.runtime.markReady(self.coroutine);
-    }
-};
-
 // Runtime-specific errors
 pub const ZioError = error{
     XevError,
@@ -56,7 +46,7 @@ pub const Cancelable = error{
 
 // Timer callback for libxev
 fn markReadyFromXevCallback(
-    userdata: ?*Waiter,
+    userdata: ?*Coroutine,
     loop: *xev.Loop,
     completion: *xev.Completion,
     result: anyerror!void,
@@ -65,8 +55,8 @@ fn markReadyFromXevCallback(
     _ = completion;
     _ = result catch {};
 
-    if (userdata) |waker| {
-        waker.markReady();
+    if (userdata) |coro| {
+        Runtime.fromCoroutine(coro).markReady(coro);
     }
     return .disarm;
 }
@@ -912,14 +902,6 @@ pub const Runtime = struct {
 
     pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
         return &task.awaitable;
-    }
-
-    pub fn getWaiter(self: *Runtime) Waiter {
-        const current = coroutines.getCurrent() orelse std.debug.panic("getWaker() must be called from within a coroutine", .{});
-        return Waiter{
-            .runtime = self,
-            .coroutine = current,
-        };
     }
 
     pub fn sleep(self: *Runtime, milliseconds: u64) void {
