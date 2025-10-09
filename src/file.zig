@@ -6,63 +6,6 @@ const Runtime = @import("runtime.zig").Runtime;
 const Cancellable = @import("runtime.zig").Cancellable;
 const Waiter = @import("runtime.zig").Waiter;
 
-/// Wait for an xev completion to finish, handling cancellation properly.
-/// When a coroutine is cancelled while waiting for an I/O operation,
-/// we need to cancel the operation (if the backend supports it) and
-/// wait for it to complete before returning error.Canceled.
-/// This prevents use-after-free bugs where the xev callback accesses
-/// freed stack memory.
-///
-/// Returns error.Canceled if the operation was cancelled.
-fn waitForXevCompletion(
-    comptime backend: xev.Backend,
-    runtime: *Runtime,
-    completion: *xev.Completion,
-) error{Canceled}!void {
-    var was_canceled = false;
-    var cancel_completion: xev.Completion = undefined;
-
-    while (completion.state() != .dead) {
-        runtime.yield(.waiting) catch |err| switch (err) {
-            error.Canceled => {
-                // First cancellation - try to cancel the xev operation
-                if (!was_canceled) {
-                    was_canceled = true;
-
-                    if (backend == .io_uring) {
-                        // io_uring supports cancellation - request cancellation
-                        runtime.loop.cancel(
-                            completion,
-                            &cancel_completion,
-                            void,
-                            null,
-                            struct {
-                                fn callback(
-                                    _: ?*void,
-                                    _: *xev.Loop,
-                                    _: *xev.Completion,
-                                    _: xev.CancelError!void,
-                                ) xev.CallbackAction {
-                                    // We don't need to do anything here - the original
-                                    // completion callback will fire and wake us up
-                                    return .disarm;
-                                }
-                            }.callback,
-                        );
-                    }
-                    // For non-io_uring backends, just continue waiting for completion
-                }
-                // Continue waiting for the operation to complete
-            },
-        };
-    }
-
-    // Operation completed - return cancellation error if we were cancelled
-    if (was_canceled) {
-        return error.Canceled;
-    }
-}
-
 pub const File = struct {
     xev_file: xev.File,
     runtime: *Runtime,
@@ -127,7 +70,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try waitForXevCompletion(xev.backend, self.runtime, &completion);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const bytes_read = try result_data.result;
         self.position += bytes_read;
@@ -176,7 +119,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try waitForXevCompletion(xev.backend, self.runtime, &completion);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const bytes_written = try result_data.result;
         self.position += bytes_written;
@@ -248,7 +191,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try waitForXevCompletion(xev.backend, self.runtime, &completion);
+        try self.runtime.waitForXevCompletion(&completion);
 
         return result_data.result;
     }
@@ -294,7 +237,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try waitForXevCompletion(xev.backend, self.runtime, &completion);
+        try self.runtime.waitForXevCompletion(&completion);
 
         return result_data.result;
     }
@@ -341,7 +284,7 @@ pub const File = struct {
             }).callback,
         );
 
-        try waitForXevCompletion(xev.backend, self.runtime, &completion);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const bytes_read = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -387,7 +330,7 @@ pub const File = struct {
             }).callback,
         );
 
-        try waitForXevCompletion(xev.backend, self.runtime, &completion);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const bytes_written = result_data.result catch |err| switch (err) {
             else => return error.WriteFailed,
@@ -433,7 +376,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try waitForXevCompletion(xev.backend, self.runtime, &completion);
+        try self.runtime.waitForXevCompletion(&completion);
 
         return result_data.result;
     }

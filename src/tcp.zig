@@ -59,7 +59,7 @@ pub const TcpListener = struct {
     }
 
     pub fn accept(self: *TcpListener) !TcpStream {
-        var waiter = self.runtime.getWaiter();
+        const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -93,7 +93,7 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        try waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const accepted_tcp = try result_data.result;
         return TcpStream{
@@ -161,7 +161,7 @@ pub const TcpStream = struct {
     /// Returns a connected TcpStream on success.
     pub fn connect(runtime: *Runtime, addr: Address) !TcpStream {
         var tcp = try xev.TCP.init(addr);
-        var waiter = runtime.getWaiter();
+        const waiter = runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -198,7 +198,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        try waiter.runtime.yield(.waiting);
+        try runtime.waitForXevCompletion(&completion);
 
         try result_data.result;
 
@@ -268,7 +268,7 @@ pub const TcpStream = struct {
     /// Shuts down the write side of the TCP connection.
     /// This sends a FIN packet to signal that no more data will be sent.
     pub fn shutdown(self: *TcpStream) !void {
-        var waiter = self.runtime.getWaiter();
+        const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -304,7 +304,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        try waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         return result_data.result;
     }
@@ -312,7 +312,7 @@ pub const TcpStream = struct {
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
     pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (error{Canceled} || std.io.Writer.Error)!usize {
-        var waiter = self.runtime.getWaiter();
+        const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -343,7 +343,7 @@ pub const TcpStream = struct {
             }).callback,
         );
 
-        try waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         return result_data.result catch return error.WriteFailed;
     }
@@ -351,7 +351,7 @@ pub const TcpStream = struct {
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
     pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (error{Canceled} || std.io.Reader.Error)!usize {
-        var waiter = self.runtime.getWaiter();
+        const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -388,7 +388,7 @@ pub const TcpStream = struct {
             }).callback,
         );
 
-        try waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const n = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,

@@ -27,7 +27,7 @@ pub const UdpSocket = struct {
     }
 
     pub fn read(self: *UdpSocket, buffer: []u8) !UdpReadResult {
-        var waiter = self.runtime.getWaiter();
+        const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
@@ -73,7 +73,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        try waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const bytes_read = try result_data.result;
         return UdpReadResult{
@@ -83,7 +83,7 @@ pub const UdpSocket = struct {
     }
 
     pub fn write(self: *UdpSocket, addr: Address, data: []const u8) !usize {
-        var waiter = self.runtime.getWaiter();
+        const waiter = self.runtime.getWaiter();
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
@@ -127,7 +127,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        try waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         return result_data.result;
     }
