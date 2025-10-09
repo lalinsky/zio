@@ -112,11 +112,8 @@ fn drainBlockingCompletions(
 
     // Drain all completed blocking tasks
     while (self.blocking_completions.pop()) |awaitable| {
-        // Wake up all coroutines waiting on this blocking task
-        while (awaitable.waiting_list.pop()) |waiting_awaitable| {
-            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-            self.markReady(&waiting_task.coro);
-        }
+        // Mark awaitable as complete and wake all waiters (coroutines and threads)
+        awaitable.markComplete(self);
         // Release the blocking task's reference (initial ref from init)
         self.releaseAwaitable(awaitable);
     }
@@ -139,6 +136,101 @@ pub const Awaitable = struct {
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
     destroy_fn: *const fn (*Runtime, *Awaitable) void,
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+
+    // Universal state for both coroutines and threads
+    // 0 = pending/not ready, 1 = complete/ready
+    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+    /// Wait for this awaitable to complete. Works from both coroutines and threads.
+    /// When called from a coroutine, suspends the coroutine.
+    /// When called from a thread, parks the thread using futex.
+    pub fn waitForComplete(self: *Awaitable) void {
+        // Fast path: already complete?
+        if (self.state.load(.acquire) == 1) return;
+
+        if (coroutines.getCurrent()) |current| {
+            // Coroutine path: add to wait queue and suspend
+            const task = AnyTask.fromCoroutine(current);
+            self.waiting_list.append(&task.awaitable);
+
+            // Double-check state before suspending (avoid lost wakeup)
+            if (self.state.load(.acquire) == 1) {
+                // Completed while we were adding to queue, remove ourselves
+                _ = self.waiting_list.remove(&task.awaitable);
+                return;
+            }
+
+            current.waitForReady();
+        } else {
+            // Thread path: park on the state using futex
+            while (self.state.load(.acquire) == 0) {
+                std.Thread.Futex.wait(&self.state, 0);
+            }
+        }
+    }
+
+    /// Wait for this awaitable to complete with a timeout. Works from both coroutines and threads.
+    /// Returns error.Timeout if the timeout expires before completion.
+    /// For coroutines, uses runtime timer infrastructure.
+    /// For threads, uses futex timedWait directly.
+    pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{Timeout}!void {
+        // Fast path: already complete?
+        if (self.state.load(.acquire) == 1) return;
+
+        if (coroutines.getCurrent()) |current| {
+            // Coroutine path: get runtime and use timer infrastructure
+            const task = AnyTask.fromCoroutine(current);
+            const rt = Runtime.fromCoroutine(current);
+
+            self.waiting_list.append(&task.awaitable);
+
+            if (self.state.load(.acquire) == 1) {
+                _ = self.waiting_list.remove(&task.awaitable);
+                return;
+            }
+
+            const TimeoutContext = struct {
+                wait_queue: *AwaitableList,
+                awaitable: *Awaitable,
+            };
+
+            var timeout_ctx = TimeoutContext{
+                .wait_queue = &self.waiting_list,
+                .awaitable = &task.awaitable,
+            };
+
+            try rt.timedWaitForReadyWithCallback(
+                timeout_ns,
+                TimeoutContext,
+                &timeout_ctx,
+                struct {
+                    fn onTimeout(ctx: *TimeoutContext) bool {
+                        return ctx.wait_queue.remove(ctx.awaitable);
+                    }
+                }.onTimeout,
+            );
+        } else {
+            // Thread path: use futex timedWait
+            while (self.state.load(.acquire) == 0) {
+                try std.Thread.Futex.timedWait(&self.state, 0, timeout_ns);
+            }
+        }
+    }
+
+    /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
+    pub fn markComplete(self: *Awaitable, runtime: *Runtime) void {
+        // Set state first (release semantics for memory ordering)
+        self.state.store(1, .release);
+
+        // Wake all waiting coroutines
+        while (self.waiting_list.pop()) |waiting_awaitable| {
+            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
+            runtime.markReady(&waiting_task.coro);
+        }
+
+        // Wake all waiting threads
+        std.Thread.Futex.wake(&self.state, std.math.maxInt(u32));
+    }
 };
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -216,8 +308,16 @@ pub fn Task(comptime T: type) type {
                 return res;
             }
 
-            // Use runtime's wait method for the waiting logic
-            self.runtime().wait(self.any_task.id);
+            // Disallow self-join from within the same coroutine
+            if (coroutines.getCurrent()) |current| {
+                const current_task = AnyTask.fromCoroutine(current);
+                if (current_task == &self.any_task) {
+                    std.debug.panic("a task cannot join itself", .{});
+                }
+            }
+
+            // Wait for task to complete (works from both coroutines and threads)
+            self.any_task.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
@@ -271,12 +371,8 @@ pub fn Future(comptime T: type) type {
                 return;
             }
 
-            // Wake up all coroutines waiting on this future
-            while (self.any_future.awaitable.waiting_list.pop()) |waiting_awaitable| {
-                const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-                const runtime = Runtime.fromCoroutine(&waiting_task.coro);
-                runtime.markReady(&waiting_task.coro);
-            }
+            // Mark awaitable as complete and wake all waiters (coroutines and threads)
+            self.any_future.awaitable.markComplete(self.any_future.runtime);
         }
 
         pub fn wait(self: *Self) T {
@@ -285,13 +381,8 @@ pub fn Future(comptime T: type) type {
                 return res;
             }
 
-            const current_coro = coroutines.getCurrent() orelse unreachable;
-            const current_task = AnyTask.fromCoroutine(current_coro);
-
-            self.any_future.awaitable.waiting_list.append(&current_task.awaitable);
-
-            current_coro.state = .waiting;
-            coroutines.yield();
+            // Wait for future to be set (works from both coroutines and threads)
+            self.any_future.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
@@ -374,11 +465,8 @@ pub fn BlockingTask(comptime T: type) type {
                 return res;
             }
 
-            const current_coro = coroutines.getCurrent() orelse unreachable;
-            const current_task = AnyTask.fromCoroutine(current_coro);
-
-            self.any_blocking_task.awaitable.waiting_list.append(&current_task.awaitable);
-            current_coro.waitForReady();
+            // Wait for blocking task to complete (works from both coroutines and threads)
+            self.any_blocking_task.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
@@ -791,10 +879,8 @@ pub const Runtime = struct {
                             task.coro.stack = null;
                         }
 
-                        while (awaitable.waiting_list.pop()) |waiting_awaitable| {
-                            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-                            self.markReady(&waiting_task.coro);
-                        }
+                        // Mark awaitable as complete and wake all waiters (coroutines and threads)
+                        awaitable.markComplete(self);
                         self.cleanup_queue.append(awaitable);
                     },
                     else => {},
