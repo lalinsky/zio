@@ -74,7 +74,11 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancellable!void {
         self.wait_queue.push(&task.awaitable);
 
         // Suspend until woken by set()
-        try runtime.yield(.waiting);
+        runtime.yield(.waiting) catch |err| {
+            // On cancellation, remove from queue
+            _ = self.wait_queue.remove(&task.awaitable);
+            return err;
+        };
     }
 
     // If state is is_set, we return immediately (event already set)
@@ -113,7 +117,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
         .awaitable = &task.awaitable,
     };
 
-    try runtime.timedWaitForReadyWithCallback(
+    runtime.timedWaitForReadyWithCallback(
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
@@ -124,7 +128,13 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
                 return ctx.wait_queue.remove(ctx.awaitable);
             }
         }.onTimeout,
-    );
+    ) catch |err| {
+        // Remove from queue if cancelled (timeout already handled by callback)
+        if (err == error.Canceled) {
+            _ = self.wait_queue.remove(&task.awaitable);
+        }
+        return err;
+    };
 }
 
 test "ResetEvent basic set/reset/isSet" {

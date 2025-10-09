@@ -45,7 +45,11 @@ pub fn wait(self: *Barrier, runtime: *Runtime) error{Canceled}!bool {
     } else {
         // Wait for the barrier to be released
         while (self.generation == local_gen) {
-            try self.cond.wait(runtime, &self.mutex);
+            self.cond.wait(runtime, &self.mutex) catch |err| {
+                // On cancellation, rollback the count increment
+                self.current -= 1;
+                return err;
+            };
         }
         return false;
     }

@@ -30,7 +30,11 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancellable!void {
     self.wait_queue.push(&task.awaitable);
 
     // Suspend until woken by unlock()
-    try runtime.yield(.waiting);
+    runtime.yield(.waiting) catch |err| {
+        // On cancellation, remove ourselves from the wait queue
+        _ = self.wait_queue.remove(&task.awaitable);
+        return err;
+    };
 
     // When we wake up, unlock() has already transferred ownership to us
     const owner = self.owner.load(.acquire);
