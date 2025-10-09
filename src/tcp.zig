@@ -93,7 +93,7 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         const accepted_tcp = try result_data.result;
         return TcpStream{
@@ -139,7 +139,7 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -198,7 +198,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         try result_data.result;
 
@@ -304,7 +304,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         return result_data.result;
     }
@@ -343,7 +343,7 @@ pub const TcpStream = struct {
             }).callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         return result_data.result catch return error.WriteFailed;
     }
@@ -388,7 +388,7 @@ pub const TcpStream = struct {
             }).callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         const n = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -437,7 +437,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.waitForReady();
+        waiter.runtime.yield(.waiting);
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

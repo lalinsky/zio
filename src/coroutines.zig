@@ -11,6 +11,14 @@ pub inline fn getCurrent() ?*Coroutine {
     return current_coroutine;
 }
 
+pub inline fn setCurrent(coro: *Coroutine) void {
+    current_coroutine = coro;
+}
+
+pub inline fn clearCurrent() void {
+    current_coroutine = null;
+}
+
 pub inline fn yield() void {
     const coro = current_coroutine orelse unreachable;
     switchContext(&coro.context, coro.parent_context_ptr);
@@ -20,9 +28,8 @@ const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
-    running = 1,
-    waiting = 2,
-    dead = 3,
+    waiting = 1,
+    dead = 2,
 };
 
 pub const stack_alignment = 16;
@@ -426,7 +433,6 @@ pub const Coroutine = struct {
             fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
                 const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
                 const coro = current_coroutine orelse unreachable;
-                coro.state = .running;
 
                 const result = @call(.always_inline, func, coro_data.args);
                 _ = coro_data.result_ptr.set(result);
@@ -469,10 +475,5 @@ pub const Coroutine = struct {
         defer current_coroutine = old_coro;
 
         switchContext(self.parent_context_ptr, &self.context);
-    }
-
-    pub fn waitForReady(self: *Coroutine) void {
-        self.state = .waiting;
-        yield();
     }
 };

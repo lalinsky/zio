@@ -20,7 +20,6 @@ pub const Mutex = struct {
     }
 
     pub fn lock(self: *Mutex, runtime: *Runtime) void {
-        _ = runtime;
         const current = coroutines.getCurrent() orelse unreachable;
 
         // Fast path: try to acquire unlocked mutex
@@ -28,10 +27,10 @@ pub const Mutex = struct {
 
         // Slow path: add current task to wait queue and suspend
         const task = AnyTask.fromCoroutine(current);
-        self.wait_queue.append(&task.awaitable);
+        self.wait_queue.push(&task.awaitable);
 
         // Suspend until woken by unlock()
-        current.waitForReady();
+        runtime.yield(.waiting);
 
         // When we wake up, unlock() has already transferred ownership to us
         const owner = self.owner.load(.acquire);
@@ -66,11 +65,11 @@ pub const Condition = struct {
         const task = AnyTask.fromCoroutine(current);
 
         // Add to wait queue before releasing mutex
-        self.wait_queue.append(&task.awaitable);
+        self.wait_queue.push(&task.awaitable);
 
         // Atomically release mutex and wait
         mutex.unlock(runtime);
-        current.waitForReady();
+        runtime.yield(.waiting);
 
         // Re-acquire mutex after waking
         mutex.lock(runtime);
@@ -80,7 +79,7 @@ pub const Condition = struct {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
-        self.wait_queue.append(&task.awaitable);
+        self.wait_queue.push(&task.awaitable);
 
         const TimeoutContext = struct {
             wait_queue: *AwaitableList,
@@ -179,7 +178,6 @@ pub const ResetEvent = struct {
     /// This is effectively a more efficient version of `while (!isSet()) {}`.
     /// The memory accesses before the set() can be said to happen before wait() returns.
     pub fn wait(self: *ResetEvent, runtime: *Runtime) void {
-        _ = runtime;
         // Try to atomically register as a waiter
         var state = self.state.load(.acquire);
         if (state == .unset) {
@@ -190,10 +188,10 @@ pub const ResetEvent = struct {
         if (state == .waiting) {
             const current = coroutines.getCurrent() orelse unreachable;
             const task = AnyTask.fromCoroutine(current);
-            self.wait_queue.append(&task.awaitable);
+            self.wait_queue.push(&task.awaitable);
 
             // Suspend until woken by set()
-            current.waitForReady();
+            runtime.yield(.waiting);
         }
 
         // If state is is_set, we return immediately (event already set)
@@ -220,7 +218,7 @@ pub const ResetEvent = struct {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
-        self.wait_queue.append(&task.awaitable);
+        self.wait_queue.push(&task.awaitable);
 
         const TimeoutContext = struct {
             wait_queue: *AwaitableList,
@@ -323,7 +321,7 @@ test "Condition basic wait/signal" {
         }
 
         fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
-            rt.yield(); // Give waiter time to start waiting
+            rt.yield(.ready); // Give waiter time to start waiting
 
             mtx.lock(rt);
             ready_flag.* = true;
@@ -396,9 +394,9 @@ test "Condition broadcast" {
 
         fn broadcaster(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
             // Give waiters time to start waiting
-            rt.yield();
-            rt.yield();
-            rt.yield();
+            rt.yield(.ready);
+            rt.yield(.ready);
+            rt.yield(.ready);
 
             mtx.lock(rt);
             ready_flag.* = true;
@@ -463,7 +461,7 @@ test "ResetEvent wait/set signaling" {
         }
 
         fn setter(rt: *Runtime, event: *ResetEvent) void {
-            rt.yield(); // Give waiter time to start waiting
+            rt.yield(.ready); // Give waiter time to start waiting
             event.set(rt);
         }
     };
@@ -522,9 +520,9 @@ test "ResetEvent multiple waiters broadcast" {
 
         fn setter(rt: *Runtime, event: *ResetEvent) void {
             // Give waiters time to start waiting
-            rt.yield();
-            rt.yield();
-            rt.yield();
+            rt.yield(.ready);
+            rt.yield(.ready);
+            rt.yield(.ready);
             event.set(rt);
         }
     };
@@ -820,7 +818,7 @@ test "Queue: blocking behavior when empty" {
         }
 
         fn producer(rt: *Runtime, q: *Queue(u32)) !void {
-            rt.yield(); // Let consumer start waiting
+            rt.yield(.ready); // Let consumer start waiting
             try q.put(rt, 42);
         }
     };
@@ -854,8 +852,8 @@ test "Queue: blocking behavior when full" {
         }
 
         fn consumer(rt: *Runtime, q: *Queue(u32)) !void {
-            rt.yield(); // Let producer fill the queue
-            rt.yield();
+            rt.yield(.ready); // Let producer fill the queue
+            rt.yield(.ready);
             _ = try q.get(rt); // Unblock producer
         }
     };
@@ -928,7 +926,7 @@ test "Queue: close graceful" {
         }
 
         fn consumer(rt: *Runtime, q: *Queue(u32), results: *[3]?u32) !void {
-            rt.yield(); // Let producer finish
+            rt.yield(.ready); // Let producer finish
             results[0] = q.get(rt) catch null;
             results[1] = q.get(rt) catch null;
             results[2] = q.get(rt) catch null; // Should fail with QueueClosed
@@ -966,7 +964,7 @@ test "Queue: close immediate" {
         }
 
         fn consumer(rt: *Runtime, q: *Queue(u32), result: *?u32) !void {
-            rt.yield(); // Let producer finish
+            rt.yield(.ready); // Let producer finish
             result.* = q.get(rt) catch null; // Should fail immediately
         }
     };
@@ -1174,7 +1172,7 @@ test "Semaphore: timedWait success" {
         }
 
         fn poster(rt: *Runtime, s: *Semaphore) void {
-            rt.yield();
+            rt.yield(.ready);
             s.post(rt);
         }
     };

@@ -41,10 +41,6 @@ pub const Waiter = struct {
     pub fn markReady(self: Waiter) void {
         self.runtime.markReady(self.coroutine);
     }
-
-    pub fn waitForReady(self: Waiter) void {
-        self.coroutine.waitForReady();
-    }
 };
 
 // Runtime-specific errors
@@ -288,10 +284,9 @@ pub fn Future(comptime T: type) type {
             const current_coro = coroutines.getCurrent() orelse unreachable;
             const current_task = AnyTask.fromCoroutine(current_coro);
 
-            self.any_future.awaitable.waiting_list.append(&current_task.awaitable);
+            self.any_future.awaitable.waiting_list.push(&current_task.awaitable);
 
-            current_coro.state = .waiting;
-            coroutines.yield();
+            self.any_future.runtime.yield(.waiting);
 
             return self.future_result.get() orelse unreachable;
         }
@@ -377,8 +372,8 @@ pub fn BlockingTask(comptime T: type) type {
             const current_coro = coroutines.getCurrent() orelse unreachable;
             const current_task = AnyTask.fromCoroutine(current_coro);
 
-            self.any_blocking_task.awaitable.waiting_list.append(&current_task.awaitable);
-            current_coro.waitForReady();
+            self.any_blocking_task.awaitable.waiting_list.push(&current_task.awaitable);
+            self.runtime.yield(.waiting);
 
             return self.future_result.get() orelse unreachable;
         }
@@ -459,10 +454,6 @@ pub const AwaitableList = struct {
         return head;
     }
 
-    pub fn append(self: *AwaitableList, awaitable: *Awaitable) void {
-        self.push(awaitable);
-    }
-
     pub fn concatByMoving(self: *AwaitableList, other: *AwaitableList) void {
         if (other.head == null) return;
 
@@ -530,6 +521,7 @@ pub const Runtime = struct {
     tasks: std.AutoHashMapUnmanaged(u64, *AnyTask) = .{},
 
     ready_queue: AwaitableList = .{},
+    next_ready_queue: AwaitableList = .{},
     cleanup_queue: AwaitableList = .{},
 
     // Blocking task support
@@ -663,15 +655,37 @@ pub const Runtime = struct {
 
         entry.value_ptr.* = &task.any_task;
 
-        self.ready_queue.append(&task.any_task.awaitable);
+        self.ready_queue.push(&task.any_task.awaitable);
 
         task.any_task.awaitable.ref_count.incr();
         return JoinHandle(Result){ .kind = .{ .coro = task } };
     }
 
-    pub fn yield(self: *Runtime) void {
-        _ = self;
-        coroutines.yield();
+    pub fn yield(self: *Runtime, desired_state: CoroutineState) void {
+        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+
+        current_coro.state = desired_state;
+        if (desired_state == .ready) {
+            self.next_ready_queue.push(&current_task.awaitable);
+        }
+
+        // If dead, always switch to scheduler for cleanup
+        if (desired_state == .dead) {
+            coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
+            unreachable;
+        }
+
+        if (self.ready_queue.pop()) |next_awaitable| {
+            const next_task = AnyTask.fromAwaitable(next_awaitable);
+
+            coroutines.setCurrent(&next_task.coro);
+            coroutines.switchContext(&current_coro.context, &next_task.coro.context);
+        } else {
+            coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
+        }
+
+        std.debug.assert(coroutines.getCurrent() == current_coro);
     }
 
     fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
@@ -760,8 +774,6 @@ pub const Runtime = struct {
                 self.last_cleanup_ms = now;
             }
 
-            var reschedule: AwaitableList = .{};
-
             // Cleanup dead coroutines
             while (self.cleanup_queue.pop()) |awaitable| {
                 const task = AnyTask.fromAwaitable(awaitable);
@@ -774,35 +786,36 @@ pub const Runtime = struct {
             // Process all ready coroutines (once)
             while (self.ready_queue.pop()) |awaitable| {
                 const task = AnyTask.fromAwaitable(awaitable);
-                task.coro.state = .running;
-                task.coro.switchTo();
 
-                // If the coroutines just yielded, it will end up in running state, so mark it as ready
-                if (task.coro.state == .running) {
-                    task.coro.state = .ready;
-                }
+                coroutines.setCurrent(&task.coro);
+                defer coroutines.clearCurrent();
+                coroutines.switchContext(&self.main_context, &task.coro.context);
 
-                switch (task.coro.state) {
-                    .ready => reschedule.append(awaitable),
-                    .dead => {
+                // Handle dead coroutines (checks getCurrent() to catch tasks that died via direct switch in yield())
+                if (coroutines.getCurrent()) |current_coro| {
+                    if (current_coro.state == .dead) {
+                        const current_task = AnyTask.fromCoroutine(current_coro);
+                        const current_awaitable = &current_task.awaitable;
+
                         // Release stack immediately since coroutine execution is complete
-                        if (task.coro.stack) |stack| {
+                        if (current_coro.stack) |stack| {
                             self.stack_pool.release(stack);
-                            task.coro.stack = null;
+                            current_coro.stack = null;
                         }
 
-                        while (awaitable.waiting_list.pop()) |waiting_awaitable| {
+                        while (current_awaitable.waiting_list.pop()) |waiting_awaitable| {
                             const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
                             self.markReady(&waiting_task.coro);
                         }
-                        self.cleanup_queue.append(awaitable);
-                    },
-                    else => {},
+                        self.cleanup_queue.push(current_awaitable);
+                    }
                 }
+
+                // Other states (.ready, .waiting) are handled by yield() or markReady()
             }
 
-            // Re-add coroutines that we previously ready
-            self.ready_queue.concatByMoving(&reschedule);
+            // Move yielded coroutines back to ready queue
+            self.ready_queue.concatByMoving(&self.next_ready_queue);
 
             // If we have no active coroutines, exit
             if (self.tasks.size == 0) {
@@ -824,7 +837,7 @@ pub const Runtime = struct {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = AnyTask.fromCoroutine(coro);
-        self.ready_queue.append(&task.awaitable);
+        self.ready_queue.push(&task.awaitable);
     }
 
     pub fn wait(self: *Runtime, task_id: u64) void {
@@ -837,8 +850,8 @@ pub const Runtime = struct {
         if (current_task == task) {
             std.debug.panic("a task cannot wait on itself", .{});
         }
-        task.awaitable.waiting_list.append(&current_task.awaitable);
-        current_coro.waitForReady();
+        task.awaitable.waiting_list.push(&current_task.awaitable);
+        self.yield(.waiting);
     }
 
     /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
@@ -931,7 +944,7 @@ pub const Runtime = struct {
         );
 
         // Wait for either timeout or external markReady
-        current.waitForReady();
+        self.yield(.waiting);
 
         if (ctx.timed_out) {
             return error.Timeout;
@@ -1046,8 +1059,9 @@ test "runtime: Future await from coroutine" {
     const TestContext = struct {
         fn setterTask(future: *Future(i32)) !void {
             // Simulate async work
-            coroutines.yield();
-            coroutines.yield();
+            const rt = Runtime.getCurrent().?;
+            rt.yield(.ready);
+            rt.yield(.ready);
             future.set(123);
         }
 
@@ -1089,8 +1103,9 @@ test "runtime: Future multiple waiters" {
 
         fn setterTask(future: *Future(i32)) !void {
             // Let waiters block first
-            coroutines.yield();
-            coroutines.yield();
+            const rt = Runtime.getCurrent().?;
+            rt.yield(.ready);
+            rt.yield(.ready);
             future.set(999);
         }
 
@@ -1110,11 +1125,14 @@ test "runtime: Future multiple waiters" {
             var setter = try rt.spawn(setterTask, .{future}, .{});
             defer setter.deinit();
 
-            // Let everything complete
-            coroutines.yield();
-            coroutines.yield();
-            coroutines.yield();
-            coroutines.yield();
+            rt.yield(.ready);
+            rt.yield(.ready);
+            rt.yield(.ready);
+            rt.yield(.ready);
+
+            try waiter1.result();
+            try waiter2.result();
+            try waiter3.result();
         }
     };
 
