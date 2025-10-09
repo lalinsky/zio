@@ -1408,18 +1408,20 @@ test "BroadcastChannel: basic send and receive" {
 
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
+    var receiver_ready = ResetEvent.init;
 
     const TestFn = struct {
-        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-            rt.yield(); // Let receiver subscribe first
+        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), ready_event: *ResetEvent) !void {
+            ready_event.wait(rt); // Wait for receiver to subscribe
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
         }
 
-        fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[3]u32) !void {
+        fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[3]u32, ready_event: *ResetEvent) !void {
             ch.subscribe(rt, consumer);
             defer ch.unsubscribe(rt, consumer);
+            ready_event.set(rt); // Signal that we're subscribed
 
             results[0] = try ch.receive(rt, consumer);
             results[1] = try ch.receive(rt, consumer);
@@ -1430,9 +1432,9 @@ test "BroadcastChannel: basic send and receive" {
     var consumer = BroadcastChannel(u32).Consumer{};
     var results: [3]u32 = undefined;
 
-    var sender_task = try runtime.spawn(TestFn.sender, .{ &runtime, &channel }, .{});
+    var sender_task = try runtime.spawn(TestFn.sender, .{ &runtime, &channel, &receiver_ready }, .{});
     defer sender_task.deinit();
-    var receiver_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer, &results }, .{});
+    var receiver_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer, &results, &receiver_ready }, .{});
     defer receiver_task.deinit();
 
     try runtime.run();
@@ -1450,18 +1452,25 @@ test "BroadcastChannel: multiple consumers receive same messages" {
 
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
+    var all_receivers_ready = ResetEvent.init;
+    var receiver_count = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-            rt.yield(); // Let consumers subscribe first
+        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), ready_event: *ResetEvent) !void {
+            ready_event.wait(rt); // Wait for all consumers to subscribe
             try ch.send(rt, 10);
             try ch.send(rt, 20);
             try ch.send(rt, 30);
         }
 
-        fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, sum: *u32) !void {
+        fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, sum: *u32, ready_event: *ResetEvent, counter: *std.atomic.Value(u32)) !void {
             ch.subscribe(rt, consumer);
             defer ch.unsubscribe(rt, consumer);
+
+            // Increment counter and signal when all 3 are ready
+            if (counter.fetchAdd(1, .monotonic) == 2) {
+                ready_event.set(rt);
+            }
 
             sum.* += try ch.receive(rt, consumer);
             sum.* += try ch.receive(rt, consumer);
@@ -1476,13 +1485,13 @@ test "BroadcastChannel: multiple consumers receive same messages" {
     var sum2: u32 = 0;
     var sum3: u32 = 0;
 
-    var sender_task = try runtime.spawn(TestFn.sender, .{ &runtime, &channel }, .{});
+    var sender_task = try runtime.spawn(TestFn.sender, .{ &runtime, &channel, &all_receivers_ready }, .{});
     defer sender_task.deinit();
-    var receiver1_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer1, &sum1 }, .{});
+    var receiver1_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer1, &sum1, &all_receivers_ready, &receiver_count }, .{});
     defer receiver1_task.deinit();
-    var receiver2_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer2, &sum2 }, .{});
+    var receiver2_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer2, &sum2, &all_receivers_ready, &receiver_count }, .{});
     defer receiver2_task.deinit();
-    var receiver3_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer3, &sum3 }, .{});
+    var receiver3_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer3, &sum3, &all_receivers_ready, &receiver_count }, .{});
     defer receiver3_task.deinit();
 
     try runtime.run();
@@ -1681,19 +1690,21 @@ test "BroadcastChannel: consumers can drain after close" {
 
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
+    var receiver_ready = ResetEvent.init;
 
     const TestFn = struct {
-        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-            rt.yield(); // Let receiver subscribe first
+        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), ready_event: *ResetEvent) !void {
+            ready_event.wait(rt); // Wait for receiver to subscribe
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
             ch.close(rt);
         }
 
-        fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[4]?u32) !void {
+        fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[4]?u32, ready_event: *ResetEvent) !void {
             ch.subscribe(rt, consumer);
             defer ch.unsubscribe(rt, consumer);
+            ready_event.set(rt); // Signal that we're subscribed
 
             // Should be able to drain all messages
             results[0] = ch.receive(rt, consumer) catch null;
@@ -1707,9 +1718,9 @@ test "BroadcastChannel: consumers can drain after close" {
     var consumer = BroadcastChannel(u32).Consumer{};
     var results: [4]?u32 = .{ null, null, null, null };
 
-    var sender_task = try runtime.spawn(TestFn.sender, .{ &runtime, &channel }, .{});
+    var sender_task = try runtime.spawn(TestFn.sender, .{ &runtime, &channel, &receiver_ready }, .{});
     defer sender_task.deinit();
-    var receiver_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer, &results }, .{});
+    var receiver_task = try runtime.spawn(TestFn.receiver, .{ &runtime, &channel, &consumer, &results, &receiver_ready }, .{});
     defer receiver_task.deinit();
 
     try runtime.run();
@@ -1728,11 +1739,13 @@ test "BroadcastChannel: waiting consumers wake on close" {
 
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
+    var waiter_ready = ResetEvent.init;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, got_closed: *bool) !void {
+        fn waiter(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, got_closed: *bool, ready_event: *ResetEvent) !void {
             ch.subscribe(rt, consumer);
             defer ch.unsubscribe(rt, consumer);
+            ready_event.set(rt); // Signal that we're subscribed and about to wait
 
             // Wait for message (channel is empty, so will block)
             const err = ch.receive(rt, consumer);
@@ -1745,8 +1758,8 @@ test "BroadcastChannel: waiting consumers wake on close" {
             }
         }
 
-        fn closer(rt: *Runtime, ch: *BroadcastChannel(u32)) void {
-            rt.yield(); // Let waiter start waiting
+        fn closer(rt: *Runtime, ch: *BroadcastChannel(u32), ready_event: *ResetEvent) void {
+            ready_event.wait(rt); // Wait for waiter to be ready
             ch.close(rt);
         }
     };
@@ -1754,9 +1767,9 @@ test "BroadcastChannel: waiting consumers wake on close" {
     var consumer = BroadcastChannel(u32).Consumer{};
     var got_closed = false;
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ &runtime, &channel, &consumer, &got_closed }, .{});
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ &runtime, &channel, &consumer, &got_closed, &waiter_ready }, .{});
     defer waiter_task.deinit();
-    var closer_task = try runtime.spawn(TestFn.closer, .{ &runtime, &channel }, .{});
+    var closer_task = try runtime.spawn(TestFn.closer, .{ &runtime, &channel, &waiter_ready }, .{});
     defer closer_task.deinit();
 
     try runtime.run();
