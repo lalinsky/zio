@@ -15,86 +15,58 @@ permits: usize = 0,
 const Semaphore = @This();
 
 /// Block until a permit is available, then decrement the permit count.
-/// If canceled after acquiring a permit, the permit is properly released before returning error.
+/// If canceled while waiting, signals another waiter to handle any available permit.
 pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
-    var was_canceled = false;
-
     while (self.permits == 0) {
         self.cond.wait(rt, &self.mutex) catch {
-            // Canceled while waiting - remember this but continue to check if permit available
-            was_canceled = true;
-            break;
+            // Wake another waiter to handle any race with permit availability
+            if (self.permits > 0) {
+                self.cond.signal(rt);
+            }
+            return error.Canceled;
         };
     }
 
-    // If we got here, either permits > 0 or we were canceled
+    self.permits -= 1;
     if (self.permits > 0) {
-        // Permit is available - acquire it
-        self.permits -= 1;
-        if (self.permits > 0) {
-            self.cond.signal(rt);
-        }
-
-        // If we were canceled, release the permit before returning error
-        if (was_canceled) {
-            self.permits += 1;
-            self.cond.signal(rt);
-            return error.Canceled;
-        }
-    } else {
-        // No permit available and we were canceled
-        return error.Canceled;
+        self.cond.signal(rt);
     }
 }
 
 /// Block until a permit is available or timeout expires.
 /// Returns error.Timeout if the timeout expires before a permit becomes available.
-/// If canceled after acquiring a permit, the permit is properly released before returning error.
+/// If canceled while waiting, signals another waiter to handle any available permit.
 pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
     var timeout_timer = std.time.Timer.start() catch unreachable;
 
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
-    var was_canceled = false;
-
     while (self.permits == 0) {
         const elapsed = timeout_timer.read();
-        if (elapsed > timeout_ns) {
+        if (elapsed >= timeout_ns) {
             return error.Timeout;
         }
 
         const local_timeout_ns = timeout_ns - elapsed;
-        self.cond.timedWait(rt, &self.mutex, local_timeout_ns) catch |err| {
-            if (err == error.Timeout) {
-                return error.Timeout;
-            }
-            // Must be Canceled - remember this but continue to check if permit available
-            was_canceled = true;
-            break;
+        self.cond.timedWait(rt, &self.mutex, local_timeout_ns) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            error.Canceled => {
+                // Wake another waiter to handle any race with permit availability
+                if (self.permits > 0) {
+                    self.cond.signal(rt);
+                }
+                return error.Canceled;
+            },
         };
     }
 
-    // If we got here, either permits > 0 or we were canceled
+    self.permits -= 1;
     if (self.permits > 0) {
-        // Permit is available - acquire it
-        self.permits -= 1;
-        if (self.permits > 0) {
-            self.cond.signal(rt);
-        }
-
-        // If we were canceled, release the permit before returning error
-        if (was_canceled) {
-            self.permits += 1;
-            self.cond.signal(rt);
-            return error.Canceled;
-        }
-    } else {
-        // No permit available and we were canceled
-        return error.Canceled;
+        self.cond.signal(rt);
     }
 }
 
