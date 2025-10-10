@@ -79,10 +79,14 @@ fn noopTimerCancelCallback(
 fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
 
-    // Execute the user's blocking function
-    any_blocking_task.execute_fn(any_blocking_task);
+    // Check if the task was canceled before it started executing
+    if (!any_blocking_task.canceled.load(.acquire)) {
+        // Execute the user's blocking function only if not canceled
+        any_blocking_task.execute_fn(any_blocking_task);
+    }
 
     // Push to completion queue (thread-safe MPSC)
+    // Even if canceled, we still mark as complete so waiters wake up
     any_blocking_task.runtime.blocking_completions.push(&any_blocking_task.awaitable);
 
     // Wake up main loop
@@ -284,6 +288,7 @@ pub const AnyBlockingTask = struct {
     thread_pool_task: xev.ThreadPool.Task,
     runtime: *Runtime,
     execute_fn: *const fn (*AnyBlockingTask) void,
+    canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
