@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const xev = @import("xev");
 
+const meta = @import("meta.zig");
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
 const CoroutineState = coroutines.CoroutineState;
@@ -450,8 +451,8 @@ pub fn BlockingTask(comptime T: type) type {
         pub fn init(
             runtime: *Runtime,
             allocator: Allocator,
-            comptime func: anytype,
-            args: anytype,
+            func: anytype,
+            args: meta.ArgsType(func),
         ) !*Self {
             const Args = @TypeOf(args);
 
@@ -576,17 +577,6 @@ pub fn JoinHandle(comptime T: type) type {
                 .future => {}, // Futures cannot be canceled
             }
         }
-    };
-}
-
-fn ReturnType(comptime func: anytype) type {
-    return if (@typeInfo(@TypeOf(func)).@"fn".return_type) |ret| ret else void;
-}
-
-fn PayloadType(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .error_union => |eu| eu.payload,
-        else => T,
     };
 }
 
@@ -778,7 +768,7 @@ pub const Runtime = struct {
         self.stack_pool.deinit();
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(PayloadType(ReturnType(func))) {
+    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: CoroutineOptions) !JoinHandle(meta.Result(func)) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
@@ -794,8 +784,8 @@ pub const Runtime = struct {
         }
         errdefer self.tasks.removeByPtr(entry.key_ptr);
 
-        const Result = ReturnType(func);
-        const Payload = PayloadType(Result);
+        const Result = meta.ReturnType(func);
+        const Payload = meta.Payload(Result);
         const TypedTask = Task(Payload);
 
         const task = try self.allocator.create(TypedTask);
@@ -821,7 +811,7 @@ pub const Runtime = struct {
             .future_result = .{},
         };
 
-        task.any_task.coro.setup(Payload, func, args, &task.future_result);
+        task.any_task.coro.setup(func, args, &task.future_result);
 
         entry.value_ptr.* = &task.any_task;
 
@@ -932,12 +922,12 @@ pub const Runtime = struct {
 
     pub fn spawnBlocking(
         self: *Runtime,
-        comptime func: anytype,
-        args: anytype,
-    ) !JoinHandle(PayloadType(ReturnType(func))) {
+        func: anytype,
+        args: meta.ArgsType(func),
+    ) !JoinHandle(meta.Result(func)) {
         try self.ensureBlockingInitialized();
 
-        const Payload = PayloadType(ReturnType(func));
+        const Payload = meta.Result(func);
         const task = try BlockingTask(Payload).init(
             self,
             self.allocator,
@@ -951,19 +941,11 @@ pub const Runtime = struct {
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
     /// This is equivalent to: spawn() + run() + result(), but in a single call.
     /// Returns an error union that includes errors from spawn(), run(), and the task itself.
-    pub fn runUntilComplete(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !ReturnPayload(func) {
+    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: CoroutineOptions) !meta.Result(func) {
         var handle = try self.spawn(func, args, options);
         defer handle.deinit();
         try self.run();
         return handle.result();
-    }
-
-    fn ReturnPayload(comptime func: anytype) type {
-        const T = ReturnType(func);
-        return switch (@typeInfo(T)) {
-            .error_union => |eu| eu.payload,
-            else => T,
-        };
     }
 
     pub fn run(self: *Runtime) !void {

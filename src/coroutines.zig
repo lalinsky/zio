@@ -3,6 +3,7 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const meta = @import("meta.zig");
 const FutureResult = @import("future_result.zig").FutureResult;
 
 threadlocal var current_coroutine: ?*Coroutine = null;
@@ -422,7 +423,8 @@ pub const Coroutine = struct {
     stack: ?Stack,
     state: CoroutineState,
 
-    pub fn setup(self: *Coroutine, comptime Result: type, comptime func: anytype, args: anytype, result_ptr: *FutureResult(Result)) void {
+    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.Result(func))) void {
+        const Result = meta.Result(func);
         const Args = @TypeOf(args);
 
         const CoroutineData = struct {
