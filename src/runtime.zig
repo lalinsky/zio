@@ -699,6 +699,9 @@ pub const Runtime = struct {
     async_completion: xev.Completion = undefined,
     blocking_initialized: bool = false,
 
+    // Signal handling support
+    signal_handler: ?*@import("signal.zig").SignalHandler = null,
+
     // Stack pool cleanup tracking
     cleanup_interval_ms: i64,
     last_cleanup_ms: i64 = 0,
@@ -760,6 +763,11 @@ pub const Runtime = struct {
             self.releaseAwaitable(&task.awaitable);
         }
         self.tasks.deinit(self.allocator);
+
+        // Clean up signal handler
+        if (self.signal_handler) |handler| {
+            handler.deinit();
+        }
 
         // Clean up blocking task support
         if (self.blocking_initialized) {
@@ -946,6 +954,24 @@ pub const Runtime = struct {
         );
 
         return JoinHandle(Payload){ .kind = .{ .blocking = task } };
+    }
+
+    /// Add a signal handler for the specified signal.
+    /// Creates the internal signal handler coroutine on first use.
+    /// The callback will be invoked from the event loop context when the signal is received.
+    pub fn addSignalHandler(
+        self: *Runtime,
+        signal: @import("signal.zig").Signal,
+        comptime callback: anytype,
+        args: anytype,
+    ) !void {
+        // Initialize signal handler on first use
+        if (self.signal_handler == null) {
+            const SignalHandler = @import("signal.zig").SignalHandler;
+            self.signal_handler = try SignalHandler.init(self, self.allocator);
+        }
+
+        try self.signal_handler.?.installHandler(signal, callback, args);
     }
 
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.

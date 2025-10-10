@@ -4,13 +4,13 @@ const zio = @import("zio");
 var should_exit = std.atomic.Value(bool).init(false);
 var signal_count = std.atomic.Value(u32).init(0);
 
-fn handleShutdown() void {
-    const count = signal_count.fetchAdd(1, .monotonic) + 1;
+fn handleShutdown(args: struct { should_exit_ptr: *std.atomic.Value(bool), signal_count_ptr: *std.atomic.Value(u32) }) void {
+    const count = args.signal_count_ptr.fetchAdd(1, .monotonic) + 1;
     std.debug.print("Received shutdown signal #{}\n", .{count});
 
     if (count >= 2) {
         std.debug.print("Received multiple signals, exiting...\n", .{});
-        should_exit.store(true, .release);
+        args.should_exit_ptr.store(true, .release);
     } else {
         std.debug.print("Press Ctrl+C again to exit\n", .{});
     }
@@ -39,16 +39,9 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(gpa.allocator(), .{});
     defer runtime.deinit();
 
-    // Install signal handlers
-    const handler = try zio.signal.SignalHandler.init(&runtime, gpa.allocator());
-    defer handler.deinit();
-
-    try handler.installHandler(.int, handleShutdown);
-    try handler.installHandler(.term, handleShutdown);
-
-    // Spawn the handler coroutine
-    var handler_task = try runtime.spawn(zio.signal.SignalHandler.run, .{handler}, .{});
-    defer handler_task.deinit();
+    // Install signal handlers using Runtime.addSignalHandler
+    try runtime.addSignalHandler(.int, handleShutdown, .{ .should_exit_ptr = &should_exit, .signal_count_ptr = &signal_count });
+    try runtime.addSignalHandler(.term, handleShutdown, .{ .should_exit_ptr = &should_exit, .signal_count_ptr = &signal_count });
 
     // Run main loop
     try runtime.runUntilComplete(mainLoop, .{&runtime}, .{});

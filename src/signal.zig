@@ -75,7 +75,7 @@ const GlobalState = struct {
 
 // Platform-specific signal handler implementations
 const posix = if (builtin.os.tag != .windows) struct {
-    fn signalHandler(sig: c_int) callconv(.C) void {
+    fn signalHandler(sig: c_int) callconv(.c) void {
         // CRITICAL: This runs in signal context - only async-signal-safe operations!
         const signal = Signal.fromNative(sig) orelse return;
         GlobalState.incrementCounter(signal);
@@ -101,7 +101,6 @@ const posix = if (builtin.os.tag != .windows) struct {
 } else struct {};
 
 const windows = if (builtin.os.tag == .windows) struct {
-    const WINAPI = std.os.windows.WINAPI;
     const BOOL = std.os.windows.BOOL;
     const TRUE = std.os.windows.TRUE;
     const FALSE = std.os.windows.FALSE;
@@ -112,11 +111,11 @@ const windows = if (builtin.os.tag == .windows) struct {
     const CTRL_CLOSE_EVENT = 2;
 
     extern "kernel32" fn SetConsoleCtrlHandler(
-        handler: ?*const fn (DWORD) callconv(WINAPI) BOOL,
+        handler: ?*const fn (DWORD) callconv(.winapi) BOOL,
         add: BOOL,
-    ) callconv(WINAPI) BOOL;
+    ) callconv(.winapi) BOOL;
 
-    fn ctrlHandler(ctrl_type: DWORD) callconv(WINAPI) BOOL {
+    fn ctrlHandler(ctrl_type: DWORD) callconv(.winapi) BOOL {
         // This runs in a separate thread spawned by the system
         const signal: ?Signal = switch (ctrl_type) {
             CTRL_C_EVENT => .int,
@@ -143,15 +142,22 @@ const windows = if (builtin.os.tag == .windows) struct {
     }
 } else struct {};
 
-/// Signal handler registration
+/// Internal signal handler state (owned by Runtime)
 pub const SignalHandler = struct {
+    const ARGS_SIZE = 64;
+
+    const HandlerEntry = struct {
+        callback: *const fn (*anyopaque) void,
+        args_data: [ARGS_SIZE]u8 align(16), // Use 16-byte alignment to handle most types
+        args_size: usize,
+    };
+
     runtime: *Runtime,
     allocator: Allocator,
     async_handle: xev.Async,
     async_completion: xev.Completion,
-    handlers: [Signal.COUNT]?*const fn () void,
+    handlers: [Signal.COUNT]?HandlerEntry,
     active_signals: [Signal.COUNT]bool,
-    running: std.atomic.Value(bool),
 
     /// Initialize signal handling system
     pub fn init(runtime: *Runtime, allocator: Allocator) !*SignalHandler {
@@ -163,9 +169,8 @@ pub const SignalHandler = struct {
             .allocator = allocator,
             .async_handle = try xev.Async.init(),
             .async_completion = .{},
-            .handlers = [_]?*const fn () void{null} ** Signal.COUNT,
+            .handlers = [_]?HandlerEntry{null} ** Signal.COUNT,
             .active_signals = [_]bool{false} ** Signal.COUNT,
-            .running = std.atomic.Value(bool).init(true),
         };
 
         // Initialize global state if not already done
@@ -193,9 +198,6 @@ pub const SignalHandler = struct {
     }
 
     pub fn deinit(self: *SignalHandler) void {
-        // Stop the handler coroutine
-        self.running.store(false, .release);
-
         // Uninstall signal handlers
         for (self.active_signals, 0..) |active, i| {
             if (active) {
@@ -219,11 +221,12 @@ pub const SignalHandler = struct {
         self.allocator.destroy(self);
     }
 
-    /// Register a signal handler callback
+    /// Register a signal handler callback with args
     pub fn installHandler(
         self: *SignalHandler,
         signal: Signal,
-        comptime callback: fn () void,
+        comptime callback: anytype,
+        args: anytype,
     ) !void {
         const idx = @intFromEnum(signal);
 
@@ -235,8 +238,58 @@ pub const SignalHandler = struct {
             }
         }
 
-        // Store the callback
-        self.handlers[idx] = callback;
+        // Get the function parameter type
+        const fn_info = @typeInfo(@TypeOf(callback)).@"fn";
+        comptime {
+            if (fn_info.params.len != 1) {
+                @compileError("Signal handler callback must take exactly 1 parameter");
+            }
+        }
+        const ParamType = fn_info.params[0].type.?;
+        const param_size = @sizeOf(ParamType);
+        const param_align = @alignOf(ParamType);
+
+        // Verify args fit in reserved space
+        comptime {
+            if (param_size > ARGS_SIZE) {
+                @compileError(std.fmt.comptimePrint(
+                    "Signal handler args too large: {} bytes (max {})",
+                    .{ param_size, ARGS_SIZE },
+                ));
+            }
+            if (param_align > 16) {
+                @compileError(std.fmt.comptimePrint(
+                    "Signal handler args alignment too large: {} (max 16)",
+                    .{param_align},
+                ));
+            }
+        }
+
+        // Create wrapper that extracts args and calls user callback
+        const Wrapper = struct {
+            fn call(args_ptr: *anyopaque) void {
+                // Cast the args pointer directly to the function's expected parameter type
+                const param_ptr: *const ParamType = @ptrCast(@alignCast(args_ptr));
+                callback(param_ptr.*);
+            }
+        };
+
+        // Store the callback and args
+        var entry = HandlerEntry{
+            .callback = &Wrapper.call,
+            .args_data = undefined,
+            .args_size = param_size,
+        };
+
+        // Copy args into the data buffer
+        if (param_size > 0) {
+            // We need to ensure proper alignment when copying
+            // Cast args to bytes and copy
+            const src_ptr: [*]const u8 = @ptrCast(&args);
+            @memcpy(entry.args_data[0..param_size], src_ptr[0..param_size]);
+        }
+
+        self.handlers[idx] = entry;
         self.active_signals[idx] = true;
 
         // Install platform-specific handler
@@ -257,48 +310,22 @@ pub const SignalHandler = struct {
 
         // Check which signals fired and dispatch to handlers
         for (0..Signal.COUNT) |i| {
-            if (self.handlers[i]) |handler| {
+            if (self.handlers[i]) |*entry| {
                 const signal: Signal = @enumFromInt(i);
                 const count = GlobalState.consumeCounter(signal);
 
                 // Call handler once for each signal received (in case of coalescing)
                 var j: u32 = 0;
                 while (j < count) : (j += 1) {
-                    handler();
+                    // Call with pointer to args data
+                    entry.callback(@ptrCast(&entry.args_data));
                 }
             }
         }
 
         return .rearm;
     }
-
-    /// Run the signal handler loop (should be spawned as a coroutine)
-    pub fn run(self: *SignalHandler) !void {
-        while (self.running.load(.acquire)) {
-            // Yield to allow other coroutines to run
-            try self.runtime.yield(.ready);
-        }
-    }
 };
-
-/// Helper function to install a signal handler
-/// This spawns the signal handling coroutine automatically
-pub fn installHandler(
-    runtime: *Runtime,
-    allocator: Allocator,
-    signal: Signal,
-    comptime callback: fn () void,
-) !*SignalHandler {
-    const handler = try SignalHandler.init(runtime, allocator);
-    errdefer handler.deinit();
-
-    try handler.installHandler(signal, callback);
-
-    // Spawn coroutine to run the handler loop
-    _ = try runtime.spawn(SignalHandler.run, .{handler}, .{});
-
-    return handler;
-}
 
 test "signal handler basic initialization" {
     const testing = std.testing;
@@ -336,4 +363,37 @@ test "signal counter increment and consume" {
     // Should be zero after consuming
     const int_count2 = GlobalState.consumeCounter(.int);
     try testing.expectEqual(@as(u32, 0), int_count2);
+}
+
+test "signal handler with args" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const handler = try SignalHandler.init(&runtime, testing.allocator);
+    defer handler.deinit();
+
+    var counter: u32 = 0;
+    const increment_by: u32 = 5;
+
+    const Args = struct { counter_ptr: *u32, value: u32 };
+    const TestCallback = struct {
+        fn callback(args: Args) void {
+            args.counter_ptr.* += args.value;
+        }
+    };
+
+    const args_to_pass: Args = .{ .counter_ptr = &counter, .value = increment_by };
+
+    try handler.installHandler(.int, TestCallback.callback, args_to_pass);
+
+    // Simulate signal
+    GlobalState.incrementCounter(.int);
+    GlobalState.incrementCounter(.int);
+
+    // Trigger async callback manually
+    _ = SignalHandler.asyncCallback(handler, &runtime.loop, &handler.async_completion, {});
+
+    try testing.expectEqual(@as(u32, 10), counter);
 }
