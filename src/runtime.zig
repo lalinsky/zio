@@ -518,19 +518,35 @@ pub fn BlockingTask(comptime T: type) type {
             self.runtime.releaseAwaitable(&self.any_blocking_task.awaitable);
         }
 
-        fn join(self: *Self) T {
+        fn join(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
             if (self.future_result.get()) |res| {
                 return res;
             }
 
             // Wait for blocking task to complete (works from both coroutines and threads)
-            // Blocking tasks should never be canceled
-            self.any_blocking_task.awaitable.waitForComplete() catch unreachable;
+            // The waiter can be canceled even though the blocking task continues execution
+            try self.any_blocking_task.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
 
-        fn result(self: *Self) T {
+        fn getErrorSet() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.error_set,
+                else => error{},
+            };
+        }
+
+        fn getPayload() type {
+            const info = @typeInfo(T);
+            return switch (info) {
+                .error_union => |eu| eu.payload,
+                else => T,
+            };
+        }
+
+        fn result(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
             return self.join();
         }
     };
@@ -558,7 +574,7 @@ pub fn JoinHandle(comptime T: type) type {
         pub fn join(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
             return switch (self.kind) {
                 .coro => |task| try task.join(),
-                .blocking => |task| task.join(), // Blocking tasks ignore cancellation
+                .blocking => |task| try task.join(),
                 .future => |future| try future.wait(),
             };
         }
