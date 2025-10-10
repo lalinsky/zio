@@ -1144,7 +1144,19 @@ pub const Runtime = struct {
         );
 
         // Wait for either timeout or external markReady
-        try self.yield(.waiting);
+        self.yield(.waiting) catch |err| {
+            // Invalidate pending callbacks before unwinding so they ignore this stack frame.
+            task.timer_generation +%= 1;
+            timer.cancel(
+                &self.loop,
+                &task.timer_c,
+                &task.timer_cancel_c,
+                void,
+                null,
+                noopTimerCancelCallback,
+            );
+            return err;
+        };
 
         if (ctx.timed_out) {
             return error.Timeout;
