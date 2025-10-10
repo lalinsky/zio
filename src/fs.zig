@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const xev = @import("xev");
 const File = @import("file.zig").File;
 const Runtime = @import("runtime.zig").Runtime;
+const Io = @import("runtime.zig").Io;
 
 const windows = if (builtin.os.tag == .windows) std.os.windows else struct {};
 
@@ -13,7 +14,7 @@ const windows = if (builtin.os.tag == .windows) std.os.windows else struct {};
 /// The returned File handle supports async read, write, pread, pwrite, and close operations.
 ///
 /// ## Parameters
-/// - `runtime`: The ZIO runtime instance for async operations
+/// - `io`: The ZIO I/O handle for async operations
 /// - `path`: Path to the file (supports both relative and absolute paths)
 /// - `flags`: std.fs.File.OpenFlags specifying access mode
 ///
@@ -24,11 +25,11 @@ const windows = if (builtin.os.tag == .windows) std.os.windows else struct {};
 /// - `FileNotFound`: File doesn't exist
 /// - `AccessDenied`: Insufficient permissions to access the file
 /// - Platform-specific file system errors
-pub fn openFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlags) !File {
+pub fn openFile(io: Io, path: []const u8, flags: std.fs.File.OpenFlags) !File {
     if (builtin.os.tag == .windows) {
-        return openFileWindows(runtime, path, flags);
+        return openFileWindows(io.runtime(), path, flags);
     } else {
-        return openFileUnix(runtime, path, flags);
+        return openFileUnix(io.runtime(), path, flags);
     }
 }
 
@@ -37,7 +38,7 @@ pub fn openFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlag
 /// Creates a new file with the specified creation flags.
 ///
 /// ## Parameters
-/// - `runtime`: The ZIO runtime instance for async operations
+/// - `io`: The ZIO I/O handle for async operations
 /// - `path`: Path to the file (supports both relative and absolute paths)
 /// - `flags`: std.fs.File.CreateFlags specifying creation behavior
 ///
@@ -47,11 +48,11 @@ pub fn openFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlag
 /// ## Errors
 /// - `AccessDenied`: Insufficient permissions to create the file
 /// - Platform-specific file system errors
-pub fn createFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.CreateFlags) !File {
+pub fn createFile(io: Io, path: []const u8, flags: std.fs.File.CreateFlags) !File {
     if (builtin.os.tag == .windows) {
-        return createFileWindows(runtime, path, flags);
+        return createFileWindows(io.runtime(), path, flags);
     } else {
-        return createFileUnix(runtime, path, flags);
+        return createFileUnix(io.runtime(), path, flags);
     }
 }
 
@@ -181,11 +182,11 @@ test "fs: openFile and createFile with different modes" {
     defer runtime.deinit();
 
     const TestTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(io: Io) !void {
             // Test creating a new file using the fs module
             const file_path = "test_fs_demo.txt";
 
-            var file = try createFile(rt, file_path, .{});
+            var file = try createFile(io, file_path, .{});
             defer file.deinit();
 
             // Write some data
@@ -194,7 +195,7 @@ test "fs: openFile and createFile with different modes" {
             file.close();
 
             // Test opening the file for reading
-            var read_file = try openFile(rt, file_path, .{ .mode = .read_only });
+            var read_file = try openFile(io, file_path, .{ .mode = .read_only });
             defer read_file.deinit();
 
             // Read back the data
@@ -208,5 +209,5 @@ test "fs: openFile and createFile with different modes" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime.io()}, .{});
 }

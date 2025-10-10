@@ -391,8 +391,7 @@ const ConnectionHandler = struct {
     store: *Store,
     allocator: std.mem.Allocator,
 
-    fn run(rt: *zio.Runtime, stream: zio.TcpStream, store_ptr: *Store, alloc: std.mem.Allocator) !void {
-        _ = rt;
+    fn run(stream: zio.TcpStream, store_ptr: *Store, alloc: std.mem.Allocator) !void {
         var self = ConnectionHandler{
             .stream = stream,
             .store = store_ptr,
@@ -460,9 +459,9 @@ const ConnectionHandler = struct {
 // Main Server
 // =============================================================================
 
-fn runServer(rt: *zio.Runtime, store_ptr: *Store, alloc: std.mem.Allocator) !void {
+fn runServer(io: zio.Io, store_ptr: *Store, alloc: std.mem.Allocator) !void {
     const addr = try zio.Address.parseIp4("127.0.0.1", 6379);
-    var listener = try zio.TcpListener.init(rt, addr);
+    var listener = try zio.TcpListener.init(io, addr);
     defer listener.close();
 
     try listener.bind(addr);
@@ -474,7 +473,7 @@ fn runServer(rt: *zio.Runtime, store_ptr: *Store, alloc: std.mem.Allocator) !voi
     while (true) {
         var stream = try listener.accept();
         errdefer stream.close();
-        var handle = try rt.spawn(ConnectionHandler.run, .{ rt, stream, store_ptr, alloc }, .{});
+        var handle = try io.spawn(ConnectionHandler.run, .{ stream, store_ptr, alloc }, .{});
         handle.deinit();
     }
 }
@@ -490,5 +489,5 @@ pub fn main() !void {
     var store = Store.init(allocator);
     defer store.deinit();
 
-    try runtime.runUntilComplete(runServer, .{ &runtime, &store, allocator }, .{});
+    try runtime.runUntilComplete(runServer, .{ runtime.io(), &store, allocator }, .{});
 }

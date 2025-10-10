@@ -8,11 +8,11 @@ fn getTimestamp() u64 {
 
 var start_time: u64 = 0;
 
-fn udpEchoServer(rt: *zio.Runtime, port: u16) !void {
+fn udpEchoServer(io: zio.Io, port: u16) !void {
     print("[Server] Starting UDP echo server on port {}\n", .{port});
 
     const bind_addr = try zio.Address.parseIp4("127.0.0.1", port);
-    var socket = try zio.UdpSocket.init(rt, bind_addr);
+    var socket = try zio.UdpSocket.init(io, bind_addr);
     defer socket.deinit();
 
     try socket.bind(bind_addr);
@@ -38,15 +38,15 @@ fn udpEchoServer(rt: *zio.Runtime, port: u16) !void {
     print("[Server] Server shutting down\n", .{});
 }
 
-fn udpClient(rt: *zio.Runtime, server_port: u16, client_id: u32, message: []const u8) !void {
+fn udpClient(io: zio.Io, server_port: u16, client_id: u32, message: []const u8) !void {
     // Give server time to start
-    rt.sleep(50 * client_id);
+    io.runtime().sleep(50 * client_id);
 
     const elapsed_start = getTimestamp() - start_time;
     print("[{}ms] [Client-{}] Starting\n", .{ elapsed_start, client_id });
 
     const client_addr = try zio.Address.parseIp4("127.0.0.1", 0); // Bind to any available port
-    var socket = try zio.UdpSocket.init(rt, client_addr);
+    var socket = try zio.UdpSocket.init(io, client_addr);
     defer socket.deinit();
 
     try socket.bind(client_addr);
@@ -91,7 +91,7 @@ pub fn main() !void {
     const server_port: u16 = 9000;
 
     // Start server
-    const server_task = try runtime.spawn(udpEchoServer, .{ &runtime, server_port }, .{});
+    const server_task = try runtime.spawn(udpEchoServer, .{ runtime.io(), server_port }, .{});
     defer server_task.deinit();
 
     // Start multiple clients with different messages
@@ -103,10 +103,10 @@ pub fn main() !void {
         "Final message",
     };
 
-    var client_tasks: [client_messages.len]@TypeOf(try runtime.spawn(udpClient, .{ &runtime, server_port, @as(u32, 1), "test" }, .{})) = undefined;
+    var client_tasks: [client_messages.len]@TypeOf(try runtime.spawn(udpClient, .{ runtime.io(), server_port, @as(u32, 1), "test" }, .{})) = undefined;
 
     for (client_messages, 0..) |message, i| {
-        client_tasks[i] = try runtime.spawn(udpClient, .{ &runtime, server_port, @as(u32, @intCast(i + 1)), message }, .{});
+        client_tasks[i] = try runtime.spawn(udpClient, .{ runtime.io(), server_port, @as(u32, @intCast(i + 1)), message }, .{});
     }
     defer for (client_tasks) |*task| task.deinit();
 
