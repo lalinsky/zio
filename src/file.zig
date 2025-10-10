@@ -73,7 +73,10 @@ pub const File = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        const bytes_read = try result_data.result;
+        const bytes_read = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         self.position += bytes_read;
         return bytes_read;
     }
@@ -122,7 +125,10 @@ pub const File = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        const bytes_written = try result_data.result;
+        const bytes_written = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         self.position += bytes_written;
         return bytes_written;
     }
@@ -194,7 +200,10 @@ pub const File = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        return result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     pub fn pwrite(self: *File, data: []const u8, offset: u64) !usize {
@@ -240,7 +249,10 @@ pub const File = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        return result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
@@ -334,9 +346,7 @@ pub const File = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        const bytes_written = result_data.result catch |err| switch (err) {
-            else => return error.WriteFailed,
-        };
+        const bytes_written = result_data.result catch return error.WriteFailed;
         self.position += bytes_written;
         return bytes_written;
     }

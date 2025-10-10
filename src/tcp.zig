@@ -97,7 +97,10 @@ pub const TcpListener = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        const accepted_tcp = try result_data.result;
+        const accepted_tcp = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         return TcpStream{
             .xev_tcp = accepted_tcp,
             .runtime = self.runtime,
@@ -207,7 +210,10 @@ pub const TcpStream = struct {
 
         try runtime.waitForXevCompletion(&completion);
 
-        try result_data.result;
+        result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
 
         return TcpStream{
             .xev_tcp = tcp,
@@ -313,7 +319,10 @@ pub const TcpStream = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     /// Low-level write function that accepts xev.WriteBuffer directly.

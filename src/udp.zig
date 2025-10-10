@@ -76,7 +76,10 @@ pub const UdpSocket = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        const bytes_read = try result_data.result;
+        const bytes_read = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         return UdpReadResult{
             .bytes_read = bytes_read,
             .sender_addr = result_data.sender_addr,
@@ -130,7 +133,10 @@ pub const UdpSocket = struct {
 
         try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        return result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     pub fn close(self: *UdpSocket) void {
