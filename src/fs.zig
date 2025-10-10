@@ -191,7 +191,7 @@ test "fs: openFile and createFile with different modes" {
             // Write some data
             const write_data = "Hello, zio fs!";
             _ = try file.write(write_data);
-            try file.close();
+            file.close();
 
             // Test opening the file for reading
             var read_file = try openFile(rt, file_path, .{ .mode = .read_only });
@@ -201,7 +201,7 @@ test "fs: openFile and createFile with different modes" {
             var buffer: [100]u8 = undefined;
             const bytes_read = try read_file.read(&buffer);
             try testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
-            try read_file.close();
+            read_file.close();
 
             // Clean up the test file
             std.fs.cwd().deleteFile(file_path) catch {};

@@ -3,7 +3,9 @@ const builtin = @import("builtin");
 const xev = @import("xev");
 const io = @import("io.zig");
 const Runtime = @import("runtime.zig").Runtime;
-const Waiter = @import("runtime.zig").Waiter;
+const Cancelable = @import("runtime.zig").Cancelable;
+const coroutines = @import("coroutines.zig");
+const Coroutine = coroutines.Coroutine;
 const Address = @import("address.zig").Address;
 const ResetEvent = @import("sync.zig").ResetEvent;
 
@@ -59,11 +61,11 @@ pub const TcpListener = struct {
     }
 
     pub fn accept(self: *TcpListener) !TcpStream {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.AcceptError!xev.TCP = undefined,
 
             pub fn callback(
@@ -77,13 +79,13 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.accept(
             &self.runtime.loop,
@@ -93,9 +95,12 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        const accepted_tcp = try result_data.result;
+        const accepted_tcp = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         return TcpStream{
             .xev_tcp = accepted_tcp,
             .runtime = self.runtime,
@@ -103,11 +108,15 @@ pub const TcpListener = struct {
     }
 
     pub fn close(self: *TcpListener) void {
-        var waiter = self.runtime.getWaiter();
+        // Shield close operation from cancellation
+        self.runtime.beginShield();
+        defer self.runtime.endShield();
+
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.CloseError!void = undefined,
 
             pub fn callback(
@@ -123,13 +132,13 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.close(
             &self.runtime.loop,
@@ -139,7 +148,8 @@ pub const TcpListener = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        // Shield ensures this never returns error.Canceled
+        self.runtime.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -161,11 +171,11 @@ pub const TcpStream = struct {
     /// Returns a connected TcpStream on success.
     pub fn connect(runtime: *Runtime, addr: Address) !TcpStream {
         var tcp = try xev.TCP.init(addr);
-        var waiter = runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.ConnectError!void = undefined,
 
             pub fn callback(
@@ -181,13 +191,13 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         tcp.connect(
             &runtime.loop,
@@ -198,9 +208,12 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try runtime.waitForXevCompletion(&completion);
 
-        try result_data.result;
+        result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
 
         return TcpStream{
             .xev_tcp = tcp,
@@ -268,11 +281,11 @@ pub const TcpStream = struct {
     /// Shuts down the write side of the TCP connection.
     /// This sends a FIN packet to signal that no more data will be sent.
     pub fn shutdown(self: *TcpStream) !void {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.ShutdownError!void = undefined,
 
             pub fn callback(
@@ -288,13 +301,13 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.shutdown(
             &self.runtime.loop,
@@ -304,22 +317,25 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) std.io.Writer.Error!usize {
-        var waiter = self.runtime.getWaiter();
+    pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.WriteError!usize = undefined,
         };
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.write(
             &self.runtime.loop,
@@ -336,30 +352,31 @@ pub const TcpStream = struct {
                     _: xev.WriteBuffer,
                     result: xev.WriteError!usize,
                 ) xev.CallbackAction {
-                    result_ptr.?.result = result;
-                    result_ptr.?.waiter.markReady();
+                    const r = result_ptr.?;
+                    r.result = result;
+                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         return result_data.result catch return error.WriteFailed;
     }
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) std.io.Reader.Error!usize {
-        var waiter = self.runtime.getWaiter();
+    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             buffer: *xev.ReadBuffer,
             result: xev.ReadError!usize = undefined,
         };
-        var result_data: Result = .{ .waiter = waiter, .buffer = buffer };
+        var result_data: Result = .{ .coro = coro, .buffer = buffer };
 
         self.xev_tcp.read(
             &self.runtime.loop,
@@ -382,13 +399,13 @@ pub const TcpStream = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    r.waiter.markReady();
+                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const n = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -401,11 +418,15 @@ pub const TcpStream = struct {
     /// Closes the TCP stream and releases associated resources.
     /// This operation is asynchronous but returns immediately.
     pub fn close(self: *TcpStream) void {
-        var waiter = self.runtime.getWaiter();
+        // Shield close operation from cancellation
+        self.runtime.beginShield();
+        defer self.runtime.endShield();
+
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.CloseError!void = undefined,
 
             pub fn callback(
@@ -421,13 +442,13 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.close(
             &self.runtime.loop,
@@ -437,7 +458,8 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        // Shield ensures this never returns error.Canceled
+        self.runtime.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -468,7 +490,7 @@ test "TCP: basic echo server and client" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -507,7 +529,7 @@ test "TCP: Writer splat handling" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -555,7 +577,7 @@ test "TCP: Writer splat with single element" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -603,7 +625,7 @@ test "TCP: Writer splat with single character" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -701,7 +723,7 @@ test "TCP: Reader takeByte with RESP protocol" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
@@ -765,7 +787,7 @@ test "TCP: readBuf with different ReadBuffer variants" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            ready_event.wait(rt);
+            try ready_event.wait(rt);
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);

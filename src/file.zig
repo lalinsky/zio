@@ -3,7 +3,9 @@ const builtin = @import("builtin");
 const xev = @import("xev");
 const io = @import("io.zig");
 const Runtime = @import("runtime.zig").Runtime;
-const Waiter = @import("runtime.zig").Waiter;
+const Cancelable = @import("runtime.zig").Cancelable;
+const coroutines = @import("coroutines.zig");
+const Coroutine = coroutines.Coroutine;
 
 pub const File = struct {
     xev_file: xev.File,
@@ -28,11 +30,11 @@ pub const File = struct {
     }
 
     pub fn read(self: *File, buffer: []u8) !usize {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.ReadError!usize = undefined,
 
             pub fn callback(
@@ -50,13 +52,13 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         // Use pread with tracked position for cross-platform compatibility
         self.xev_file.pread(
@@ -69,19 +71,22 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        const bytes_read = try result_data.result;
+        const bytes_read = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         self.position += bytes_read;
         return bytes_read;
     }
 
     pub fn write(self: *File, data: []const u8) !usize {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.WriteError!usize = undefined,
 
             pub fn callback(
@@ -99,13 +104,13 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         // Use pwrite with tracked position for cross-platform compatibility
         self.xev_file.pwrite(
@@ -118,9 +123,12 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        const bytes_written = try result_data.result;
+        const bytes_written = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         self.position += bytes_written;
         return bytes_written;
     }
@@ -150,11 +158,11 @@ pub const File = struct {
     }
 
     pub fn pread(self: *File, buffer: []u8, offset: u64) !usize {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.ReadError!usize = undefined,
 
             pub fn callback(
@@ -172,13 +180,13 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_file.pread(
             &self.runtime.loop,
@@ -190,17 +198,20 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        return result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     pub fn pwrite(self: *File, data: []const u8, offset: u64) !usize {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.WriteError!usize = undefined,
 
             pub fn callback(
@@ -218,13 +229,13 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_file.pwrite(
             &self.runtime.loop,
@@ -236,23 +247,26 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        return result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *File, buffer: *xev.ReadBuffer) std.io.Reader.Error!usize {
-        var waiter = self.runtime.getWaiter();
+    pub fn readBuf(self: *File, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             buffer: *xev.ReadBuffer,
             result: xev.ReadError!usize = undefined,
         };
-        var result_data: Result = .{ .waiter = waiter, .buffer = buffer };
+        var result_data: Result = .{ .coro = coro, .buffer = buffer };
 
         // Use pread with tracked position for cross-platform compatibility
         self.xev_file.pread(
@@ -277,13 +291,13 @@ pub const File = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    r.waiter.markReady();
+                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const bytes_read = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -295,15 +309,15 @@ pub const File = struct {
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *File, buffer: xev.WriteBuffer) std.io.Writer.Error!usize {
-        var waiter = self.runtime.getWaiter();
+    pub fn writeBuf(self: *File, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.WriteError!usize = undefined,
         };
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         // Use pwrite with tracked position for cross-platform compatibility
         self.xev_file.pwrite(
@@ -322,26 +336,31 @@ pub const File = struct {
                     _: xev.WriteBuffer,
                     result: xev.WriteError!usize,
                 ) xev.CallbackAction {
-                    result_ptr.?.result = result;
-                    result_ptr.?.waiter.markReady();
+                    const r = result_ptr.?;
+                    r.result = result;
+                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
         const bytes_written = result_data.result catch return error.WriteFailed;
         self.position += bytes_written;
         return bytes_written;
     }
 
-    pub fn close(self: *File) !void {
-        var waiter = self.runtime.getWaiter();
+    pub fn close(self: *File) void {
+        // Shield close operation from cancellation
+        self.runtime.beginShield();
+        defer self.runtime.endShield();
+
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.CloseError!void = undefined,
 
             pub fn callback(
@@ -357,13 +376,13 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_file.close(
             &self.runtime.loop,
@@ -373,9 +392,11 @@ pub const File = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        // Shield ensures this never returns error.Canceled
+        self.runtime.waitForXevCompletion(&completion) catch unreachable;
 
-        return result_data.result;
+        // Ignore close errors, following Zig std lib pattern
+        _ = result_data.result catch {};
     }
 
     // Zig 0.15+ streaming interface
@@ -422,15 +443,13 @@ test "File: basic read and write" {
             try testing.expectEqual(write_data.len, bytes_written);
 
             // Close file before reopening for read
-            try zio_file.close();
+            zio_file.close();
             std.log.info("TestTask: Closed file after write", .{});
 
             // Read test - reopen the file for reading
             var read_file = try fs.openFile(rt, file_path, .{ .mode = .read_only });
             defer read_file.deinit();
-            defer read_file.close() catch |err| {
-                std.log.warn("Failed to close read file: {}", .{err});
-            };
+            defer read_file.close();
             std.log.info("TestTask: Reopened file for reading", .{});
 
             var buffer: [100]u8 = undefined;
@@ -457,9 +476,7 @@ test "File: positional read and write" {
             const file_path = "test_file_positional.txt";
             var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
             defer zio_file.deinit();
-            defer zio_file.close() catch |err| {
-                std.log.warn("Failed to close positional test file: {}", .{err});
-            };
+            defer zio_file.close();
             defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write at different positions
@@ -503,7 +520,7 @@ test "File: close operation" {
             try testing.expectEqual(9, bytes_written);
 
             // Close the file using zio
-            try zio_file.close();
+            zio_file.close();
 
             // File should now be closed
         }
@@ -538,7 +555,7 @@ test "File: reader and writer interface" {
                 try writer.interface.writeSplatAll(&data, 10);
                 try writer.interface.flush();
 
-                try file.close();
+                file.close();
             }
 
             // Read using reader interface
@@ -555,7 +572,7 @@ test "File: reader and writer interface" {
                 try testing.expectEqual(10, bytes_read);
                 try testing.expectEqualStrings("xxxxxxxxxx", result[0..bytes_read]);
 
-                try file.close();
+                file.close();
             }
         }
     };

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
 const Awaitable = @import("../runtime.zig").Awaitable;
@@ -12,7 +13,7 @@ const Condition = @This();
 
 pub const init: Condition = .{};
 
-pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
+pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
     const current = coroutines.getCurrent() orelse unreachable;
     const task = AnyTask.fromCoroutine(current);
 
@@ -21,13 +22,22 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
 
     // Atomically release mutex and wait
     mutex.unlock(runtime);
-    runtime.yield(.waiting);
+    runtime.yield(.waiting) catch |err| {
+        // On cancellation, remove from queue and reacquire mutex
+        _ = self.wait_queue.remove(&task.awaitable);
+        // Must reacquire mutex before returning, retry if canceled
+        while (true) {
+            mutex.lock(runtime) catch continue;
+            break;
+        }
+        return err;
+    };
 
     // Re-acquire mutex after waking
-    mutex.lock(runtime);
+    try mutex.lock(runtime);
 }
 
-pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
+pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{ Timeout, Canceled }!void {
     const current = coroutines.getCurrent() orelse unreachable;
     const task = AnyTask.fromCoroutine(current);
 
@@ -43,11 +53,12 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         .awaitable = &task.awaitable,
     };
 
+    var was_canceled = false;
+
     // Atomically release mutex and wait
     mutex.unlock(runtime);
-    defer mutex.lock(runtime);
 
-    try runtime.timedWaitForReadyWithCallback(
+    runtime.timedWaitForReadyWithCallback(
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
@@ -58,7 +69,39 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
                 return ctx.wait_queue.remove(ctx.awaitable);
             }
         }.onTimeout,
-    );
+    ) catch |err| {
+        // Remove from queue if canceled (timeout already handled by callback)
+        if (err == error.Canceled) {
+            _ = self.wait_queue.remove(&task.awaitable);
+        }
+        // Re-acquire mutex before returning - retry if canceled
+        while (true) {
+            mutex.lock(runtime) catch {
+                was_canceled = true;
+                continue;
+            };
+            break;
+        }
+        // Cancellation has priority over timeout
+        if (was_canceled) {
+            return error.Canceled;
+        }
+        return err;
+    };
+
+    // Re-acquire mutex before returning - retry if canceled
+    while (true) {
+        mutex.lock(runtime) catch {
+            was_canceled = true;
+            continue;
+        };
+        break;
+    }
+
+    // Cancellation has priority
+    if (was_canceled) {
+        return error.Canceled;
+    }
 }
 
 pub fn signal(self: *Condition, runtime: *Runtime) void {
@@ -86,19 +129,19 @@ test "Condition basic wait/signal" {
     var ready = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
-            mtx.lock(rt);
+        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
+            try mtx.lock(rt);
             defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(rt, mtx);
+                try cond.wait(rt, mtx);
             }
         }
 
-        fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
-            rt.yield(.ready); // Give waiter time to start waiting
+        fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
+            try rt.yield(.ready); // Give waiter time to start waiting
 
-            mtx.lock(rt);
+            try mtx.lock(rt);
             ready_flag.* = true;
             mtx.unlock(rt);
 
@@ -127,8 +170,8 @@ test "Condition timedWait timeout" {
     var timed_out = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, timeout_flag: *bool) void {
-            mtx.lock(rt);
+        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, timeout_flag: *bool) !void {
+            try mtx.lock(rt);
             defer mtx.unlock(rt);
 
             // Should timeout after 10ms
@@ -157,23 +200,23 @@ test "Condition broadcast" {
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) void {
-            mtx.lock(rt);
+        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) !void {
+            try mtx.lock(rt);
             defer mtx.unlock(rt);
 
             while (!ready_flag.*) {
-                cond.wait(rt, mtx);
+                try cond.wait(rt, mtx);
             }
             counter.* += 1;
         }
 
-        fn broadcaster(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) void {
+        fn broadcaster(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
             // Give waiters time to start waiting
-            rt.yield(.ready);
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
 
-            mtx.lock(rt);
+            try mtx.lock(rt);
             ready_flag.* = true;
             mtx.unlock(rt);
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 
@@ -14,12 +15,19 @@ permits: usize = 0,
 const Semaphore = @This();
 
 /// Block until a permit is available, then decrement the permit count.
-pub fn wait(self: *Semaphore, rt: *Runtime) void {
-    self.mutex.lock(rt);
+/// If canceled while waiting, signals another waiter to handle any available permit.
+pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
+    try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
     while (self.permits == 0) {
-        self.cond.wait(rt, &self.mutex);
+        self.cond.wait(rt, &self.mutex) catch {
+            // Wake another waiter to handle any race with permit availability
+            if (self.permits > 0) {
+                self.cond.signal(rt);
+            }
+            return error.Canceled;
+        };
     }
 
     self.permits -= 1;
@@ -30,20 +38,30 @@ pub fn wait(self: *Semaphore, rt: *Runtime) void {
 
 /// Block until a permit is available or timeout expires.
 /// Returns error.Timeout if the timeout expires before a permit becomes available.
-pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{Timeout}!void {
+/// If canceled while waiting, signals another waiter to handle any available permit.
+pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
     var timeout_timer = std.time.Timer.start() catch unreachable;
 
-    self.mutex.lock(rt);
+    try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
     while (self.permits == 0) {
         const elapsed = timeout_timer.read();
-        if (elapsed > timeout_ns) {
+        if (elapsed >= timeout_ns) {
             return error.Timeout;
         }
 
         const local_timeout_ns = timeout_ns - elapsed;
-        try self.cond.timedWait(rt, &self.mutex, local_timeout_ns);
+        self.cond.timedWait(rt, &self.mutex, local_timeout_ns) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            error.Canceled => {
+                // Wake another waiter to handle any race with permit availability
+                if (self.permits > 0) {
+                    self.cond.signal(rt);
+                }
+                return error.Canceled;
+            },
+        };
     }
 
     self.permits -= 1;
@@ -53,8 +71,13 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{Timeout}
 }
 
 /// Increment the permit count and wake one waiting coroutine.
+/// Shielded from cancellation to ensure the permit is always posted.
 pub fn post(self: *Semaphore, rt: *Runtime) void {
-    self.mutex.lock(rt);
+    // Shield post operation from cancellation
+    rt.beginShield();
+    defer rt.endShield();
+
+    self.mutex.lock(rt) catch unreachable;
     defer self.mutex.unlock(rt);
 
     self.permits += 1;
@@ -70,8 +93,8 @@ test "Semaphore: basic wait/post" {
     var sem = Semaphore{ .permits = 1 };
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, s: *Semaphore, n: *i32) void {
-            s.wait(rt);
+        fn worker(rt: *Runtime, s: *Semaphore, n: *i32) !void {
+            try s.wait(rt);
             n.* += 1;
             s.post(rt);
         }
@@ -130,9 +153,9 @@ test "Semaphore: timedWait success" {
             flag.* = true;
         }
 
-        fn poster(rt: *Runtime, s: *Semaphore) void {
-            rt.yield(.ready);
-            s.post(rt);
+        fn poster(rt: *Runtime, s: *Semaphore) !void {
+            defer s.post(rt);
+            try rt.yield(.ready);
         }
     };
 
@@ -156,8 +179,8 @@ test "Semaphore: multiple permits" {
     var sem = Semaphore{ .permits = 3 };
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, s: *Semaphore) void {
-            s.wait(rt);
+        fn worker(rt: *Runtime, s: *Semaphore) !void {
+            try s.wait(rt);
             // Don't post - consume the permit
         }
     };

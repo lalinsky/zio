@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
 const Awaitable = @import("../runtime.zig").Awaitable;
@@ -59,7 +60,7 @@ pub fn reset(self: *ResetEvent) void {
 /// Blocks the caller's coroutine until the ResetEvent is set().
 /// This is effectively a more efficient version of `while (!isSet()) {}`.
 /// The memory accesses before the set() can be said to happen before wait() returns.
-pub fn wait(self: *ResetEvent, runtime: *Runtime) void {
+pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -73,7 +74,11 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) void {
         self.wait_queue.push(&task.awaitable);
 
         // Suspend until woken by set()
-        runtime.yield(.waiting);
+        runtime.yield(.waiting) catch |err| {
+            // On cancellation, remove from queue
+            _ = self.wait_queue.remove(&task.awaitable);
+            return err;
+        };
     }
 
     // If state is is_set, we return immediately (event already set)
@@ -83,7 +88,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) void {
 /// Blocks the caller's coroutine until the ResetEvent is set(), or until the corresponding timeout expires.
 /// If the timeout expires before the ResetEvent is set, `error.Timeout` is returned.
 /// The memory accesses before the set() can be said to happen before timedWait() returns without error.
-pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{Timeout}!void {
+pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -112,7 +117,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{Ti
         .awaitable = &task.awaitable,
     };
 
-    try runtime.timedWaitForReadyWithCallback(
+    runtime.timedWaitForReadyWithCallback(
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
@@ -123,7 +128,13 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{Ti
                 return ctx.wait_queue.remove(ctx.awaitable);
             }
         }.onTimeout,
-    );
+    ) catch |err| {
+        // Remove from queue if canceled (timeout already handled by callback)
+        if (err == error.Canceled) {
+            _ = self.wait_queue.remove(&task.awaitable);
+        }
+        return err;
+    };
 }
 
 test "ResetEvent basic set/reset/isSet" {
@@ -160,13 +171,13 @@ test "ResetEvent wait/set signaling" {
     var waiter_finished = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, finished: *bool) void {
-            event.wait(rt);
+        fn waiter(rt: *Runtime, event: *ResetEvent, finished: *bool) !void {
+            try event.wait(rt);
             finished.* = true;
         }
 
-        fn setter(rt: *Runtime, event: *ResetEvent) void {
-            rt.yield(.ready); // Give waiter time to start waiting
+        fn setter(rt: *Runtime, event: *ResetEvent) !void {
+            try rt.yield(.ready); // Give waiter time to start waiting
             event.set(rt);
         }
     };
@@ -192,7 +203,7 @@ test "ResetEvent timedWait timeout" {
     var timed_out = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, timeout_flag: *bool) void {
+        fn waiter(rt: *Runtime, event: *ResetEvent, timeout_flag: *bool) !void {
             // Should timeout after 10ms
             event.timedWait(rt, 10_000_000) catch |err| {
                 if (err == error.Timeout) {
@@ -218,16 +229,16 @@ test "ResetEvent multiple waiters broadcast" {
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, counter: *u32) void {
-            event.wait(rt);
+        fn waiter(rt: *Runtime, event: *ResetEvent, counter: *u32) !void {
+            try event.wait(rt);
             counter.* += 1;
         }
 
-        fn setter(rt: *Runtime, event: *ResetEvent) void {
+        fn setter(rt: *Runtime, event: *ResetEvent) !void {
             // Give waiters time to start waiting
-            rt.yield(.ready);
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
             event.set(rt);
         }
     };
@@ -260,8 +271,8 @@ test "ResetEvent wait on already set event" {
     reset_event.set(&runtime);
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, completed: *bool) void {
-            event.wait(rt); // Should return immediately
+        fn waiter(rt: *Runtime, event: *ResetEvent, completed: *bool) !void {
+            try event.wait(rt); // Should return immediately
             completed.* = true;
         }
     };

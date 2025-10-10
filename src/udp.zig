@@ -1,7 +1,8 @@
 const std = @import("std");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
-const Waiter = @import("runtime.zig").Waiter;
+const coroutines = @import("coroutines.zig");
+const Coroutine = coroutines.Coroutine;
 const Address = @import("address.zig").Address;
 
 const TEST_PORT = 45001;
@@ -27,12 +28,12 @@ pub const UdpSocket = struct {
     }
 
     pub fn read(self: *UdpSocket, buffer: []u8) !UdpReadResult {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.ReadError!usize = undefined,
             sender_addr: Address = undefined,
 
@@ -55,13 +56,13 @@ pub const UdpSocket = struct {
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
                 result_data.sender_addr = addr;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_udp.read(
             &self.runtime.loop,
@@ -73,9 +74,12 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        const bytes_read = try result_data.result;
+        const bytes_read = result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
         return UdpReadResult{
             .bytes_read = bytes_read,
             .sender_addr = result_data.sender_addr,
@@ -83,12 +87,12 @@ pub const UdpSocket = struct {
     }
 
     pub fn write(self: *UdpSocket, addr: Address, data: []const u8) !usize {
-        var waiter = self.runtime.getWaiter();
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.WriteError!usize = undefined,
 
             pub fn callback(
@@ -108,13 +112,13 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_udp.write(
             &self.runtime.loop,
@@ -127,17 +131,24 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        try self.runtime.waitForXevCompletion(&completion);
 
-        return result_data.result;
+        return result_data.result catch |err| {
+            if (err == error.Canceled) return error.Unexpected;
+            return err;
+        };
     }
 
     pub fn close(self: *UdpSocket) void {
-        var waiter = self.runtime.getWaiter();
+        // Shield close operation from cancellation
+        self.runtime.beginShield();
+        defer self.runtime.endShield();
+
+        const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            waiter: Waiter,
+            coro: *Coroutine,
             result: xev.CloseError!void = undefined,
 
             pub fn callback(
@@ -153,13 +164,13 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                result_data.waiter.markReady();
+                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .waiter = waiter };
+        var result_data: Result = .{ .coro = coro };
 
         self.xev_udp.close(
             &self.runtime.loop,
@@ -169,7 +180,8 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        waiter.runtime.yield(.waiting);
+        // Shield ensures this never returns error.Canceled
+        self.runtime.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

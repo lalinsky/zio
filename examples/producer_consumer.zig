@@ -9,6 +9,10 @@ fn producer(rt: *zio.Runtime, queue: *zio.Queue(i32), id: u32) void {
                 std.log.info("Producer {}: queue closed, exiting", .{id});
                 return;
             },
+            error.Canceled => {
+                std.log.info("Producer {}: canceled, exiting", .{id});
+                return;
+            },
         };
         std.log.info("Produced: {}", .{item});
         rt.sleep(100); // Small delay between productions
@@ -21,6 +25,10 @@ fn consumer(rt: *zio.Runtime, queue: *zio.Queue(i32), id: u32) void {
         const item = queue.get(rt) catch |err| switch (err) {
             error.QueueClosed => {
                 std.log.info("Consumer {}: queue closed, exiting", .{id});
+                return;
+            },
+            error.Canceled => {
+                std.log.info("Consumer {}: canceled, exiting", .{id});
                 return;
             },
         };

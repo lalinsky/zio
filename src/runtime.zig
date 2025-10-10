@@ -33,25 +33,20 @@ pub const RuntimeOptions = struct {
     };
 };
 
-// Waker interface for asynchronous operations
-pub const Waiter = struct {
-    runtime: *Runtime,
-    coroutine: *Coroutine,
-
-    pub fn markReady(self: Waiter) void {
-        self.runtime.markReady(self.coroutine);
-    }
-};
-
 // Runtime-specific errors
 pub const ZioError = error{
     XevError,
     NotInCoroutine,
 };
 
+// Cancelable error set
+pub const Cancelable = error{
+    Canceled,
+};
+
 // Timer callback for libxev
 fn markReadyFromXevCallback(
-    userdata: ?*Waiter,
+    userdata: ?*Coroutine,
     loop: *xev.Loop,
     completion: *xev.Completion,
     result: anyerror!void,
@@ -60,8 +55,8 @@ fn markReadyFromXevCallback(
     _ = completion;
     _ = result catch {};
 
-    if (userdata) |waker| {
-        waker.markReady();
+    if (userdata) |coro| {
+        Runtime.fromCoroutine(coro).markReady(coro);
     }
     return .disarm;
 }
@@ -84,10 +79,14 @@ fn noopTimerCancelCallback(
 fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
 
-    // Execute the user's blocking function
-    any_blocking_task.execute_fn(any_blocking_task);
+    // Check if the task was canceled before it started executing
+    if (!any_blocking_task.awaitable.canceled.load(.acquire)) {
+        // Execute the user's blocking function only if not canceled
+        any_blocking_task.execute_fn(any_blocking_task);
+    }
 
     // Push to completion queue (thread-safe MPSC)
+    // Even if canceled, we still mark as complete so waiters wake up
     any_blocking_task.runtime.blocking_completions.push(&any_blocking_task.awaitable);
 
     // Wake up main loop
@@ -137,12 +136,17 @@ pub const Awaitable = struct {
     // 0 = pending/not ready, 1 = complete/ready
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
+    // Cancellation flag - set to request cancellation, consumed by yield()
+    canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     /// Wait for this awaitable to complete. Works from both coroutines and threads.
     /// When called from a coroutine, suspends the coroutine.
     /// When called from a thread, parks the thread using futex.
-    pub fn waitForComplete(self: *Awaitable) void {
-        // Fast path: already complete?
-        if (self.state.load(.acquire) == 1) return;
+    /// Returns error.Canceled if the coroutine was canceled during the wait.
+    pub fn waitForComplete(self: *Awaitable) Cancelable!void {
+        // Fast path: check if already complete
+        const fast_state = self.state.load(.acquire);
+        if (fast_state == 1) return;
 
         if (coroutines.getCurrent()) |current| {
             // Coroutine path: add to wait queue and suspend
@@ -150,17 +154,26 @@ pub const Awaitable = struct {
             self.waiting_list.push(&task.awaitable);
 
             // Double-check state before suspending (avoid lost wakeup)
-            if (self.state.load(.acquire) == 1) {
+            const double_check_state = self.state.load(.acquire);
+            if (double_check_state == 1) {
                 // Completed while we were adding to queue, remove ourselves
                 _ = self.waiting_list.remove(&task.awaitable);
                 return;
             }
 
             const runtime = Runtime.fromCoroutine(current);
-            runtime.yield(.waiting);
+            runtime.yield(.waiting) catch |err| {
+                // If yield itself was canceled, remove from wait list
+                _ = self.waiting_list.remove(&task.awaitable);
+                return err;
+            };
+
+            // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: park on the state using futex
-            while (self.state.load(.acquire) == 0) {
+            while (true) {
+                const current_state = self.state.load(.acquire);
+                if (current_state == 1) return;
                 std.Thread.Futex.wait(&self.state, 0);
             }
         }
@@ -168,11 +181,13 @@ pub const Awaitable = struct {
 
     /// Wait for this awaitable to complete with a timeout. Works from both coroutines and threads.
     /// Returns error.Timeout if the timeout expires before completion.
+    /// Returns error.Canceled if the coroutine was canceled during the wait.
     /// For coroutines, uses runtime timer infrastructure.
     /// For threads, uses futex timedWait directly.
-    pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{Timeout}!void {
-        // Fast path: already complete?
-        if (self.state.load(.acquire) == 1) return;
+    pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{ Timeout, Canceled }!void {
+        // Fast path: check if already complete
+        const fast_state = self.state.load(.acquire);
+        if (fast_state == 1) return;
 
         if (coroutines.getCurrent()) |current| {
             // Coroutine path: get runtime and use timer infrastructure
@@ -181,7 +196,8 @@ pub const Awaitable = struct {
 
             self.waiting_list.push(&task.awaitable);
 
-            if (self.state.load(.acquire) == 1) {
+            const double_check_state = self.state.load(.acquire);
+            if (double_check_state == 1) {
                 _ = self.waiting_list.remove(&task.awaitable);
                 return;
             }
@@ -196,7 +212,7 @@ pub const Awaitable = struct {
                 .awaitable = &task.awaitable,
             };
 
-            try rt.timedWaitForReadyWithCallback(
+            rt.timedWaitForReadyWithCallback(
                 timeout_ns,
                 TimeoutContext,
                 &timeout_ctx,
@@ -205,10 +221,20 @@ pub const Awaitable = struct {
                         return ctx.wait_queue.remove(ctx.awaitable);
                     }
                 }.onTimeout,
-            );
+            ) catch |err| {
+                // Handle both timeout and cancellation from yield
+                if (err == error.Canceled) {
+                    _ = self.waiting_list.remove(&task.awaitable);
+                }
+                return err;
+            };
+
+            // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: use futex timedWait
-            while (self.state.load(.acquire) == 0) {
+            while (true) {
+                const current_state = self.state.load(.acquire);
+                if (current_state == 1) return;
                 try std.Thread.Futex.timedWait(&self.state, 0, timeout_ns);
             }
         }
@@ -228,6 +254,12 @@ pub const Awaitable = struct {
         // Wake all waiting threads
         std.Thread.Futex.wake(&self.state, std.math.maxInt(u32));
     }
+
+    /// Request cancellation of this awaitable.
+    /// The cancellation flag will be consumed by the next yield() call.
+    pub fn requestCancellation(self: *Awaitable) void {
+        self.canceled.store(true, .release);
+    }
 };
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -238,6 +270,7 @@ pub const AnyTask = struct {
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
+    shield_count: u32 = 0,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         assert(awaitable.kind == .coro);
@@ -246,6 +279,12 @@ pub const AnyTask = struct {
 
     pub inline fn fromCoroutine(coro: *Coroutine) *AnyTask {
         return @fieldParentPtr("coro", coro);
+    }
+
+    /// Request cancellation of this task.
+    /// The cancellation flag will be checked at the next yield point.
+    pub fn cancel(self: *AnyTask) void {
+        self.awaitable.requestCancellation();
     }
 };
 
@@ -259,6 +298,13 @@ pub const AnyBlockingTask = struct {
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
         return @fieldParentPtr("awaitable", awaitable);
+    }
+
+    /// Request cancellation of this blocking task.
+    /// If the task hasn't started executing yet, it will skip execution.
+    /// If already executing, this has no effect (cannot stop blocking work).
+    pub fn cancel(self: *AnyBlockingTask) void {
+        self.awaitable.requestCancellation();
     }
 };
 
@@ -299,7 +345,7 @@ pub fn Task(comptime T: type) type {
             return Runtime.fromCoroutine(&self.any_task.coro);
         }
 
-        fn join(self: *Self) T {
+        fn join(self: *Self) !T {
             // Check if already completed
             if (self.future_result.get()) |res| {
                 return res;
@@ -314,13 +360,19 @@ pub fn Task(comptime T: type) type {
             }
 
             // Wait for task to complete (works from both coroutines and threads)
-            self.any_task.awaitable.waitForComplete();
+            try self.any_task.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
 
-        fn result(self: *Self) T {
+        fn result(self: *Self) !T {
             return self.join();
+        }
+
+        /// Request cancellation of this task.
+        /// The cancellation flag will be checked at the next yield point.
+        pub fn cancel(self: *Self) void {
+            self.any_task.cancel();
         }
     };
 }
@@ -361,7 +413,7 @@ pub fn Future(comptime T: type) type {
             self.any_future.runtime.releaseAwaitable(&self.any_future.awaitable);
         }
 
-        pub fn set(self: *Self, value: T) void {
+        pub fn set(self: *Self, value: anyerror!T) void {
             const was_set = self.future_result.set(value);
             if (!was_set) {
                 // Value was already set, ignore
@@ -372,14 +424,14 @@ pub fn Future(comptime T: type) type {
             self.any_future.awaitable.markComplete(self.any_future.runtime);
         }
 
-        pub fn wait(self: *Self) T {
+        pub fn wait(self: *Self) !T {
             // Check if already set
             if (self.future_result.get()) |res| {
                 return res;
             }
 
             // Wait for future to be set (works from both coroutines and threads)
-            self.any_future.awaitable.waitForComplete();
+            try self.any_future.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
@@ -457,19 +509,27 @@ pub fn BlockingTask(comptime T: type) type {
             self.runtime.releaseAwaitable(&self.any_blocking_task.awaitable);
         }
 
-        fn join(self: *Self) T {
+        fn join(self: *Self) !T {
             if (self.future_result.get()) |res| {
                 return res;
             }
 
             // Wait for blocking task to complete (works from both coroutines and threads)
-            self.any_blocking_task.awaitable.waitForComplete();
+            // The waiter can be canceled even though the blocking task continues execution
+            try self.any_blocking_task.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
         }
 
-        fn result(self: *Self) T {
+        fn result(self: *Self) !T {
             return self.join();
+        }
+
+        /// Request cancellation of this blocking task.
+        /// If the task hasn't started executing yet, it will skip execution.
+        /// If already executing, this has no effect (cannot stop blocking work).
+        pub fn cancel(self: *Self) void {
+            self.any_blocking_task.cancel();
         }
     };
 }
@@ -493,22 +553,41 @@ pub fn JoinHandle(comptime T: type) type {
             }
         }
 
-        pub fn join(self: *Self) T {
+        pub fn join(self: *Self) !T {
             return switch (self.kind) {
-                .coro => |task| task.join(),
-                .blocking => |task| task.join(),
-                .future => |future| future.wait(),
+                .coro => |task| try task.join(),
+                .blocking => |task| try task.join(),
+                .future => |future| try future.wait(),
             };
         }
 
-        pub fn result(self: *Self) T {
+        pub fn result(self: *Self) !T {
             return self.join();
+        }
+
+        /// Request cancellation of this task.
+        /// For coroutine tasks: Sets the cancellation flag, which will be checked at the next yield point.
+        /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
+        /// For futures: Has no effect (futures are not cancelable).
+        pub fn cancel(self: *Self) void {
+            switch (self.kind) {
+                .coro => |task| task.any_task.cancel(),
+                .blocking => |task| task.any_blocking_task.cancel(),
+                .future => {}, // Futures cannot be canceled
+            }
         }
     };
 }
 
 fn ReturnType(comptime func: anytype) type {
     return if (@typeInfo(@TypeOf(func)).@"fn".return_type) |ret| ret else void;
+}
+
+fn PayloadType(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .error_union => |eu| eu.payload,
+        else => T,
+    };
 }
 
 // Simple singly-linked list of awaitables
@@ -699,7 +778,7 @@ pub const Runtime = struct {
         self.stack_pool.deinit();
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(ReturnType(func)) {
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(PayloadType(ReturnType(func))) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
@@ -716,7 +795,8 @@ pub const Runtime = struct {
         errdefer self.tasks.removeByPtr(entry.key_ptr);
 
         const Result = ReturnType(func);
-        const TypedTask = Task(Result);
+        const Payload = PayloadType(Result);
+        const TypedTask = Task(Payload);
 
         const task = try self.allocator.create(TypedTask);
         errdefer self.allocator.destroy(task);
@@ -741,19 +821,28 @@ pub const Runtime = struct {
             .future_result = .{},
         };
 
-        task.any_task.coro.setup(Result, func, args, &task.future_result);
+        task.any_task.coro.setup(Payload, func, args, &task.future_result);
 
         entry.value_ptr.* = &task.any_task;
 
         self.ready_queue.push(&task.any_task.awaitable);
 
         task.any_task.awaitable.ref_count.incr();
-        return JoinHandle(Result){ .kind = .{ .coro = task } };
+        return JoinHandle(Payload){ .kind = .{ .coro = task } };
     }
 
-    pub fn yield(self: *Runtime, desired_state: CoroutineState) void {
+    pub fn yield(self: *Runtime, desired_state: CoroutineState) Cancelable!void {
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
+
+        // Check and consume cancellation flag before yielding (unless shielded)
+        if (current_task.shield_count == 0) {
+            // cmpxchgStrong returns null on success, current value on failure
+            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
+                // CAS succeeded: we consumed true, return canceled
+                return error.Canceled;
+            }
+        }
 
         current_coro.state = desired_state;
         if (desired_state == .ready) {
@@ -776,6 +865,35 @@ pub const Runtime = struct {
         }
 
         std.debug.assert(coroutines.getCurrent() == current_coro);
+
+        // Check again after resuming in case we were canceled while suspended (unless shielded)
+        if (current_task.shield_count == 0) {
+            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
+                return error.Canceled;
+            }
+        }
+    }
+
+    /// Begin a cancellation shield.
+    /// While shielded, yield() will not check or consume the cancellation flag.
+    /// The flag remains set for when the shield ends.
+    /// This is useful for cleanup operations (like close()) that must complete even if canceled.
+    /// Must be paired with endShield().
+    pub fn beginShield(self: *Runtime) void {
+        _ = self;
+        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        current_task.shield_count += 1;
+    }
+
+    /// End a cancellation shield.
+    /// Must be paired with beginShield().
+    pub fn endShield(self: *Runtime) void {
+        _ = self;
+        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        std.debug.assert(current_task.shield_count > 0);
+        current_task.shield_count -= 1;
     }
 
     fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
@@ -786,14 +904,6 @@ pub const Runtime = struct {
 
     pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
         return &task.awaitable;
-    }
-
-    pub fn getWaiter(self: *Runtime) Waiter {
-        const current = coroutines.getCurrent() orelse std.debug.panic("getWaker() must be called from within a coroutine", .{});
-        return Waiter{
-            .runtime = self,
-            .coroutine = current,
-        };
     }
 
     pub fn sleep(self: *Runtime, milliseconds: u64) void {
@@ -824,17 +934,18 @@ pub const Runtime = struct {
         self: *Runtime,
         comptime func: anytype,
         args: anytype,
-    ) !JoinHandle(ReturnType(func)) {
+    ) !JoinHandle(PayloadType(ReturnType(func))) {
         try self.ensureBlockingInitialized();
 
-        const task = try BlockingTask(ReturnType(func)).init(
+        const Payload = PayloadType(ReturnType(func));
+        const task = try BlockingTask(Payload).init(
             self,
             self.allocator,
             func,
             args,
         );
 
-        return JoinHandle(ReturnType(func)){ .kind = .{ .blocking = task } };
+        return JoinHandle(Payload){ .kind = .{ .blocking = task } };
     }
 
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
@@ -928,7 +1039,7 @@ pub const Runtime = struct {
         self.ready_queue.push(&task.awaitable);
     }
 
-    pub fn wait(self: *Runtime, task_id: u64) void {
+    pub fn wait(self: *Runtime, task_id: u64) Cancelable!void {
         const task = self.tasks.get(task_id) orelse return;
         if (task.coro.state == .dead) {
             return;
@@ -939,7 +1050,11 @@ pub const Runtime = struct {
             std.debug.panic("a task cannot wait on itself", .{});
         }
         task.awaitable.waiting_list.push(&current_task.awaitable);
-        self.yield(.waiting);
+        self.yield(.waiting) catch |err| {
+            // On cancellation, remove from wait queue
+            _ = task.awaitable.waiting_list.remove(&current_task.awaitable);
+            return err;
+        };
     }
 
     /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
@@ -971,7 +1086,7 @@ pub const Runtime = struct {
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
         comptime onTimeout: fn (ctx: *TimeoutContext) bool,
-    ) error{Timeout}!void {
+    ) error{ Timeout, Canceled }!void {
         const current = coroutines.getCurrent() orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
@@ -1032,7 +1147,19 @@ pub const Runtime = struct {
         );
 
         // Wait for either timeout or external markReady
-        self.yield(.waiting);
+        self.yield(.waiting) catch |err| {
+            // Invalidate pending callbacks before unwinding so they ignore this stack frame.
+            task.timer_generation +%= 1;
+            timer.cancel(
+                &self.loop,
+                &task.timer_c,
+                &task.timer_cancel_c,
+                void,
+                null,
+                noopTimerCancelCallback,
+            );
+            return err;
+        };
 
         if (ctx.timed_out) {
             return error.Timeout;
@@ -1056,7 +1183,7 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{Timeout}!void {
+    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(
@@ -1069,6 +1196,62 @@ pub const Runtime = struct {
                 }
             }.onTimeout,
         );
+    }
+
+    /// Wait for an xev completion to finish, handling cancellation properly.
+    /// When a coroutine is canceled while waiting for an I/O operation,
+    /// we need to cancel the operation (if the backend supports it) and
+    /// wait for it to complete before returning error.Canceled.
+    /// This prevents use-after-free bugs where the xev callback accesses
+    /// freed stack memory.
+    ///
+    /// Returns error.Canceled if the operation was canceled.
+    pub fn waitForXevCompletion(
+        self: *Runtime,
+        completion: *xev.Completion,
+    ) Cancelable!void {
+        var was_canceled = false;
+        var cancel_completion: xev.Completion = .{};
+
+        while (completion.state() != .dead) {
+            self.yield(.waiting) catch |err| switch (err) {
+                error.Canceled => {
+                    // First cancellation - try to cancel the xev operation
+                    if (!was_canceled) {
+                        was_canceled = true;
+
+                        if (xev.backend == .io_uring) {
+                            // io_uring supports cancellation - request cancellation
+                            self.loop.cancel(
+                                completion,
+                                &cancel_completion,
+                                void,
+                                null,
+                                struct {
+                                    fn callback(
+                                        _: ?*void,
+                                        _: *xev.Loop,
+                                        _: *xev.Completion,
+                                        _: xev.CancelError!void,
+                                    ) xev.CallbackAction {
+                                        // We don't need to do anything here - the original
+                                        // completion callback will fire and wake us up
+                                        return .disarm;
+                                    }
+                                }.callback,
+                            );
+                        }
+                        // For non-io_uring backends, just continue waiting for completion
+                    }
+                    // Continue waiting for the operation to complete
+                },
+            };
+        }
+
+        // Operation completed - return cancellation error if we were canceled
+        if (was_canceled) {
+            return error.Canceled;
+        }
     }
 };
 
@@ -1148,8 +1331,8 @@ test "runtime: Future await from coroutine" {
         fn setterTask(future: *Future(i32)) !void {
             // Simulate async work
             const rt = Runtime.getCurrent().?;
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
             future.set(123);
         }
 
@@ -1192,8 +1375,8 @@ test "runtime: Future multiple waiters" {
         fn setterTask(future: *Future(i32)) !void {
             // Let waiters block first
             const rt = Runtime.getCurrent().?;
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
             future.set(999);
         }
 
@@ -1213,10 +1396,10 @@ test "runtime: Future multiple waiters" {
             var setter = try rt.spawn(setterTask, .{future}, .{});
             defer setter.deinit();
 
-            rt.yield(.ready);
-            rt.yield(.ready);
-            rt.yield(.ready);
-            rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
+            try rt.yield(.ready);
 
             try waiter1.result();
             try waiter2.result();
