@@ -6,7 +6,7 @@ pub const Semaphore = @import("sync/Semaphore.zig");
 pub const Barrier = @import("sync/Barrier.zig");
 
 // Generic types
-pub const Queue = @import("sync/queue.zig").Queue;
+pub const Channel = @import("sync/channel.zig").Channel;
 pub const BroadcastChannel = @import("sync/broadcast_channel.zig").BroadcastChannel;
 
 // Re-export tests from individual modules
@@ -16,6 +16,6 @@ test {
     _ = ResetEvent;
     _ = Semaphore;
     _ = Barrier;
-    _ = @import("sync/queue.zig");
+    _ = @import("sync/channel.zig");
     _ = @import("sync/broadcast_channel.zig");
 }

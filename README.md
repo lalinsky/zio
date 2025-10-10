@@ -27,7 +27,7 @@ the interface, or deprecate this library.
 - Network I/O, supports TCP/UDP sockets, DNS resolution currently via thread pool
 - Full `std.Io.Reader` and `std.Io.Writer` support for TCP streams
 - Synchronization primitives matching `std.Thread` API (`Mutex`/`Condition`/`Semaphore`/`ResetEvent`)
-- `Queue(T)` for producer-consumer patterns across coroutines
+- `Channel(T)` for producer-consumer patterns across coroutines
 
 ## TODO
 
