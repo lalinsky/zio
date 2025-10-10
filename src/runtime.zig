@@ -1194,7 +1194,7 @@ pub const Runtime = struct {
     pub fn waitForXevCompletion(
         self: *Runtime,
         completion: *xev.Completion,
-    ) error{Canceled}!void {
+    ) Cancelable!void {
         var was_canceled = false;
         var cancel_completion: xev.Completion = undefined;
 

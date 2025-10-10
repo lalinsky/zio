@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Cancelable = @import("../runtime.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 
@@ -29,7 +30,7 @@ pub fn init(count: usize) Barrier {
 /// Returns true if this coroutine was the last to arrive (the "leader"),
 /// false otherwise. This can be useful for having one coroutine perform
 /// cleanup or initialization for the next phase.
-pub fn wait(self: *Barrier, runtime: *Runtime) error{Canceled}!bool {
+pub fn wait(self: *Barrier, runtime: *Runtime) Cancelable!bool {
     try self.mutex.lock(runtime);
     defer self.mutex.unlock(runtime);
 
