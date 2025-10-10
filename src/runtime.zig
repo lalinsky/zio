@@ -345,7 +345,7 @@ pub fn Task(comptime T: type) type {
             return Runtime.fromCoroutine(&self.any_task.coro);
         }
 
-        fn join(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
+        fn join(self: *Self) !T {
             // Check if already completed
             if (self.future_result.get()) |res| {
                 return res;
@@ -365,23 +365,7 @@ pub fn Task(comptime T: type) type {
             return self.future_result.get() orelse unreachable;
         }
 
-        fn getErrorSet() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.error_set,
-                else => error{},
-            };
-        }
-
-        fn getPayload() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.payload,
-                else => T,
-            };
-        }
-
-        fn result(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
+        fn result(self: *Self) !T {
             return self.join();
         }
 
@@ -429,7 +413,7 @@ pub fn Future(comptime T: type) type {
             self.any_future.runtime.releaseAwaitable(&self.any_future.awaitable);
         }
 
-        pub fn set(self: *Self, value: T) void {
+        pub fn set(self: *Self, value: anyerror!T) void {
             const was_set = self.future_result.set(value);
             if (!was_set) {
                 // Value was already set, ignore
@@ -440,7 +424,7 @@ pub fn Future(comptime T: type) type {
             self.any_future.awaitable.markComplete(self.any_future.runtime);
         }
 
-        pub fn wait(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
+        pub fn wait(self: *Self) !T {
             // Check if already set
             if (self.future_result.get()) |res| {
                 return res;
@@ -450,22 +434,6 @@ pub fn Future(comptime T: type) type {
             try self.any_future.awaitable.waitForComplete();
 
             return self.future_result.get() orelse unreachable;
-        }
-
-        fn getErrorSet() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.error_set,
-                else => error{},
-            };
-        }
-
-        fn getPayload() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.payload,
-                else => T,
-            };
         }
     };
 }
@@ -541,7 +509,7 @@ pub fn BlockingTask(comptime T: type) type {
             self.runtime.releaseAwaitable(&self.any_blocking_task.awaitable);
         }
 
-        fn join(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
+        fn join(self: *Self) !T {
             if (self.future_result.get()) |res| {
                 return res;
             }
@@ -553,23 +521,7 @@ pub fn BlockingTask(comptime T: type) type {
             return self.future_result.get() orelse unreachable;
         }
 
-        fn getErrorSet() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.error_set,
-                else => error{},
-            };
-        }
-
-        fn getPayload() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.payload,
-                else => T,
-            };
-        }
-
-        fn result(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
+        fn result(self: *Self) !T {
             return self.join();
         }
 
@@ -601,7 +553,7 @@ pub fn JoinHandle(comptime T: type) type {
             }
         }
 
-        pub fn join(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
+        pub fn join(self: *Self) !T {
             return switch (self.kind) {
                 .coro => |task| try task.join(),
                 .blocking => |task| try task.join(),
@@ -609,7 +561,7 @@ pub fn JoinHandle(comptime T: type) type {
             };
         }
 
-        pub fn result(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
+        pub fn result(self: *Self) !T {
             return self.join();
         }
 
@@ -624,27 +576,18 @@ pub fn JoinHandle(comptime T: type) type {
                 .future => {}, // Futures cannot be canceled
             }
         }
-
-        fn getErrorSet() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.error_set,
-                else => error{},
-            };
-        }
-
-        fn getPayload() type {
-            const info = @typeInfo(T);
-            return switch (info) {
-                .error_union => |eu| eu.payload,
-                else => T,
-            };
-        }
     };
 }
 
 fn ReturnType(comptime func: anytype) type {
     return if (@typeInfo(@TypeOf(func)).@"fn".return_type) |ret| ret else void;
+}
+
+fn PayloadType(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .error_union => |eu| eu.payload,
+        else => T,
+    };
 }
 
 // Simple singly-linked list of awaitables
@@ -835,7 +778,7 @@ pub const Runtime = struct {
         self.stack_pool.deinit();
     }
 
-    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(ReturnType(func)) {
+    pub fn spawn(self: *Runtime, comptime func: anytype, args: anytype, options: CoroutineOptions) !JoinHandle(PayloadType(ReturnType(func))) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
@@ -852,7 +795,8 @@ pub const Runtime = struct {
         errdefer self.tasks.removeByPtr(entry.key_ptr);
 
         const Result = ReturnType(func);
-        const TypedTask = Task(Result);
+        const Payload = PayloadType(Result);
+        const TypedTask = Task(Payload);
 
         const task = try self.allocator.create(TypedTask);
         errdefer self.allocator.destroy(task);
@@ -877,14 +821,14 @@ pub const Runtime = struct {
             .future_result = .{},
         };
 
-        task.any_task.coro.setup(Result, func, args, &task.future_result);
+        task.any_task.coro.setup(Payload, func, args, &task.future_result);
 
         entry.value_ptr.* = &task.any_task;
 
         self.ready_queue.push(&task.any_task.awaitable);
 
         task.any_task.awaitable.ref_count.incr();
-        return JoinHandle(Result){ .kind = .{ .coro = task } };
+        return JoinHandle(Payload){ .kind = .{ .coro = task } };
     }
 
     pub fn yield(self: *Runtime, desired_state: CoroutineState) Cancelable!void {
@@ -990,17 +934,18 @@ pub const Runtime = struct {
         self: *Runtime,
         comptime func: anytype,
         args: anytype,
-    ) !JoinHandle(ReturnType(func)) {
+    ) !JoinHandle(PayloadType(ReturnType(func))) {
         try self.ensureBlockingInitialized();
 
-        const task = try BlockingTask(ReturnType(func)).init(
+        const Payload = PayloadType(ReturnType(func));
+        const task = try BlockingTask(Payload).init(
             self,
             self.allocator,
             func,
             args,
         );
 
-        return JoinHandle(ReturnType(func)){ .kind = .{ .blocking = task } };
+        return JoinHandle(Payload){ .kind = .{ .blocking = task } };
     }
 
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
