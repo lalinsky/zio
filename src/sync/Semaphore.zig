@@ -71,26 +71,17 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout
 }
 
 /// Increment the permit count and wake one waiting coroutine.
-/// Retries if canceled to ensure the permit is posted, then returns error.Canceled.
-pub fn post(self: *Semaphore, rt: *Runtime) Cancelable!void {
-    var was_canceled = false;
+/// Shielded from cancellation to ensure the permit is always posted.
+pub fn post(self: *Semaphore, rt: *Runtime) void {
+    // Shield post operation from cancellation
+    rt.beginShield();
+    defer rt.endShield();
 
-    // Retry lock if canceled - we must post the permit
-    while (true) {
-        self.mutex.lock(rt) catch {
-            was_canceled = true;
-            continue; // Retry if canceled
-        };
-        break;
-    }
+    self.mutex.lock(rt) catch unreachable;
     defer self.mutex.unlock(rt);
 
     self.permits += 1;
     self.cond.signal(rt);
-
-    if (was_canceled) {
-        return error.Canceled;
-    }
 }
 
 test "Semaphore: basic wait/post" {
@@ -105,7 +96,7 @@ test "Semaphore: basic wait/post" {
         fn worker(rt: *Runtime, s: *Semaphore, n: *i32) !void {
             try s.wait(rt);
             n.* += 1;
-            try s.post(rt);
+            s.post(rt);
         }
     };
 
@@ -163,8 +154,8 @@ test "Semaphore: timedWait success" {
         }
 
         fn poster(rt: *Runtime, s: *Semaphore) !void {
+            defer s.post(rt);
             try rt.yield(.ready);
-            try s.post(rt);
         }
     };
 
