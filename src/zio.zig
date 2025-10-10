@@ -31,6 +31,11 @@ pub const ResetEvent = @import("sync.zig").ResetEvent;
 pub const Queue = @import("sync.zig").Queue;
 pub const Semaphore = @import("sync.zig").Semaphore;
 
+// Re-export signal handling functionality
+pub const signal = @import("signal.zig");
+pub const Signal = signal.Signal;
+pub const SignalHandler = signal.SignalHandler;
+
 test {
     std.testing.refAllDecls(@This());
 }
