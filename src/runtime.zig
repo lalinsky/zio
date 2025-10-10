@@ -1196,7 +1196,7 @@ pub const Runtime = struct {
         completion: *xev.Completion,
     ) Cancelable!void {
         var was_canceled = false;
-        var cancel_completion: xev.Completion = undefined;
+        var cancel_completion: xev.Completion = .{};
 
         while (completion.state() != .dead) {
             self.yield(.waiting) catch |err| switch (err) {
