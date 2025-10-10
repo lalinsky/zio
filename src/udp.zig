@@ -1,6 +1,7 @@
 const std = @import("std");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
+const Io = @import("runtime.zig").Io;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
 const Address = @import("address.zig").Address;
@@ -16,10 +17,10 @@ pub const UdpSocket = struct {
     xev_udp: xev.UDP,
     runtime: *Runtime,
 
-    pub fn init(runtime: *Runtime, addr: Address) !UdpSocket {
+    pub fn init(io: Io, addr: Address) !UdpSocket {
         return UdpSocket{
             .xev_udp = try xev.UDP.init(addr),
-            .runtime = runtime,
+            .runtime = io.runtime(),
         };
     }
 
@@ -196,9 +197,9 @@ test "UDP: basic send and receive" {
     defer runtime.deinit();
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, server_port: *u16) !void {
+        fn run(io: Io, server_port: *u16) !void {
             const bind_addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var socket = try UdpSocket.init(rt, bind_addr);
+            var socket = try UdpSocket.init(io, bind_addr);
             defer socket.close();
 
             try socket.bind(bind_addr);
@@ -217,11 +218,11 @@ test "UDP: basic send and receive" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, server_port: *u16) !void {
-            rt.sleep(10); // Give server time to bind
+        fn run(io: Io, server_port: *u16) !void {
+            io.runtime().sleep(10); // Give server time to bind
 
             const client_addr = try Address.parseIp4("127.0.0.1", 0);
-            var socket = try UdpSocket.init(rt, client_addr);
+            var socket = try UdpSocket.init(io, client_addr);
             defer socket.close();
 
             try socket.bind(client_addr);
@@ -241,10 +242,10 @@ test "UDP: basic send and receive" {
 
     var server_port: u16 = TEST_PORT;
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_port }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime.io(), &server_port }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_port }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime.io(), &server_port }, .{});
     defer client_task.deinit();
 
     try runtime.run();

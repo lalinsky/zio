@@ -29,10 +29,10 @@ fn handleClient(in_stream: zio.TcpStream) !void {
     }
 }
 
-fn serverTask(rt: *zio.Runtime) !void {
+fn serverTask(io: zio.Io, rt: *zio.Runtime) !void {
     const addr = try zio.Address.parseIp4("127.0.0.1", 8080);
 
-    var listener = try zio.TcpListener.init(rt, addr);
+    var listener = try zio.TcpListener.init(io, addr);
     defer listener.close();
 
     try listener.bind(addr);
@@ -60,7 +60,7 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server = try runtime.spawn(serverTask, .{&runtime}, .{});
+    var server = try runtime.spawn(serverTask, .{runtime.io()}, .{});
     defer server.deinit();
 
     try runtime.run();

@@ -1,8 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
-const io = @import("io.zig");
+const streams = @import("io/stream.zig");
 const Runtime = @import("runtime.zig").Runtime;
+const Io = @import("runtime.zig").Io;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -400,8 +401,8 @@ pub const File = struct {
     }
 
     // Zig 0.15+ streaming interface
-    pub const Reader = io.StreamReader(File);
-    pub const Writer = io.StreamWriter(File);
+    pub const Reader = streams.StreamReader(File);
+    pub const Writer = streams.StreamWriter(File);
 
     pub fn reader(self: *File, buffer: []u8) Reader {
         return Reader.init(self, buffer);
@@ -425,12 +426,12 @@ test "File: basic read and write" {
     defer runtime.deinit();
 
     const TestTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(io: Io) !void {
             std.log.info("TestTask: Starting file test", .{});
 
             // Create a test file using the new fs module
             const file_path = "test_file_basic.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{});
+            var zio_file = try fs.createFile(io, file_path, .{});
             defer zio_file.deinit();
             defer std.fs.cwd().deleteFile(file_path) catch {};
             std.log.info("TestTask: Created file using fs module", .{});
@@ -447,7 +448,7 @@ test "File: basic read and write" {
             std.log.info("TestTask: Closed file after write", .{});
 
             // Read test - reopen the file for reading
-            var read_file = try fs.openFile(rt, file_path, .{ .mode = .read_only });
+            var read_file = try fs.openFile(io, file_path, .{ .mode = .read_only });
             defer read_file.deinit();
             defer read_file.close();
             std.log.info("TestTask: Reopened file for reading", .{});
@@ -460,7 +461,7 @@ test "File: basic read and write" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime.io()}, .{});
 }
 
 test "File: positional read and write" {
@@ -472,9 +473,9 @@ test "File: positional read and write" {
     defer runtime.deinit();
 
     const TestTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(io: Io) !void {
             const file_path = "test_file_positional.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
+            var zio_file = try fs.createFile(io, file_path, .{ .read = true });
             defer zio_file.deinit();
             defer zio_file.close();
             defer std.fs.cwd().deleteFile(file_path) catch {};
@@ -497,7 +498,7 @@ test "File: positional read and write" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime.io()}, .{});
 }
 
 test "File: close operation" {
@@ -509,9 +510,9 @@ test "File: close operation" {
     defer runtime.deinit();
 
     const TestTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(io: Io) !void {
             const file_path = "test_file_close.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{});
+            var zio_file = try fs.createFile(io, file_path, .{});
             defer zio_file.deinit();
             defer std.fs.cwd().deleteFile(file_path) catch {};
 
@@ -526,7 +527,7 @@ test "File: close operation" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime.io()}, .{});
 }
 
 test "File: reader and writer interface" {
@@ -538,13 +539,13 @@ test "File: reader and writer interface" {
     defer runtime.deinit();
 
     const TestTask = struct {
-        fn run(rt: *Runtime) !void {
+        fn run(io: Io) !void {
             const file_path = "test_file_rw_interface.txt";
             defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write using writer interface
             {
-                var file = try fs.createFile(rt, file_path, .{});
+                var file = try fs.createFile(io, file_path, .{});
                 defer file.deinit();
 
                 var write_buffer: [256]u8 = undefined;
@@ -560,7 +561,7 @@ test "File: reader and writer interface" {
 
             // Read using reader interface
             {
-                var file = try fs.openFile(rt, file_path, .{});
+                var file = try fs.openFile(io, file_path, .{});
                 defer file.deinit();
 
                 var read_buffer: [256]u8 = undefined;
@@ -577,5 +578,5 @@ test "File: reader and writer interface" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime.io()}, .{});
 }

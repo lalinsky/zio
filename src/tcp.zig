@@ -1,8 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
-const io = @import("io.zig");
+const streams = @import("io/stream.zig");
 const Runtime = @import("runtime.zig").Runtime;
+const Io = @import("runtime.zig").Io;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -11,15 +12,15 @@ const ResetEvent = @import("sync.zig").ResetEvent;
 
 const TEST_PORT = 45001;
 
-fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
+fn echoServer(io: Io, ready_event: *ResetEvent) !void {
     const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-    var listener = try TcpListener.init(rt, addr);
+    var listener = try TcpListener.init(io, addr);
     defer listener.close();
 
     try listener.bind(addr);
     try listener.listen(1);
 
-    ready_event.set(rt);
+    ready_event.set(io.runtime());
 
     var stream = try listener.accept();
     defer {
@@ -45,10 +46,10 @@ pub const TcpListener = struct {
     xev_tcp: xev.TCP,
     runtime: *Runtime,
 
-    pub fn init(runtime: *Runtime, addr: Address) !TcpListener {
+    pub fn init(io: Io, addr: Address) !TcpListener {
         return TcpListener{
             .xev_tcp = try xev.TCP.init(addr),
-            .runtime = runtime,
+            .runtime = io.runtime(),
         };
     }
 
@@ -169,7 +170,8 @@ pub const TcpStream = struct {
 
     /// Establishes a TCP connection to the specified address.
     /// Returns a connected TcpStream on success.
-    pub fn connect(runtime: *Runtime, addr: Address) !TcpStream {
+    pub fn connect(io: Io, addr: Address) !TcpStream {
+        const runtime = io.runtime();
         var tcp = try xev.TCP.init(addr);
         const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
@@ -466,8 +468,8 @@ pub const TcpStream = struct {
     }
 
     // Zig 0.15+ streaming interface
-    pub const Reader = io.StreamReader(TcpStream);
-    pub const Writer = io.StreamWriter(TcpStream);
+    pub const Reader = streams.StreamReader(TcpStream);
+    pub const Writer = streams.StreamWriter(TcpStream);
 
     // Zig 0.15+ interface methods
     pub fn reader(self: *const TcpStream, buffer: []u8) Reader {
@@ -489,11 +491,11 @@ test "TCP: basic echo server and client" {
     var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            try ready_event.wait(rt);
+        fn run(io: Io, ready_event: *ResetEvent) !void {
+            try ready_event.wait(io.runtime());
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
+            var stream = try TcpStream.connect(io, addr);
             defer stream.close();
 
             const test_data = "Hello, TCP!";
@@ -506,10 +508,10 @@ test "TCP: basic echo server and client" {
         }
     };
 
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ runtime.io(), &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime.io(), &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -528,11 +530,11 @@ test "TCP: Writer splat handling" {
     var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            try ready_event.wait(rt);
+        fn run(io: Io, ready_event: *ResetEvent) !void {
+            try ready_event.wait(io.runtime());
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
+            var stream = try TcpStream.connect(io, addr);
             defer stream.close();
 
             var write_buffer: [256]u8 = undefined;
@@ -554,10 +556,10 @@ test "TCP: Writer splat handling" {
         }
     };
 
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ runtime.io(), &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime.io(), &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -576,11 +578,11 @@ test "TCP: Writer splat with single element" {
     var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            try ready_event.wait(rt);
+        fn run(io: Io, ready_event: *ResetEvent) !void {
+            try ready_event.wait(io.runtime());
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
+            var stream = try TcpStream.connect(io, addr);
             defer stream.close();
 
             var write_buffer: [256]u8 = undefined;
@@ -602,10 +604,10 @@ test "TCP: Writer splat with single element" {
         }
     };
 
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ runtime.io(), &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime.io(), &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -624,11 +626,11 @@ test "TCP: Writer splat with single character" {
     var server_ready = ResetEvent.init;
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            try ready_event.wait(rt);
+        fn run(io: Io, ready_event: *ResetEvent) !void {
+            try ready_event.wait(io.runtime());
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
+            var stream = try TcpStream.connect(io, addr);
             defer stream.close();
 
             var write_buffer: [256]u8 = undefined;
@@ -650,10 +652,10 @@ test "TCP: Writer splat with single character" {
         }
     };
 
-    var server_task = try runtime.spawn(echoServer, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(echoServer, .{ runtime.io(), &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime.io(), &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -672,15 +674,15 @@ test "TCP: Reader takeByte with RESP protocol" {
     var server_ready = ResetEvent.init;
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+        fn run(io: Io, ready_event: *ResetEvent) !void {
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
+            var listener = try TcpListener.init(io, addr);
             defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
 
-            ready_event.set(rt);
+            ready_event.set(io.runtime());
 
             var stream = try listener.accept();
             defer {
@@ -722,11 +724,11 @@ test "TCP: Reader takeByte with RESP protocol" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            try ready_event.wait(rt);
+        fn run(io: Io, ready_event: *ResetEvent) !void {
+            try ready_event.wait(io.runtime());
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
+            var stream = try TcpStream.connect(io, addr);
             defer stream.close();
 
             // Send RESP PING command
@@ -741,10 +743,10 @@ test "TCP: Reader takeByte with RESP protocol" {
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime.io(), &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime.io(), &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -763,15 +765,15 @@ test "TCP: readBuf with different ReadBuffer variants" {
     var server_ready = ResetEvent.init;
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
+        fn run(io: Io, ready_event: *ResetEvent) !void {
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
+            var listener = try TcpListener.init(io, addr);
             defer listener.close();
 
             try listener.bind(addr);
             try listener.listen(1);
 
-            ready_event.set(rt);
+            ready_event.set(io.runtime());
 
             var stream = try listener.accept();
             defer {
@@ -786,11 +788,11 @@ test "TCP: readBuf with different ReadBuffer variants" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            try ready_event.wait(rt);
+        fn run(io: Io, ready_event: *ResetEvent) !void {
+            try ready_event.wait(io.runtime());
 
             const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
-            var stream = try TcpStream.connect(rt, addr);
+            var stream = try TcpStream.connect(io, addr);
             defer stream.close();
 
             // Test 1: ReadBuffer with .slice
@@ -842,10 +844,10 @@ test "TCP: readBuf with different ReadBuffer variants" {
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime.io(), &server_ready }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime.io(), &server_ready }, .{});
     defer client_task.deinit();
 
     try runtime.run();

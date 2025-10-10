@@ -668,6 +668,32 @@ pub const AwaitableList = struct {
     }
 };
 
+// I/O handle for async I/O operations
+// This is a lightweight wrapper around Runtime that provides forward compatibility
+// with the future std.Io interface. Use this for I/O operations instead of passing
+// *Runtime directly.
+pub const Io = struct {
+    rt: *Runtime,
+
+    /// Get the underlying Runtime instance.
+    /// Use this when you need access to runtime-specific operations.
+    pub fn runtime(self: Io) *Runtime {
+        return self.rt;
+    }
+
+    /// Spawn a new coroutine task.
+    /// This is a convenience wrapper around Runtime.spawn.
+    pub fn spawn(self: Io, func: anytype, args: meta.ArgsType(func), options: CoroutineOptions) !JoinHandle(meta.Result(func)) {
+        return self.rt.spawn(func, args, options);
+    }
+
+    /// Spawn a blocking task in the thread pool.
+    /// This is a convenience wrapper around Runtime.spawnBlocking.
+    pub fn spawnBlocking(self: Io, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.Result(func)) {
+        return self.rt.spawnBlocking(func, args);
+    }
+};
+
 // Runtime class - the main zio runtime
 pub const Runtime = struct {
     loop: xev.Loop,
@@ -704,6 +730,12 @@ pub const Runtime = struct {
             return fromCoroutine(coro);
         }
         return null;
+    }
+
+    /// Get an Io handle for this runtime.
+    /// Use this to pass I/O capabilities to functions instead of passing *Runtime directly.
+    pub fn io(self: *Runtime) Io {
+        return Io{ .rt = self };
     }
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
@@ -1268,8 +1300,8 @@ test "runtime: spawnBlocking smoke test" {
             return x * 2;
         }
 
-        fn asyncTask(rt: *Runtime) !void {
-            var handle = try rt.spawnBlocking(blockingWork, .{21});
+        fn asyncTask(io: Io) !void {
+            var handle = try io.spawnBlocking(blockingWork, .{21});
             defer handle.deinit();
 
             const result = handle.join();
@@ -1277,7 +1309,7 @@ test "runtime: spawnBlocking smoke test" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime.io()}, .{});
 }
 
 test "runtime: Future basic set and get" {
@@ -1287,8 +1319,8 @@ test "runtime: Future basic set and get" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
-            const future = try Future(i32).init(rt, testing.allocator);
+        fn asyncTask(io: Io) !void {
+            const future = try Future(i32).init(io.runtime(), testing.allocator);
             defer future.deinit();
 
             // Set value
@@ -1300,7 +1332,7 @@ test "runtime: Future basic set and get" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime.io()}, .{});
 }
 
 test "runtime: Future await from coroutine" {
@@ -1323,16 +1355,16 @@ test "runtime: Future await from coroutine" {
             return future.wait();
         }
 
-        fn asyncTask(rt: *Runtime) !void {
-            const future = try Future(i32).init(rt, testing.allocator);
+        fn asyncTask(io: Io) !void {
+            const future = try Future(i32).init(io.runtime(), testing.allocator);
             defer future.deinit();
 
             // Spawn setter coroutine
-            var setter_handle = try rt.spawn(setterTask, .{future}, .{});
+            var setter_handle = try io.spawn(setterTask, .{future}, .{});
             defer setter_handle.deinit();
 
             // Spawn getter coroutine
-            var getter_handle = try rt.spawn(getterTask, .{future}, .{});
+            var getter_handle = try io.spawn(getterTask, .{future}, .{});
             defer getter_handle.deinit();
 
             const result = getter_handle.join();
@@ -1340,7 +1372,7 @@ test "runtime: Future await from coroutine" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime.io()}, .{});
 }
 
 test "runtime: Future multiple waiters" {
@@ -1362,22 +1394,23 @@ test "runtime: Future multiple waiters" {
             future.set(999);
         }
 
-        fn asyncTask(rt: *Runtime) !void {
-            const future = try Future(i32).init(rt, testing.allocator);
+        fn asyncTask(io: Io) !void {
+            const future = try Future(i32).init(io.runtime(), testing.allocator);
             defer future.deinit();
 
             // Spawn multiple waiters
-            var waiter1 = try rt.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
+            var waiter1 = try io.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
             defer waiter1.deinit();
-            var waiter2 = try rt.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
+            var waiter2 = try io.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
             defer waiter2.deinit();
-            var waiter3 = try rt.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
+            var waiter3 = try io.spawn(waiterTask, .{ future, @as(i32, 999) }, .{});
             defer waiter3.deinit();
 
             // Spawn setter
-            var setter = try rt.spawn(setterTask, .{future}, .{});
+            var setter = try io.spawn(setterTask, .{future}, .{});
             defer setter.deinit();
 
+            const rt = Runtime.getCurrent().?;
             try rt.yield(.ready);
             try rt.yield(.ready);
             try rt.yield(.ready);
@@ -1389,5 +1422,5 @@ test "runtime: Future multiple waiters" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime.io()}, .{});
 }
