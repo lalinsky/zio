@@ -80,7 +80,7 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
 
     // Check if the task was canceled before it started executing
-    if (!any_blocking_task.canceled.load(.acquire)) {
+    if (!any_blocking_task.awaitable.canceled.load(.acquire)) {
         // Execute the user's blocking function only if not canceled
         any_blocking_task.execute_fn(any_blocking_task);
     }
@@ -280,6 +280,12 @@ pub const AnyTask = struct {
     pub inline fn fromCoroutine(coro: *Coroutine) *AnyTask {
         return @fieldParentPtr("coro", coro);
     }
+
+    /// Request cancellation of this task.
+    /// The cancellation flag will be checked at the next yield point.
+    pub fn cancel(self: *AnyTask) void {
+        self.awaitable.requestCancellation();
+    }
 };
 
 // Blocking task for runtime scheduling - thread pool based tasks
@@ -288,11 +294,17 @@ pub const AnyBlockingTask = struct {
     thread_pool_task: xev.ThreadPool.Task,
     runtime: *Runtime,
     execute_fn: *const fn (*AnyBlockingTask) void,
-    canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
         return @fieldParentPtr("awaitable", awaitable);
+    }
+
+    /// Request cancellation of this blocking task.
+    /// If the task hasn't started executing yet, it will skip execution.
+    /// If already executing, this has no effect (cannot stop blocking work).
+    pub fn cancel(self: *AnyBlockingTask) void {
+        self.awaitable.requestCancellation();
     }
 };
 
@@ -371,6 +383,12 @@ pub fn Task(comptime T: type) type {
 
         fn result(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
             return self.join();
+        }
+
+        /// Request cancellation of this task.
+        /// The cancellation flag will be checked at the next yield point.
+        pub fn cancel(self: *Self) void {
+            self.any_task.cancel();
         }
     };
 }
@@ -554,6 +572,13 @@ pub fn BlockingTask(comptime T: type) type {
         fn result(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
             return self.join();
         }
+
+        /// Request cancellation of this blocking task.
+        /// If the task hasn't started executing yet, it will skip execution.
+        /// If already executing, this has no effect (cannot stop blocking work).
+        pub fn cancel(self: *Self) void {
+            self.any_blocking_task.cancel();
+        }
     };
 }
 
@@ -586,6 +611,18 @@ pub fn JoinHandle(comptime T: type) type {
 
         pub fn result(self: *Self) (Cancelable || Self.getErrorSet())!Self.getPayload() {
             return self.join();
+        }
+
+        /// Request cancellation of this task.
+        /// For coroutine tasks: Sets the cancellation flag, which will be checked at the next yield point.
+        /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
+        /// For futures: Has no effect (futures are not cancelable).
+        pub fn cancel(self: *Self) void {
+            switch (self.kind) {
+                .coro => |task| task.any_task.cancel(),
+                .blocking => |task| task.any_blocking_task.cancel(),
+                .future => {}, // Futures cannot be canceled
+            }
         }
 
         fn getErrorSet() type {
