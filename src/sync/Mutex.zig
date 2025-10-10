@@ -31,8 +31,10 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 
     // Suspend until woken by unlock()
     runtime.yield(.waiting) catch |err| {
-        // On cancellation, remove ourselves from the wait queue
-        _ = self.wait_queue.remove(&task.awaitable);
+        if (!self.wait_queue.remove(&task.awaitable)) {
+            // We already inherited the lock; drop it so others can proceed.
+            self.unlock(runtime);
+        }
         return err;
     };
 
