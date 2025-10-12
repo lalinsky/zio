@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
 const TcpStream = @import("tcp.zig").TcpStream;
-const Address = @import("address.zig").Address;
 
 pub const AddressList = std.net.AddressList;
 
@@ -51,7 +50,7 @@ pub fn tcpConnectToHost(
 
 /// Async TCP connection to a specific address.
 /// This is a convenience wrapper around TcpStream.connect.
-pub fn tcpConnectToAddress(runtime: *Runtime, address: Address) !TcpStream {
+pub fn tcpConnectToAddress(runtime: *Runtime, address: std.net.Address) !TcpStream {
     return TcpStream.connect(runtime, address);
 }
 
@@ -109,7 +108,7 @@ test "tcpConnectToAddress: basic connection" {
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const TcpListener = @import("tcp.zig").TcpListener;
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
 
@@ -131,7 +130,7 @@ test "tcpConnectToAddress: basic connection" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             try ready_event.wait(rt);
 
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try tcpConnectToAddress(rt, addr);
             defer stream.close();
 
@@ -167,7 +166,7 @@ test "tcpConnectToHost: localhost connection" {
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const TcpListener = @import("tcp.zig").TcpListener;
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
 

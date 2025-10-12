@@ -6,13 +6,12 @@ const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
-const Address = @import("address.zig").Address;
 const ResetEvent = @import("sync.zig").ResetEvent;
 
 const TEST_PORT = 45001;
 
 fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
-    const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
     var listener = try TcpListener.init(rt, addr);
     defer listener.close();
 
@@ -45,14 +44,14 @@ pub const TcpListener = struct {
     xev_tcp: xev.TCP,
     runtime: *Runtime,
 
-    pub fn init(runtime: *Runtime, addr: Address) !TcpListener {
+    pub fn init(runtime: *Runtime, addr: std.net.Address) !TcpListener {
         return TcpListener{
             .xev_tcp = try xev.TCP.init(addr),
             .runtime = runtime,
         };
     }
 
-    pub fn bind(self: *TcpListener, addr: Address) !void {
+    pub fn bind(self: *TcpListener, addr: std.net.Address) !void {
         try self.xev_tcp.bind(addr);
     }
 
@@ -169,7 +168,7 @@ pub const TcpStream = struct {
 
     /// Establishes a TCP connection to the specified address.
     /// Returns a connected TcpStream on success.
-    pub fn connect(runtime: *Runtime, addr: Address) !TcpStream {
+    pub fn connect(runtime: *Runtime, addr: std.net.Address) !TcpStream {
         var tcp = try xev.TCP.init(addr);
         const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
@@ -492,7 +491,7 @@ test "TCP: basic echo server and client" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             try ready_event.wait(rt);
 
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
             defer stream.close();
 
@@ -531,7 +530,7 @@ test "TCP: Writer splat handling" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             try ready_event.wait(rt);
 
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
             defer stream.close();
 
@@ -579,7 +578,7 @@ test "TCP: Writer splat with single element" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             try ready_event.wait(rt);
 
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
             defer stream.close();
 
@@ -627,7 +626,7 @@ test "TCP: Writer splat with single character" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             try ready_event.wait(rt);
 
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
             defer stream.close();
 
@@ -673,7 +672,7 @@ test "TCP: Reader takeByte with RESP protocol" {
 
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
 
@@ -725,7 +724,7 @@ test "TCP: Reader takeByte with RESP protocol" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             try ready_event.wait(rt);
 
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
             defer stream.close();
 
@@ -764,7 +763,7 @@ test "TCP: readBuf with different ReadBuffer variants" {
 
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var listener = try TcpListener.init(rt, addr);
             defer listener.close();
 
@@ -789,7 +788,7 @@ test "TCP: readBuf with different ReadBuffer variants" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             try ready_event.wait(rt);
 
-            const addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
             defer stream.close();
 

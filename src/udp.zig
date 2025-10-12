@@ -3,27 +3,26 @@ const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
-const Address = @import("address.zig").Address;
 
 const TEST_PORT = 45001;
 
 pub const UdpReadResult = struct {
     bytes_read: usize,
-    sender_addr: Address,
+    sender_addr: std.net.Address,
 };
 
 pub const UdpSocket = struct {
     xev_udp: xev.UDP,
     runtime: *Runtime,
 
-    pub fn init(runtime: *Runtime, addr: Address) !UdpSocket {
+    pub fn init(runtime: *Runtime, addr: std.net.Address) !UdpSocket {
         return UdpSocket{
             .xev_udp = try xev.UDP.init(addr),
             .runtime = runtime,
         };
     }
 
-    pub fn bind(self: *UdpSocket, addr: Address) !void {
+    pub fn bind(self: *UdpSocket, addr: std.net.Address) !void {
         try self.xev_udp.bind(addr);
     }
 
@@ -35,14 +34,14 @@ pub const UdpSocket = struct {
         const Result = struct {
             coro: *Coroutine,
             result: xev.ReadError!usize = undefined,
-            sender_addr: Address = undefined,
+            sender_addr: std.net.Address = undefined,
 
             pub fn callback(
                 result_data_ptr: ?*@This(),
                 loop: *xev.Loop,
                 completion_inner: *xev.Completion,
                 state_inner: *xev.UDP.State,
-                addr: Address,
+                addr: std.net.Address,
                 socket: xev.UDP,
                 buffer_inner: xev.ReadBuffer,
                 result: xev.ReadError!usize,
@@ -86,7 +85,7 @@ pub const UdpSocket = struct {
         };
     }
 
-    pub fn write(self: *UdpSocket, addr: Address, data: []const u8) !usize {
+    pub fn write(self: *UdpSocket, addr: std.net.Address, data: []const u8) !usize {
         const coro = coroutines.getCurrent().?;
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
@@ -197,7 +196,7 @@ test "UDP: basic send and receive" {
 
     const ServerTask = struct {
         fn run(rt: *Runtime, server_port: *u16) !void {
-            const bind_addr = try Address.parseIp4("127.0.0.1", TEST_PORT);
+            const bind_addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var socket = try UdpSocket.init(rt, bind_addr);
             defer socket.close();
 
@@ -220,7 +219,7 @@ test "UDP: basic send and receive" {
         fn run(rt: *Runtime, server_port: *u16) !void {
             rt.sleep(10); // Give server time to bind
 
-            const client_addr = try Address.parseIp4("127.0.0.1", 0);
+            const client_addr = try std.net.Address.parseIp4("127.0.0.1", 0);
             var socket = try UdpSocket.init(rt, client_addr);
             defer socket.close();
 
@@ -228,7 +227,7 @@ test "UDP: basic send and receive" {
 
             // Send test data
             const test_data = "Hello, UDP!";
-            const server_addr = try Address.parseIp4("127.0.0.1", server_port.*);
+            const server_addr = try std.net.Address.parseIp4("127.0.0.1", server_port.*);
             const bytes_sent = try socket.write(server_addr, test_data);
             try testing.expectEqual(test_data.len, bytes_sent);
 
