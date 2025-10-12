@@ -134,6 +134,7 @@ pub const AwaitableKind = enum {
 pub const Awaitable = struct {
     kind: AwaitableKind,
     next: ?*Awaitable = null,
+    prev: ?*Awaitable = null,
     waiting_list: AwaitableList = .{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
     destroy_fn: *const fn (*Runtime, *Awaitable) void,
@@ -599,8 +600,10 @@ pub const AwaitableList = struct {
         awaitable.next = null;
         if (self.tail) |tail| {
             tail.next = awaitable;
+            awaitable.prev = tail;
             self.tail = awaitable;
         } else {
+            awaitable.prev = null;
             self.head = awaitable;
             self.tail = awaitable;
         }
@@ -612,10 +615,13 @@ pub const AwaitableList = struct {
             head.in_list = false;
         }
         self.head = head.next;
-        if (self.head == null) {
+        if (self.head) |new_head| {
+            new_head.prev = null;
+        } else {
             self.tail = null;
         }
         head.next = null;
+        head.prev = null;
         return head;
     }
 
@@ -624,6 +630,9 @@ pub const AwaitableList = struct {
 
         if (self.tail) |tail| {
             tail.next = other.head;
+            if (other.head) |other_head| {
+                other_head.prev = tail;
+            }
             self.tail = other.tail;
         } else {
             self.head = other.head;
@@ -638,39 +647,32 @@ pub const AwaitableList = struct {
         // Handle empty list
         if (self.head == null) return false;
 
-        // Handle removing head
-        if (self.head == awaitable) {
-            if (builtin.mode == .Debug) {
-                std.debug.assert(awaitable.in_list);
-                awaitable.in_list = false;
-            }
+        if (builtin.mode == .Debug) {
+            std.debug.assert(awaitable.in_list);
+            awaitable.in_list = false;
+        }
+
+        // Update prev node's next pointer (or head if removing first node)
+        if (awaitable.prev) |prev_node| {
+            prev_node.next = awaitable.next;
+        } else {
+            // No prev means this is the head
             self.head = awaitable.next;
-            if (self.head == null) {
-                self.tail = null;
-            }
-            awaitable.next = null;
-            return true;
         }
 
-        // Search for awaitable in the list
-        var current = self.head;
-        while (current) |curr| {
-            if (curr.next == awaitable) {
-                if (builtin.mode == .Debug) {
-                    std.debug.assert(awaitable.in_list);
-                    awaitable.in_list = false;
-                }
-                curr.next = awaitable.next;
-                if (awaitable == self.tail) {
-                    self.tail = curr;
-                }
-                awaitable.next = null;
-                return true;
-            }
-            current = curr.next;
+        // Update next node's prev pointer (or tail if removing last node)
+        if (awaitable.next) |next_node| {
+            next_node.prev = awaitable.prev;
+        } else {
+            // No next means this is the tail
+            self.tail = awaitable.prev;
         }
 
-        return false;
+        // Clear pointers
+        awaitable.next = null;
+        awaitable.prev = null;
+
+        return true;
     }
 };
 
