@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
-const io = @import("io.zig");
+const StreamReader = @import("stream.zig").StreamReader;
+const StreamWriter = @import("stream.zig").StreamWriter;
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
@@ -400,8 +401,8 @@ pub const File = struct {
     }
 
     // Zig 0.15+ streaming interface
-    pub const Reader = io.StreamReader(File);
-    pub const Writer = io.StreamWriter(File);
+    pub const Reader = StreamReader(File);
+    pub const Writer = StreamWriter(File);
 
     pub fn reader(self: *File, buffer: []u8) Reader {
         return Reader.init(self, buffer);

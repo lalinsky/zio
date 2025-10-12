@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
-const io = @import("io.zig");
+const StreamReader = @import("stream.zig").StreamReader;
+const StreamWriter = @import("stream.zig").StreamWriter;
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
@@ -465,8 +466,8 @@ pub const TcpStream = struct {
     }
 
     // Zig 0.15+ streaming interface
-    pub const Reader = io.StreamReader(TcpStream);
-    pub const Writer = io.StreamWriter(TcpStream);
+    pub const Reader = StreamReader(TcpStream);
+    pub const Writer = StreamWriter(TcpStream);
 
     // Zig 0.15+ interface methods
     pub fn reader(self: *const TcpStream, buffer: []u8) Reader {
