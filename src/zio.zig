@@ -4,12 +4,11 @@ const std = @import("std");
 pub const coroutines = @import("coroutines.zig");
 pub const Coroutine = coroutines.Coroutine;
 pub const CoroutineState = coroutines.CoroutineState;
-pub const CoroutineOptions = coroutines.CoroutineOptions;
 
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
-pub const ZioError = runtime.ZioError;
+pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
 
 // Re-export I/O functionality
