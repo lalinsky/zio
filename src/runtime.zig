@@ -6,10 +6,11 @@ const assert = std.debug.assert;
 const xev = @import("xev");
 
 const meta = @import("meta.zig");
+
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
 const CoroutineState = coroutines.CoroutineState;
-const CoroutineOptions = coroutines.CoroutineOptions;
+
 // const Error = coroutines.Error;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 const FutureResult = @import("future_result.zig").FutureResult;
@@ -21,6 +22,11 @@ const StackPoolOptions = stack_pool.StackPoolOptions;
 fn backendNeedsThreadPool() bool {
     return @hasField(xev.Loop, "thread_pool");
 }
+
+/// Options for spawning a coroutine
+pub const SpawnOptions = struct {
+    stack_size: ?usize = null,
+};
 
 // Runtime configuration options
 pub const RuntimeOptions = struct {
@@ -768,7 +774,7 @@ pub const Runtime = struct {
         self.stack_pool.deinit();
     }
 
-    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: CoroutineOptions) !JoinHandle(meta.Result(func)) {
+    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.Result(func)) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
@@ -792,7 +798,7 @@ pub const Runtime = struct {
         errdefer self.allocator.destroy(task);
 
         // Acquire stack from pool
-        const stack = try self.stack_pool.acquire(options.stack_size);
+        const stack = try self.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
         errdefer self.stack_pool.release(stack);
 
         task.* = .{
@@ -939,9 +945,9 @@ pub const Runtime = struct {
     }
 
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
-    /// This is equivalent to: spawn() + run() + result(), but in a single call.
-    /// Returns an error union that includes errors from spawn(), run(), and the task itself.
-    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: CoroutineOptions) !meta.Result(func) {
+    /// This is equivalent to: `spawn()` + `run()` + `result()`, but in a single call.
+    /// Returns an error union that includes errors from `spawn()`, `run()`, and the task itself.
+    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Result(func) {
         var handle = try self.spawn(func, args, options);
         defer handle.deinit();
         try self.run();

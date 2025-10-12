@@ -25,7 +25,7 @@ pub inline fn yield() void {
     switchContext(&coro.context, coro.parent_context_ptr);
 }
 
-const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
+pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
@@ -413,10 +413,6 @@ fn coroEntry() callconv(.naked) noreturn {
     }
 }
 
-pub const CoroutineOptions = struct {
-    stack_size: usize = DEFAULT_STACK_SIZE,
-};
-
 pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
@@ -469,13 +465,5 @@ pub const Coroutine = struct {
             self.context.stack_limit = stack_base; // Bottom of stack (low address)
             self.context.deallocation_stack = stack_base; // Allocation base
         }
-    }
-
-    pub fn switchTo(self: *Coroutine) void {
-        const old_coro = current_coroutine;
-        current_coroutine = self;
-        defer current_coroutine = old_coro;
-
-        switchContext(self.parent_context_ptr, &self.context);
     }
 };
