@@ -44,10 +44,12 @@ pub fn build(b: *std.Build) void {
     // Benchmarks configuration
     const benchmarks = [_]struct { name: []const u8, file: []const u8 }{
         .{ .name = "ping-pong", .file = "benchmarks/ping_pong.zig" },
-        .{ .name = "yield-only", .file = "benchmarks/yield_only.zig" },
     };
 
-    // Create executables
+    // Create examples step
+    const examples_step = b.step("examples", "Build examples");
+
+    // Create example executables
     for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
@@ -64,8 +66,12 @@ pub fn build(b: *std.Build) void {
             exe.linkLibC();
         }
 
-        b.installArtifact(exe);
+        const install_exe = b.addInstallArtifact(exe, .{});
+        examples_step.dependOn(&install_exe.step);
     }
+
+    // Create benchmarks step
+    const benchmarks_step = b.step("benchmarks", "Build benchmarks");
 
     // Create benchmark executables
     for (benchmarks) |benchmark| {
@@ -79,7 +85,8 @@ pub fn build(b: *std.Build) void {
         });
         exe.root_module.addImport("zio", zio);
 
-        b.installArtifact(exe);
+        const install_exe = b.addInstallArtifact(exe, .{});
+        benchmarks_step.dependOn(&install_exe.step);
     }
 
     // Tests

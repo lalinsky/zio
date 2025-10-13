@@ -26,6 +26,14 @@ jobs:
       run: zig build
       timeout-minutes: 5
 
+    - name: Build examples
+      run: zig build examples
+      timeout-minutes: 5
+
+    - name: Build benchmarks
+      run: zig build benchmarks
+      timeout-minutes: 5
+
     - name: Run tests
       run: zig build test
       timeout-minutes: 5
