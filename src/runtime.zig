@@ -749,6 +749,13 @@ pub const AwaitableList = struct {
     }
 };
 
+// Executor metrics
+pub const ExecutorMetrics = struct {
+    yields: u64 = 0,
+    tasks_spawned: u64 = 0,
+    tasks_completed: u64 = 0,
+};
+
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     loop: xev.Loop,
@@ -772,6 +779,9 @@ pub const Executor = struct {
     // Stack pool cleanup tracking
     cleanup_interval_ms: i64,
     last_cleanup_ms: i64 = 0,
+
+    // Runtime metrics
+    metrics: ExecutorMetrics = .{},
 
     /// Get the Executor instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
@@ -872,6 +882,9 @@ pub const Executor = struct {
 
         self.ready_queue.push(&task.any_task.awaitable);
 
+        // Track task spawn
+        self.metrics.tasks_spawned += 1;
+
         task.any_task.awaitable.ref_count.incr();
         return JoinHandle(Payload){ .kind = .{ .coro = task } };
     }
@@ -879,6 +892,9 @@ pub const Executor = struct {
     pub fn yield(self: *Executor, desired_state: CoroutineState) Cancelable!void {
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
+
+        // Track yield
+        self.metrics.yields += 1;
 
         // Check and consume cancellation flag before yielding (unless shielded)
         if (current_task.shield_count == 0) {
@@ -1034,6 +1050,9 @@ pub const Executor = struct {
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
                         current_awaitable.markComplete(self);
 
+                        // Track task completion
+                        self.metrics.tasks_completed += 1;
+
                         // Remove from tasks hashmap and release runtime's reference
                         _ = self.tasks.remove(current_task.id);
                         self.releaseAwaitable(current_awaitable);
@@ -1068,6 +1087,16 @@ pub const Executor = struct {
         coro.state = .ready;
         const task = AnyTask.fromCoroutine(coro);
         self.ready_queue.push(&task.awaitable);
+    }
+
+    /// Get a copy of the current metrics
+    pub fn getMetrics(self: *Executor) ExecutorMetrics {
+        return self.metrics;
+    }
+
+    /// Reset all metrics to zero
+    pub fn resetMetrics(self: *Executor) void {
+        self.metrics = .{};
     }
 
     pub fn wait(self: *Executor, task_id: u64) Cancelable!void {
@@ -1397,6 +1426,16 @@ pub const Runtime = struct {
             return @fieldParentPtr("executor", executor);
         }
         return null;
+    }
+
+    /// Get a copy of the current executor metrics
+    pub fn getMetrics(self: *Runtime) ExecutorMetrics {
+        return self.executor.getMetrics();
+    }
+
+    /// Reset all executor metrics to zero
+    pub fn resetMetrics(self: *Runtime) void {
+        self.executor.resetMetrics();
     }
 };
 
