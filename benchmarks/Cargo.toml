@@ -1,0 +1,19 @@
+[package]
+name = "ping_pong"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "ping_pong"
+path = "ping_pong.rs"
+
+[[bin]]
+name = "ping_pong_current_thread"
+path = "ping_pong_current_thread.rs"
+
+[[bin]]
+name = "yield_only"
+path = "yield_only.rs"

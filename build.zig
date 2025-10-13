@@ -41,6 +41,12 @@ pub fn build(b: *std.Build) void {
         //.{ .name = "udp-echo", .file = "examples/udp_echo.zig" },
     };
 
+    // Benchmarks configuration
+    const benchmarks = [_]struct { name: []const u8, file: []const u8 }{
+        .{ .name = "ping-pong", .file = "benchmarks/ping_pong.zig" },
+        .{ .name = "yield-only", .file = "benchmarks/yield_only.zig" },
+    };
+
     // Create executables
     for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -57,6 +63,21 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, example.name, "stack-overflow-demo")) {
             exe.linkLibC();
         }
+
+        b.installArtifact(exe);
+    }
+
+    // Create benchmark executables
+    for (benchmarks) |benchmark| {
+        const exe = b.addExecutable(.{
+            .name = benchmark.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(benchmark.file),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        exe.root_module.addImport("zio", zio);
 
         b.installArtifact(exe);
     }
