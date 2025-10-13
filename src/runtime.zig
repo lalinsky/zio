@@ -92,7 +92,7 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
         any_blocking_task.execute_fn(any_blocking_task);
     }
 
-    // Push to completion queue (thread-safe MPSC)
+    // Push to completion queue (thread-safe lock-free stack)
     // Even if canceled, we still mark as complete so waiters wake up
     any_blocking_task.executor.blocking_completions.push(&any_blocking_task.awaitable);
 
@@ -112,12 +112,17 @@ fn drainBlockingCompletions(
     _ = c;
     const self = executor.?;
 
-    // Drain all completed blocking tasks
-    while (self.blocking_completions.pop()) |awaitable| {
+    // Atomically drain all completed blocking tasks (LIFO order)
+    var current = self.blocking_completions.popAll();
+    while (current) |awaitable| {
+        const next = awaitable.next;
+
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
         awaitable.markComplete(self);
         // Release the blocking task's reference (initial ref from init)
         self.releaseAwaitable(awaitable);
+
+        current = next;
     }
 
     return .rearm;
@@ -587,6 +592,36 @@ pub fn JoinHandle(comptime T: type) type {
     };
 }
 
+// Lock-free intrusive stack for cross-thread communication
+pub const AwaitableStack = struct {
+    head: std.atomic.Value(?*Awaitable) = std.atomic.Value(?*Awaitable).init(null),
+
+    /// Push an item onto the stack. Thread-safe, can be called from any thread.
+    pub fn push(self: *AwaitableStack, item: *Awaitable) void {
+        while (true) {
+            const current_head = self.head.load(.acquire);
+            item.next = current_head;
+
+            // Try to swing head to new item
+            if (self.head.cmpxchgWeak(
+                current_head,
+                item,
+                .release,
+                .acquire,
+            ) == null) {
+                return; // Success!
+            }
+            // CAS failed, retry
+        }
+    }
+
+    /// Atomically drain all items from the stack.
+    /// Returns the head of a linked list (LIFO order).
+    pub fn popAll(self: *AwaitableStack) ?*Awaitable {
+        return self.head.swap(null, .acq_rel);
+    }
+};
+
 // Simple singly-linked list of awaitables
 pub const AwaitableList = struct {
     head: ?*Awaitable = null,
@@ -691,8 +726,8 @@ pub const Executor = struct {
     next_ready_queue: AwaitableList = .{},
     cleanup_queue: AwaitableList = .{},
 
-    // Blocking task support
-    blocking_completions: xev.queue_mpsc.Intrusive(Awaitable) = undefined,
+    // Blocking task support - lock-free LIFO stack
+    blocking_completions: AwaitableStack = .{},
     async_wakeup: xev.Async = undefined,
     async_completion: xev.Completion = undefined,
     blocking_initialized: bool = false,
@@ -888,7 +923,6 @@ pub const Executor = struct {
         if (self.blocking_initialized) return;
         if (self.thread_pool == null) return error.ThreadPoolRequired;
 
-        self.blocking_completions.init();
         self.async_wakeup = try xev.Async.init();
 
         // Register async completion to drain blocking tasks
