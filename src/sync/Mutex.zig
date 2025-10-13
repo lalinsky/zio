@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
@@ -21,6 +22,7 @@ pub fn tryLock(self: *Mutex) bool {
 
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     const current = coroutines.getCurrent() orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
 
     // Fast path: try to acquire unlocked mutex
     if (self.tryLock()) return;
@@ -30,7 +32,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     self.wait_queue.push(&task.awaitable);
 
     // Suspend until woken by unlock()
-    runtime.yield(.waiting) catch |err| {
+    executor.yield(.waiting) catch |err| {
         if (!self.wait_queue.remove(&task.awaitable)) {
             // We already inherited the lock; drop it so others can proceed.
             self.unlock(runtime);
@@ -44,7 +46,9 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 }
 
 pub fn unlock(self: *Mutex, runtime: *Runtime) void {
+    _ = runtime;
     const current = coroutines.getCurrent() orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
     std.debug.assert(self.owner.load(.monotonic) == current);
 
     // Check if there are waiters
@@ -53,7 +57,7 @@ pub fn unlock(self: *Mutex, runtime: *Runtime) void {
         // Transfer ownership directly to next waiter
         self.owner.store(&task.coro, .release);
         // Wake them up (they already own the lock)
-        runtime.markReady(&task.coro);
+        executor.markReady(&task.coro);
     } else {
         // No waiters, release the lock completely
         self.owner.store(null, .release);

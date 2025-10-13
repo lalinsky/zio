@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
@@ -15,6 +16,7 @@ pub const init: Condition = .{};
 
 pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
     const current = coroutines.getCurrent() orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 
     // Add to wait queue before releasing mutex
@@ -22,7 +24,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 
     // Atomically release mutex and wait
     mutex.unlock(runtime);
-    runtime.yield(.waiting) catch |err| {
+    executor.yield(.waiting) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
         _ = self.wait_queue.remove(&task.awaitable);
         // Must reacquire mutex before returning, retry if canceled
@@ -39,6 +41,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 
 pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{ Timeout, Canceled }!void {
     const current = coroutines.getCurrent() orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 
     self.wait_queue.push(&task.awaitable);
@@ -58,7 +61,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     // Atomically release mutex and wait
     mutex.unlock(runtime);
 
-    runtime.timedWaitForReadyWithCallback(
+    executor.timedWaitForReadyWithCallback(
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
@@ -105,16 +108,20 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
 }
 
 pub fn signal(self: *Condition, runtime: *Runtime) void {
+    _ = runtime;
     if (self.wait_queue.pop()) |awaitable| {
         const task = AnyTask.fromAwaitable(awaitable);
-        runtime.markReady(&task.coro);
+        const executor = Executor.fromCoroutine(&task.coro);
+        executor.markReady(&task.coro);
     }
 }
 
 pub fn broadcast(self: *Condition, runtime: *Runtime) void {
+    _ = runtime;
     while (self.wait_queue.pop()) |awaitable| {
         const task = AnyTask.fromAwaitable(awaitable);
-        runtime.markReady(&task.coro);
+        const executor = Executor.fromCoroutine(&task.coro);
+        executor.markReady(&task.coro);
     }
 }
 
@@ -139,7 +146,7 @@ test "Condition basic wait/signal" {
         }
 
         fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
-            try rt.yield(.ready); // Give waiter time to start waiting
+            try rt.yield(); // Give waiter time to start waiting
 
             try mtx.lock(rt);
             ready_flag.* = true;
@@ -212,9 +219,9 @@ test "Condition broadcast" {
 
         fn broadcaster(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
             // Give waiters time to start waiting
-            try rt.yield(.ready);
-            try rt.yield(.ready);
-            try rt.yield(.ready);
+            try rt.yield();
+            try rt.yield();
+            try rt.yield();
 
             try mtx.lock(rt);
             ready_flag.* = true;

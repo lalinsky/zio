@@ -4,6 +4,7 @@ const xev = @import("xev");
 const StreamReader = @import("stream.zig").StreamReader;
 const StreamWriter = @import("stream.zig").StreamWriter;
 const Runtime = @import("runtime.zig").Runtime;
+const Executor = @import("runtime.zig").Executor;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -79,7 +80,7 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -88,14 +89,14 @@ pub const TcpListener = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.accept(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             Result,
             &result_data,
             Result.callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         const accepted_tcp = result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -132,7 +133,7 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -141,7 +142,7 @@ pub const TcpListener = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.close(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             Result,
             &result_data,
@@ -149,7 +150,7 @@ pub const TcpListener = struct {
         );
 
         // Shield ensures this never returns error.Canceled
-        self.runtime.waitForXevCompletion(&completion) catch unreachable;
+        self.runtime.executor.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -191,7 +192,7 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -200,7 +201,7 @@ pub const TcpStream = struct {
         var result_data: Result = .{ .coro = coro };
 
         tcp.connect(
-            &runtime.loop,
+            &runtime.executor.loop,
             &completion,
             addr,
             Result,
@@ -208,7 +209,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        try runtime.waitForXevCompletion(&completion);
+        try runtime.executor.waitForXevCompletion(&completion);
 
         result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -301,7 +302,7 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -310,14 +311,14 @@ pub const TcpStream = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.shutdown(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             Result,
             &result_data,
             Result.callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -338,7 +339,7 @@ pub const TcpStream = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.write(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             buffer,
             Result,
@@ -354,13 +355,13 @@ pub const TcpStream = struct {
                 ) xev.CallbackAction {
                     const r = result_ptr.?;
                     r.result = result;
-                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
+                    Executor.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         return result_data.result catch return error.WriteFailed;
     }
@@ -379,7 +380,7 @@ pub const TcpStream = struct {
         var result_data: Result = .{ .coro = coro, .buffer = buffer };
 
         self.xev_tcp.read(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             buffer.*,
             Result,
@@ -399,13 +400,13 @@ pub const TcpStream = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
+                    Executor.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         const n = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -442,7 +443,7 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -451,7 +452,7 @@ pub const TcpStream = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_tcp.close(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             Result,
             &result_data,
@@ -459,7 +460,7 @@ pub const TcpStream = struct {
         );
 
         // Shield ensures this never returns error.Canceled
-        self.runtime.waitForXevCompletion(&completion) catch unreachable;
+        self.runtime.executor.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

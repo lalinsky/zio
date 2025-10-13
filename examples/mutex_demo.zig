@@ -12,7 +12,7 @@ fn incrementTask(rt: *zio.Runtime, data: *SharedData, id: u32) !void {
         defer data.mutex.unlock(rt);
 
         const old = data.counter;
-        try rt.yield(.ready); // Yield to simulate preemption
+        try rt.yield(); // Yield to simulate preemption
         data.counter = old + 1;
 
         if (@rem(data.counter, 100) == 0) {

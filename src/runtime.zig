@@ -63,7 +63,7 @@ fn markReadyFromXevCallback(
     _ = result catch {};
 
     if (userdata) |coro| {
-        Runtime.fromCoroutine(coro).markReady(coro);
+        Executor.fromCoroutine(coro).markReady(coro);
     }
     return .disarm;
 }
@@ -94,15 +94,15 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
 
     // Push to completion queue (thread-safe MPSC)
     // Even if canceled, we still mark as complete so waiters wake up
-    any_blocking_task.runtime.blocking_completions.push(&any_blocking_task.awaitable);
+    any_blocking_task.executor.blocking_completions.push(&any_blocking_task.awaitable);
 
     // Wake up main loop
-    any_blocking_task.runtime.async_wakeup.notify() catch {};
+    any_blocking_task.executor.async_wakeup.notify() catch {};
 }
 
 // Async callback to drain completed blocking tasks
 fn drainBlockingCompletions(
-    runtime: ?*Runtime,
+    executor: ?*Executor,
     loop: *xev.Loop,
     c: *xev.Completion,
     result: xev.Async.WaitError!void,
@@ -110,7 +110,7 @@ fn drainBlockingCompletions(
     _ = result catch unreachable;
     _ = loop;
     _ = c;
-    const self = runtime.?;
+    const self = executor.?;
 
     // Drain all completed blocking tasks
     while (self.blocking_completions.pop()) |awaitable| {
@@ -137,7 +137,7 @@ pub const Awaitable = struct {
     prev: ?*Awaitable = null,
     waiting_list: AwaitableList = .{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
-    destroy_fn: *const fn (*Runtime, *Awaitable) void,
+    destroy_fn: *const fn (*Executor, *Awaitable) void,
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 
     // Universal state for both coroutines and threads
@@ -169,8 +169,8 @@ pub const Awaitable = struct {
                 return;
             }
 
-            const runtime = Runtime.fromCoroutine(current);
-            runtime.yield(.waiting) catch |err| {
+            const executor = Executor.fromCoroutine(current);
+            executor.yield(.waiting) catch |err| {
                 // If yield itself was canceled, remove from wait list
                 _ = self.waiting_list.remove(&task.awaitable);
                 return err;
@@ -198,9 +198,9 @@ pub const Awaitable = struct {
         if (fast_state == 1) return;
 
         if (coroutines.getCurrent()) |current| {
-            // Coroutine path: get runtime and use timer infrastructure
+            // Coroutine path: get executor and use timer infrastructure
             const task = AnyTask.fromCoroutine(current);
-            const rt = Runtime.fromCoroutine(current);
+            const executor = Executor.fromCoroutine(current);
 
             self.waiting_list.push(&task.awaitable);
 
@@ -220,7 +220,7 @@ pub const Awaitable = struct {
                 .awaitable = &task.awaitable,
             };
 
-            rt.timedWaitForReadyWithCallback(
+            executor.timedWaitForReadyWithCallback(
                 timeout_ns,
                 TimeoutContext,
                 &timeout_ctx,
@@ -249,14 +249,14 @@ pub const Awaitable = struct {
     }
 
     /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
-    pub fn markComplete(self: *Awaitable, runtime: *Runtime) void {
+    pub fn markComplete(self: *Awaitable, executor: *Executor) void {
         // Set state first (release semantics for memory ordering)
         self.state.store(1, .release);
 
         // Wake all waiting coroutines
         while (self.waiting_list.pop()) |waiting_awaitable| {
             const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-            runtime.markReady(&waiting_task.coro);
+            executor.markReady(&waiting_task.coro);
         }
 
         // Wake all waiting threads
@@ -300,7 +300,7 @@ pub const AnyTask = struct {
 pub const AnyBlockingTask = struct {
     awaitable: Awaitable,
     thread_pool_task: xev.ThreadPool.Task,
-    runtime: *Runtime,
+    executor: *Executor,
     execute_fn: *const fn (*AnyBlockingTask) void,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
@@ -335,22 +335,22 @@ pub fn Task(comptime T: type) type {
         any_task: AnyTask,
         future_result: FutureResult(T),
 
-        fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
+        fn destroyFn(exec: *Executor, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
             const self: *Self = @fieldParentPtr("any_task", any_task);
             // Stack should already be released when coroutine became dead, but check defensively
             if (any_task.coro.stack) |stack| {
-                rt.stack_pool.release(stack);
+                exec.stack_pool.release(stack);
             }
-            rt.allocator.destroy(self);
+            exec.allocator.destroy(self);
         }
 
         fn deinit(self: *Self) void {
-            self.runtime().releaseAwaitable(&self.any_task.awaitable);
+            self.executor().releaseAwaitable(&self.any_task.awaitable);
         }
 
-        fn runtime(self: *Self) *Runtime {
-            return Runtime.fromCoroutine(&self.any_task.coro);
+        fn executor(self: *Self) *Executor {
+            return Executor.fromCoroutine(&self.any_task.coro);
         }
 
         fn join(self: *Self) !T {
@@ -393,10 +393,10 @@ pub fn Future(comptime T: type) type {
         any_future: AnyFuture,
         future_result: FutureResult(T),
 
-        fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
+        fn destroyFn(exec: *Executor, awaitable: *Awaitable) void {
             const any_future = AnyFuture.fromAwaitable(awaitable);
             const self: *Self = @fieldParentPtr("any_future", any_future);
-            rt.allocator.destroy(self);
+            exec.allocator.destroy(self);
         }
 
         pub fn init(runtime: *Runtime, allocator: Allocator) !*Self {
@@ -418,7 +418,7 @@ pub fn Future(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.any_future.runtime.releaseAwaitable(&self.any_future.awaitable);
+            self.any_future.runtime.executor.releaseAwaitable(&self.any_future.awaitable);
         }
 
         pub fn set(self: *Self, value: anyerror!T) void {
@@ -429,7 +429,7 @@ pub fn Future(comptime T: type) type {
             }
 
             // Mark awaitable as complete and wake all waiters (coroutines and threads)
-            self.any_future.awaitable.markComplete(self.any_future.runtime);
+            self.any_future.awaitable.markComplete(&self.any_future.runtime.executor);
         }
 
         pub fn wait(self: *Self) !T {
@@ -453,10 +453,10 @@ pub fn BlockingTask(comptime T: type) type {
 
         any_blocking_task: AnyBlockingTask,
         future_result: FutureResult(T),
-        runtime: *Runtime,
+        executor: *Executor,
 
         pub fn init(
-            runtime: *Runtime,
+            executor: *Executor,
             allocator: Allocator,
             func: anytype,
             args: meta.ArgsType(func),
@@ -475,11 +475,11 @@ pub fn BlockingTask(comptime T: type) type {
                     _ = self.blocking_task.future_result.set(res);
                 }
 
-                fn destroy(runtime_ptr: *Runtime, awaitable: *Awaitable) void {
+                fn destroy(exec: *Executor, awaitable: *Awaitable) void {
                     const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
                     const blocking_task: *Self = @fieldParentPtr("any_blocking_task", any_blocking_task);
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
-                    runtime_ptr.allocator.destroy(self);
+                    exec.allocator.destroy(self);
                 }
             };
 
@@ -494,11 +494,11 @@ pub fn BlockingTask(comptime T: type) type {
                             .destroy_fn = &TaskData.destroy,
                         },
                         .thread_pool_task = .{ .callback = threadPoolCallback },
-                        .runtime = runtime,
+                        .executor = executor,
                         .execute_fn = &TaskData.execute,
                     },
                     .future_result = FutureResult(T){},
-                    .runtime = runtime,
+                    .executor = executor,
                 },
                 .args = args,
             };
@@ -506,7 +506,7 @@ pub fn BlockingTask(comptime T: type) type {
             // Increment ref count for the JoinHandle
             task_data.blocking_task.any_blocking_task.awaitable.ref_count.incr();
 
-            runtime.thread_pool.?.schedule(
+            executor.thread_pool.?.schedule(
                 xev.ThreadPool.Batch.from(&task_data.blocking_task.any_blocking_task.thread_pool_task),
             );
 
@@ -514,7 +514,7 @@ pub fn BlockingTask(comptime T: type) type {
         }
 
         fn deinit(self: *Self) void {
-            self.runtime.releaseAwaitable(&self.any_blocking_task.awaitable);
+            self.executor.releaseAwaitable(&self.any_blocking_task.awaitable);
         }
 
         fn join(self: *Self) !T {
@@ -676,10 +676,10 @@ pub const AwaitableList = struct {
     }
 };
 
-// Runtime class - the main zio runtime
-pub const Runtime = struct {
+// Executor - per-thread execution unit for running coroutines
+pub const Executor = struct {
     loop: xev.Loop,
-    thread_pool: ?*xev.ThreadPool = null,
+    thread_pool: ?*xev.ThreadPool, // Reference to Runtime's thread pool
     stack_pool: StackPool,
     count: u32 = 0,
     main_context: coroutines.Context,
@@ -701,42 +701,26 @@ pub const Runtime = struct {
     cleanup_interval_ms: i64,
     last_cleanup_ms: i64 = 0,
 
-    /// Get the Runtime instance from any coroutine that belongs to it
-    pub fn fromCoroutine(coro: *Coroutine) *Runtime {
+    /// Get the Executor instance from any coroutine that belongs to it
+    pub fn fromCoroutine(coro: *Coroutine) *Executor {
         return @fieldParentPtr("main_context", coro.parent_context_ptr);
     }
 
-    /// Get the current Runtime from within a coroutine
-    pub fn getCurrent() ?*Runtime {
+    /// Get the current Executor from within a coroutine
+    pub fn getCurrent() ?*Executor {
         if (coroutines.getCurrent()) |coro| {
             return fromCoroutine(coro);
         }
         return null;
     }
 
-    pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
-        // Initialize ThreadPool if enabled
-        var thread_pool: ?*xev.ThreadPool = null;
-        if (options.thread_pool.enabled) {
-            thread_pool = try allocator.create(xev.ThreadPool);
-
-            var config = xev.ThreadPool.Config{};
-            if (options.thread_pool.max_threads) |max| config.max_threads = max;
-            if (options.thread_pool.stack_size) |size| config.stack_size = size;
-            thread_pool.?.* = xev.ThreadPool.init(config);
-        }
-        errdefer if (thread_pool) |tp| {
-            tp.shutdown();
-            tp.deinit();
-            allocator.destroy(tp);
-        };
-
+    pub fn init(allocator: Allocator, thread_pool: ?*xev.ThreadPool, options: RuntimeOptions) !Executor {
         // Initialize libxev loop with optional ThreadPool
         const loop = try xev.Loop.init(.{
             .thread_pool = thread_pool,
         });
 
-        return Runtime{
+        return Executor{
             .allocator = allocator,
             .loop = loop,
             .thread_pool = thread_pool,
@@ -746,11 +730,8 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn deinit(self: *Runtime) void {
-        // Shutdown ThreadPool before cleaning up tasks and loop
-        if (self.thread_pool) |tp| {
-            tp.shutdown();
-        }
+    pub fn deinit(self: *Executor) void {
+        // Note: ThreadPool is owned by Runtime, not Executor
 
         var iter = self.tasks.iterator();
         while (iter.next()) |entry| {
@@ -766,17 +747,11 @@ pub const Runtime = struct {
 
         self.loop.deinit();
 
-        // Clean up ThreadPool after loop
-        if (self.thread_pool) |tp| {
-            tp.deinit();
-            self.allocator.destroy(tp);
-        }
-
         // Clean up stack pool
         self.stack_pool.deinit();
     }
 
-    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.Result(func)) {
+    pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.Result(func)) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
@@ -829,7 +804,7 @@ pub const Runtime = struct {
         return JoinHandle(Payload){ .kind = .{ .coro = task } };
     }
 
-    pub fn yield(self: *Runtime, desired_state: CoroutineState) Cancelable!void {
+    pub fn yield(self: *Executor, desired_state: CoroutineState) Cancelable!void {
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
@@ -877,7 +852,7 @@ pub const Runtime = struct {
     /// The flag remains set for when the shield ends.
     /// This is useful for cleanup operations (like close()) that must complete even if canceled.
     /// Must be paired with endShield().
-    pub fn beginShield(self: *Runtime) void {
+    pub fn beginShield(self: *Executor) void {
         _ = self;
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
@@ -886,7 +861,7 @@ pub const Runtime = struct {
 
     /// End a cancellation shield.
     /// Must be paired with beginShield().
-    pub fn endShield(self: *Runtime) void {
+    pub fn endShield(self: *Executor) void {
         _ = self;
         const current_coro = coroutines.getCurrent() orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
@@ -894,7 +869,7 @@ pub const Runtime = struct {
         current_task.shield_count -= 1;
     }
 
-    fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
+    fn releaseAwaitable(self: *Executor, awaitable: *Awaitable) void {
         if (awaitable.ref_count.decr()) {
             awaitable.destroy_fn(self, awaitable);
         }
@@ -904,12 +879,12 @@ pub const Runtime = struct {
         return &task.awaitable;
     }
 
-    pub fn sleep(self: *Runtime, milliseconds: u64) void {
+    pub fn sleep(self: *Executor, milliseconds: u64) void {
         self.timedWaitForReady(milliseconds * 1_000_000) catch return;
         unreachable; // Should always timeout - waking without timeout is a bug
     }
 
-    fn ensureBlockingInitialized(self: *Runtime) !void {
+    fn ensureBlockingInitialized(self: *Executor) !void {
         if (self.blocking_initialized) return;
         if (self.thread_pool == null) return error.ThreadPoolRequired;
 
@@ -920,7 +895,7 @@ pub const Runtime = struct {
         self.async_wakeup.wait(
             &self.loop,
             &self.async_completion,
-            Runtime,
+            Executor,
             self,
             drainBlockingCompletions,
         );
@@ -929,7 +904,7 @@ pub const Runtime = struct {
     }
 
     pub fn spawnBlocking(
-        self: *Runtime,
+        self: *Executor,
         func: anytype,
         args: meta.ArgsType(func),
     ) !JoinHandle(meta.Result(func)) {
@@ -937,7 +912,7 @@ pub const Runtime = struct {
 
         const Payload = meta.Result(func);
         const task = try BlockingTask(Payload).init(
-            self,
+            self, // Already passes *Executor
             self.allocator,
             func,
             args,
@@ -949,14 +924,14 @@ pub const Runtime = struct {
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
     /// This is equivalent to: `spawn()` + `run()` + `result()`, but in a single call.
     /// Returns an error union that includes errors from `spawn()`, `run()`, and the task itself.
-    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Result(func) {
+    pub fn runUntilComplete(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Result(func) {
         var handle = try self.spawn(func, args, options);
         defer handle.deinit();
         try self.run();
         return handle.result();
     }
 
-    pub fn run(self: *Runtime) !void {
+    pub fn run(self: *Executor) !void {
         while (true) {
             // Time-based stack pool cleanup
             const now = std.time.milliTimestamp();
@@ -1022,14 +997,14 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn markReady(self: *Runtime, coro: *Coroutine) void {
+    pub fn markReady(self: *Executor, coro: *Coroutine) void {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = AnyTask.fromCoroutine(coro);
         self.ready_queue.push(&task.awaitable);
     }
 
-    pub fn wait(self: *Runtime, task_id: u64) Cancelable!void {
+    pub fn wait(self: *Executor, task_id: u64) Cancelable!void {
         const task = self.tasks.get(task_id) orelse return;
         if (task.coro.state == .dead) {
             return;
@@ -1071,7 +1046,7 @@ pub const Runtime = struct {
     /// coroutine should be woken with error.Timeout, or false if it was already signaled by
     /// another source (in which case the timeout is ignored).
     pub fn timedWaitForReadyWithCallback(
-        self: *Runtime,
+        self: *Executor,
         timeout_ns: u64,
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
@@ -1129,7 +1104,7 @@ pub const Runtime = struct {
                     const ctx_ptr = unpacked.ptr;
                     if (onTimeout(ctx_ptr.user_ctx)) {
                         ctx_ptr.timed_out = true;
-                        Runtime.fromCoroutine(&t.coro).markReady(&t.coro);
+                        Executor.fromCoroutine(&t.coro).markReady(&t.coro);
                     }
                     return .disarm;
                 }
@@ -1173,7 +1148,7 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWaitForReady(self: *Executor, timeout_ns: u64) error{ Timeout, Canceled }!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(
@@ -1197,7 +1172,7 @@ pub const Runtime = struct {
     ///
     /// Returns error.Canceled if the operation was canceled.
     pub fn waitForXevCompletion(
-        self: *Runtime,
+        self: *Executor,
         completion: *xev.Completion,
     ) Cancelable!void {
         var was_canceled = false;
@@ -1242,6 +1217,120 @@ pub const Runtime = struct {
         if (was_canceled) {
             return error.Canceled;
         }
+    }
+};
+
+// Runtime - orchestrator that wraps a single Executor (for now)
+pub const Runtime = struct {
+    executor: Executor,
+    thread_pool: ?*xev.ThreadPool,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
+        // Initialize ThreadPool if enabled (shared resource)
+        var thread_pool: ?*xev.ThreadPool = null;
+        if (options.thread_pool.enabled) {
+            thread_pool = try allocator.create(xev.ThreadPool);
+
+            var config = xev.ThreadPool.Config{};
+            if (options.thread_pool.max_threads) |max| config.max_threads = max;
+            if (options.thread_pool.stack_size) |size| config.stack_size = size;
+            thread_pool.?.* = xev.ThreadPool.init(config);
+        }
+        errdefer if (thread_pool) |tp| {
+            tp.shutdown();
+            tp.deinit();
+            allocator.destroy(tp);
+        };
+
+        const executor = try Executor.init(allocator, thread_pool, options);
+        errdefer executor.deinit();
+
+        return Runtime{
+            .executor = executor,
+            .thread_pool = thread_pool,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        // Shutdown ThreadPool before cleaning up executor
+        if (self.thread_pool) |tp| {
+            tp.shutdown();
+        }
+
+        self.executor.deinit();
+
+        // Clean up ThreadPool after executor
+        if (self.thread_pool) |tp| {
+            tp.deinit();
+            self.allocator.destroy(tp);
+        }
+    }
+
+    // High-level public API - delegates to Executor
+    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.Result(func)) {
+        return self.executor.spawn(func, args, options);
+    }
+
+    pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.Result(func)) {
+        return self.executor.spawnBlocking(func, args);
+    }
+
+    pub fn run(self: *Runtime) !void {
+        return self.executor.run();
+    }
+
+    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Result(func) {
+        return self.executor.runUntilComplete(func, args, options);
+    }
+
+    // Convenience methods that operate on the current coroutine context
+    // These delegate to the current executor automatically
+    // Most are no-op if not called from within a coroutine
+
+    /// Cooperatively yield control to allow other tasks to run.
+    /// The current task will be rescheduled and continue execution later.
+    /// No-op if not called from within a coroutine.
+    pub fn yield(self: *Runtime) Cancelable!void {
+        _ = self;
+        const executor = Executor.getCurrent() orelse return;
+        return executor.yield(.ready);
+    }
+
+    /// Sleep for the specified number of milliseconds.
+    /// Uses async sleep if in a coroutine, blocking sleep otherwise.
+    pub fn sleep(self: *Runtime, milliseconds: u64) void {
+        _ = self;
+        if (Executor.getCurrent()) |executor| {
+            executor.sleep(milliseconds);
+        } else {
+            // Not in coroutine - use blocking sleep
+            std.Thread.sleep(milliseconds * std.time.ns_per_ms);
+        }
+    }
+
+    /// Begin a cancellation shield to prevent cancellation during critical sections.
+    /// No-op if not called from within a coroutine.
+    pub fn beginShield(self: *Runtime) void {
+        _ = self;
+        const executor = Executor.getCurrent() orelse return;
+        return executor.beginShield();
+    }
+
+    /// End a cancellation shield.
+    /// No-op if not called from within a coroutine.
+    pub fn endShield(self: *Runtime) void {
+        _ = self;
+        const executor = Executor.getCurrent() orelse return;
+        return executor.endShield();
+    }
+
+    pub fn getCurrent() ?*Runtime {
+        if (Executor.getCurrent()) |executor| {
+            return @fieldParentPtr("executor", executor);
+        }
+        return null;
     }
 };
 
@@ -1321,8 +1410,8 @@ test "runtime: Future await from coroutine" {
         fn setterTask(future: *Future(i32)) !void {
             // Simulate async work
             const rt = Runtime.getCurrent().?;
-            try rt.yield(.ready);
-            try rt.yield(.ready);
+            try rt.yield();
+            try rt.yield();
             future.set(123);
         }
 
@@ -1365,8 +1454,8 @@ test "runtime: Future multiple waiters" {
         fn setterTask(future: *Future(i32)) !void {
             // Let waiters block first
             const rt = Runtime.getCurrent().?;
-            try rt.yield(.ready);
-            try rt.yield(.ready);
+            try rt.yield();
+            try rt.yield();
             future.set(999);
         }
 
@@ -1386,10 +1475,10 @@ test "runtime: Future multiple waiters" {
             var setter = try rt.spawn(setterTask, .{future}, .{});
             defer setter.deinit();
 
-            try rt.yield(.ready);
-            try rt.yield(.ready);
-            try rt.yield(.ready);
-            try rt.yield(.ready);
+            try rt.yield();
+            try rt.yield();
+            try rt.yield();
+            try rt.yield();
 
             try waiter1.result();
             try waiter2.result();

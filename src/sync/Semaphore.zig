@@ -155,7 +155,7 @@ test "Semaphore: timedWait success" {
 
         fn poster(rt: *Runtime, s: *Semaphore) !void {
             defer s.post(rt);
-            try rt.yield(.ready);
+            try rt.yield();
         }
     };
 

@@ -4,6 +4,7 @@ const xev = @import("xev");
 const StreamReader = @import("stream.zig").StreamReader;
 const StreamWriter = @import("stream.zig").StreamWriter;
 const Runtime = @import("runtime.zig").Runtime;
+const Executor = @import("runtime.zig").Executor;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -53,7 +54,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -63,7 +64,7 @@ pub const File = struct {
 
         // Use pread with tracked position for cross-platform compatibility
         self.xev_file.pread(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             .{ .slice = buffer },
             self.position,
@@ -72,7 +73,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         const bytes_read = result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -105,7 +106,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -115,7 +116,7 @@ pub const File = struct {
 
         // Use pwrite with tracked position for cross-platform compatibility
         self.xev_file.pwrite(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             .{ .slice = data },
             self.position,
@@ -124,7 +125,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         const bytes_written = result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -181,7 +182,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -190,7 +191,7 @@ pub const File = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_file.pread(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             .{ .slice = buffer },
             offset,
@@ -199,7 +200,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         return result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -230,7 +231,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -239,7 +240,7 @@ pub const File = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_file.pwrite(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             .{ .slice = data },
             offset,
@@ -248,7 +249,7 @@ pub const File = struct {
             Result.callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         return result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -271,7 +272,7 @@ pub const File = struct {
 
         // Use pread with tracked position for cross-platform compatibility
         self.xev_file.pread(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             buffer.*,
             self.position,
@@ -292,13 +293,13 @@ pub const File = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
+                    Executor.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         const bytes_read = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -322,7 +323,7 @@ pub const File = struct {
 
         // Use pwrite with tracked position for cross-platform compatibility
         self.xev_file.pwrite(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             buffer,
             self.position,
@@ -339,13 +340,13 @@ pub const File = struct {
                 ) xev.CallbackAction {
                     const r = result_ptr.?;
                     r.result = result;
-                    Runtime.fromCoroutine(r.coro).markReady(r.coro);
+                    Executor.fromCoroutine(r.coro).markReady(r.coro);
                     return .disarm;
                 }
             }).callback,
         );
 
-        try self.runtime.waitForXevCompletion(&completion);
+        try self.runtime.executor.waitForXevCompletion(&completion);
 
         const bytes_written = result_data.result catch return error.WriteFailed;
         self.position += bytes_written;
@@ -377,7 +378,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Runtime.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
 
                 return .disarm;
             }
@@ -386,7 +387,7 @@ pub const File = struct {
         var result_data: Result = .{ .coro = coro };
 
         self.xev_file.close(
-            &self.runtime.loop,
+            &self.runtime.executor.loop,
             &completion,
             Result,
             &result_data,
@@ -394,7 +395,7 @@ pub const File = struct {
         );
 
         // Shield ensures this never returns error.Canceled
-        self.runtime.waitForXevCompletion(&completion) catch unreachable;
+        self.runtime.executor.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

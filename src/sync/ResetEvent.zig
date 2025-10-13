@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
@@ -33,6 +34,7 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// The ResetEvent stays "set" until reset() is called, making future set() calls do nothing semantically.
 /// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return successfully.
 pub fn set(self: *ResetEvent, runtime: *Runtime) void {
+    _ = runtime;
     // Quick check if already set to avoid unnecessary atomic operations
     if (self.state.load(.monotonic) == .is_set) {
         return;
@@ -45,7 +47,8 @@ pub fn set(self: *ResetEvent, runtime: *Runtime) void {
     if (prev_state == .waiting) {
         while (self.wait_queue.pop()) |awaitable| {
             const task = AnyTask.fromAwaitable(awaitable);
-            runtime.markReady(&task.coro);
+            const executor = Executor.fromCoroutine(&task.coro);
+            executor.markReady(&task.coro);
         }
     }
 }
@@ -61,6 +64,7 @@ pub fn reset(self: *ResetEvent) void {
 /// This is effectively a more efficient version of `while (!isSet()) {}`.
 /// The memory accesses before the set() can be said to happen before wait() returns.
 pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
+    _ = runtime;
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -70,11 +74,12 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     // If we're now in waiting state, add to queue and block
     if (state == .waiting) {
         const current = coroutines.getCurrent() orelse unreachable;
+        const executor = Executor.fromCoroutine(current);
         const task = AnyTask.fromCoroutine(current);
         self.wait_queue.push(&task.awaitable);
 
         // Suspend until woken by set()
-        runtime.yield(.waiting) catch |err| {
+        executor.yield(.waiting) catch |err| {
             // On cancellation, remove from queue
             _ = self.wait_queue.remove(&task.awaitable);
             return err;
@@ -89,6 +94,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 /// If the timeout expires before the ResetEvent is set, `error.Timeout` is returned.
 /// The memory accesses before the set() can be said to happen before timedWait() returns without error.
 pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    _ = runtime;
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -103,6 +109,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     // We're now in waiting state, add to queue and wait with timeout
     std.debug.assert(state == .waiting);
     const current = coroutines.getCurrent() orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 
     self.wait_queue.push(&task.awaitable);
@@ -117,7 +124,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
         .awaitable = &task.awaitable,
     };
 
-    runtime.timedWaitForReadyWithCallback(
+    executor.timedWaitForReadyWithCallback(
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
@@ -177,7 +184,7 @@ test "ResetEvent wait/set signaling" {
         }
 
         fn setter(rt: *Runtime, event: *ResetEvent) !void {
-            try rt.yield(.ready); // Give waiter time to start waiting
+            try rt.yield(); // Give waiter time to start waiting
             event.set(rt);
         }
     };
@@ -236,9 +243,9 @@ test "ResetEvent multiple waiters broadcast" {
 
         fn setter(rt: *Runtime, event: *ResetEvent) !void {
             // Give waiters time to start waiting
-            try rt.yield(.ready);
-            try rt.yield(.ready);
-            try rt.yield(.ready);
+            try rt.yield();
+            try rt.yield();
+            try rt.yield();
             event.set(rt);
         }
     };

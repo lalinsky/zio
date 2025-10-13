@@ -258,7 +258,7 @@ test "Channel: blocking behavior when empty" {
         }
 
         fn producer(rt: *Runtime, ch: *Channel(u32)) !void {
-            try rt.yield(.ready); // Let consumer start waiting
+            try rt.yield(); // Let consumer start waiting
             try ch.send(rt, 42);
         }
     };
@@ -292,8 +292,8 @@ test "Channel: blocking behavior when full" {
         }
 
         fn consumer(rt: *Runtime, ch: *Channel(u32)) !void {
-            try rt.yield(.ready); // Let producer fill the channel
-            try rt.yield(.ready);
+            try rt.yield(); // Let producer fill the channel
+            try rt.yield();
             _ = try ch.receive(rt); // Unblock producer
         }
     };
@@ -366,7 +366,7 @@ test "Channel: close graceful" {
         }
 
         fn consumer(rt: *Runtime, ch: *Channel(u32), results: *[3]?u32) !void {
-            try rt.yield(.ready); // Let producer finish
+            try rt.yield(); // Let producer finish
             results[0] = ch.receive(rt) catch null;
             results[1] = ch.receive(rt) catch null;
             results[2] = ch.receive(rt) catch null; // Should fail with ChannelClosed
@@ -404,7 +404,7 @@ test "Channel: close immediate" {
         }
 
         fn consumer(rt: *Runtime, ch: *Channel(u32), result: *?u32) !void {
-            try rt.yield(.ready); // Let producer finish
+            try rt.yield(); // Let producer finish
             result.* = ch.receive(rt) catch null; // Should fail immediately
         }
     };
