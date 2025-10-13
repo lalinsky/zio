@@ -113,16 +113,12 @@ fn drainBlockingCompletions(
     const self = executor.?;
 
     // Atomically drain all completed blocking tasks (LIFO order)
-    var current = self.blocking_completions.popAll();
-    while (current) |awaitable| {
-        const next = awaitable.next;
-
+    var drained = self.blocking_completions.popAll();
+    while (drained.pop()) |awaitable| {
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
         awaitable.markComplete(self);
         // Release the blocking task's reference (initial ref from init)
         self.releaseAwaitable(awaitable);
-
-        current = next;
     }
 
     return .rearm;
@@ -657,9 +653,10 @@ pub const AwaitableStack = struct {
     }
 
     /// Atomically drain all items from the stack.
-    /// Returns the head of a linked list (LIFO order).
-    pub fn popAll(self: *AwaitableStack) ?*Awaitable {
-        return self.head.swap(null, .acq_rel);
+    /// Returns a SimpleAwaitableStack containing all drained items (LIFO order).
+    pub fn popAll(self: *AwaitableStack) SimpleAwaitableStack {
+        const head = self.head.swap(null, .acq_rel);
+        return SimpleAwaitableStack{ .head = head };
     }
 };
 
