@@ -30,6 +30,11 @@ pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
 pub const Semaphore = @import("sync.zig").Semaphore;
 
+// Re-export signal handling functionality
+pub const signal = @import("signal.zig");
+pub const Signal = signal.Signal;
+pub const SignalHandler = signal.SignalHandler;
+
 test {
     std.testing.refAllDecls(@This());
 }
