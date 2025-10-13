@@ -592,6 +592,47 @@ pub fn JoinHandle(comptime T: type) type {
     };
 }
 
+// Simple singly-linked stack (LIFO) for single-threaded use
+pub const SimpleAwaitableStack = struct {
+    head: ?*Awaitable = null,
+
+    pub fn push(self: *SimpleAwaitableStack, item: *Awaitable) void {
+        if (builtin.mode == .Debug) {
+            std.debug.assert(!item.in_list);
+            item.in_list = true;
+        }
+        item.next = self.head;
+        self.head = item;
+    }
+
+    pub fn pop(self: *SimpleAwaitableStack) ?*Awaitable {
+        const head = self.head orelse return null;
+        if (builtin.mode == .Debug) {
+            head.in_list = false;
+        }
+        self.head = head.next;
+        head.next = null;
+        return head;
+    }
+
+    /// Move all items from other stack to this stack (prepends).
+    pub fn prependByMoving(self: *SimpleAwaitableStack, other: *SimpleAwaitableStack) void {
+        const other_head = other.head orelse return;
+
+        // Find tail of other stack
+        var tail = other_head;
+        while (tail.next) |next| {
+            tail = next;
+        }
+
+        // Link tail to our current head
+        tail.next = self.head;
+        self.head = other_head;
+
+        other.head = null;
+    }
+};
+
 // Lock-free intrusive stack for cross-thread communication
 pub const AwaitableStack = struct {
     head: std.atomic.Value(?*Awaitable) = std.atomic.Value(?*Awaitable).init(null),
@@ -722,8 +763,8 @@ pub const Executor = struct {
 
     tasks: std.AutoHashMapUnmanaged(u64, *AnyTask) = .{},
 
-    ready_queue: AwaitableList = .{},
-    next_ready_queue: AwaitableList = .{},
+    ready_queue: SimpleAwaitableStack = .{},
+    next_ready_queue: SimpleAwaitableStack = .{},
     cleanup_queue: AwaitableList = .{},
 
     // Blocking task support - lock-free LIFO stack
@@ -1013,7 +1054,7 @@ pub const Executor = struct {
             }
 
             // Move yielded coroutines back to ready queue
-            self.ready_queue.concatByMoving(&self.next_ready_queue);
+            self.ready_queue.prependByMoving(&self.next_ready_queue);
 
             // If we have no active coroutines, exit
             if (self.tasks.size == 0) {
@@ -1022,7 +1063,7 @@ pub const Executor = struct {
             }
 
             // Check for I/O events without blocking if we have pending work
-            const mode: xev.RunMode = if (self.cleanup_queue.head != null or self.ready_queue.head != null)
+            const mode: xev.RunMode = if (self.cleanup_queue.head != null or self.ready_queue.head != null or self.next_ready_queue.head != null)
                 .no_wait
             else
                 .once;
