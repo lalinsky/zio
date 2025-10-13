@@ -765,7 +765,6 @@ pub const Executor = struct {
 
     ready_queue: SimpleAwaitableStack = .{},
     next_ready_queue: SimpleAwaitableStack = .{},
-    cleanup_queue: AwaitableList = .{},
 
     // Blocking task support - lock-free LIFO stack
     blocking_completions: AwaitableStack = .{},
@@ -1015,15 +1014,6 @@ pub const Executor = struct {
                 self.last_cleanup_ms = now;
             }
 
-            // Cleanup dead coroutines
-            while (self.cleanup_queue.pop()) |awaitable| {
-                const task = AnyTask.fromAwaitable(awaitable);
-                _ = self.tasks.remove(task.id);
-                // Runtime releases its reference when removing from hashmap
-                self.releaseAwaitable(awaitable);
-                // If ref_count > 0, Task(T) handles still exist, keep the task alive
-            }
-
             // Process all ready coroutines (once)
             while (self.ready_queue.pop()) |awaitable| {
                 const task = AnyTask.fromAwaitable(awaitable);
@@ -1046,7 +1036,11 @@ pub const Executor = struct {
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
                         current_awaitable.markComplete(self);
-                        self.cleanup_queue.push(current_awaitable);
+
+                        // Remove from tasks hashmap and release runtime's reference
+                        _ = self.tasks.remove(current_task.id);
+                        self.releaseAwaitable(current_awaitable);
+                        // If ref_count > 0, Task(T) handles still exist, keep the task alive
                     }
                 }
 
@@ -1063,7 +1057,7 @@ pub const Executor = struct {
             }
 
             // Check for I/O events without blocking if we have pending work
-            const mode: xev.RunMode = if (self.cleanup_queue.head != null or self.ready_queue.head != null or self.next_ready_queue.head != null)
+            const mode: xev.RunMode = if (self.ready_queue.head != null or self.next_ready_queue.head != null)
                 .no_wait
             else
                 .once;
