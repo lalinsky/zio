@@ -6,7 +6,7 @@ fn runTlsTask(rt: *zio.Runtime) !void {
 
     // Connect to httpbin.org (reliable HTTPS API)
     // TODO: Add DNS resolution support instead of hardcoded IP address
-    const addr = try zio.Address.parseIp4("52.2.107.230", 443); // httpbin.org
+    const addr = try std.net.Address.parseIp4("52.2.107.230", 443); // httpbin.org
     std.log.info("Attempting TCP connection to httpbin.org:443...", .{});
 
     var stream = try zio.TcpStream.connect(rt, addr);

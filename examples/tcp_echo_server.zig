@@ -30,7 +30,7 @@ fn handleClient(in_stream: zio.TcpStream) !void {
 }
 
 fn serverTask(rt: *zio.Runtime) !void {
-    const addr = try zio.Address.parseIp4("127.0.0.1", 8080);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", 8080);
 
     var listener = try zio.TcpListener.init(rt, addr);
     defer listener.close();

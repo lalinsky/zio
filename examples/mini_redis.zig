@@ -461,7 +461,7 @@ const ConnectionHandler = struct {
 // =============================================================================
 
 fn runServer(rt: *zio.Runtime, store_ptr: *Store, alloc: std.mem.Allocator) !void {
-    const addr = try zio.Address.parseIp4("127.0.0.1", 6379);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", 6379);
     var listener = try zio.TcpListener.init(rt, addr);
     defer listener.close();
 
