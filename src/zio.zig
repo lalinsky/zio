@@ -22,13 +22,14 @@ pub const UdpSocket = @import("udp.zig").UdpSocket;
 pub const UdpRecvResult = @import("udp.zig").UdpReadResult;
 pub const net = @import("net.zig");
 
-// Re-export synchronization functionality
+// Re-export synchronization primitives
 pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
 pub const ResetEvent = @import("sync.zig").ResetEvent;
+pub const Semaphore = @import("sync.zig").Semaphore;
+pub const Barrier = @import("sync.zig").Barrier;
 pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
-pub const Semaphore = @import("sync.zig").Semaphore;
 
 test {
     std.testing.refAllDecls(@This());
