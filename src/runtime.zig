@@ -116,7 +116,7 @@ fn drainBlockingCompletions(
     var drained = self.blocking_completions.popAll();
     while (drained.pop()) |awaitable| {
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-        awaitable.markComplete(self);
+        awaitable.markComplete();
         // Release the blocking task's reference (initial ref from init)
         self.releaseAwaitable(awaitable);
     }
@@ -250,13 +250,14 @@ pub const Awaitable = struct {
     }
 
     /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
-    pub fn markComplete(self: *Awaitable, executor: *Executor) void {
+    pub fn markComplete(self: *Awaitable) void {
         // Set state first (release semantics for memory ordering)
         self.state.store(1, .release);
 
         // Wake all waiting coroutines
         while (self.waiting_list.pop()) |waiting_awaitable| {
             const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
+            const executor = Executor.fromCoroutine(&waiting_task.coro);
             executor.markReady(&waiting_task.coro);
         }
 
@@ -448,7 +449,7 @@ pub fn Future(comptime T: type) type {
             }
 
             // Mark awaitable as complete and wake all waiters (coroutines and threads)
-            self.any_future.awaitable.markComplete(&self.any_future.runtime.executor);
+            self.any_future.awaitable.markComplete();
         }
 
         pub fn wait(self: *Self) !T {
@@ -1080,7 +1081,7 @@ pub const Executor = struct {
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        current_awaitable.markComplete(self);
+                        current_awaitable.markComplete();
 
                         // Track task completion
                         self.metrics.tasks_completed += 1;
