@@ -1638,7 +1638,7 @@ test "runtime: spawnBlocking smoke test" {
             var handle = try rt.spawnBlocking(blockingWork, .{21});
             defer handle.deinit();
 
-            const result = handle.join();
+            const result = try handle.join();
             try testing.expectEqual(@as(i32, 42), result);
         }
     };
@@ -1661,7 +1661,7 @@ test "runtime: Future basic set and get" {
             future.set(42);
 
             // Get value (should return immediately since already set)
-            const result = future.wait();
+            const result = try future.wait();
             try testing.expectEqual(@as(i32, 42), result);
         }
     };
@@ -1701,7 +1701,7 @@ test "runtime: Future await from coroutine" {
             var getter_handle = try rt.spawn(getterTask, .{future}, .{});
             defer getter_handle.deinit();
 
-            const result = getter_handle.join();
+            const result = try getter_handle.join();
             try testing.expectEqual(@as(i32, 123), result);
         }
     };
@@ -1716,7 +1716,7 @@ test "runtime: Future multiple waiters" {
     defer runtime.deinit();
     const TestContext = struct {
         fn waiterTask(future: *Future(i32), expected: i32) !void {
-            const result = future.wait();
+            const result = try future.wait();
             try testing.expectEqual(expected, result);
         }
 

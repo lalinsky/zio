@@ -117,7 +117,7 @@ fn benchmarkTask(
     const start = std.time.nanoTimestamp();
 
     // Spawn all clients
-    const client_tasks = try allocator.alloc(zio.JoinHandle(void), NUM_CLIENTS);
+    const client_tasks = try allocator.alloc(zio.JoinHandle(!void), NUM_CLIENTS);
     defer allocator.free(client_tasks);
 
     for (client_tasks, 0..) |*task, i| {
