@@ -1,3 +1,47 @@
+//! Thread-safe atomic reference counter for shared ownership.
+//!
+//! A reference counter tracks the number of references to a shared resource.
+//! When the count reaches zero, the resource can be safely deallocated.
+//!
+//! This is thread-safe and can be used across multiple OS threads. It uses
+//! atomic operations with carefully chosen memory orderings:
+//! - Monotonic ordering for increments (weakest safe ordering)
+//! - Release ordering for decrements (ensures visibility of operations)
+//! - Acquire ordering when reaching zero (synchronizes with all releases)
+//!
+//! This primitive is included to help with shared memory management in server
+//! applications, particularly when sharing resources across multiple connections
+//! or threads.
+//!
+//! Unlike other sync primitives in this module, RefCounter is thread-safe across
+//! OS threads, not just within a single zio Runtime.
+//!
+//! ## Example
+//!
+//! ```zig
+//! const MyResource = struct {
+//!     ref_count: RefCounter(u32),
+//!     data: []u8,
+//!
+//!     fn acquire(self: *MyResource) void {
+//!         self.ref_count.incr();
+//!     }
+//!
+//!     fn release(self: *MyResource, allocator: Allocator) void {
+//!         if (self.ref_count.decr()) {
+//!             allocator.free(self.data);
+//!             allocator.destroy(self);
+//!         }
+//!     }
+//! };
+//!
+//! var resource = try allocator.create(MyResource);
+//! resource.* = .{
+//!     .ref_count = RefCounter(u32).init(),
+//!     .data = try allocator.alloc(u8, 1024),
+//! };
+//! ```
+
 // Copyright 2025 Lukas Lalinsky
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,28 +57,22 @@
 
 const std = @import("std");
 
-/// Thread-safe atomic reference counter
-///
-/// This implementation follows best practices for atomic reference counting:
-/// - Uses .monotonic ordering for increments (weakest safe ordering)
-/// - Uses .release ordering for decrements (ensures memory operations are visible)
-/// - Uses .acquire load when count reaches zero (synchronizes with all releases)
-///
-/// This pattern is equivalent to std::shared_ptr in C++ and follows the same
-/// memory ordering guarantees as established in academic literature.
 pub fn RefCounter(comptime T: type) type {
     return struct {
         refs: std.atomic.Value(T),
 
         pub const Self = @This();
 
+        /// Initializes a reference counter with an initial count of 1.
         pub fn init() Self {
             return .{
                 .refs = std.atomic.Value(T).init(1),
             };
         }
 
-        /// Increases the reference count.
+        /// Increments the reference count.
+        ///
+        /// Call this when creating a new reference to the shared resource.
         /// Uses monotonic ordering since new references can only be created
         /// from existing ones, which already provide necessary synchronization.
         pub fn incr(self: *Self) void {
@@ -42,9 +80,14 @@ pub fn RefCounter(comptime T: type) type {
             std.debug.assert(prev_ref_count > 0);
         }
 
-        /// Decreases the reference count and returns true if it reached zero.
-        /// Uses release ordering to ensure all previous memory operations
-        /// are visible before the count reaches zero.
+        /// Decrements the reference count.
+        ///
+        /// Call this when releasing a reference to the shared resource.
+        /// Returns `true` if the count reached zero, indicating the resource
+        /// should be deallocated. Returns `false` if other references still exist.
+        ///
+        /// Uses release ordering to ensure all previous memory operations are
+        /// visible to the thread that deallocates the resource.
         pub fn decr(self: *Self) bool {
             const prev_ref_count = self.refs.fetchSub(1, .release);
             std.debug.assert(prev_ref_count > 0);
@@ -57,7 +100,10 @@ pub fn RefCounter(comptime T: type) type {
             return false;
         }
 
-        /// Get current reference count (for debugging only)
+        /// Returns the current reference count.
+        ///
+        /// This is intended for debugging and testing only. The value may be
+        /// stale immediately after reading due to concurrent modifications.
         pub fn count(self: *const Self) T {
             return self.refs.load(.monotonic);
         }
