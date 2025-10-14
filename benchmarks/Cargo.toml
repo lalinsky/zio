@@ -17,3 +17,11 @@ path = "ping_pong_current_thread.rs"
 [[bin]]
 name = "yield_only"
 path = "yield_only.rs"
+
+[[bin]]
+name = "echo_server"
+path = "echo_server.rs"
+
+[[bin]]
+name = "echo_server_multi"
+path = "echo_server_multi.rs"
