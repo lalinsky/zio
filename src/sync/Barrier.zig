@@ -1,14 +1,53 @@
+//! A synchronization barrier for coordinating multiple async tasks.
+//!
+//! A barrier allows a fixed number of tasks to wait at a synchronization point
+//! until all participants have arrived. Once all tasks reach the barrier, they
+//! are all released simultaneously to continue execution.
+//!
+//! This implementation provides cooperative synchronization for the zio runtime.
+//! Tasks that arrive early will suspend and yield to the executor, allowing other
+//! work to proceed.
+//!
+//! Barriers are reusable - after all tasks pass through, the barrier automatically
+//! resets for the next synchronization cycle. This makes them ideal for iterative
+//! algorithms where tasks need to synchronize at the end of each iteration.
+//!
+//! The barrier provides "leader election" - the last task to arrive receives a
+//! special return value, allowing it to perform setup or cleanup for the next phase.
+//!
+//! If a task is cancelled while waiting, the barrier enters a "broken" state and
+//! all current and future waiters receive `error.BrokenBarrier`. This prevents
+//! deadlocks when tasks are cancelled.
+//!
+//! ## Example
+//!
+//! ```zig
+//! fn worker(rt: *Runtime, barrier: *zio.Barrier, id: u32) !void {
+//!     // Phase 1: do some work
+//!     std.debug.print("Worker {} starting phase 1\n", .{id});
+//!
+//!     // Wait for all workers to complete phase 1
+//!     const is_leader = try barrier.wait(rt);
+//!
+//!     // Phase 2: all workers proceed together
+//!     if (is_leader) {
+//!         std.debug.print("All workers reached barrier\n", .{});
+//!     }
+//!     std.debug.print("Worker {} starting phase 2\n", .{id});
+//! }
+//!
+//! var barrier = zio.Barrier.init(3);
+//!
+//! var task1 = try runtime.spawn(worker, .{ &runtime, &barrier, 1 }, .{});
+//! var task2 = try runtime.spawn(worker, .{ &runtime, &barrier, 2 }, .{});
+//! var task3 = try runtime.spawn(worker, .{ &runtime, &barrier, 3 }, .{});
+//! ```
+
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
-
-/// Barrier is a coroutine-safe synchronization primitive that allows a fixed number of coroutines
-/// to wait until all of them reach a common synchronization point.
-/// Once all coroutines have arrived at the barrier, they are all released simultaneously.
-/// The barrier can be reused for multiple synchronization cycles.
-/// NOT safe for use across OS threads - use within a single Runtime only.
 mutex: Mutex = Mutex.init,
 cond: Condition = Condition.init,
 count: usize,
@@ -18,21 +57,33 @@ broken: bool = false,
 
 const Barrier = @This();
 
-/// Initialize a barrier that will synchronize the specified number of coroutines.
+/// Initializes a barrier that will synchronize the specified number of tasks.
 /// The count must be greater than 0.
 pub fn init(count: usize) Barrier {
     std.debug.assert(count > 0);
     return .{ .count = count };
 }
 
-/// Wait at the barrier until all coroutines have arrived.
-/// When the last coroutine arrives, all waiting coroutines are released.
+/// Waits at the barrier until all tasks have arrived.
+///
+/// When the last task arrives, all waiting tasks are released simultaneously.
 /// The barrier automatically resets for the next synchronization cycle.
-/// Returns true if this coroutine was the last to arrive (the "leader"),
-/// false otherwise. This can be useful for having one coroutine perform
-/// cleanup or initialization for the next phase.
-/// Returns error.BrokenBarrier if the barrier has been broken by a cancellation.
-/// Returns error.Canceled if this coroutine is cancelled while waiting.
+///
+/// Returns `true` if this task was the last to arrive (the "leader"), `false`
+/// otherwise. This can be useful for having one task perform cleanup or
+/// initialization for the next phase:
+/// ```zig
+/// const is_leader = try barrier.wait(rt);
+/// if (is_leader) {
+///     // Perform phase transition work
+/// }
+/// ```
+///
+/// Returns `error.BrokenBarrier` if the barrier has been broken by a cancellation
+/// of another waiting task. Once broken, the barrier cannot be used again.
+///
+/// Returns `error.Canceled` if this task is cancelled while waiting. This will
+/// also break the barrier for all other waiting tasks.
 pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrier})!bool {
     try self.mutex.lock(runtime);
     defer self.mutex.unlock(runtime);

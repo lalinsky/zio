@@ -1,3 +1,45 @@
+//! A manual-reset synchronization event for async tasks.
+//!
+//! ResetEvent is a boolean flag that tasks can wait on. It can be in one of two
+//! states: set or unset. Tasks can wait for the event to become set, and once set,
+//! all waiting tasks are released. The event remains set until explicitly reset.
+//!
+//! This is similar to manual-reset events in other threading libraries. Unlike
+//! auto-reset events, setting the event wakes all waiting tasks and the event
+//! stays signaled until `reset()` is called.
+//!
+//! This implementation provides cooperative synchronization for the zio runtime.
+//! Waiting tasks will suspend and yield to the executor, allowing other work
+//! to proceed.
+//!
+//! The event provides memory ordering guarantees: memory accesses before `set()`
+//! happen-before any task observing the set state via `isSet()`, `wait()`, or
+//! `timedWait()`.
+//!
+//! ## Example
+//!
+//! ```zig
+//! fn worker(rt: *Runtime, event: *zio.ResetEvent, id: u32) !void {
+//!     // Wait for event to be signaled
+//!     try event.wait(rt);
+//!     std.debug.print("Worker {} proceeding\n", .{id});
+//! }
+//!
+//! fn coordinator(rt: *Runtime, event: *zio.ResetEvent) !void {
+//!     // Do some initialization work
+//!     // ...
+//!
+//!     // Signal all waiting workers
+//!     event.set(rt);
+//! }
+//!
+//! var event = zio.ResetEvent.init;
+//!
+//! var task1 = try runtime.spawn(worker, .{ &runtime, &event, 1 }, .{});
+//! var task2 = try runtime.spawn(worker, .{ &runtime, &event, 2 }, .{});
+//! var task3 = try runtime.spawn(coordinator, .{ &runtime, &event }, .{});
+//! ```
+
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
@@ -6,10 +48,6 @@ const coroutines = @import("../coroutines.zig");
 const AwaitableList = @import("../runtime.zig").AwaitableList;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-
-/// ResetEvent is a thread-safe bool which can be set to true/false ("set"/"unset").
-/// It can also block coroutines until the "bool" is set with cancellation via timed waits.
-/// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return.
 state: std.atomic.Value(State) = std.atomic.Value(State).init(.unset),
 wait_queue: AwaitableList = .{},
 
@@ -21,18 +59,22 @@ const State = enum(u8) {
     is_set = 2,
 };
 
+/// Creates a new ResetEvent in the unset state.
 pub const init: ResetEvent = .{};
 
-/// Returns if the ResetEvent was set().
-/// Once reset() is called, this returns false until the next set().
-/// The memory accesses before the set() can be said to happen before isSet() returns true.
+/// Returns whether the event is currently set.
+///
+/// Returns `true` if `set()` has been called and `reset()` has not been called since.
+/// Returns `false` otherwise.
 pub fn isSet(self: *const ResetEvent) bool {
     return self.state.load(.acquire) == .is_set;
 }
 
-/// Marks the ResetEvent as "set" and unblocks any coroutines in wait() or timedWait() to observe the new state.
-/// The ResetEvent stays "set" until reset() is called, making future set() calls do nothing semantically.
-/// The memory accesses before set() can be said to happen before isSet() returns true or wait()/timedWait() return successfully.
+/// Sets the event and wakes all waiting tasks.
+///
+/// Marks the event as set and unblocks all tasks waiting in `wait()` or `timedWait()`.
+/// The event remains set until `reset()` is called. Multiple calls to `set()` while
+/// already set have no effect.
 pub fn set(self: *ResetEvent, runtime: *Runtime) void {
     _ = runtime;
     // Quick check if already set to avoid unnecessary atomic operations
@@ -53,16 +95,21 @@ pub fn set(self: *ResetEvent, runtime: *Runtime) void {
     }
 }
 
-/// Unmarks the ResetEvent from its "set" state if set() was called previously.
-/// It is undefined behavior if reset() is called while coroutines are blocked in wait() or timedWait().
-/// Concurrent calls to set(), isSet() and reset() are allowed.
+/// Resets the event to the unset state.
+///
+/// After calling `reset()`, the event is back in the unset state and tasks can wait
+/// on it again. It is undefined behavior to call `reset()` while tasks are waiting
+/// in `wait()` or `timedWait()`.
 pub fn reset(self: *ResetEvent) void {
     self.state.store(.unset, .monotonic);
 }
 
-/// Blocks the caller's coroutine until the ResetEvent is set().
-/// This is effectively a more efficient version of `while (!isSet()) {}`.
-/// The memory accesses before the set() can be said to happen before wait() returns.
+/// Waits for the event to be set.
+///
+/// Suspends the current task until the event is set via `set()`. If the event is
+/// already set when called, returns immediately without suspending.
+///
+/// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     _ = runtime;
     // Try to atomically register as a waiter
@@ -90,9 +137,15 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     std.debug.assert(state == .is_set or state == .waiting);
 }
 
-/// Blocks the caller's coroutine until the ResetEvent is set(), or until the corresponding timeout expires.
-/// If the timeout expires before the ResetEvent is set, `error.Timeout` is returned.
-/// The memory accesses before the set() can be said to happen before timedWait() returns without error.
+/// Waits for the event to be set with a timeout.
+///
+/// Like `wait()`, but returns `error.Timeout` if the event is not set within the
+/// specified duration. The timeout is specified in nanoseconds.
+///
+/// If the event is already set when called, returns immediately without suspending.
+///
+/// Returns `error.Timeout` if the timeout expires before the event is set.
+/// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
     _ = runtime;
     // Try to atomically register as a waiter
