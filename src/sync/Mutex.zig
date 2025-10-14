@@ -83,6 +83,23 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     std.debug.assert(owner == current);
 }
 
+/// Acquires the mutex with cancellation shielding.
+///
+/// Like `lock()`, but guarantees the mutex is held when returning, even if
+/// cancellation occurs during acquisition. Cancellation requests are ignored
+/// during the lock operation.
+///
+/// This is useful in critical sections where you must hold the mutex regardless
+/// of cancellation (e.g., cleanup operations like close(), post()).
+///
+/// If you need to propagate cancellation after acquiring the lock, call
+/// `runtime.checkCanceled()` after this function returns.
+pub fn lockNoCancel(self: *Mutex, runtime: *Runtime) void {
+    runtime.beginShield();
+    defer runtime.endShield();
+    self.lock(runtime) catch unreachable;
+}
+
 /// Releases the mutex.
 ///
 /// This function must be called by the coroutine that currently holds the lock.

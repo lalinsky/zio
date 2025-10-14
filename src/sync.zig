@@ -9,6 +9,7 @@ pub const Barrier = @import("sync/Barrier.zig");
 pub const Channel = @import("sync/channel.zig").Channel;
 pub const BroadcastChannel = @import("sync/broadcast_channel.zig").BroadcastChannel;
 pub const RefCounter = @import("sync/ref_counter.zig").RefCounter;
+pub const SharedPtr = @import("sync/shared_ptr.zig").SharedPtr;
 
 // Re-export tests from individual modules
 test {
@@ -20,4 +21,5 @@ test {
     _ = @import("sync/channel.zig");
     _ = @import("sync/broadcast_channel.zig");
     _ = @import("sync/ref_counter.zig");
+    _ = @import("sync/shared_ptr.zig");
 }

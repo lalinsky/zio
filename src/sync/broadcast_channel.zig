@@ -131,11 +131,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         ///
         /// This operation is shielded from cancellation to ensure cleanup completes.
         pub fn unsubscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) void {
-            // Shield unsubscribe operation from cancellation
-            runtime.beginShield();
-            defer runtime.endShield();
-
-            self.mutex.lock(runtime) catch unreachable;
+            self.mutex.lockNoCancel(runtime);
             defer self.mutex.unlock(runtime);
 
             self.consumers.remove(consumer);

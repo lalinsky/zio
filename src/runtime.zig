@@ -957,6 +957,19 @@ pub const Executor = struct {
         current_task.shield_count -= 1;
     }
 
+    /// Check if cancellation has been requested and return error.Canceled if so.
+    /// This consumes the cancellation flag.
+    /// Use this after endShield() to detect cancellation that occurred during the shielded section.
+    pub fn checkCanceled(self: *Executor) Cancelable!void {
+        _ = self;
+        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        // Check and consume cancellation flag
+        if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
+            return error.Canceled;
+        }
+    }
+
     fn releaseAwaitable(self: *Executor, awaitable: *Awaitable) void {
         if (awaitable.ref_count.decr()) {
             awaitable.destroy_fn(self, awaitable);
@@ -1419,6 +1432,16 @@ pub const Runtime = struct {
         _ = self;
         const executor = Executor.getCurrent() orelse return;
         return executor.endShield();
+    }
+
+    /// Check if cancellation has been requested and return error.Canceled if so.
+    /// This consumes the cancellation flag.
+    /// Use this after endShield() to detect cancellation that occurred during the shielded section.
+    /// No-op (returns successfully) if not called from within a coroutine.
+    pub fn checkCanceled(self: *Runtime) Cancelable!void {
+        _ = self;
+        const executor = Executor.getCurrent() orelse return;
+        return executor.checkCanceled();
     }
 
     pub fn getCurrent() ?*Runtime {

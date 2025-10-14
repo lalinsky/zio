@@ -208,11 +208,7 @@ pub fn Channel(comptime T: type) type {
         ///
         /// This operation is shielded from cancellation to ensure the close completes.
         pub fn close(self: *Self, rt: *Runtime, immediate: bool) void {
-            // Shield close operation from cancellation
-            rt.beginShield();
-            defer rt.endShield();
-
-            self.mutex.lock(rt) catch unreachable;
+            self.mutex.lockNoCancel(rt);
             defer self.mutex.unlock(rt);
 
             self.closed = true;

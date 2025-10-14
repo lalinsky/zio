@@ -94,16 +94,14 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     executor.yield(.waiting) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
         _ = self.wait_queue.remove(&task.awaitable);
-        // Must reacquire mutex before returning, retry if canceled
-        while (true) {
-            mutex.lock(runtime) catch continue;
-            break;
-        }
+        // Must reacquire mutex before returning
+        mutex.lockNoCancel(runtime);
         return err;
     };
 
-    // Re-acquire mutex after waking
-    try mutex.lock(runtime);
+    // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
+    mutex.lockNoCancel(runtime);
+    try runtime.checkCanceled();
 }
 
 /// Atomically releases the mutex and waits for a signal with a timeout.
@@ -135,8 +133,6 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         .awaitable = &task.awaitable,
     };
 
-    var was_canceled = false;
-
     // Atomically release mutex and wait
     mutex.unlock(runtime);
 
@@ -156,34 +152,16 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         if (err == error.Canceled) {
             _ = self.wait_queue.remove(&task.awaitable);
         }
-        // Re-acquire mutex before returning - retry if canceled
-        while (true) {
-            mutex.lock(runtime) catch {
-                was_canceled = true;
-                continue;
-            };
-            break;
-        }
-        // Cancellation has priority over timeout
-        if (was_canceled) {
-            return error.Canceled;
-        }
+        // Must reacquire mutex before returning
+        mutex.lockNoCancel(runtime);
+        // Cancellation during lock has priority over timeout
+        try runtime.checkCanceled();
         return err;
     };
 
-    // Re-acquire mutex before returning - retry if canceled
-    while (true) {
-        mutex.lock(runtime) catch {
-            was_canceled = true;
-            continue;
-        };
-        break;
-    }
-
-    // Cancellation has priority
-    if (was_canceled) {
-        return error.Canceled;
-    }
+    // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
+    mutex.lockNoCancel(runtime);
+    try runtime.checkCanceled();
 }
 
 /// Wakes one task waiting on this condition variable.

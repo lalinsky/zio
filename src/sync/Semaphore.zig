@@ -126,11 +126,7 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout
 /// This operation is shielded from cancellation to ensure the permit is always
 /// released, even if the calling task is in the process of being cancelled.
 pub fn post(self: *Semaphore, rt: *Runtime) void {
-    // Shield post operation from cancellation
-    rt.beginShield();
-    defer rt.endShield();
-
-    self.mutex.lock(rt) catch unreachable;
+    self.mutex.lockNoCancel(rt);
     defer self.mutex.unlock(rt);
 
     self.permits += 1;
