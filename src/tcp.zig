@@ -515,8 +515,8 @@ test "TCP: basic echo server and client" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }
 
 test "TCP: Writer splat handling" {
@@ -563,8 +563,8 @@ test "TCP: Writer splat handling" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }
 
 test "TCP: Writer splat with single element" {
@@ -611,8 +611,8 @@ test "TCP: Writer splat with single element" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }
 
 test "TCP: Writer splat with single character" {
@@ -659,8 +659,8 @@ test "TCP: Writer splat with single character" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }
 
 test "TCP: Reader takeByte with RESP protocol" {
@@ -750,8 +750,8 @@ test "TCP: Reader takeByte with RESP protocol" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }
 
 test "TCP: readBuf with different ReadBuffer variants" {
@@ -851,6 +851,6 @@ test "TCP: readBuf with different ReadBuffer variants" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }
