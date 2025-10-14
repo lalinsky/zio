@@ -419,8 +419,8 @@ pub const Coroutine = struct {
     stack: ?Stack,
     state: CoroutineState,
 
-    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.Result(func))) void {
-        const Result = meta.Result(func);
+    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.ReturnType(func))) void {
+        const Result = meta.ReturnType(func);
         const Args = @TypeOf(args);
 
         const CoroutineData = struct {
