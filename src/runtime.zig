@@ -126,7 +126,7 @@ fn drainBlockingCompletions(
 
 // Awaitable kind - distinguishes different awaitable types
 pub const AwaitableKind = enum {
-    coro,
+    task,
     blocking_task,
     future,
 };
@@ -282,7 +282,7 @@ pub const AnyTask = struct {
     shield_count: u32 = 0,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
-        assert(awaitable.kind == .coro);
+        assert(awaitable.kind == .task);
         return @fieldParentPtr("awaitable", awaitable);
     }
 
@@ -335,6 +335,15 @@ pub fn Task(comptime T: type) type {
 
         any_task: AnyTask,
         future_result: FutureResult(T),
+
+        pub fn fromAny(any_task: *AnyTask) *Self {
+            return @fieldParentPtr("any_task", any_task);
+        }
+
+        pub fn fromAwaitable(awaitable: *Awaitable) *Self {
+            assert(awaitable.kind == .task);
+            return fromAny(AnyTask.fromAwaitable(awaitable));
+        }
 
         fn destroyFn(exec: *Executor, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
@@ -393,6 +402,15 @@ pub fn Future(comptime T: type) type {
 
         any_future: AnyFuture,
         future_result: FutureResult(T),
+
+        pub fn fromAny(any_future: *AnyFuture) *Self {
+            return @fieldParentPtr("any_future", any_future);
+        }
+
+        pub fn fromAwaitable(awaitable: *Awaitable) *Self {
+            assert(awaitable.kind == .future);
+            return fromAny(AnyFuture.fromAwaitable(awaitable));
+        }
 
         fn destroyFn(exec: *Executor, awaitable: *Awaitable) void {
             const any_future = AnyFuture.fromAwaitable(awaitable);
@@ -455,6 +473,15 @@ pub fn BlockingTask(comptime T: type) type {
         any_blocking_task: AnyBlockingTask,
         future_result: FutureResult(T),
         executor: *Executor,
+
+        pub fn fromAny(any_blocking_task: *AnyBlockingTask) *Self {
+            return @fieldParentPtr("any_blocking_task", any_blocking_task);
+        }
+
+        pub fn fromAwaitable(awaitable: *Awaitable) *Self {
+            assert(awaitable.kind == .blocking_task);
+            return fromAny(AnyBlockingTask.fromAwaitable(awaitable));
+        }
 
         pub fn init(
             executor: *Executor,
@@ -548,26 +575,35 @@ pub fn JoinHandle(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        kind: union(enum) {
-            coro: *Task(T),
-            blocking: *BlockingTask(T),
-            future: *Future(T),
-        },
+        awaitable: *Awaitable,
 
         pub fn deinit(self: *Self) void {
-            switch (self.kind) {
-                .coro => |task| task.deinit(),
-                .blocking => |task| task.deinit(),
-                .future => |future| future.deinit(),
-            }
+            const executor = switch (self.awaitable.kind) {
+                .task => blk: {
+                    const task = AnyTask.fromAwaitable(self.awaitable);
+                    break :blk Executor.fromCoroutine(&task.coro);
+                },
+                .blocking_task => blk: {
+                    const bt = AnyBlockingTask.fromAwaitable(self.awaitable);
+                    break :blk bt.executor;
+                },
+                .future => blk: {
+                    const future = AnyFuture.fromAwaitable(self.awaitable);
+                    break :blk &future.runtime.executor;
+                },
+            };
+            executor.releaseAwaitable(self.awaitable);
         }
 
         pub fn join(self: *Self) !T {
-            return switch (self.kind) {
-                .coro => |task| try task.join(),
-                .blocking => |task| try task.join(),
-                .future => |future| try future.wait(),
+            try self.awaitable.waitForComplete();
+
+            const future_result: *FutureResult(T) = switch (self.awaitable.kind) {
+                .task => &Task(T).fromAwaitable(self.awaitable).future_result,
+                .blocking_task => &BlockingTask(T).fromAwaitable(self.awaitable).future_result,
+                .future => &Future(T).fromAwaitable(self.awaitable).future_result,
             };
+            return future_result.get() orelse unreachable;
         }
 
         pub fn result(self: *Self) !T {
@@ -579,11 +615,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
         /// For futures: Has no effect (futures are not cancelable).
         pub fn cancel(self: *Self) void {
-            switch (self.kind) {
-                .coro => |task| task.any_task.cancel(),
-                .blocking => |task| task.any_blocking_task.cancel(),
-                .future => {}, // Futures cannot be canceled
-            }
+            self.awaitable.requestCancellation();
         }
     };
 }
@@ -864,7 +896,7 @@ pub const Executor = struct {
             .any_task = .{
                 .id = id,
                 .awaitable = .{
-                    .kind = .coro,
+                    .kind = .task,
                     .destroy_fn = &TypedTask.destroyFn,
                 },
                 .coro = .{
@@ -886,7 +918,7 @@ pub const Executor = struct {
         self.metrics.tasks_spawned += 1;
 
         task.any_task.awaitable.ref_count.incr();
-        return JoinHandle(Payload){ .kind = .{ .coro = task } };
+        return JoinHandle(Payload){ .awaitable = &task.any_task.awaitable };
     }
 
     pub fn yield(self: *Executor, desired_state: CoroutineState) Cancelable!void {
@@ -1005,7 +1037,7 @@ pub const Executor = struct {
             args,
         );
 
-        return JoinHandle(Payload){ .kind = .{ .blocking = task } };
+        return JoinHandle(Payload){ .awaitable = &task.any_blocking_task.awaitable };
     }
 
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
