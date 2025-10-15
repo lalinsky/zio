@@ -1171,24 +1171,6 @@ pub const Executor = struct {
         self.metrics = .{};
     }
 
-    pub fn wait(self: *Executor, task_id: u64) Cancelable!void {
-        const task = self.tasks.get(task_id) orelse return;
-        if (task.coro.state == .dead) {
-            return;
-        }
-        const current_coro = coroutines.getCurrent() orelse std.debug.panic("not in coroutine", .{});
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        if (current_task == task) {
-            std.debug.panic("a task cannot wait on itself", .{});
-        }
-        task.awaitable.waiting_list.push(&current_task.awaitable);
-        self.yield(.waiting) catch |err| {
-            // On cancellation, remove from wait queue
-            _ = task.awaitable.waiting_list.remove(&current_task.awaitable);
-            return err;
-        };
-    }
-
     /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
     /// Uses lower 2 bits for generation (pointers are aligned).
     inline fn packTimerUserdata(comptime T: type, ptr: *T, generation: u2) ?*anyopaque {
