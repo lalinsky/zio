@@ -1,16 +1,59 @@
+//! A broadcast channel for sending values to multiple consumers.
+//!
+//! A broadcast channel allows sending values to multiple independent consumers,
+//! where each consumer receives all messages sent after they subscribe. This is
+//! implemented as a fixed-capacity ring buffer with non-blocking sends.
+//!
+//! Unlike regular channels, broadcast channels have these characteristics:
+//! - Producers never block - sending always succeeds immediately
+//! - When full, new messages overwrite the oldest buffered messages
+//! - Each consumer maintains its own read position
+//! - Slow consumers that fall too far behind receive `error.Lagged`
+//! - New subscribers only receive messages sent after subscription
+//!
+//! This design is similar to Tokio's broadcast channel and is useful for
+//! implementing pub/sub patterns, event distribution, or message broadcasting.
+//!
+//! This implementation provides cooperative synchronization for the zio runtime.
+//! Consumers waiting for messages will suspend and yield to the executor.
+//!
+//! ## Example
+//!
+//! ```zig
+//! fn broadcaster(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
+//!     for (0..10) |i| {
+//!         try ch.send(rt, @intCast(i));
+//!     }
+//! }
+//!
+//! fn listener(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
+//!     var consumer = BroadcastChannel(u32).Consumer{};
+//!     try ch.subscribe(rt, &consumer);
+//!     defer ch.unsubscribe(rt, &consumer);
+//!
+//!     while (ch.receive(rt, &consumer)) |value| {
+//!         std.debug.print("Received: {}\n", .{value});
+//!     } else |err| switch (err) {
+//!         error.Closed => {},
+//!         error.Lagged => {}, // Fell behind, continue from current position
+//!         else => return err,
+//!     }
+//! }
+//!
+//! var buffer: [5]u32 = undefined;
+//! var channel = BroadcastChannel(u32).init(&buffer);
+//!
+//! var task1 = try runtime.spawn(broadcaster, .{ &runtime, &channel }, .{});
+//! var task2 = try runtime.spawn(listener, .{ &runtime, &channel }, .{});
+//! var task3 = try runtime.spawn(listener, .{ &runtime, &channel }, .{});
+//! ```
+
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 const Barrier = @import("Barrier.zig");
 
-/// BroadcastChannel is a non-blocking broadcast channel where producers never wait.
-/// Similar to Tokio's broadcast channel:
-/// - Fixed capacity ring buffer
-/// - Slow consumers receive error.Lagged when they fall too far behind
-/// - Producers always succeed, overwriting oldest values when full
-/// - Multiple consumers each receive all messages (unless lagged)
-/// NOT safe for use across OS threads - use within a single Runtime only.
 pub fn BroadcastChannel(comptime T: type) type {
     return struct {
         buffer: []T,
@@ -70,9 +113,12 @@ pub fn BroadcastChannel(comptime T: type) type {
             return .{ .buffer = buffer };
         }
 
-        /// Subscribe a consumer to the channel.
-        /// The consumer starts at the current write position (won't receive past messages).
-        /// The consumer must remain valid until unsubscribe is called.
+        /// Subscribes a consumer to the channel.
+        ///
+        /// The consumer begins at the current write position and will only receive
+        /// messages sent after subscription. Past messages are not available.
+        ///
+        /// The consumer must remain valid until `unsubscribe()` is called.
         pub fn subscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) !void {
             try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
@@ -81,18 +127,26 @@ pub fn BroadcastChannel(comptime T: type) type {
             self.consumers.append(consumer);
         }
 
-        /// Unsubscribe a consumer from the channel.
-        pub fn unsubscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) !void {
-            try self.mutex.lock(runtime);
+        /// Unsubscribes a consumer from the channel.
+        ///
+        /// This operation is shielded from cancellation to ensure cleanup completes.
+        pub fn unsubscribe(self: *Self, runtime: *Runtime, consumer: *Consumer) void {
+            self.mutex.lockNoCancel(runtime);
             defer self.mutex.unlock(runtime);
 
             self.consumers.remove(consumer);
         }
 
-        /// Receive the next item for this consumer, blocking if no new items are available.
-        /// Returns error.Lagged if the consumer has fallen too far behind and missed messages.
-        /// After a Lagged error, the consumer is advanced to the oldest available message.
-        /// Returns error.Closed if the channel is closed and no more items are available.
+        /// Receives the next message for this consumer, blocking if none available.
+        ///
+        /// Suspends the current task if no new messages are available until one is sent.
+        ///
+        /// Returns `error.Lagged` if the consumer has fallen too far behind (more than
+        /// buffer capacity) and missed messages. After a Lagged error, the consumer is
+        /// automatically advanced to the oldest available message and can continue receiving.
+        ///
+        /// Returns `error.Closed` if the channel is closed and no more messages are available.
+        /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, runtime: *Runtime, consumer: *Consumer) !T {
             try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
@@ -126,10 +180,14 @@ pub fn BroadcastChannel(comptime T: type) type {
             return item;
         }
 
-        /// Try to receive an item without blocking.
-        /// Returns error.WouldBlock if no new items available.
-        /// Returns error.Lagged if the consumer has fallen too far behind.
-        /// Returns error.Closed if the channel is closed and no more items are available.
+        /// Tries to receive a message without blocking.
+        ///
+        /// Returns immediately with a message if available, otherwise returns an error.
+        ///
+        /// Returns `error.WouldBlock` if no new messages are available.
+        /// Returns `error.Lagged` if the consumer has fallen too far behind.
+        /// Returns `error.Closed` if the channel is closed and no more messages are available.
+        /// Returns `error.Canceled` if the task is cancelled while acquiring the lock.
         pub fn tryReceive(self: *Self, runtime: *Runtime, consumer: *Consumer) !T {
             try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
@@ -154,9 +212,14 @@ pub fn BroadcastChannel(comptime T: type) type {
             return item;
         }
 
-        /// Broadcast an item to all consumers.
-        /// This never blocks, potentially overwriting old values that slow consumers haven't read yet.
-        /// Returns error.Closed if the channel has been closed.
+        /// Broadcasts a message to all consumers.
+        ///
+        /// This operation never blocks. If the buffer is full, the oldest message is
+        /// overwritten. Slow consumers that haven't read the overwritten message will
+        /// receive `error.Lagged` on their next receive attempt.
+        ///
+        /// Returns `error.Closed` if the channel has been closed.
+        /// Returns `error.Canceled` if the task is cancelled while acquiring the lock.
         pub fn send(self: *Self, runtime: *Runtime, item: T) !void {
             try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
@@ -172,9 +235,10 @@ pub fn BroadcastChannel(comptime T: type) type {
             self.not_empty.broadcast(runtime);
         }
 
-        /// Close the channel.
-        /// After closing, send() will return error.Closed.
-        /// Consumers can still drain remaining messages, then receive() will return error.Closed.
+        /// Closes the channel.
+        ///
+        /// After closing, all send operations will fail with `error.Closed`.
+        /// Consumers can still drain any buffered messages before receiving `error.Closed`.
         pub fn close(self: *Self, runtime: *Runtime) !void {
             try self.mutex.lock(runtime);
             defer self.mutex.unlock(runtime);
@@ -207,7 +271,7 @@ test "BroadcastChannel: basic send and receive" {
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[3]u32, b: *Barrier) !void {
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
             _ = try b.wait(rt); // Signal that we're subscribed
 
             results[0] = try ch.receive(rt, consumer);
@@ -251,7 +315,7 @@ test "BroadcastChannel: multiple consumers receive same messages" {
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, sum: *u32, b: *Barrier) !void {
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
             _ = try b.wait(rt); // Signal that we're subscribed
 
             sum.* += try ch.receive(rt, consumer);
@@ -296,7 +360,7 @@ test "BroadcastChannel: lagged consumer" {
     const TestFn = struct {
         fn test_lag(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
 
             // Send more items than buffer capacity without consuming
             try ch.send(rt, 1);
@@ -337,7 +401,7 @@ test "BroadcastChannel: tryReceive" {
     const TestFn = struct {
         fn test_try(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
 
             // tryReceive on empty channel should return WouldBlock
             const err1 = ch.tryReceive(rt, consumer);
@@ -382,7 +446,7 @@ test "BroadcastChannel: new subscriber doesn't receive old messages" {
 
             // Now subscribe
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
 
             // Send new message
             try ch.send(rt, 4);
@@ -423,7 +487,7 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
             try testing.expectEqual(@as(u32, 1), try ch.receive(rt, c2));
 
             // Unsubscribe c1
-            try ch.unsubscribe(rt, c1);
+            ch.unsubscribe(rt, c1);
 
             try ch.send(rt, 3);
 
@@ -485,7 +549,7 @@ test "BroadcastChannel: consumers can drain after close" {
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[4]?u32, b: *Barrier) !void {
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
             _ = try b.wait(rt); // Signal that we're subscribed
 
             // Should be able to drain all messages
@@ -526,7 +590,7 @@ test "BroadcastChannel: waiting consumers wake on close" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, got_closed: *bool, b: *Barrier) !void {
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
             _ = try b.wait(rt); // Signal that we're subscribed and about to wait
 
             // Wait for message (channel is empty, so will block)
@@ -571,7 +635,7 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
     const TestFn = struct {
         fn test_try_closed(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
             try ch.subscribe(rt, consumer);
-            defer ch.unsubscribe(rt, consumer) catch {};
+            defer ch.unsubscribe(rt, consumer);
 
             // Close the empty channel
             try ch.close(rt);

@@ -1,3 +1,50 @@
+//! A condition variable for coordinating async tasks.
+//!
+//! Condition variables allow tasks to wait for certain conditions to become true
+//! while cooperating with other tasks. They are always used in conjunction with
+//! a Mutex to protect the shared state being checked.
+//!
+//! This implementation is designed for the zio async runtime and provides
+//! cooperative waiting that works with coroutines. When a coroutine waits on
+//! a condition, it suspends and yields to the executor, allowing other tasks
+//! to run.
+//!
+//! The standard pattern for using a condition variable is:
+//! 1. Lock the mutex
+//! 2. Check the condition in a loop
+//! 3. If condition is false, wait on the condition variable (this atomically
+//!    releases the mutex and suspends)
+//! 4. When woken, the mutex is automatically reacquired
+//! 5. Loop back to check condition again
+//! 6. Once condition is true, proceed with work
+//! 7. Unlock the mutex
+//!
+//! Wait operations are cancelable. If a task is cancelled while waiting,
+//! the mutex will be reacquired before the error is returned, maintaining
+//! the invariant that wait() always holds the mutex on return.
+//!
+//! ## Example
+//!
+//! ```zig
+//! var mutex: zio.Mutex = .init;
+//! var condition: zio.Condition = .init;
+//! var ready = false;
+//!
+//! // Waiter task
+//! try mutex.lock(rt);
+//! defer mutex.unlock(rt);
+//! while (!ready) {
+//!     try condition.wait(rt, &mutex);
+//! }
+//! // ... proceed with work ...
+//!
+//! // Signaler task
+//! try mutex.lock(rt);
+//! ready = true;
+//! mutex.unlock(rt);
+//! condition.signal(rt);
+//! ```
+
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
@@ -12,8 +59,28 @@ wait_queue: AwaitableList = .{},
 
 const Condition = @This();
 
+/// Creates a new condition variable.
 pub const init: Condition = .{};
 
+/// Atomically releases the mutex and waits for a signal.
+///
+/// This function must be called while holding the mutex. It will:
+/// 1. Add the current task to the wait queue
+/// 2. Release the mutex
+/// 3. Suspend until signaled by `signal()` or `broadcast()`
+/// 4. Reacquire the mutex before returning
+///
+/// This function should typically be called in a loop that checks the condition:
+/// ```zig
+/// try mutex.lock(rt);
+/// defer mutex.unlock(rt);
+/// while (!condition_is_true) {
+///     try condition.wait(rt, &mutex);
+/// }
+/// ```
+///
+/// Returns `error.Canceled` if the task is cancelled while waiting. The mutex
+/// will still be held when returning with an error.
 pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
@@ -27,18 +94,28 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     executor.yield(.waiting) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
         _ = self.wait_queue.remove(&task.awaitable);
-        // Must reacquire mutex before returning, retry if canceled
-        while (true) {
-            mutex.lock(runtime) catch continue;
-            break;
-        }
+        // Must reacquire mutex before returning
+        mutex.lockNoCancel(runtime);
         return err;
     };
 
-    // Re-acquire mutex after waking
-    try mutex.lock(runtime);
+    // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
+    mutex.lockNoCancel(runtime);
+    try runtime.checkCanceled();
 }
 
+/// Atomically releases the mutex and waits for a signal with a timeout.
+///
+/// Like `wait()`, but will return `error.Timeout` if no signal is received
+/// within the specified duration.
+///
+/// The timeout is specified in nanoseconds. If a signal is received before
+/// the timeout expires, the function returns successfully with the mutex held.
+/// If the timeout expires first, `error.Timeout` is returned with the mutex held.
+///
+/// Returns `error.Canceled` if the task is cancelled while waiting. Cancellation
+/// takes priority over timeout - if both occur, `error.Canceled` is returned.
+/// The mutex will be held when returning with any error.
 pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{ Timeout, Canceled }!void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
@@ -55,8 +132,6 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         .wait_queue = &self.wait_queue,
         .awaitable = &task.awaitable,
     };
-
-    var was_canceled = false;
 
     // Atomically release mutex and wait
     mutex.unlock(runtime);
@@ -77,36 +152,33 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         if (err == error.Canceled) {
             _ = self.wait_queue.remove(&task.awaitable);
         }
-        // Re-acquire mutex before returning - retry if canceled
-        while (true) {
-            mutex.lock(runtime) catch {
-                was_canceled = true;
-                continue;
-            };
-            break;
-        }
-        // Cancellation has priority over timeout
-        if (was_canceled) {
-            return error.Canceled;
-        }
+        // Must reacquire mutex before returning
+        mutex.lockNoCancel(runtime);
+        // Cancellation during lock has priority over timeout
+        try runtime.checkCanceled();
         return err;
     };
 
-    // Re-acquire mutex before returning - retry if canceled
-    while (true) {
-        mutex.lock(runtime) catch {
-            was_canceled = true;
-            continue;
-        };
-        break;
-    }
-
-    // Cancellation has priority
-    if (was_canceled) {
-        return error.Canceled;
-    }
+    // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
+    mutex.lockNoCancel(runtime);
+    try runtime.checkCanceled();
 }
 
+/// Wakes one task waiting on this condition variable.
+///
+/// If there are tasks waiting, one will be woken and made ready to run.
+/// The woken task will attempt to reacquire the mutex before continuing.
+///
+/// If no tasks are waiting, this function does nothing.
+///
+/// It is typically called after modifying the shared state and releasing
+/// the mutex:
+/// ```zig
+/// try mutex.lock(rt);
+/// shared_state = new_value;
+/// mutex.unlock(rt);
+/// condition.signal(rt);
+/// ```
 pub fn signal(self: *Condition, runtime: *Runtime) void {
     _ = runtime;
     if (self.wait_queue.pop()) |awaitable| {
@@ -116,6 +188,21 @@ pub fn signal(self: *Condition, runtime: *Runtime) void {
     }
 }
 
+/// Wakes all tasks waiting on this condition variable.
+///
+/// All waiting tasks will be woken and made ready to run. Each woken task
+/// will attempt to reacquire the mutex before continuing, so they will
+/// wake up one at a time as the mutex becomes available.
+///
+/// If no tasks are waiting, this function does nothing.
+///
+/// Use this when the condition change might allow multiple waiters to proceed:
+/// ```zig
+/// try mutex.lock(rt);
+/// shutdown_flag = true;
+/// mutex.unlock(rt);
+/// condition.broadcast(rt);
+/// ```
 pub fn broadcast(self: *Condition, runtime: *Runtime) void {
     _ = runtime;
     while (self.wait_queue.pop()) |awaitable| {

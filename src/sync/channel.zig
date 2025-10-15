@@ -1,11 +1,49 @@
+//! A bounded FIFO channel for communication between async tasks.
+//!
+//! Channels provide a way to send values between tasks with backpressure. A channel
+//! has a fixed capacity and maintains FIFO ordering. When the channel is full,
+//! senders will block until space becomes available. When empty, receivers will
+//! block until a value is sent.
+//!
+//! This is implemented as a ring buffer for efficient memory usage and operation.
+//!
+//! This implementation provides cooperative synchronization for the zio runtime.
+//! Blocked tasks will suspend and yield to the executor, allowing other work to
+//! proceed.
+//!
+//! Channels can be closed to signal that no more values will be sent. After closing,
+//! receivers can drain any remaining buffered values before receiving `error.ChannelClosed`.
+//!
+//! ## Example
+//!
+//! ```zig
+//! fn producer(rt: *Runtime, ch: *Channel(u32)) !void {
+//!     for (0..10) |i| {
+//!         try ch.send(rt, @intCast(i));
+//!     }
+//! }
+//!
+//! fn consumer(rt: *Runtime, ch: *Channel(u32)) !void {
+//!     while (ch.receive(rt)) |value| {
+//!         std.debug.print("Received: {}\n", .{value});
+//!     } else |err| switch (err) {
+//!         error.ChannelClosed => {}, // Normal shutdown
+//!         else => return err,
+//!     }
+//! }
+//!
+//! var buffer: [5]u32 = undefined;
+//! var channel = Channel(u32).init(&buffer);
+//!
+//! var task1 = try runtime.spawn(producer, .{ &runtime, &channel }, .{});
+//! var task2 = try runtime.spawn(consumer, .{ &runtime, &channel }, .{});
+//! ```
+
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 
-/// Channel is a coroutine-safe bounded FIFO channel implemented as a ring buffer.
-/// It blocks coroutines when full (send) or empty (receive).
-/// NOT safe for use across OS threads - use within a single Runtime only.
 pub fn Channel(comptime T: type) type {
     return struct {
         buffer: []T,
@@ -21,29 +59,34 @@ pub fn Channel(comptime T: type) type {
 
         const Self = @This();
 
-        /// Initialize a channel with the provided buffer.
+        /// Initializes a channel with the provided buffer.
         /// The buffer's length determines the channel capacity.
         pub fn init(buffer: []T) Self {
             std.debug.assert(buffer.len > 0);
             return .{ .buffer = buffer };
         }
 
-        /// Check if the channel is empty.
+        /// Checks if the channel is empty.
         pub fn isEmpty(self: *Self, rt: *Runtime) !bool {
             try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
             return self.count == 0;
         }
 
-        /// Check if the channel is full.
+        /// Checks if the channel is full.
         pub fn isFull(self: *Self, rt: *Runtime) !bool {
             try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
             return self.count == self.buffer.len;
         }
 
-        /// Receive an item from the channel, blocking if empty.
-        /// Returns error.ChannelClosed if the channel is closed and empty.
+        /// Receives a value from the channel, blocking if empty.
+        ///
+        /// Suspends the current task if the channel is empty until a value is sent.
+        /// Values are received in FIFO order.
+        ///
+        /// Returns `error.ChannelClosed` if the channel is closed and empty.
+        /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
             try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
@@ -69,8 +112,13 @@ pub fn Channel(comptime T: type) type {
             return item;
         }
 
-        /// Try to receive an item without blocking.
-        /// Returns error.ChannelEmpty if empty, error.ChannelClosed if closed and empty.
+        /// Tries to receive a value without blocking.
+        ///
+        /// Returns immediately with a value if available, otherwise returns an error.
+        ///
+        /// Returns `error.ChannelEmpty` if the channel is empty.
+        /// Returns `error.ChannelClosed` if the channel is closed and empty.
+        /// Returns `error.Canceled` if the task is cancelled while acquiring the lock.
         pub fn tryReceive(self: *Self, rt: *Runtime) !T {
             try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
@@ -91,8 +139,12 @@ pub fn Channel(comptime T: type) type {
             return item;
         }
 
-        /// Send an item into the channel, blocking if full.
-        /// Returns error.ChannelClosed if the channel is closed.
+        /// Sends a value to the channel, blocking if full.
+        ///
+        /// Suspends the current task if the channel is full until space becomes available.
+        ///
+        /// Returns `error.ChannelClosed` if the channel is closed.
+        /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
             try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
@@ -119,8 +171,13 @@ pub fn Channel(comptime T: type) type {
             self.not_empty.signal(rt);
         }
 
-        /// Try to send an item without blocking.
-        /// Returns error.ChannelFull if full, error.ChannelClosed if closed.
+        /// Tries to send a value without blocking.
+        ///
+        /// Returns immediately with success if space is available, otherwise returns an error.
+        ///
+        /// Returns `error.ChannelFull` if the channel is full.
+        /// Returns `error.ChannelClosed` if the channel is closed.
+        /// Returns `error.Canceled` if the task is cancelled while acquiring the lock.
         pub fn trySend(self: *Self, rt: *Runtime, item: T) !void {
             try self.mutex.lock(rt);
             defer self.mutex.unlock(rt);
@@ -140,16 +197,18 @@ pub fn Channel(comptime T: type) type {
             self.not_empty.signal(rt);
         }
 
-        /// Close the channel.
-        /// If immediate is true, clears all items from the channel.
-        /// After closing, send operations will return error.ChannelClosed.
-        /// receive operations will drain remaining items, then return error.ChannelClosed.
+        /// Closes the channel.
+        ///
+        /// After closing, all send operations will fail with `error.ChannelClosed`.
+        /// Receive operations can still drain any buffered values before returning
+        /// `error.ChannelClosed`.
+        ///
+        /// If `immediate` is true, clears all buffered items immediately. This causes
+        /// receivers to get `error.ChannelClosed` right away instead of draining.
+        ///
+        /// This operation is shielded from cancellation to ensure the close completes.
         pub fn close(self: *Self, rt: *Runtime, immediate: bool) void {
-            // Shield close operation from cancellation
-            rt.beginShield();
-            defer rt.endShield();
-
-            self.mutex.lock(rt) catch unreachable;
+            self.mutex.lockNoCancel(rt);
             defer self.mutex.unlock(rt);
 
             self.closed = true;

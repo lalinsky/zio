@@ -12,7 +12,7 @@ const Coroutine = coroutines.Coroutine;
 const CoroutineState = coroutines.CoroutineState;
 
 // const Error = coroutines.Error;
-const RefCounter = @import("ref_counter.zig").RefCounter;
+const RefCounter = @import("sync/ref_counter.zig").RefCounter;
 const FutureResult = @import("future_result.zig").FutureResult;
 const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
@@ -1020,6 +1020,18 @@ pub const Executor = struct {
         current_task.shield_count -= 1;
     }
 
+    /// Check if cancellation has been requested and return error.Canceled if so.
+    /// This consumes the cancellation flag.
+    /// Use this after endShield() to detect cancellation that occurred during the shielded section.
+    pub fn checkCanceled(self: *Executor) Cancelable!void {
+        const current_coro = self.current_coroutine orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        // Check and consume cancellation flag
+        if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
+            return error.Canceled;
+        }
+    }
+
     pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
         return &task.awaitable;
     }
@@ -1461,6 +1473,15 @@ pub const Runtime = struct {
     pub fn endShield(self: *Runtime) void {
         if (self.executor.current_coroutine == null) return;
         self.executor.endShield();
+    }
+
+    /// Check if cancellation has been requested and return error.Canceled if so.
+    /// This consumes the cancellation flag.
+    /// Use this after endShield() to detect cancellation that occurred during the shielded section.
+    /// No-op (returns successfully) if not called from within a coroutine.
+    pub fn checkCanceled(self: *Runtime) Cancelable!void {
+        if (self.executor.current_coroutine == null) return;
+        return self.executor.checkCanceled();
     }
 
     pub fn getCurrent() ?*Runtime {

@@ -1,3 +1,25 @@
+//! A mutual exclusion primitive for protecting shared data in async contexts.
+//!
+//! This mutex is designed for use with the zio async runtime and provides
+//! cooperative locking that works with coroutines. When a coroutine attempts
+//! to acquire a locked mutex, it will suspend and yield to the executor,
+//! allowing other tasks to run.
+//!
+//! Lock operations are cancelable. If a task is cancelled while waiting
+//! for a mutex, it will properly handle cleanup and propagate the error.
+//!
+//! ## Example
+//!
+//! ```zig
+//! var mutex: zio.Mutex = .init;
+//! var shared_data: u32 = 0;
+//!
+//! try mutex.lock(rt);
+//! defer mutex.unlock(rt);
+//!
+//! shared_data += 1;
+//! ```
+
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
@@ -11,8 +33,13 @@ wait_queue: AwaitableList = .{},
 
 const Mutex = @This();
 
+/// Creates a new unlocked mutex.
 pub const init: Mutex = .{};
 
+/// Attempts to acquire the mutex without blocking.
+/// Returns `true` if the lock was successfully acquired, `false` if the mutex
+/// is already locked by another coroutine or if called outside a coroutine context.
+/// This function will never suspend the current task. If you need blocking behavior, use `lock()` instead.
 pub fn tryLock(self: *Mutex, runtime: *Runtime) bool {
     const current = runtime.executor.current_coroutine orelse return false;
 
@@ -20,6 +47,17 @@ pub fn tryLock(self: *Mutex, runtime: *Runtime) bool {
     return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
 }
 
+/// Acquires the mutex, blocking if it is already locked.
+///
+/// If the mutex is currently unlocked, this function acquires it immediately.
+/// If the mutex is locked by another coroutine, the current task will be
+/// suspended until the lock becomes available.
+///
+/// This function must be called from within a coroutine context managed by
+/// the zio runtime.
+///
+/// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
+/// ```
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
@@ -45,6 +83,31 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     std.debug.assert(owner == current);
 }
 
+/// Acquires the mutex with cancellation shielding.
+///
+/// Like `lock()`, but guarantees the mutex is held when returning, even if
+/// cancellation occurs during acquisition. Cancellation requests are ignored
+/// during the lock operation.
+///
+/// This is useful in critical sections where you must hold the mutex regardless
+/// of cancellation (e.g., cleanup operations like close(), post()).
+///
+/// If you need to propagate cancellation after acquiring the lock, call
+/// `runtime.checkCanceled()` after this function returns.
+pub fn lockNoCancel(self: *Mutex, runtime: *Runtime) void {
+    runtime.beginShield();
+    defer runtime.endShield();
+    self.lock(runtime) catch unreachable;
+}
+
+/// Releases the mutex.
+///
+/// This function must be called by the coroutine that currently holds the lock.
+/// If there are tasks waiting for the lock, the next waiter will be woken and
+/// given ownership of the mutex. If there are no waiters, the mutex is released
+/// to the unlocked state.
+///
+/// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex, runtime: *Runtime) void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
