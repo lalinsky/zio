@@ -7,7 +7,7 @@ const MESSAGE_SIZE = 64; // bytes
 
 const ResetEvent = zio.ResetEvent;
 
-fn handleClient(in_stream: zio.TcpStream) !void {
+fn handleClient(in_stream: zio.TcpStream) anyerror!void {
     var stream = in_stream;
     defer stream.close();
     defer stream.shutdown() catch {};
@@ -26,7 +26,7 @@ fn handleClient(in_stream: zio.TcpStream) !void {
     }
 }
 
-fn serverTask(rt: *zio.Runtime, ready: *ResetEvent, done: *ResetEvent) !void {
+fn serverTask(rt: *zio.Runtime, ready: *ResetEvent, done: *ResetEvent) anyerror!void {
     const addr = try std.net.Address.parseIp4("127.0.0.1", 45678);
 
     var listener = try zio.TcpListener.init(rt, addr);
@@ -55,7 +55,7 @@ fn clientTask(
     ready: *ResetEvent,
     latencies: []u64,
     client_id: usize,
-) !void {
+) anyerror!void {
     try ready.wait(rt);
 
     const addr = try std.net.Address.parseIp4("127.0.0.1", 45678);
