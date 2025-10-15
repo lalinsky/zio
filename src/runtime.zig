@@ -275,6 +275,7 @@ pub const Awaitable = struct {
                 .select_waiter => {
                     // For select waiters, extract the SelectWaiter and wake the task directly
                     const waiter: *SelectWaiter = @fieldParentPtr("awaitable", waiting_awaitable);
+                    waiter.ready = true;
                     const executor = Executor.fromCoroutine(&waiter.task.coro);
                     executor.markReady(&waiter.task.coro);
                 },
@@ -1390,6 +1391,7 @@ pub const Executor = struct {
 pub const SelectWaiter = struct {
     awaitable: Awaitable,
     task: *AnyTask,
+    ready: bool = false,
 };
 
 // Runtime - orchestrator that wraps a single Executor (for now)
@@ -1577,39 +1579,34 @@ pub const Runtime = struct {
             handle.awaitable.waiting_list.push(&waiters[i].awaitable);
         }
 
+        // Clean up waiters on all exit paths (skip waiters marked ready by markComplete)
+        defer {
+            inline for (0..fields.len) |i| {
+                if (!waiters[i].ready) {
+                    var h = @field(handles, fields[i].name);
+                    _ = h.awaitable.waiting_list.remove(&waiters[i].awaitable);
+                }
+            }
+        }
+
         // Double-check for completion (race condition prevention)
         inline for (fields, 0..) |field, i| {
             var handle = @field(handles, field.name);
             if (handle.hasResult()) {
-                // Completed while we were adding to lists, clean up and return
-                inline for (0..fields.len) |j| {
-                    var h = @field(handles, fields[j].name);
-                    _ = h.awaitable.waiting_list.remove(&waiters[j].awaitable);
-                }
+                // Completed while we were adding to lists, defer will clean up
                 return @unionInit(U, field.name, handle.getResult());
             }
             _ = i;
         }
 
         // Yield and wait for one to complete
-        executor.yield(.waiting) catch |err| {
-            // On cancellation, remove from all waiting lists
-            inline for (0..fields.len) |i| {
-                var h = @field(handles, fields[i].name);
-                _ = h.awaitable.waiting_list.remove(&waiters[i].awaitable);
-            }
-            return err;
-        };
+        try executor.yield(.waiting);
 
-        // We were woken up - find which one completed and clean up the rest
+        // We were woken up - find which one completed
         inline for (fields, 0..) |field, i| {
             var handle = @field(handles, field.name);
             if (handle.hasResult()) {
-                // This one completed - remove from all other waiting lists
-                inline for (0..fields.len) |j| {
-                    var h = @field(handles, fields[j].name);
-                    _ = h.awaitable.waiting_list.remove(&waiters[j].awaitable);
-                }
+                // This one completed, defer will clean up all non-ready waiters
                 return @unionInit(U, field.name, handle.getResult());
             }
             _ = i;
