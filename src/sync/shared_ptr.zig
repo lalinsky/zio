@@ -1,87 +1,3 @@
-//! Thread-safe shared pointer with automatic reference counting.
-//!
-//! SharedPtr provides shared ownership of a dynamically allocated value.
-//! Multiple SharedPtr instances can point to the same data, and the data
-//! is automatically freed when the last reference is released.
-//!
-//! This is similar to C++'s std::shared_ptr or Rust's Arc<T>.
-//!
-//! ## Thread Safety
-//!
-//! SharedPtr is thread-safe across OS threads, not just within a single zio
-//! Runtime. The reference counting uses atomic operations to ensure safe
-//! concurrent access.
-//!
-//! ## Usage
-//!
-//! The SharedPtr exposes the `value` field directly for ergonomic access:
-//! ```zig
-//! var ptr = try SharedPtr(u32, void).init(allocator, 42);
-//! defer ptr.deinit(allocator);
-//!
-//! // Direct access to the value
-//! ptr.value.* = 100;
-//! std.debug.print("{}\n", .{ptr.value.*});
-//! ```
-//!
-//! ## Custom Cleanup with Context
-//!
-//! Use the Context parameter to provide custom cleanup logic for complex types:
-//!
-//! ```zig
-//! const Buffer = struct {
-//!     data: []u8,
-//! };
-//!
-//! const BufferContext = struct {
-//!     pub fn deinit(buffer: *Buffer, allocator: Allocator) void {
-//!         allocator.free(buffer.data);
-//!     }
-//! };
-//!
-//! var buf_ptr = try SharedPtr(Buffer, BufferContext).init(allocator, .{
-//!     .data = try allocator.alloc(u8, 1024),
-//! });
-//! defer buf_ptr.deinit(allocator);
-//! ```
-//!
-//! For simple types that don't need cleanup, use void:
-//! ```zig
-//! var ptr = try SharedPtr(u32, void).init(allocator, 42);
-//! ```
-//!
-//! ## Example: Shared Connection Pool
-//!
-//! ```zig
-//! const Connection = struct {
-//!     socket: Socket,
-//!
-//!     fn close(self: *Connection) void {
-//!         self.socket.close();
-//!     }
-//! };
-//!
-//! const ConnectionContext = struct {
-//!     pub fn deinit(conn: *Connection, allocator: Allocator) void {
-//!         _ = allocator;
-//!         conn.close();
-//!     }
-//! };
-//!
-//! const SharedConnection = SharedPtr(Connection, ConnectionContext);
-//!
-//! // Create connection
-//! var conn1 = try SharedConnection.init(allocator, .{ .socket = socket });
-//! defer conn1.deinit(allocator);
-//!
-//! // Share with another thread/task
-//! var conn2 = conn1.clone();
-//! defer conn2.deinit(allocator);
-//!
-//! // Both can use the connection
-//! try conn1.value.socket.write("Hello");
-//! ```
-
 // Copyright 2025 Lukas Lalinsky
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -99,7 +15,89 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 
-/// Creates a thread-safe shared pointer type for T with optional custom cleanup.
+/// Thread-safe shared pointer with automatic reference counting.
+///
+/// SharedPtr provides shared ownership of a dynamically allocated value.
+/// Multiple SharedPtr instances can point to the same data, and the data
+/// is automatically freed when the last reference is released.
+///
+/// This is similar to C++'s std::shared_ptr or Rust's Arc<T>.
+///
+/// ## Thread Safety
+///
+/// SharedPtr is thread-safe across OS threads, not just within a single zio
+/// Runtime. The reference counting uses atomic operations to ensure safe
+/// concurrent access.
+///
+/// ## Usage
+///
+/// The SharedPtr exposes the `value` field directly for ergonomic access:
+/// ```zig
+/// var ptr = try SharedPtr(u32, void).init(allocator, 42);
+/// defer ptr.deinit(allocator);
+///
+/// // Direct access to the value
+/// ptr.value.* = 100;
+/// std.debug.print("{}\n", .{ptr.value.*});
+/// ```
+///
+/// ## Custom Cleanup with Context
+///
+/// Use the Context parameter to provide custom cleanup logic for complex types:
+///
+/// ```zig
+/// const Buffer = struct {
+///     data: []u8,
+/// };
+///
+/// const BufferContext = struct {
+///     pub fn deinit(buffer: *Buffer, allocator: Allocator) void {
+///         allocator.free(buffer.data);
+///     }
+/// };
+///
+/// var buf_ptr = try SharedPtr(Buffer, BufferContext).init(allocator, .{
+///     .data = try allocator.alloc(u8, 1024),
+/// });
+/// defer buf_ptr.deinit(allocator);
+/// ```
+///
+/// For simple types that don't need cleanup, use void:
+/// ```zig
+/// var ptr = try SharedPtr(u32, void).init(allocator, 42);
+/// ```
+///
+/// ## Example: Shared Connection Pool
+///
+/// ```zig
+/// const Connection = struct {
+///     socket: Socket,
+///
+///     fn close(self: *Connection) void {
+///         self.socket.close();
+///     }
+/// };
+///
+/// const ConnectionContext = struct {
+///     pub fn deinit(conn: *Connection, allocator: Allocator) void {
+///         _ = allocator;
+///         conn.close();
+///     }
+/// };
+///
+/// const SharedConnection = SharedPtr(Connection, ConnectionContext);
+///
+/// // Create connection
+/// var conn1 = try SharedConnection.init(allocator, .{ .socket = socket });
+/// defer conn1.deinit(allocator);
+///
+/// // Share with another thread/task
+/// var conn2 = conn1.clone();
+/// defer conn2.deinit(allocator);
+///
+/// // Both can use the connection
+/// try conn1.value.socket.write("Hello");
+/// ```
 ///
 /// The Context parameter allows customization of cleanup behavior. If Context
 /// has a `deinit` function, it will be called when the last reference is released.

@@ -1,47 +1,3 @@
-//! Thread-safe atomic reference counter for shared ownership.
-//!
-//! A reference counter tracks the number of references to a shared resource.
-//! When the count reaches zero, the resource can be safely deallocated.
-//!
-//! This is thread-safe and can be used across multiple OS threads. It uses
-//! atomic operations with carefully chosen memory orderings:
-//! - Monotonic ordering for increments (weakest safe ordering)
-//! - Release ordering for decrements (ensures visibility of operations)
-//! - Acquire ordering when reaching zero (synchronizes with all releases)
-//!
-//! This primitive is included to help with shared memory management in server
-//! applications, particularly when sharing resources across multiple connections
-//! or threads.
-//!
-//! Unlike other sync primitives in this module, RefCounter is thread-safe across
-//! OS threads, not just within a single zio Runtime.
-//!
-//! ## Example
-//!
-//! ```zig
-//! const MyResource = struct {
-//!     ref_count: RefCounter(u32),
-//!     data: []u8,
-//!
-//!     fn acquire(self: *MyResource) void {
-//!         self.ref_count.incr();
-//!     }
-//!
-//!     fn release(self: *MyResource, allocator: Allocator) void {
-//!         if (self.ref_count.decr()) {
-//!             allocator.free(self.data);
-//!             allocator.destroy(self);
-//!         }
-//!     }
-//! };
-//!
-//! var resource = try allocator.create(MyResource);
-//! resource.* = .{
-//!     .ref_count = RefCounter(u32).init(),
-//!     .data = try allocator.alloc(u8, 1024),
-//! };
-//! ```
-
 // Copyright 2025 Lukas Lalinsky
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,6 +13,49 @@
 
 const std = @import("std");
 
+/// Thread-safe atomic reference counter for shared ownership.
+///
+/// A reference counter tracks the number of references to a shared resource.
+/// When the count reaches zero, the resource can be safely deallocated.
+///
+/// This is thread-safe and can be used across multiple OS threads. It uses
+/// atomic operations with carefully chosen memory orderings:
+/// - Monotonic ordering for increments (weakest safe ordering)
+/// - Release ordering for decrements (ensures visibility of operations)
+/// - Acquire ordering when reaching zero (synchronizes with all releases)
+///
+/// This primitive is included to help with shared memory management in server
+/// applications, particularly when sharing resources across multiple connections
+/// or threads.
+///
+/// Unlike other sync primitives in this module, RefCounter is thread-safe across
+/// OS threads, not just within a single zio Runtime.
+///
+/// ## Example
+///
+/// ```zig
+/// const MyResource = struct {
+///     ref_count: RefCounter(u32),
+///     data: []u8,
+///
+///     fn acquire(self: *MyResource) void {
+///         self.ref_count.incr();
+///     }
+///
+///     fn release(self: *MyResource, allocator: Allocator) void {
+///         if (self.ref_count.decr()) {
+///             allocator.free(self.data);
+///             allocator.destroy(self);
+///         }
+///     }
+/// };
+///
+/// var resource = try allocator.create(MyResource);
+/// resource.* = .{
+///     .ref_count = RefCounter(u32).init(),
+///     .data = try allocator.alloc(u8, 1024),
+/// };
+/// ```
 pub fn RefCounter(comptime T: type) type {
     return struct {
         refs: std.atomic.Value(T),

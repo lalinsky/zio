@@ -1,59 +1,58 @@
-//! A broadcast channel for sending values to multiple consumers.
-//!
-//! A broadcast channel allows sending values to multiple independent consumers,
-//! where each consumer receives all messages sent after they subscribe. This is
-//! implemented as a fixed-capacity ring buffer with non-blocking sends.
-//!
-//! Unlike regular channels, broadcast channels have these characteristics:
-//! - Producers never block - sending always succeeds immediately
-//! - When full, new messages overwrite the oldest buffered messages
-//! - Each consumer maintains its own read position
-//! - Slow consumers that fall too far behind receive `error.Lagged`
-//! - New subscribers only receive messages sent after subscription
-//!
-//! This design is similar to Tokio's broadcast channel and is useful for
-//! implementing pub/sub patterns, event distribution, or message broadcasting.
-//!
-//! This implementation provides cooperative synchronization for the zio runtime.
-//! Consumers waiting for messages will suspend and yield to the executor.
-//!
-//! ## Example
-//!
-//! ```zig
-//! fn broadcaster(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-//!     for (0..10) |i| {
-//!         try ch.send(rt, @intCast(i));
-//!     }
-//! }
-//!
-//! fn listener(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-//!     var consumer = BroadcastChannel(u32).Consumer{};
-//!     try ch.subscribe(rt, &consumer);
-//!     defer ch.unsubscribe(rt, &consumer);
-//!
-//!     while (ch.receive(rt, &consumer)) |value| {
-//!         std.debug.print("Received: {}\n", .{value});
-//!     } else |err| switch (err) {
-//!         error.Closed => {},
-//!         error.Lagged => {}, // Fell behind, continue from current position
-//!         else => return err,
-//!     }
-//! }
-//!
-//! var buffer: [5]u32 = undefined;
-//! var channel = BroadcastChannel(u32).init(&buffer);
-//!
-//! var task1 = try runtime.spawn(broadcaster, .{ &runtime, &channel }, .{});
-//! var task2 = try runtime.spawn(listener, .{ &runtime, &channel }, .{});
-//! var task3 = try runtime.spawn(listener, .{ &runtime, &channel }, .{});
-//! ```
-
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 const Barrier = @import("Barrier.zig");
 
+/// A broadcast channel for sending values to multiple consumers.
+///
+/// A broadcast channel allows sending values to multiple independent consumers,
+/// where each consumer receives all messages sent after they subscribe. This is
+/// implemented as a fixed-capacity ring buffer with non-blocking sends.
+///
+/// Unlike regular channels, broadcast channels have these characteristics:
+/// - Producers never block - sending always succeeds immediately
+/// - When full, new messages overwrite the oldest buffered messages
+/// - Each consumer maintains its own read position
+/// - Slow consumers that fall too far behind receive `error.Lagged`
+/// - New subscribers only receive messages sent after subscription
+///
+/// This design is similar to Tokio's broadcast channel and is useful for
+/// implementing pub/sub patterns, event distribution, or message broadcasting.
+///
+/// This implementation provides cooperative synchronization for the zio runtime.
+/// Consumers waiting for messages will suspend and yield to the executor.
+///
+/// ## Example
+///
+/// ```zig
+/// fn broadcaster(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
+///     for (0..10) |i| {
+///         try ch.send(rt, @intCast(i));
+///     }
+/// }
+///
+/// fn listener(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
+///     var consumer = BroadcastChannel(u32).Consumer{};
+///     try ch.subscribe(rt, &consumer);
+///     defer ch.unsubscribe(rt, &consumer);
+///
+///     while (ch.receive(rt, &consumer)) |value| {
+///         std.debug.print("Received: {}\n", .{value});
+///     } else |err| switch (err) {
+///         error.Closed => {},
+///         error.Lagged => {}, // Fell behind, continue from current position
+///         else => return err,
+///     }
+/// }
+///
+/// var buffer: [5]u32 = undefined;
+/// var channel = BroadcastChannel(u32).init(&buffer);
+///
+/// var task1 = try runtime.spawn(broadcaster, .{ &runtime, &channel }, .{});
+/// var task2 = try runtime.spawn(listener, .{ &runtime, &channel }, .{});
+/// var task3 = try runtime.spawn(listener, .{ &runtime, &channel }, .{});
+/// ```
 pub fn BroadcastChannel(comptime T: type) type {
     return struct {
         buffer: []T,

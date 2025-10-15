@@ -1,49 +1,48 @@
-//! A bounded FIFO channel for communication between async tasks.
-//!
-//! Channels provide a way to send values between tasks with backpressure. A channel
-//! has a fixed capacity and maintains FIFO ordering. When the channel is full,
-//! senders will block until space becomes available. When empty, receivers will
-//! block until a value is sent.
-//!
-//! This is implemented as a ring buffer for efficient memory usage and operation.
-//!
-//! This implementation provides cooperative synchronization for the zio runtime.
-//! Blocked tasks will suspend and yield to the executor, allowing other work to
-//! proceed.
-//!
-//! Channels can be closed to signal that no more values will be sent. After closing,
-//! receivers can drain any remaining buffered values before receiving `error.ChannelClosed`.
-//!
-//! ## Example
-//!
-//! ```zig
-//! fn producer(rt: *Runtime, ch: *Channel(u32)) !void {
-//!     for (0..10) |i| {
-//!         try ch.send(rt, @intCast(i));
-//!     }
-//! }
-//!
-//! fn consumer(rt: *Runtime, ch: *Channel(u32)) !void {
-//!     while (ch.receive(rt)) |value| {
-//!         std.debug.print("Received: {}\n", .{value});
-//!     } else |err| switch (err) {
-//!         error.ChannelClosed => {}, // Normal shutdown
-//!         else => return err,
-//!     }
-//! }
-//!
-//! var buffer: [5]u32 = undefined;
-//! var channel = Channel(u32).init(&buffer);
-//!
-//! var task1 = try runtime.spawn(producer, .{ &runtime, &channel }, .{});
-//! var task2 = try runtime.spawn(consumer, .{ &runtime, &channel }, .{});
-//! ```
-
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 
+/// A bounded FIFO channel for communication between async tasks.
+///
+/// Channels provide a way to send values between tasks with backpressure. A channel
+/// has a fixed capacity and maintains FIFO ordering. When the channel is full,
+/// senders will block until space becomes available. When empty, receivers will
+/// block until a value is sent.
+///
+/// This is implemented as a ring buffer for efficient memory usage and operation.
+///
+/// This implementation provides cooperative synchronization for the zio runtime.
+/// Blocked tasks will suspend and yield to the executor, allowing other work to
+/// proceed.
+///
+/// Channels can be closed to signal that no more values will be sent. After closing,
+/// receivers can drain any remaining buffered values before receiving `error.ChannelClosed`.
+///
+/// ## Example
+///
+/// ```zig
+/// fn producer(rt: *Runtime, ch: *Channel(u32)) !void {
+///     for (0..10) |i| {
+///         try ch.send(rt, @intCast(i));
+///     }
+/// }
+///
+/// fn consumer(rt: *Runtime, ch: *Channel(u32)) !void {
+///     while (ch.receive(rt)) |value| {
+///         std.debug.print("Received: {}\n", .{value});
+///     } else |err| switch (err) {
+///         error.ChannelClosed => {}, // Normal shutdown
+///         else => return err,
+///     }
+/// }
+///
+/// var buffer: [5]u32 = undefined;
+/// var channel = Channel(u32).init(&buffer);
+///
+/// var task1 = try runtime.spawn(producer, .{ &runtime, &channel }, .{});
+/// var task2 = try runtime.spawn(consumer, .{ &runtime, &channel }, .{});
+/// ```
 pub fn Channel(comptime T: type) type {
     return struct {
         buffer: []T,
