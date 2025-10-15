@@ -111,7 +111,6 @@ pub fn reset(self: *ResetEvent) void {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
-    _ = runtime;
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -120,7 +119,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 
     // If we're now in waiting state, add to queue and block
     if (state == .waiting) {
-        const current = coroutines.getCurrent() orelse unreachable;
+        const current = runtime.executor.current_coroutine orelse unreachable;
         const executor = Executor.fromCoroutine(current);
         const task = AnyTask.fromCoroutine(current);
         self.wait_queue.push(&task.awaitable);
@@ -147,7 +146,6 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
-    _ = runtime;
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -161,7 +159,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
 
     // We're now in waiting state, add to queue and wait with timeout
     std.debug.assert(state == .waiting);
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 

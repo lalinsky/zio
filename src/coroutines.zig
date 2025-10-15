@@ -6,25 +6,6 @@ const assert = std.debug.assert;
 const meta = @import("meta.zig");
 const FutureResult = @import("future_result.zig").FutureResult;
 
-threadlocal var current_coroutine: ?*Coroutine = null;
-
-pub inline fn getCurrent() ?*Coroutine {
-    return current_coroutine;
-}
-
-pub inline fn setCurrent(coro: *Coroutine) void {
-    current_coroutine = coro;
-}
-
-pub inline fn clearCurrent() void {
-    current_coroutine = null;
-}
-
-pub inline fn yield() void {
-    const coro = current_coroutine orelse unreachable;
-    switchContext(&coro.context, coro.parent_context_ptr);
-}
-
 pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
 pub const CoroutineState = enum(u8) {
@@ -419,18 +400,19 @@ pub const Coroutine = struct {
     stack: ?Stack,
     state: CoroutineState,
 
-    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.Result(func))) void {
-        const Result = meta.Result(func);
+    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.ReturnType(func))) void {
+        const Result = meta.ReturnType(func);
         const Args = @TypeOf(args);
 
         const CoroutineData = struct {
             func: *const fn (*anyopaque) callconv(.c) noreturn,
             args: Args,
             result_ptr: *FutureResult(Result),
+            coro: *Coroutine,
 
             fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
                 const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
-                const coro = current_coroutine orelse unreachable;
+                const coro = coro_data.coro;
 
                 const result = @call(.always_inline, func, coro_data.args);
                 _ = coro_data.result_ptr.set(result);
@@ -449,11 +431,12 @@ pub const Coroutine = struct {
         // Store function pointer, args, and result space as a contiguous block at the end of stack
         const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
 
-        // Set up function pointer, args, and result_ptr
+        // Set up function pointer, args, result_ptr, and coro pointer
         const data: *CoroutineData = @ptrFromInt(data_ptr);
         data.func = &CoroutineData.wrapper;
         data.args = args;
         data.result_ptr = result_ptr;
+        data.coro = self;
 
         // Initialize the context with the entry point
         self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);

@@ -94,10 +94,11 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
 
     // Push to completion queue (thread-safe lock-free stack)
     // Even if canceled, we still mark as complete so waiters wake up
-    any_blocking_task.executor.blocking_completions.push(&any_blocking_task.awaitable);
+    const executor = &any_blocking_task.runtime.executor;
+    executor.blocking_completions.push(&any_blocking_task.awaitable);
 
     // Wake up main loop
-    any_blocking_task.executor.async_wakeup.notify() catch {};
+    executor.async_wakeup.notify() catch {};
 }
 
 // Async callback to drain completed blocking tasks
@@ -111,14 +112,15 @@ fn drainBlockingCompletions(
     _ = loop;
     _ = c;
     const self = executor.?;
+    const runtime = self.runtime();
 
     // Atomically drain all completed blocking tasks (LIFO order)
     var drained = self.blocking_completions.popAll();
     while (drained.pop()) |awaitable| {
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-        awaitable.markComplete(self);
+        awaitable.markComplete();
         // Release the blocking task's reference (initial ref from init)
-        self.releaseAwaitable(awaitable);
+        runtime.releaseAwaitable(awaitable);
     }
 
     return .rearm;
@@ -126,9 +128,10 @@ fn drainBlockingCompletions(
 
 // Awaitable kind - distinguishes different awaitable types
 pub const AwaitableKind = enum {
-    coro,
+    task,
     blocking_task,
     future,
+    select_waiter,
 };
 
 // Awaitable - base type for anything that can be waited on
@@ -138,7 +141,7 @@ pub const Awaitable = struct {
     prev: ?*Awaitable = null,
     waiting_list: AwaitableList = .{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
-    destroy_fn: *const fn (*Executor, *Awaitable) void,
+    destroy_fn: *const fn (*Runtime, *Awaitable) void,
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 
     // Universal state for both coroutines and threads
@@ -152,14 +155,21 @@ pub const Awaitable = struct {
     /// When called from a coroutine, suspends the coroutine.
     /// When called from a thread, parks the thread using futex.
     /// Returns error.Canceled if the coroutine was canceled during the wait.
-    pub fn waitForComplete(self: *Awaitable) Cancelable!void {
+    pub fn waitForComplete(self: *Awaitable, runtime: *Runtime) Cancelable!void {
         // Fast path: check if already complete
         const fast_state = self.state.load(.acquire);
         if (fast_state == 1) return;
 
-        if (coroutines.getCurrent()) |current| {
+        if (runtime.executor.current_coroutine) |current| {
             // Coroutine path: add to wait queue and suspend
             const task = AnyTask.fromCoroutine(current);
+
+            // Check for self-join (would deadlock)
+            if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+                if (&task.awaitable == self) {
+                    std.debug.panic("cannot wait on self (would deadlock)", .{});
+                }
+            }
             self.waiting_list.push(&task.awaitable);
 
             // Double-check state before suspending (avoid lost wakeup)
@@ -193,12 +203,12 @@ pub const Awaitable = struct {
     /// Returns error.Canceled if the coroutine was canceled during the wait.
     /// For coroutines, uses runtime timer infrastructure.
     /// For threads, uses futex timedWait directly.
-    pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWaitForComplete(self: *Awaitable, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
         // Fast path: check if already complete
         const fast_state = self.state.load(.acquire);
         if (fast_state == 1) return;
 
-        if (coroutines.getCurrent()) |current| {
+        if (runtime.executor.current_coroutine) |current| {
             // Coroutine path: get executor and use timer infrastructure
             const task = AnyTask.fromCoroutine(current);
             const executor = Executor.fromCoroutine(current);
@@ -250,14 +260,30 @@ pub const Awaitable = struct {
     }
 
     /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
-    pub fn markComplete(self: *Awaitable, executor: *Executor) void {
+    pub fn markComplete(self: *Awaitable) void {
         // Set state first (release semantics for memory ordering)
         self.state.store(1, .release);
 
         // Wake all waiting coroutines
         while (self.waiting_list.pop()) |waiting_awaitable| {
-            const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-            executor.markReady(&waiting_task.coro);
+            switch (waiting_awaitable.kind) {
+                .task => {
+                    const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
+                    const executor = Executor.fromCoroutine(&waiting_task.coro);
+                    executor.markReady(&waiting_task.coro);
+                },
+                .select_waiter => {
+                    // For select waiters, extract the SelectWaiter and wake the task directly
+                    const waiter: *SelectWaiter = @fieldParentPtr("awaitable", waiting_awaitable);
+                    waiter.ready = true;
+                    const executor = Executor.fromCoroutine(&waiter.task.coro);
+                    executor.markReady(&waiter.task.coro);
+                },
+                .blocking_task, .future => {
+                    // These should not be in waiting lists of other awaitables
+                    unreachable;
+                },
+            }
         }
 
         // Wake all waiting threads
@@ -274,7 +300,6 @@ pub const Awaitable = struct {
 // Task for runtime scheduling - coroutine-based tasks
 pub const AnyTask = struct {
     awaitable: Awaitable,
-    id: u64,
     coro: Coroutine,
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
@@ -282,7 +307,7 @@ pub const AnyTask = struct {
     shield_count: u32 = 0,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
-        assert(awaitable.kind == .coro);
+        assert(awaitable.kind == .task);
         return @fieldParentPtr("awaitable", awaitable);
     }
 
@@ -301,7 +326,7 @@ pub const AnyTask = struct {
 pub const AnyBlockingTask = struct {
     awaitable: Awaitable,
     thread_pool_task: xev.ThreadPool.Task,
-    executor: *Executor,
+    runtime: *Runtime,
     execute_fn: *const fn (*AnyBlockingTask) void,
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
@@ -328,60 +353,73 @@ pub const AnyFuture = struct {
     }
 };
 
+// Shared implementation for all Future types (Task, BlockingTask, Future)
+fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type {
+    return struct {
+        base: Base,
+        future_result: FutureResult(T),
+
+        pub fn wait(parent: *Parent) !meta.Payload(T) {
+            // Check if already completed
+            if (parent.impl.future_result.get()) |res| {
+                return res;
+            }
+
+            // Wait for completion
+            const runtime = Parent.getRuntime(parent);
+            try parent.impl.base.awaitable.waitForComplete(runtime);
+
+            return parent.impl.future_result.get().?;
+        }
+
+        pub fn cancel(parent: *Parent) void {
+            parent.impl.base.awaitable.requestCancellation();
+        }
+
+        pub fn fromAny(base: *Base) *Parent {
+            const impl_ptr: *@This() = @fieldParentPtr("base", base);
+            return @fieldParentPtr("impl", impl_ptr);
+        }
+
+        pub fn fromAwaitable(awaitable: *Awaitable) *Parent {
+            const base_ptr = Base.fromAwaitable(awaitable);
+            return fromAny(base_ptr);
+        }
+
+        pub fn deinit(parent: *Parent) void {
+            const runtime = Parent.getRuntime(parent);
+            runtime.releaseAwaitable(&parent.impl.base.awaitable);
+        }
+    };
+}
+
 // Typed task that contains the AnyTask and FutureResult
 pub fn Task(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Impl = FutureImpl(T, AnyTask, Self);
 
-        any_task: AnyTask,
-        future_result: FutureResult(T),
+        impl: Impl,
 
-        fn destroyFn(exec: *Executor, awaitable: *Awaitable) void {
+        pub const deinit = Impl.deinit;
+        pub const wait = Impl.wait;
+        pub const cancel = Impl.cancel;
+        pub const fromAny = Impl.fromAny;
+        pub const fromAwaitable = Impl.fromAwaitable;
+
+        pub fn getRuntime(self: *Self) *Runtime {
+            const executor = Executor.fromCoroutine(&self.impl.base.coro);
+            return executor.runtime();
+        }
+
+        fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
             const any_task = AnyTask.fromAwaitable(awaitable);
-            const self: *Self = @fieldParentPtr("any_task", any_task);
+            const self = fromAny(any_task);
             // Stack should already be released when coroutine became dead, but check defensively
             if (any_task.coro.stack) |stack| {
-                exec.stack_pool.release(stack);
+                runtime.executor.stack_pool.release(stack);
             }
-            exec.allocator.destroy(self);
-        }
-
-        fn deinit(self: *Self) void {
-            self.executor().releaseAwaitable(&self.any_task.awaitable);
-        }
-
-        fn executor(self: *Self) *Executor {
-            return Executor.fromCoroutine(&self.any_task.coro);
-        }
-
-        fn join(self: *Self) !T {
-            // Check if already completed
-            if (self.future_result.get()) |res| {
-                return res;
-            }
-
-            // Disallow self-join from within the same coroutine
-            if (coroutines.getCurrent()) |current| {
-                const current_task = AnyTask.fromCoroutine(current);
-                if (current_task == &self.any_task) {
-                    std.debug.panic("a task cannot join itself", .{});
-                }
-            }
-
-            // Wait for task to complete (works from both coroutines and threads)
-            try self.any_task.awaitable.waitForComplete();
-
-            return self.future_result.get() orelse unreachable;
-        }
-
-        fn result(self: *Self) !T {
-            return self.join();
-        }
-
-        /// Request cancellation of this task.
-        /// The cancellation flag will be checked at the next yield point.
-        pub fn cancel(self: *Self) void {
-            self.any_task.cancel();
+            runtime.allocator.destroy(self);
         }
     };
 }
@@ -390,27 +428,39 @@ pub fn Task(comptime T: type) type {
 pub fn Future(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Impl = FutureImpl(T, AnyFuture, Self);
 
-        any_future: AnyFuture,
-        future_result: FutureResult(T),
+        impl: Impl,
 
-        fn destroyFn(exec: *Executor, awaitable: *Awaitable) void {
+        pub const deinit = Impl.deinit;
+        pub const wait = Impl.wait;
+        pub const cancel = Impl.cancel;
+        pub const fromAny = Impl.fromAny;
+        pub const fromAwaitable = Impl.fromAwaitable;
+
+        pub fn getRuntime(self: *Self) *Runtime {
+            return self.impl.base.runtime;
+        }
+
+        fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
             const any_future = AnyFuture.fromAwaitable(awaitable);
-            const self: *Self = @fieldParentPtr("any_future", any_future);
-            exec.allocator.destroy(self);
+            const self = fromAny(any_future);
+            runtime.allocator.destroy(self);
         }
 
         pub fn init(runtime: *Runtime, allocator: Allocator) !*Self {
             const self = try allocator.create(Self);
             self.* = .{
-                .any_future = .{
-                    .awaitable = .{
-                        .kind = .future,
-                        .destroy_fn = destroyFn,
+                .impl = .{
+                    .base = .{
+                        .awaitable = .{
+                            .kind = .future,
+                            .destroy_fn = destroyFn,
+                        },
+                        .runtime = runtime,
                     },
-                    .runtime = runtime,
+                    .future_result = FutureResult(T){},
                 },
-                .future_result = FutureResult(T){},
             };
 
             // ref_count starts at 1 by default via RefCounter.init()
@@ -418,31 +468,15 @@ pub fn Future(comptime T: type) type {
             return self;
         }
 
-        pub fn deinit(self: *Self) void {
-            self.any_future.runtime.executor.releaseAwaitable(&self.any_future.awaitable);
-        }
-
-        pub fn set(self: *Self, value: anyerror!T) void {
-            const was_set = self.future_result.set(value);
+        pub fn set(self: *Self, value: T) void {
+            const was_set = self.impl.future_result.set(value);
             if (!was_set) {
                 // Value was already set, ignore
                 return;
             }
 
             // Mark awaitable as complete and wake all waiters (coroutines and threads)
-            self.any_future.awaitable.markComplete(&self.any_future.runtime.executor);
-        }
-
-        pub fn wait(self: *Self) !T {
-            // Check if already set
-            if (self.future_result.get()) |res| {
-                return res;
-            }
-
-            // Wait for future to be set (works from both coroutines and threads)
-            try self.any_future.awaitable.waitForComplete();
-
-            return self.future_result.get() orelse unreachable;
+            self.impl.base.awaitable.markComplete();
         }
     };
 }
@@ -451,13 +485,22 @@ pub fn Future(comptime T: type) type {
 pub fn BlockingTask(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Impl = FutureImpl(T, AnyBlockingTask, Self);
 
-        any_blocking_task: AnyBlockingTask,
-        future_result: FutureResult(T),
-        executor: *Executor,
+        impl: Impl,
+
+        pub const deinit = Impl.deinit;
+        pub const wait = Impl.wait;
+        pub const cancel = Impl.cancel;
+        pub const fromAny = Impl.fromAny;
+        pub const fromAwaitable = Impl.fromAwaitable;
+
+        pub fn getRuntime(self: *Self) *Runtime {
+            return self.impl.base.runtime;
+        }
 
         pub fn init(
-            executor: *Executor,
+            runtime: *Runtime,
             allocator: Allocator,
             func: anytype,
             args: meta.ArgsType(func),
@@ -469,18 +512,18 @@ pub fn BlockingTask(comptime T: type) type {
                 args: Args,
 
                 fn execute(any_blocking_task: *AnyBlockingTask) void {
-                    const blocking_task: *Self = @fieldParentPtr("any_blocking_task", any_blocking_task);
+                    const blocking_task = Self.fromAny(any_blocking_task);
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
 
                     const res = @call(.always_inline, func, self.args);
-                    _ = self.blocking_task.future_result.set(res);
+                    _ = self.blocking_task.impl.future_result.set(res);
                 }
 
-                fn destroy(exec: *Executor, awaitable: *Awaitable) void {
+                fn destroy(rt: *Runtime, awaitable: *Awaitable) void {
                     const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
-                    const blocking_task: *Self = @fieldParentPtr("any_blocking_task", any_blocking_task);
+                    const blocking_task = Self.fromAny(any_blocking_task);
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
-                    exec.allocator.destroy(self);
+                    rt.allocator.destroy(self);
                 }
             };
 
@@ -489,56 +532,30 @@ pub fn BlockingTask(comptime T: type) type {
 
             task_data.* = .{
                 .blocking_task = .{
-                    .any_blocking_task = .{
-                        .awaitable = .{
-                            .kind = .blocking_task,
-                            .destroy_fn = &TaskData.destroy,
+                    .impl = .{
+                        .base = .{
+                            .awaitable = .{
+                                .kind = .blocking_task,
+                                .destroy_fn = &TaskData.destroy,
+                            },
+                            .thread_pool_task = .{ .callback = threadPoolCallback },
+                            .runtime = runtime,
+                            .execute_fn = &TaskData.execute,
                         },
-                        .thread_pool_task = .{ .callback = threadPoolCallback },
-                        .executor = executor,
-                        .execute_fn = &TaskData.execute,
+                        .future_result = FutureResult(T){},
                     },
-                    .future_result = FutureResult(T){},
-                    .executor = executor,
                 },
                 .args = args,
             };
 
             // Increment ref count for the JoinHandle
-            task_data.blocking_task.any_blocking_task.awaitable.ref_count.incr();
+            task_data.blocking_task.impl.base.awaitable.ref_count.incr();
 
-            executor.thread_pool.?.schedule(
-                xev.ThreadPool.Batch.from(&task_data.blocking_task.any_blocking_task.thread_pool_task),
+            runtime.executor.thread_pool.?.schedule(
+                xev.ThreadPool.Batch.from(&task_data.blocking_task.impl.base.thread_pool_task),
             );
 
             return &task_data.blocking_task;
-        }
-
-        fn deinit(self: *Self) void {
-            self.executor.releaseAwaitable(&self.any_blocking_task.awaitable);
-        }
-
-        fn join(self: *Self) !T {
-            if (self.future_result.get()) |res| {
-                return res;
-            }
-
-            // Wait for blocking task to complete (works from both coroutines and threads)
-            // The waiter can be canceled even though the blocking task continues execution
-            try self.any_blocking_task.awaitable.waitForComplete();
-
-            return self.future_result.get() orelse unreachable;
-        }
-
-        fn result(self: *Self) !T {
-            return self.join();
-        }
-
-        /// Request cancellation of this blocking task.
-        /// If the task hasn't started executing yet, it will skip execution.
-        /// If already executing, this has no effect (cannot stop blocking work).
-        pub fn cancel(self: *Self) void {
-            self.any_blocking_task.cancel();
         }
     };
 }
@@ -547,31 +564,47 @@ pub fn BlockingTask(comptime T: type) type {
 pub fn JoinHandle(comptime T: type) type {
     return struct {
         const Self = @This();
+        pub const Result = T;
 
-        kind: union(enum) {
-            coro: *Task(T),
-            blocking: *BlockingTask(T),
-            future: *Future(T),
-        },
+        awaitable: *Awaitable,
 
         pub fn deinit(self: *Self) void {
-            switch (self.kind) {
-                .coro => |task| task.deinit(),
-                .blocking => |task| task.deinit(),
-                .future => |future| future.deinit(),
-            }
+            const runtime = switch (self.awaitable.kind) {
+                .task => Task(T).fromAwaitable(self.awaitable).getRuntime(),
+                .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).getRuntime(),
+                .future => Future(T).fromAwaitable(self.awaitable).getRuntime(),
+                .select_waiter => unreachable, // JoinHandles never point to select waiters
+            };
+            runtime.releaseAwaitable(self.awaitable);
         }
 
-        pub fn join(self: *Self) !T {
-            return switch (self.kind) {
-                .coro => |task| try task.join(),
-                .blocking => |task| try task.join(),
-                .future => |future| try future.wait(),
+        pub fn join(self: *Self) !meta.Payload(T) {
+            return switch (self.awaitable.kind) {
+                .task => Task(T).fromAwaitable(self.awaitable).wait(),
+                .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).wait(),
+                .future => Future(T).fromAwaitable(self.awaitable).wait(),
+                .select_waiter => unreachable, // JoinHandles never point to select waiters
             };
         }
 
-        pub fn result(self: *Self) !T {
-            return self.join();
+        /// Check if the task has completed and a result is available.
+        pub fn hasResult(self: *const Self) bool {
+            return self.awaitable.state.load(.acquire) == 1;
+        }
+
+        /// Get the result value of type T (preserving any error union).
+        /// Asserts that the task has already completed.
+        /// This is used internally by select() to preserve error union types.
+        fn getResult(self: *Self) T {
+            assert(self.hasResult());
+
+            // Get the stored result of type T
+            return switch (self.awaitable.kind) {
+                .task => Task(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
+                .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
+                .future => Future(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
+                .select_waiter => unreachable,
+            };
         }
 
         /// Request cancellation of this task.
@@ -579,13 +612,51 @@ pub fn JoinHandle(comptime T: type) type {
         /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
         /// For futures: Has no effect (futures are not cancelable).
         pub fn cancel(self: *Self) void {
-            switch (self.kind) {
-                .coro => |task| task.any_task.cancel(),
-                .blocking => |task| task.any_blocking_task.cancel(),
-                .future => {}, // Futures cannot be canceled
+            self.awaitable.requestCancellation();
+        }
+
+        /// Cast this JoinHandle to a different error set while keeping the same payload type.
+        /// This is safe because all error sets have the same runtime representation (u16).
+        /// The payload type must remain unchanged.
+        /// This is a move operation - the original handle is consumed.
+        ///
+        /// Example: JoinHandle(MyError!i32) can be cast to JoinHandle(anyerror!i32)
+        pub fn cast(self: Self, comptime T2: type) JoinHandle(T2) {
+            const P1 = meta.Payload(T);
+            const P2 = meta.Payload(T2);
+            if (P1 != P2) {
+                @compileError("cast() can only change error set, not payload type. " ++
+                    "Source payload: " ++ @typeName(P1) ++ ", target payload: " ++ @typeName(P2));
             }
+
+            return JoinHandle(T2){ .awaitable = self.awaitable };
         }
     };
+}
+
+/// Given a struct with each field a `JoinHandle(T)`, returns a union with the same
+/// fields, each field type `T` (which may include error unions).
+pub fn SelectUnion(comptime S: type) type {
+    const struct_fields = @typeInfo(S).@"struct".fields;
+    var fields: [struct_fields.len]std.builtin.Type.UnionField = undefined;
+    for (&fields, struct_fields) |*union_field, struct_field| {
+        // Extract T from JoinHandle(T)
+        // struct_field.type is JoinHandle(T)
+        const Handle = struct_field.type;
+        // Handle.Result is T directly (may be an error union like ParseError!i32)
+        const Result = Handle.Result;
+        union_field.* = .{
+            .name = struct_field.name,
+            .type = Result,
+            .alignment = struct_field.alignment,
+        };
+    }
+    return @Type(.{ .@"union" = .{
+        .layout = .auto,
+        .tag_type = std.meta.FieldEnum(S),
+        .fields = &fields,
+        .decls = &.{},
+    } });
 }
 
 // Simple singly-linked stack (LIFO) for single-threaded use
@@ -761,11 +832,11 @@ pub const Executor = struct {
     loop: xev.Loop,
     thread_pool: ?*xev.ThreadPool, // Reference to Runtime's thread pool
     stack_pool: StackPool,
-    count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
+    current_coroutine: ?*Coroutine = null,
 
-    tasks: std.AutoHashMapUnmanaged(u64, *AnyTask) = .{},
+    tasks: std.AutoHashMapUnmanaged(*AnyTask, void) = .{},
 
     ready_queue: SimpleAwaitableStack = .{},
     next_ready_queue: SimpleAwaitableStack = .{},
@@ -788,12 +859,9 @@ pub const Executor = struct {
         return @fieldParentPtr("main_context", coro.parent_context_ptr);
     }
 
-    /// Get the current Executor from within a coroutine
-    pub fn getCurrent() ?*Executor {
-        if (coroutines.getCurrent()) |coro| {
-            return fromCoroutine(coro);
-        }
-        return null;
+    /// Get the Runtime instance from this Executor
+    pub inline fn runtime(self: *Executor) *Runtime {
+        return @fieldParentPtr("executor", self);
     }
 
     pub fn init(allocator: Allocator, thread_pool: ?*xev.ThreadPool, options: RuntimeOptions) !Executor {
@@ -815,10 +883,11 @@ pub const Executor = struct {
     pub fn deinit(self: *Executor) void {
         // Note: ThreadPool is owned by Runtime, not Executor
 
-        var iter = self.tasks.iterator();
-        while (iter.next()) |entry| {
-            const task = entry.value_ptr.*;
-            self.releaseAwaitable(&task.awaitable);
+        const rt = self.runtime();
+        var iter = self.tasks.keyIterator();
+        while (iter.next()) |task_ptr| {
+            const task = task_ptr.*;
+            rt.releaseAwaitable(&task.awaitable);
         }
         self.tasks.deinit(self.allocator);
 
@@ -833,26 +902,20 @@ pub const Executor = struct {
         self.stack_pool.deinit();
     }
 
-    pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.Result(func)) {
+    pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         const debug_crash = false;
         if (debug_crash) {
             const v = @call(.always_inline, func, args);
             std.debug.print("Spawned task with ID {any}\n", .{v});
         }
 
-        const id = self.count;
-        self.count += 1;
-
-        const entry = try self.tasks.getOrPut(self.allocator, id);
-        if (entry.found_existing) {
-            std.debug.panic("Task ID {} already exists", .{id});
-        }
-        errdefer self.tasks.removeByPtr(entry.key_ptr);
+        // Ensure hashmap capacity first, before any allocations
+        try self.tasks.ensureUnusedCapacity(self.allocator, 1);
 
         const Result = meta.ReturnType(func);
-        const Payload = meta.Payload(Result);
-        const TypedTask = Task(Payload);
+        const TypedTask = Task(Result);
 
+        // Allocate task struct
         const task = try self.allocator.create(TypedTask);
         errdefer self.allocator.destroy(task);
 
@@ -861,36 +924,38 @@ pub const Executor = struct {
         errdefer self.stack_pool.release(stack);
 
         task.* = .{
-            .any_task = .{
-                .id = id,
-                .awaitable = .{
-                    .kind = .coro,
-                    .destroy_fn = &TypedTask.destroyFn,
+            .impl = .{
+                .base = .{
+                    .awaitable = .{
+                        .kind = .task,
+                        .destroy_fn = &TypedTask.destroyFn,
+                    },
+                    .coro = .{
+                        .stack = stack,
+                        .parent_context_ptr = &self.main_context,
+                        .state = .ready,
+                    },
                 },
-                .coro = .{
-                    .stack = stack,
-                    .parent_context_ptr = &self.main_context,
-                    .state = .ready,
-                },
+                .future_result = .{},
             },
-            .future_result = .{},
         };
 
-        task.any_task.coro.setup(func, args, &task.future_result);
+        task.impl.base.coro.setup(func, args, &task.impl.future_result);
 
-        entry.value_ptr.* = &task.any_task;
+        // putNoClobber cannot fail since we ensured capacity
+        self.tasks.putAssumeCapacityNoClobber(&task.impl.base, {});
 
-        self.ready_queue.push(&task.any_task.awaitable);
+        self.ready_queue.push(&task.impl.base.awaitable);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
 
-        task.any_task.awaitable.ref_count.incr();
-        return JoinHandle(Payload){ .kind = .{ .coro = task } };
+        task.impl.base.awaitable.ref_count.incr();
+        return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
 
     pub fn yield(self: *Executor, desired_state: CoroutineState) Cancelable!void {
-        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
         // Track yield
@@ -919,13 +984,13 @@ pub const Executor = struct {
         if (self.ready_queue.pop()) |next_awaitable| {
             const next_task = AnyTask.fromAwaitable(next_awaitable);
 
-            coroutines.setCurrent(&next_task.coro);
+            self.current_coroutine = &next_task.coro;
             coroutines.switchContext(&current_coro.context, &next_task.coro.context);
         } else {
             coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
         }
 
-        std.debug.assert(coroutines.getCurrent() == current_coro);
+        std.debug.assert(self.current_coroutine == current_coro);
 
         // Check again after resuming in case we were canceled while suspended (unless shielded)
         if (current_task.shield_count == 0) {
@@ -941,8 +1006,7 @@ pub const Executor = struct {
     /// This is useful for cleanup operations (like close()) that must complete even if canceled.
     /// Must be paired with endShield().
     pub fn beginShield(self: *Executor) void {
-        _ = self;
-        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
         current_task.shield_count += 1;
     }
@@ -950,8 +1014,7 @@ pub const Executor = struct {
     /// End a cancellation shield.
     /// Must be paired with beginShield().
     pub fn endShield(self: *Executor) void {
-        _ = self;
-        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
         std.debug.assert(current_task.shield_count > 0);
         current_task.shield_count -= 1;
@@ -961,18 +1024,11 @@ pub const Executor = struct {
     /// This consumes the cancellation flag.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
     pub fn checkCanceled(self: *Executor) Cancelable!void {
-        _ = self;
-        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
         // Check and consume cancellation flag
         if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
             return error.Canceled;
-        }
-    }
-
-    fn releaseAwaitable(self: *Executor, awaitable: *Awaitable) void {
-        if (awaitable.ref_count.decr()) {
-            awaitable.destroy_fn(self, awaitable);
         }
     }
 
@@ -1007,28 +1063,28 @@ pub const Executor = struct {
         self: *Executor,
         func: anytype,
         args: meta.ArgsType(func),
-    ) !JoinHandle(meta.Result(func)) {
+    ) !JoinHandle(meta.ReturnType(func)) {
         try self.ensureBlockingInitialized();
 
-        const Payload = meta.Result(func);
-        const task = try BlockingTask(Payload).init(
-            self, // Already passes *Executor
+        const Result = meta.ReturnType(func);
+        const task = try BlockingTask(Result).init(
+            self.runtime(),
             self.allocator,
             func,
             args,
         );
 
-        return JoinHandle(Payload){ .kind = .{ .blocking = task } };
+        return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
 
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
     /// This is equivalent to: `spawn()` + `run()` + `result()`, but in a single call.
     /// Returns an error union that includes errors from `spawn()`, `run()`, and the task itself.
-    pub fn runUntilComplete(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Result(func) {
+    pub fn runUntilComplete(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
         var handle = try self.spawn(func, args, options);
         defer handle.deinit();
         try self.run();
-        return handle.result();
+        return handle.join();
     }
 
     pub fn run(self: *Executor) !void {
@@ -1044,12 +1100,12 @@ pub const Executor = struct {
             while (self.ready_queue.pop()) |awaitable| {
                 const task = AnyTask.fromAwaitable(awaitable);
 
-                coroutines.setCurrent(&task.coro);
-                defer coroutines.clearCurrent();
+                self.current_coroutine = &task.coro;
+                defer self.current_coroutine = null;
                 coroutines.switchContext(&self.main_context, &task.coro.context);
 
-                // Handle dead coroutines (checks getCurrent() to catch tasks that died via direct switch in yield())
-                if (coroutines.getCurrent()) |current_coro| {
+                // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
+                if (self.current_coroutine) |current_coro| {
                     if (current_coro.state == .dead) {
                         const current_task = AnyTask.fromCoroutine(current_coro);
                         const current_awaitable = &current_task.awaitable;
@@ -1061,14 +1117,14 @@ pub const Executor = struct {
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        current_awaitable.markComplete(self);
+                        current_awaitable.markComplete();
 
                         // Track task completion
                         self.metrics.tasks_completed += 1;
 
                         // Remove from tasks hashmap and release runtime's reference
-                        _ = self.tasks.remove(current_task.id);
-                        self.releaseAwaitable(current_awaitable);
+                        _ = self.tasks.remove(current_task);
+                        self.runtime().releaseAwaitable(current_awaitable);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
                     }
                 }
@@ -1112,24 +1168,6 @@ pub const Executor = struct {
         self.metrics = .{};
     }
 
-    pub fn wait(self: *Executor, task_id: u64) Cancelable!void {
-        const task = self.tasks.get(task_id) orelse return;
-        if (task.coro.state == .dead) {
-            return;
-        }
-        const current_coro = coroutines.getCurrent() orelse std.debug.panic("not in coroutine", .{});
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        if (current_task == task) {
-            std.debug.panic("a task cannot wait on itself", .{});
-        }
-        task.awaitable.waiting_list.push(&current_task.awaitable);
-        self.yield(.waiting) catch |err| {
-            // On cancellation, remove from wait queue
-            _ = task.awaitable.waiting_list.remove(&current_task.awaitable);
-            return err;
-        };
-    }
-
     /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
     /// Uses lower 2 bits for generation (pointers are aligned).
     inline fn packTimerUserdata(comptime T: type, ptr: *T, generation: u2) ?*anyopaque {
@@ -1160,7 +1198,7 @@ pub const Executor = struct {
         timeout_ctx: *TimeoutContext,
         comptime onTimeout: fn (ctx: *TimeoutContext) bool,
     ) error{ Timeout, Canceled }!void {
-        const current = coroutines.getCurrent() orelse unreachable;
+        const current = self.current_coroutine orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
         const CallbackContext = struct {
@@ -1328,6 +1366,13 @@ pub const Executor = struct {
     }
 };
 
+// SelectWaiter - used by Runtime.select to wait on multiple handles
+pub const SelectWaiter = struct {
+    awaitable: Awaitable,
+    task: *AnyTask,
+    ready: bool = false,
+};
+
 // Runtime - orchestrator that wraps a single Executor (for now)
 pub const Runtime = struct {
     executor: Executor,
@@ -1377,11 +1422,11 @@ pub const Runtime = struct {
     }
 
     // High-level public API - delegates to Executor
-    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.Result(func)) {
+    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         return self.executor.spawn(func, args, options);
     }
 
-    pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.Result(func)) {
+    pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
         return self.executor.spawnBlocking(func, args);
     }
 
@@ -1389,7 +1434,7 @@ pub const Runtime = struct {
         return self.executor.run();
     }
 
-    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Result(func) {
+    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
         return self.executor.runUntilComplete(func, args, options);
     }
 
@@ -1401,17 +1446,15 @@ pub const Runtime = struct {
     /// The current task will be rescheduled and continue execution later.
     /// No-op if not called from within a coroutine.
     pub fn yield(self: *Runtime) Cancelable!void {
-        _ = self;
-        const executor = Executor.getCurrent() orelse return;
-        return executor.yield(.ready);
+        if (self.executor.current_coroutine == null) return;
+        return self.executor.yield(.ready);
     }
 
     /// Sleep for the specified number of milliseconds.
     /// Uses async sleep if in a coroutine, blocking sleep otherwise.
     pub fn sleep(self: *Runtime, milliseconds: u64) void {
-        _ = self;
-        if (Executor.getCurrent()) |executor| {
-            executor.sleep(milliseconds);
+        if (self.executor.current_coroutine) |_| {
+            self.executor.sleep(milliseconds);
         } else {
             // Not in coroutine - use blocking sleep
             std.Thread.sleep(milliseconds * std.time.ns_per_ms);
@@ -1421,17 +1464,15 @@ pub const Runtime = struct {
     /// Begin a cancellation shield to prevent cancellation during critical sections.
     /// No-op if not called from within a coroutine.
     pub fn beginShield(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.getCurrent() orelse return;
-        return executor.beginShield();
+        if (self.executor.current_coroutine == null) return;
+        self.executor.beginShield();
     }
 
     /// End a cancellation shield.
     /// No-op if not called from within a coroutine.
     pub fn endShield(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.getCurrent() orelse return;
-        return executor.endShield();
+        if (self.executor.current_coroutine == null) return;
+        self.executor.endShield();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
@@ -1439,16 +1480,14 @@ pub const Runtime = struct {
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
     /// No-op (returns successfully) if not called from within a coroutine.
     pub fn checkCanceled(self: *Runtime) Cancelable!void {
-        _ = self;
-        const executor = Executor.getCurrent() orelse return;
-        return executor.checkCanceled();
+        if (self.executor.current_coroutine == null) return;
+        return self.executor.checkCanceled();
     }
 
     pub fn getCurrent() ?*Runtime {
-        if (Executor.getCurrent()) |executor| {
-            return @fieldParentPtr("executor", executor);
-        }
-        return null;
+        // This function has no way to access the runtime without threadlocal
+        // It should not be used - tests that use it need Runtime passed as parameter
+        @compileError("Runtime.getCurrent() is not supported - pass *Runtime as parameter instead");
     }
 
     /// Get a copy of the current executor metrics
@@ -1459,6 +1498,107 @@ pub const Runtime = struct {
     /// Reset all executor metrics to zero
     pub fn resetMetrics(self: *Runtime) void {
         self.executor.resetMetrics();
+    }
+
+    fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
+        if (awaitable.ref_count.decr()) {
+            awaitable.destroy_fn(self, awaitable);
+        }
+    }
+
+    /// Wait for multiple JoinHandles simultaneously and return whichever completes first.
+    /// `handles` is a struct with each field a `JoinHandle(T)`, where `T` can be different for each field.
+    /// Returns a tagged union with the same field names, containing the result of whichever completed first.
+    ///
+    /// When multiple handles complete at the same time, fields are checked in declaration order
+    /// and the first ready handle is returned.
+    ///
+    /// Example:
+    /// ```
+    /// var h1 = try rt.spawn(task1, .{}, .{});
+    /// var h2 = try rt.spawn(task2, .{}, .{});
+    /// const result = rt.select(.{ .first = h1, .second = h2 });
+    /// switch (result) {
+    ///     .first => |val| ...,
+    ///     .second => |val| ...,
+    /// }
+    /// ```
+    pub fn select(self: *Runtime, handles: anytype) !SelectUnion(@TypeOf(handles)) {
+        const U = SelectUnion(@TypeOf(handles));
+        const S = @TypeOf(handles);
+        const fields = @typeInfo(S).@"struct".fields;
+
+        // Fast path: check if any handle is already complete
+        inline for (fields) |field| {
+            var handle = @field(handles, field.name);
+            if (handle.hasResult()) {
+                // Already complete, return immediately
+                return @unionInit(U, field.name, handle.getResult());
+            }
+        }
+
+        // Multi-wait path: Create separate waiter awaitables for each handle
+        // We can't add the same awaitable to multiple lists (next/prev pointers conflict)
+        const current_coro = self.executor.current_coroutine orelse return error.NotInCoroutine;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        const executor = Executor.fromCoroutine(current_coro);
+
+        // Create waiter structures on the stack
+        var waiters: [fields.len]SelectWaiter = undefined;
+        inline for (&waiters, 0..) |*waiter, i| {
+            waiter.* = .{
+                .awaitable = .{
+                    .kind = .select_waiter,
+                    .destroy_fn = struct {
+                        fn dummy(_: *Runtime, _: *Awaitable) void {}
+                    }.dummy,
+                },
+                .task = current_task,
+            };
+            _ = i; // Will use below
+        }
+
+        // Add waiters to all waiting lists
+        inline for (fields, 0..) |field, i| {
+            var handle = @field(handles, field.name);
+            handle.awaitable.waiting_list.push(&waiters[i].awaitable);
+        }
+
+        // Clean up waiters on all exit paths (skip waiters marked ready by markComplete)
+        defer {
+            inline for (0..fields.len) |i| {
+                if (!waiters[i].ready) {
+                    var h = @field(handles, fields[i].name);
+                    _ = h.awaitable.waiting_list.remove(&waiters[i].awaitable);
+                }
+            }
+        }
+
+        // Double-check for completion (race condition prevention)
+        inline for (fields, 0..) |field, i| {
+            var handle = @field(handles, field.name);
+            if (handle.hasResult()) {
+                // Completed while we were adding to lists, defer will clean up
+                return @unionInit(U, field.name, handle.getResult());
+            }
+            _ = i;
+        }
+
+        // Yield and wait for one to complete
+        try executor.yield(.waiting);
+
+        // We were woken up - find which one completed
+        inline for (fields, 0..) |field, i| {
+            var handle = @field(handles, field.name);
+            if (handle.hasResult()) {
+                // This one completed, defer will clean up all non-ready waiters
+                return @unionInit(U, field.name, handle.getResult());
+            }
+            _ = i;
+        }
+
+        // Should never reach here - we were woken up, so something must be complete
+        unreachable;
     }
 };
 
@@ -1497,7 +1637,7 @@ test "runtime: spawnBlocking smoke test" {
             var handle = try rt.spawnBlocking(blockingWork, .{21});
             defer handle.deinit();
 
-            const result = handle.join();
+            const result = try handle.join();
             try testing.expectEqual(@as(i32, 42), result);
         }
     };
@@ -1520,7 +1660,7 @@ test "runtime: Future basic set and get" {
             future.set(42);
 
             // Get value (should return immediately since already set)
-            const result = future.wait();
+            const result = try future.wait();
             try testing.expectEqual(@as(i32, 42), result);
         }
     };
@@ -1535,9 +1675,8 @@ test "runtime: Future await from coroutine" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn setterTask(future: *Future(i32)) !void {
+        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
             // Simulate async work
-            const rt = Runtime.getCurrent().?;
             try rt.yield();
             try rt.yield();
             future.set(123);
@@ -1553,14 +1692,14 @@ test "runtime: Future await from coroutine" {
             defer future.deinit();
 
             // Spawn setter coroutine
-            var setter_handle = try rt.spawn(setterTask, .{future}, .{});
+            var setter_handle = try rt.spawn(setterTask, .{ rt, future }, .{});
             defer setter_handle.deinit();
 
             // Spawn getter coroutine
             var getter_handle = try rt.spawn(getterTask, .{future}, .{});
             defer getter_handle.deinit();
 
-            const result = getter_handle.join();
+            const result = try getter_handle.join();
             try testing.expectEqual(@as(i32, 123), result);
         }
     };
@@ -1575,13 +1714,12 @@ test "runtime: Future multiple waiters" {
     defer runtime.deinit();
     const TestContext = struct {
         fn waiterTask(future: *Future(i32), expected: i32) !void {
-            const result = future.wait();
+            const result = try future.wait();
             try testing.expectEqual(expected, result);
         }
 
-        fn setterTask(future: *Future(i32)) !void {
+        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
             // Let waiters block first
-            const rt = Runtime.getCurrent().?;
             try rt.yield();
             try rt.yield();
             future.set(999);
@@ -1600,7 +1738,7 @@ test "runtime: Future multiple waiters" {
             defer waiter3.deinit();
 
             // Spawn setter
-            var setter = try rt.spawn(setterTask, .{future}, .{});
+            var setter = try rt.spawn(setterTask, .{ rt, future }, .{});
             defer setter.deinit();
 
             try rt.yield();
@@ -1608,9 +1746,401 @@ test "runtime: Future multiple waiters" {
             try rt.yield();
             try rt.yield();
 
-            try waiter1.result();
-            try waiter2.result();
-            try waiter3.result();
+            try waiter1.join();
+            try waiter2.join();
+            try waiter3.join();
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: select basic - first completes" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn slowTask(rt: *Runtime) i32 {
+            rt.sleep(100);
+            return 42;
+        }
+
+        fn fastTask(rt: *Runtime) i32 {
+            rt.sleep(10);
+            return 99;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var slow = try rt.spawn(slowTask, .{rt}, .{});
+            defer slow.deinit();
+            var fast = try rt.spawn(fastTask, .{rt}, .{});
+            defer fast.deinit();
+
+            const result = try rt.select(.{ .fast = fast, .slow = slow });
+            switch (result) {
+                .slow => |val| try testing.expectEqual(@as(i32, 42), val),
+                .fast => |val| try testing.expectEqual(@as(i32, 99), val),
+            }
+            // Fast should win
+            try testing.expectEqual(std.meta.Tag(@TypeOf(result)).fast, std.meta.activeTag(result));
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: select already complete - fast path" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn immediateTask() i32 {
+            return 123;
+        }
+
+        fn slowTask(rt: *Runtime) i32 {
+            rt.sleep(100);
+            return 456;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var immediate = try rt.spawn(immediateTask, .{}, .{});
+            defer immediate.deinit();
+
+            // Give immediate task a chance to complete
+            try rt.yield();
+            try rt.yield();
+
+            var slow = try rt.spawn(slowTask, .{rt}, .{});
+            defer slow.deinit();
+
+            // immediate should already be complete, select should return immediately
+            const result = try rt.select(.{ .immediate = immediate, .slow = slow });
+            switch (result) {
+                .immediate => |val| try testing.expectEqual(@as(i32, 123), val),
+                .slow => return error.TestUnexpectedResult,
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: select heterogeneous types" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn intTask(rt: *Runtime) i32 {
+            rt.sleep(100);
+            return 42;
+        }
+
+        fn stringTask(rt: *Runtime) []const u8 {
+            rt.sleep(10);
+            return "hello";
+        }
+
+        fn boolTask(rt: *Runtime) bool {
+            rt.sleep(150);
+            return true;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var int_handle = try rt.spawn(intTask, .{rt}, .{});
+            defer int_handle.deinit();
+            var string_handle = try rt.spawn(stringTask, .{rt}, .{});
+            defer string_handle.deinit();
+            var bool_handle = try rt.spawn(boolTask, .{rt}, .{});
+            defer bool_handle.deinit();
+
+            const result = try rt.select(.{
+                .string = string_handle,
+                .int = int_handle,
+                .bool = bool_handle,
+            });
+
+            switch (result) {
+                .int => |val| {
+                    try testing.expectEqual(@as(i32, 42), val);
+                    return error.TestUnexpectedResult; // Should not complete first
+                },
+                .string => |val| {
+                    try testing.expectEqualStrings("hello", val);
+                    // This should win
+                },
+                .bool => |val| {
+                    try testing.expectEqual(true, val);
+                    return error.TestUnexpectedResult; // Should not complete first
+                },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: select with cancellation" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn slowTask1(rt: *Runtime) i32 {
+            rt.sleep(1000);
+            return 1;
+        }
+
+        fn slowTask2(rt: *Runtime) i32 {
+            rt.sleep(1000);
+            return 2;
+        }
+
+        fn selectTask(rt: *Runtime) !i32 {
+            var h1 = try rt.spawn(slowTask1, .{rt}, .{});
+            defer h1.deinit();
+            var h2 = try rt.spawn(slowTask2, .{rt}, .{});
+            defer h2.deinit();
+
+            const result = try rt.select(.{ .first = h1, .second = h2 });
+            return switch (result) {
+                .first => |v| v,
+                .second => |v| v,
+            };
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var select_handle = try rt.spawn(selectTask, .{rt}, .{});
+            defer select_handle.deinit();
+
+            // Give it a chance to start waiting
+            try rt.yield();
+            try rt.yield();
+
+            // Cancel the select operation
+            select_handle.cancel();
+
+            // Should return error.Canceled
+            const result = select_handle.join();
+            try testing.expectError(error.Canceled, result);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: select with error unions - success case" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        const ParseError = error{ InvalidFormat, OutOfRange };
+        const ValidationError = error{ TooShort, TooLong };
+
+        fn parseTask(rt: *Runtime) ParseError!i32 {
+            rt.sleep(100);
+            return 42;
+        }
+
+        fn validateTask(rt: *Runtime) ValidationError![]const u8 {
+            rt.sleep(10);
+            return "valid";
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var parse_handle = try rt.spawn(parseTask, .{rt}, .{});
+            defer parse_handle.deinit();
+            var validate_handle = try rt.spawn(validateTask, .{rt}, .{});
+            defer validate_handle.deinit();
+
+            const result = try rt.select(.{
+                .validate = validate_handle,
+                .parse = parse_handle,
+            });
+
+            // Result is a union where each field has the original error type
+            switch (result) {
+                .parse => |val_or_err| {
+                    // val_or_err is ParseError!i32
+                    const val = val_or_err catch |err| {
+                        try testing.expect(false); // Should not error
+                        return err;
+                    };
+                    try testing.expectEqual(@as(i32, 42), val);
+                    return error.TestUnexpectedResult; // validate should win
+                },
+                .validate => |val_or_err| {
+                    // val_or_err is ValidationError![]const u8
+                    const val = val_or_err catch |err| {
+                        try testing.expect(false); // Should not error
+                        return err;
+                    };
+                    try testing.expectEqualStrings("valid", val);
+                    // This should win
+                },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: select with error unions - error case" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        const ParseError = error{ InvalidFormat, OutOfRange };
+
+        fn failingTask(rt: *Runtime) ParseError!i32 {
+            rt.sleep(10);
+            return error.OutOfRange;
+        }
+
+        fn slowTask(rt: *Runtime) i32 {
+            rt.sleep(100);
+            return 99;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var failing = try rt.spawn(failingTask, .{rt}, .{});
+            defer failing.deinit();
+            var slow = try rt.spawn(slowTask, .{rt}, .{});
+            defer slow.deinit();
+
+            const result = try rt.select(.{ .failing = failing, .slow = slow });
+
+            switch (result) {
+                .failing => |val_or_err| {
+                    // val_or_err is ParseError!i32
+                    _ = val_or_err catch |err| {
+                        // Should receive the original error
+                        try testing.expectEqual(ParseError.OutOfRange, err);
+                        return;
+                    };
+                    return error.TestUnexpectedResult; // Should have errored
+                },
+                .slow => |val| {
+                    try testing.expectEqual(@as(i32, 99), val);
+                    return error.TestUnexpectedResult; // failing should win
+                },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: select with mixed error types" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        const ParseError = error{ InvalidFormat, OutOfRange };
+        const IOError = error{ FileNotFound, PermissionDenied };
+
+        fn task1(rt: *Runtime) ParseError!i32 {
+            rt.sleep(100);
+            return 100;
+        }
+
+        fn task2(rt: *Runtime) IOError![]const u8 {
+            rt.sleep(10);
+            return error.FileNotFound;
+        }
+
+        fn task3(rt: *Runtime) bool {
+            rt.sleep(150);
+            return true;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var h1 = try rt.spawn(task1, .{rt}, .{});
+            defer h1.deinit();
+            var h2 = try rt.spawn(task2, .{rt}, .{});
+            defer h2.deinit();
+            var h3 = try rt.spawn(task3, .{rt}, .{});
+            defer h3.deinit();
+
+            // rt.select returns Cancelable!SelectUnion(...)
+            // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
+            const result = try rt.select(.{ .h2 = h2, .h1 = h1, .h3 = h3 });
+
+            switch (result) {
+                .h1 => |val_or_err| {
+                    _ = val_or_err catch return error.TestUnexpectedResult;
+                    return error.TestUnexpectedResult;
+                },
+                .h2 => |val_or_err| {
+                    // val_or_err is IOError![]const u8
+                    _ = val_or_err catch |err| {
+                        // Verify we got the original error type
+                        try testing.expectEqual(IOError.FileNotFound, err);
+                        return; // This is expected
+                    };
+                    return error.TestUnexpectedResult; // Should have errored
+                },
+                .h3 => |val| {
+                    try testing.expectEqual(true, val);
+                    return error.TestUnexpectedResult;
+                },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: JoinHandle.cast() error set conversion" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        const MyError = error{ Foo, Bar };
+
+        fn taskSuccess() MyError!i32 {
+            return 42;
+        }
+
+        fn taskError() MyError!i32 {
+            return error.Foo;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            // Test casting success case
+            {
+                var handle = try rt.spawn(taskSuccess, .{}, .{});
+                var casted = handle.cast(anyerror!i32);
+                defer casted.deinit();
+
+                const result = try casted.join();
+                try testing.expectEqual(@as(i32, 42), result);
+            }
+
+            // Test casting error case
+            {
+                var handle = try rt.spawn(taskError, .{}, .{});
+                var casted = handle.cast(anyerror!i32);
+                defer casted.deinit();
+
+                const result = casted.join();
+                try testing.expectError(error.Foo, result);
+            }
         }
     };
 

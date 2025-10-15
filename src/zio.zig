@@ -10,6 +10,7 @@ const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
+pub const SelectUnion = runtime.SelectUnion;
 
 // Re-export I/O functionality
 pub const File = @import("file.zig").File;

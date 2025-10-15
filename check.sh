@@ -74,12 +74,13 @@ fi
 zig build build-tests
 timeout 30s ./zig-out/bin/test
 
+echo "=== Building examples ==="
+zig build examples
+
+echo "=== Running benchmarks ==="
+zig build benchmarks
+
 echo "=== Running xev unit tests ==="
-if [ -n "$TEST_FILTER" ]; then
-    echo "Running unit tests with filter: $TEST_FILTER"
-else
-    echo "Running all xev unit tests..."
-fi
 cd vendor/libxev && zig build test
 
 echo "=== All checks passed! ==="

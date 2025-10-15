@@ -147,8 +147,8 @@ test "tcpConnectToAddress: basic connection" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }
 
 test "tcpConnectToHost: localhost connection" {
@@ -204,6 +204,6 @@ test "tcpConnectToHost: localhost connection" {
 
     try runtime.run();
 
-    try server_task.result();
-    try client_task.result();
+    try server_task.join();
+    try client_task.join();
 }

@@ -40,8 +40,8 @@ pub const init: Mutex = .{};
 /// Returns `true` if the lock was successfully acquired, `false` if the mutex
 /// is already locked by another coroutine or if called outside a coroutine context.
 /// This function will never suspend the current task. If you need blocking behavior, use `lock()` instead.
-pub fn tryLock(self: *Mutex) bool {
-    const current = coroutines.getCurrent() orelse return false;
+pub fn tryLock(self: *Mutex, runtime: *Runtime) bool {
+    const current = runtime.executor.current_coroutine orelse return false;
 
     // Try to atomically set owner from null to current
     return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
@@ -59,11 +59,11 @@ pub fn tryLock(self: *Mutex) bool {
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
 /// ```
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
 
     // Fast path: try to acquire unlocked mutex
-    if (self.tryLock()) return;
+    if (self.tryLock(runtime)) return;
 
     // Slow path: add current task to wait queue and suspend
     const task = AnyTask.fromCoroutine(current);
@@ -109,8 +109,7 @@ pub fn lockNoCancel(self: *Mutex, runtime: *Runtime) void {
 ///
 /// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex, runtime: *Runtime) void {
-    _ = runtime;
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     std.debug.assert(self.owner.load(.monotonic) == current);
 
@@ -166,10 +165,10 @@ test "Mutex tryLock" {
 
     const TestFn = struct {
         fn testTryLock(rt: *Runtime, mtx: *Mutex, results: *[3]bool) void {
-            results[0] = mtx.tryLock(); // Should succeed
-            results[1] = mtx.tryLock(); // Should fail (already locked)
+            results[0] = mtx.tryLock(rt); // Should succeed
+            results[1] = mtx.tryLock(rt); // Should fail (already locked)
             mtx.unlock(rt);
-            results[2] = mtx.tryLock(); // Should succeed again
+            results[2] = mtx.tryLock(rt); // Should succeed again
             mtx.unlock(rt);
         }
     };
