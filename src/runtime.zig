@@ -1742,7 +1742,7 @@ test "runtime: select basic - first completes" {
 
     const TestContext = struct {
         fn slowTask(rt: *Runtime) i32 {
-            rt.sleep(50);
+            rt.sleep(100);
             return 42;
         }
 
@@ -1817,7 +1817,7 @@ test "runtime: select heterogeneous types" {
 
     const TestContext = struct {
         fn intTask(rt: *Runtime) i32 {
-            rt.sleep(20);
+            rt.sleep(100);
             return 42;
         }
 
@@ -1827,7 +1827,7 @@ test "runtime: select heterogeneous types" {
         }
 
         fn boolTask(rt: *Runtime) bool {
-            rt.sleep(30);
+            rt.sleep(150);
             return true;
         }
 
@@ -1926,7 +1926,7 @@ test "runtime: select with error unions - success case" {
         const ValidationError = error{ TooShort, TooLong };
 
         fn parseTask(rt: *Runtime) ParseError!i32 {
-            rt.sleep(20);
+            rt.sleep(100);
             return 42;
         }
 
@@ -2032,7 +2032,7 @@ test "runtime: select with mixed error types" {
         const IOError = error{ FileNotFound, PermissionDenied };
 
         fn task1(rt: *Runtime) ParseError!i32 {
-            rt.sleep(30);
+            rt.sleep(100);
             return 100;
         }
 
@@ -2042,7 +2042,7 @@ test "runtime: select with mixed error types" {
         }
 
         fn task3(rt: *Runtime) bool {
-            rt.sleep(50);
+            rt.sleep(150);
             return true;
         }
 
