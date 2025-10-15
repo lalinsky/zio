@@ -62,7 +62,7 @@ pub const TcpListener = struct {
     }
 
     pub fn accept(self: *TcpListener) !TcpStream {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -113,7 +113,7 @@ pub const TcpListener = struct {
         self.runtime.beginShield();
         defer self.runtime.endShield();
 
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -172,7 +172,7 @@ pub const TcpStream = struct {
     /// Returns a connected TcpStream on success.
     pub fn connect(runtime: *Runtime, addr: std.net.Address) !TcpStream {
         var tcp = try xev.TCP.init(addr);
-        const coro = coroutines.getCurrent().?;
+        const coro = runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -282,7 +282,7 @@ pub const TcpStream = struct {
     /// Shuts down the write side of the TCP connection.
     /// This sends a FIN packet to signal that no more data will be sent.
     pub fn shutdown(self: *TcpStream) !void {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -329,7 +329,7 @@ pub const TcpStream = struct {
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
     pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -369,7 +369,7 @@ pub const TcpStream = struct {
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
     pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -423,7 +423,7 @@ pub const TcpStream = struct {
         self.runtime.beginShield();
         defer self.runtime.endShield();
 
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {

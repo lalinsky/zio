@@ -155,12 +155,12 @@ pub const Awaitable = struct {
     /// When called from a coroutine, suspends the coroutine.
     /// When called from a thread, parks the thread using futex.
     /// Returns error.Canceled if the coroutine was canceled during the wait.
-    pub fn waitForComplete(self: *Awaitable) Cancelable!void {
+    pub fn waitForComplete(self: *Awaitable, runtime: *Runtime) Cancelable!void {
         // Fast path: check if already complete
         const fast_state = self.state.load(.acquire);
         if (fast_state == 1) return;
 
-        if (coroutines.getCurrent()) |current| {
+        if (runtime.executor.current_coroutine) |current| {
             // Coroutine path: add to wait queue and suspend
             const task = AnyTask.fromCoroutine(current);
 
@@ -203,12 +203,12 @@ pub const Awaitable = struct {
     /// Returns error.Canceled if the coroutine was canceled during the wait.
     /// For coroutines, uses runtime timer infrastructure.
     /// For threads, uses futex timedWait directly.
-    pub fn timedWaitForComplete(self: *Awaitable, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWaitForComplete(self: *Awaitable, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
         // Fast path: check if already complete
         const fast_state = self.state.load(.acquire);
         if (fast_state == 1) return;
 
-        if (coroutines.getCurrent()) |current| {
+        if (runtime.executor.current_coroutine) |current| {
             // Coroutine path: get executor and use timer infrastructure
             const task = AnyTask.fromCoroutine(current);
             const executor = Executor.fromCoroutine(current);
@@ -366,7 +366,8 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
             }
 
             // Wait for completion
-            try parent.impl.base.awaitable.waitForComplete();
+            const runtime = Parent.getRuntime(parent);
+            try parent.impl.base.awaitable.waitForComplete(runtime);
 
             return parent.impl.future_result.get().?;
         }
@@ -833,6 +834,7 @@ pub const Executor = struct {
     stack_pool: StackPool,
     main_context: coroutines.Context,
     allocator: Allocator,
+    current_coroutine: ?*Coroutine = null,
 
     tasks: std.AutoHashMapUnmanaged(*AnyTask, void) = .{},
 
@@ -855,14 +857,6 @@ pub const Executor = struct {
     /// Get the Executor instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
         return @fieldParentPtr("main_context", coro.parent_context_ptr);
-    }
-
-    /// Get the current Executor from within a coroutine
-    pub fn getCurrent() ?*Executor {
-        if (coroutines.getCurrent()) |coro| {
-            return fromCoroutine(coro);
-        }
-        return null;
     }
 
     /// Get the Runtime instance from this Executor
@@ -961,7 +955,7 @@ pub const Executor = struct {
     }
 
     pub fn yield(self: *Executor, desired_state: CoroutineState) Cancelable!void {
-        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
         // Track yield
@@ -990,13 +984,13 @@ pub const Executor = struct {
         if (self.ready_queue.pop()) |next_awaitable| {
             const next_task = AnyTask.fromAwaitable(next_awaitable);
 
-            coroutines.setCurrent(&next_task.coro);
+            self.current_coroutine = &next_task.coro;
             coroutines.switchContext(&current_coro.context, &next_task.coro.context);
         } else {
             coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
         }
 
-        std.debug.assert(coroutines.getCurrent() == current_coro);
+        std.debug.assert(self.current_coroutine == current_coro);
 
         // Check again after resuming in case we were canceled while suspended (unless shielded)
         if (current_task.shield_count == 0) {
@@ -1012,8 +1006,7 @@ pub const Executor = struct {
     /// This is useful for cleanup operations (like close()) that must complete even if canceled.
     /// Must be paired with endShield().
     pub fn beginShield(self: *Executor) void {
-        _ = self;
-        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
         current_task.shield_count += 1;
     }
@@ -1021,8 +1014,7 @@ pub const Executor = struct {
     /// End a cancellation shield.
     /// Must be paired with beginShield().
     pub fn endShield(self: *Executor) void {
-        _ = self;
-        const current_coro = coroutines.getCurrent() orelse unreachable;
+        const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
         std.debug.assert(current_task.shield_count > 0);
         current_task.shield_count -= 1;
@@ -1096,12 +1088,12 @@ pub const Executor = struct {
             while (self.ready_queue.pop()) |awaitable| {
                 const task = AnyTask.fromAwaitable(awaitable);
 
-                coroutines.setCurrent(&task.coro);
-                defer coroutines.clearCurrent();
+                self.current_coroutine = &task.coro;
+                defer self.current_coroutine = null;
                 coroutines.switchContext(&self.main_context, &task.coro.context);
 
-                // Handle dead coroutines (checks getCurrent() to catch tasks that died via direct switch in yield())
-                if (coroutines.getCurrent()) |current_coro| {
+                // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
+                if (self.current_coroutine) |current_coro| {
                     if (current_coro.state == .dead) {
                         const current_task = AnyTask.fromCoroutine(current_coro);
                         const current_awaitable = &current_task.awaitable;
@@ -1194,7 +1186,7 @@ pub const Executor = struct {
         timeout_ctx: *TimeoutContext,
         comptime onTimeout: fn (ctx: *TimeoutContext) bool,
     ) error{ Timeout, Canceled }!void {
-        const current = coroutines.getCurrent() orelse unreachable;
+        const current = self.current_coroutine orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
         const CallbackContext = struct {
@@ -1442,17 +1434,15 @@ pub const Runtime = struct {
     /// The current task will be rescheduled and continue execution later.
     /// No-op if not called from within a coroutine.
     pub fn yield(self: *Runtime) Cancelable!void {
-        _ = self;
-        const executor = Executor.getCurrent() orelse return;
-        return executor.yield(.ready);
+        if (self.executor.current_coroutine == null) return;
+        return self.executor.yield(.ready);
     }
 
     /// Sleep for the specified number of milliseconds.
     /// Uses async sleep if in a coroutine, blocking sleep otherwise.
     pub fn sleep(self: *Runtime, milliseconds: u64) void {
-        _ = self;
-        if (Executor.getCurrent()) |executor| {
-            executor.sleep(milliseconds);
+        if (self.executor.current_coroutine) |_| {
+            self.executor.sleep(milliseconds);
         } else {
             // Not in coroutine - use blocking sleep
             std.Thread.sleep(milliseconds * std.time.ns_per_ms);
@@ -1462,24 +1452,21 @@ pub const Runtime = struct {
     /// Begin a cancellation shield to prevent cancellation during critical sections.
     /// No-op if not called from within a coroutine.
     pub fn beginShield(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.getCurrent() orelse return;
-        return executor.beginShield();
+        if (self.executor.current_coroutine == null) return;
+        self.executor.beginShield();
     }
 
     /// End a cancellation shield.
     /// No-op if not called from within a coroutine.
     pub fn endShield(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.getCurrent() orelse return;
-        return executor.endShield();
+        if (self.executor.current_coroutine == null) return;
+        self.executor.endShield();
     }
 
     pub fn getCurrent() ?*Runtime {
-        if (Executor.getCurrent()) |executor| {
-            return @fieldParentPtr("executor", executor);
-        }
-        return null;
+        // This function has no way to access the runtime without threadlocal
+        // It should not be used - tests that use it need Runtime passed as parameter
+        @compileError("Runtime.getCurrent() is not supported - pass *Runtime as parameter instead");
     }
 
     /// Get a copy of the current executor metrics
@@ -1516,7 +1503,6 @@ pub const Runtime = struct {
     /// }
     /// ```
     pub fn select(self: *Runtime, handles: anytype) !SelectUnion(@TypeOf(handles)) {
-        _ = self;
         const U = SelectUnion(@TypeOf(handles));
         const S = @TypeOf(handles);
         const fields = @typeInfo(S).@"struct".fields;
@@ -1532,7 +1518,7 @@ pub const Runtime = struct {
 
         // Multi-wait path: Create separate waiter awaitables for each handle
         // We can't add the same awaitable to multiple lists (next/prev pointers conflict)
-        const current_coro = coroutines.getCurrent() orelse return error.NotInCoroutine;
+        const current_coro = self.executor.current_coroutine orelse return error.NotInCoroutine;
         const current_task = AnyTask.fromCoroutine(current_coro);
         const executor = Executor.fromCoroutine(current_coro);
 
@@ -1668,9 +1654,8 @@ test "runtime: Future await from coroutine" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn setterTask(future: *Future(i32)) !void {
+        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
             // Simulate async work
-            const rt = Runtime.getCurrent().?;
             try rt.yield();
             try rt.yield();
             future.set(123);
@@ -1686,7 +1671,7 @@ test "runtime: Future await from coroutine" {
             defer future.deinit();
 
             // Spawn setter coroutine
-            var setter_handle = try rt.spawn(setterTask, .{future}, .{});
+            var setter_handle = try rt.spawn(setterTask, .{ rt, future }, .{});
             defer setter_handle.deinit();
 
             // Spawn getter coroutine
@@ -1712,9 +1697,8 @@ test "runtime: Future multiple waiters" {
             try testing.expectEqual(expected, result);
         }
 
-        fn setterTask(future: *Future(i32)) !void {
+        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
             // Let waiters block first
-            const rt = Runtime.getCurrent().?;
             try rt.yield();
             try rt.yield();
             future.set(999);
@@ -1733,7 +1717,7 @@ test "runtime: Future multiple waiters" {
             defer waiter3.deinit();
 
             // Spawn setter
-            var setter = try rt.spawn(setterTask, .{future}, .{});
+            var setter = try rt.spawn(setterTask, .{ rt, future }, .{});
             defer setter.deinit();
 
             try rt.yield();
@@ -1757,22 +1741,20 @@ test "runtime: select basic - first completes" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn slowTask() i32 {
-            const rt = Runtime.getCurrent().?;
+        fn slowTask(rt: *Runtime) i32 {
             rt.sleep(50);
             return 42;
         }
 
-        fn fastTask() i32 {
-            const rt = Runtime.getCurrent().?;
+        fn fastTask(rt: *Runtime) i32 {
             rt.sleep(10);
             return 99;
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var slow = try rt.spawn(slowTask, .{}, .{});
+            var slow = try rt.spawn(slowTask, .{rt}, .{});
             defer slow.deinit();
-            var fast = try rt.spawn(fastTask, .{}, .{});
+            var fast = try rt.spawn(fastTask, .{rt}, .{});
             defer fast.deinit();
 
             const result = try rt.select(.{ .fast = fast, .slow = slow });
@@ -1799,8 +1781,7 @@ test "runtime: select already complete - fast path" {
             return 123;
         }
 
-        fn slowTask() i32 {
-            const rt = Runtime.getCurrent().?;
+        fn slowTask(rt: *Runtime) i32 {
             rt.sleep(100);
             return 456;
         }
@@ -1813,7 +1794,7 @@ test "runtime: select already complete - fast path" {
             try rt.yield();
             try rt.yield();
 
-            var slow = try rt.spawn(slowTask, .{}, .{});
+            var slow = try rt.spawn(slowTask, .{rt}, .{});
             defer slow.deinit();
 
             // immediate should already be complete, select should return immediately
@@ -1835,30 +1816,27 @@ test "runtime: select heterogeneous types" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn intTask() i32 {
-            const rt = Runtime.getCurrent().?;
+        fn intTask(rt: *Runtime) i32 {
             rt.sleep(20);
             return 42;
         }
 
-        fn stringTask() []const u8 {
-            const rt = Runtime.getCurrent().?;
+        fn stringTask(rt: *Runtime) []const u8 {
             rt.sleep(10);
             return "hello";
         }
 
-        fn boolTask() bool {
-            const rt = Runtime.getCurrent().?;
+        fn boolTask(rt: *Runtime) bool {
             rt.sleep(30);
             return true;
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var int_handle = try rt.spawn(intTask, .{}, .{});
+            var int_handle = try rt.spawn(intTask, .{rt}, .{});
             defer int_handle.deinit();
-            var string_handle = try rt.spawn(stringTask, .{}, .{});
+            var string_handle = try rt.spawn(stringTask, .{rt}, .{});
             defer string_handle.deinit();
-            var bool_handle = try rt.spawn(boolTask, .{}, .{});
+            var bool_handle = try rt.spawn(boolTask, .{rt}, .{});
             defer bool_handle.deinit();
 
             const result = try rt.select(.{
@@ -1894,23 +1872,20 @@ test "runtime: select with cancellation" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn slowTask1() i32 {
-            const rt = Runtime.getCurrent().?;
+        fn slowTask1(rt: *Runtime) i32 {
             rt.sleep(1000);
             return 1;
         }
 
-        fn slowTask2() i32 {
-            const rt = Runtime.getCurrent().?;
+        fn slowTask2(rt: *Runtime) i32 {
             rt.sleep(1000);
             return 2;
         }
 
-        fn selectTask() !i32 {
-            const rt = Runtime.getCurrent().?;
-            var h1 = try rt.spawn(slowTask1, .{}, .{});
+        fn selectTask(rt: *Runtime) !i32 {
+            var h1 = try rt.spawn(slowTask1, .{rt}, .{});
             defer h1.deinit();
-            var h2 = try rt.spawn(slowTask2, .{}, .{});
+            var h2 = try rt.spawn(slowTask2, .{rt}, .{});
             defer h2.deinit();
 
             const result = try rt.select(.{ .first = h1, .second = h2 });
@@ -1921,7 +1896,7 @@ test "runtime: select with cancellation" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var select_handle = try rt.spawn(selectTask, .{}, .{});
+            var select_handle = try rt.spawn(selectTask, .{rt}, .{});
             defer select_handle.deinit();
 
             // Give it a chance to start waiting
@@ -1950,22 +1925,20 @@ test "runtime: select with error unions - success case" {
         const ParseError = error{ InvalidFormat, OutOfRange };
         const ValidationError = error{ TooShort, TooLong };
 
-        fn parseTask() ParseError!i32 {
-            const rt = Runtime.getCurrent().?;
+        fn parseTask(rt: *Runtime) ParseError!i32 {
             rt.sleep(20);
             return 42;
         }
 
-        fn validateTask() ValidationError![]const u8 {
-            const rt = Runtime.getCurrent().?;
+        fn validateTask(rt: *Runtime) ValidationError![]const u8 {
             rt.sleep(10);
             return "valid";
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var parse_handle = try rt.spawn(parseTask, .{}, .{});
+            var parse_handle = try rt.spawn(parseTask, .{rt}, .{});
             defer parse_handle.deinit();
-            var validate_handle = try rt.spawn(validateTask, .{}, .{});
+            var validate_handle = try rt.spawn(validateTask, .{rt}, .{});
             defer validate_handle.deinit();
 
             const result = try rt.select(.{
@@ -2009,22 +1982,20 @@ test "runtime: select with error unions - error case" {
     const TestContext = struct {
         const ParseError = error{ InvalidFormat, OutOfRange };
 
-        fn failingTask() ParseError!i32 {
-            const rt = Runtime.getCurrent().?;
+        fn failingTask(rt: *Runtime) ParseError!i32 {
             rt.sleep(10);
             return error.OutOfRange;
         }
 
-        fn slowTask() i32 {
-            const rt = Runtime.getCurrent().?;
+        fn slowTask(rt: *Runtime) i32 {
             rt.sleep(100);
             return 99;
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var failing = try rt.spawn(failingTask, .{}, .{});
+            var failing = try rt.spawn(failingTask, .{rt}, .{});
             defer failing.deinit();
-            var slow = try rt.spawn(slowTask, .{}, .{});
+            var slow = try rt.spawn(slowTask, .{rt}, .{});
             defer slow.deinit();
 
             const result = try rt.select(.{ .failing = failing, .slow = slow });
@@ -2060,30 +2031,27 @@ test "runtime: select with mixed error types" {
         const ParseError = error{ InvalidFormat, OutOfRange };
         const IOError = error{ FileNotFound, PermissionDenied };
 
-        fn task1() ParseError!i32 {
-            const rt = Runtime.getCurrent().?;
+        fn task1(rt: *Runtime) ParseError!i32 {
             rt.sleep(30);
             return 100;
         }
 
-        fn task2() IOError![]const u8 {
-            const rt = Runtime.getCurrent().?;
+        fn task2(rt: *Runtime) IOError![]const u8 {
             rt.sleep(10);
             return error.FileNotFound;
         }
 
-        fn task3() bool {
-            const rt = Runtime.getCurrent().?;
+        fn task3(rt: *Runtime) bool {
             rt.sleep(50);
             return true;
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var h1 = try rt.spawn(task1, .{}, .{});
+            var h1 = try rt.spawn(task1, .{rt}, .{});
             defer h1.deinit();
-            var h2 = try rt.spawn(task2, .{}, .{});
+            var h2 = try rt.spawn(task2, .{rt}, .{});
             defer h2.deinit();
-            var h3 = try rt.spawn(task3, .{}, .{});
+            var h3 = try rt.spawn(task3, .{rt}, .{});
             defer h3.deinit();
 
             // rt.select returns Cancelable!SelectUnion(...)

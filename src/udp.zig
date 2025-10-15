@@ -28,7 +28,7 @@ pub const UdpSocket = struct {
     }
 
     pub fn read(self: *UdpSocket, buffer: []u8) !UdpReadResult {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
@@ -87,7 +87,7 @@ pub const UdpSocket = struct {
     }
 
     pub fn write(self: *UdpSocket, addr: std.net.Address, data: []const u8) !usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
@@ -144,7 +144,7 @@ pub const UdpSocket = struct {
         self.runtime.beginShield();
         defer self.runtime.endShield();
 
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {

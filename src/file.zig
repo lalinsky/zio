@@ -32,7 +32,7 @@ pub const File = struct {
     }
 
     pub fn read(self: *File, buffer: []u8) !usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -84,7 +84,7 @@ pub const File = struct {
     }
 
     pub fn write(self: *File, data: []const u8) !usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -160,7 +160,7 @@ pub const File = struct {
     }
 
     pub fn pread(self: *File, buffer: []u8, offset: u64) !usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -209,7 +209,7 @@ pub const File = struct {
     }
 
     pub fn pwrite(self: *File, data: []const u8, offset: u64) !usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -260,7 +260,7 @@ pub const File = struct {
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
     pub fn readBuf(self: *File, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -312,7 +312,7 @@ pub const File = struct {
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
     pub fn writeBuf(self: *File, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
@@ -358,7 +358,7 @@ pub const File = struct {
         self.runtime.beginShield();
         defer self.runtime.endShield();
 
-        const coro = coroutines.getCurrent().?;
+        const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
         const Result = struct {
