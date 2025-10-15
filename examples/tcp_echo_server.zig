@@ -65,5 +65,5 @@ pub fn main() !void {
 
     try runtime.run();
 
-    try server.result();
+    try server.join();
 }

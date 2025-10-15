@@ -15,7 +15,7 @@ const Condition = @This();
 pub const init: Condition = .{};
 
 pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 
@@ -40,7 +40,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 }
 
 pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{ Timeout, Canceled }!void {
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 

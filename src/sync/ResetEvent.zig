@@ -64,7 +64,6 @@ pub fn reset(self: *ResetEvent) void {
 /// This is effectively a more efficient version of `while (!isSet()) {}`.
 /// The memory accesses before the set() can be said to happen before wait() returns.
 pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
-    _ = runtime;
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -73,7 +72,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 
     // If we're now in waiting state, add to queue and block
     if (state == .waiting) {
-        const current = coroutines.getCurrent() orelse unreachable;
+        const current = runtime.executor.current_coroutine orelse unreachable;
         const executor = Executor.fromCoroutine(current);
         const task = AnyTask.fromCoroutine(current);
         self.wait_queue.push(&task.awaitable);
@@ -94,7 +93,6 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 /// If the timeout expires before the ResetEvent is set, `error.Timeout` is returned.
 /// The memory accesses before the set() can be said to happen before timedWait() returns without error.
 pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
-    _ = runtime;
     // Try to atomically register as a waiter
     var state = self.state.load(.acquire);
     if (state == .unset) {
@@ -108,7 +106,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
 
     // We're now in waiting state, add to queue and wait with timeout
     std.debug.assert(state == .waiting);
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 

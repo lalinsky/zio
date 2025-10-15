@@ -72,5 +72,5 @@ pub fn main() !void {
 
     try runtime.run();
 
-    try tls_task.result();
+    try tls_task.join();
 }

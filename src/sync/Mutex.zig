@@ -13,19 +13,19 @@ const Mutex = @This();
 
 pub const init: Mutex = .{};
 
-pub fn tryLock(self: *Mutex) bool {
-    const current = coroutines.getCurrent() orelse return false;
+pub fn tryLock(self: *Mutex, runtime: *Runtime) bool {
+    const current = runtime.executor.current_coroutine orelse return false;
 
     // Try to atomically set owner from null to current
     return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
 }
 
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
 
     // Fast path: try to acquire unlocked mutex
-    if (self.tryLock()) return;
+    if (self.tryLock(runtime)) return;
 
     // Slow path: add current task to wait queue and suspend
     const task = AnyTask.fromCoroutine(current);
@@ -46,8 +46,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 }
 
 pub fn unlock(self: *Mutex, runtime: *Runtime) void {
-    _ = runtime;
-    const current = coroutines.getCurrent() orelse unreachable;
+    const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     std.debug.assert(self.owner.load(.monotonic) == current);
 
@@ -103,10 +102,10 @@ test "Mutex tryLock" {
 
     const TestFn = struct {
         fn testTryLock(rt: *Runtime, mtx: *Mutex, results: *[3]bool) void {
-            results[0] = mtx.tryLock(); // Should succeed
-            results[1] = mtx.tryLock(); // Should fail (already locked)
+            results[0] = mtx.tryLock(rt); // Should succeed
+            results[1] = mtx.tryLock(rt); // Should fail (already locked)
             mtx.unlock(rt);
-            results[2] = mtx.tryLock(); // Should succeed again
+            results[2] = mtx.tryLock(rt); // Should succeed again
             mtx.unlock(rt);
         }
     };

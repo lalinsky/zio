@@ -20,6 +20,15 @@ pub fn Payload(comptime T: type) type {
     };
 }
 
+/// Extract the error set from an error union type.
+/// Returns anyerror if it's not an error union.
+pub fn ErrorSet(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .error_union => |eu| eu.error_set,
+        else => anyerror,
+    };
+}
+
 /// Convenience function that combines ReturnType and Payload.
 /// Extracts the return type from a function and unwraps any error union.
 pub fn Result(func: anytype) type {
