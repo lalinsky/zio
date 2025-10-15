@@ -1991,8 +1991,8 @@ test "runtime: select with error unions - success case" {
             defer validate_handle.deinit();
 
             const result = try rt.select(.{
-                .parse = parse_handle,
                 .validate = validate_handle,
+                .parse = parse_handle,
             });
 
             // Result is a union where each field has the original error type
