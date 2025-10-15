@@ -300,7 +300,6 @@ pub const Awaitable = struct {
 // Task for runtime scheduling - coroutine-based tasks
 pub const AnyTask = struct {
     awaitable: Awaitable,
-    id: u64,
     coro: Coroutine,
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
@@ -832,11 +831,10 @@ pub const Executor = struct {
     loop: xev.Loop,
     thread_pool: ?*xev.ThreadPool, // Reference to Runtime's thread pool
     stack_pool: StackPool,
-    count: u32 = 0,
     main_context: coroutines.Context,
     allocator: Allocator,
 
-    tasks: std.AutoHashMapUnmanaged(u64, *AnyTask) = .{},
+    tasks: std.AutoHashMapUnmanaged(*AnyTask, void) = .{},
 
     ready_queue: SimpleAwaitableStack = .{},
     next_ready_queue: SimpleAwaitableStack = .{},
@@ -892,9 +890,9 @@ pub const Executor = struct {
         // Note: ThreadPool is owned by Runtime, not Executor
 
         const rt = self.runtime();
-        var iter = self.tasks.iterator();
-        while (iter.next()) |entry| {
-            const task = entry.value_ptr.*;
+        var iter = self.tasks.keyIterator();
+        while (iter.next()) |task_ptr| {
+            const task = task_ptr.*;
             rt.releaseAwaitable(&task.awaitable);
         }
         self.tasks.deinit(self.allocator);
@@ -917,18 +915,13 @@ pub const Executor = struct {
             std.debug.print("Spawned task with ID {any}\n", .{v});
         }
 
-        const id = self.count;
-        self.count += 1;
-
-        const entry = try self.tasks.getOrPut(self.allocator, id);
-        if (entry.found_existing) {
-            std.debug.panic("Task ID {} already exists", .{id});
-        }
-        errdefer self.tasks.removeByPtr(entry.key_ptr);
+        // Ensure hashmap capacity first, before any allocations
+        try self.tasks.ensureUnusedCapacity(self.allocator, 1);
 
         const Result = meta.ReturnType(func);
         const TypedTask = Task(Result);
 
+        // Allocate task struct
         const task = try self.allocator.create(TypedTask);
         errdefer self.allocator.destroy(task);
 
@@ -939,7 +932,6 @@ pub const Executor = struct {
         task.* = .{
             .impl = .{
                 .base = .{
-                    .id = id,
                     .awaitable = .{
                         .kind = .task,
                         .destroy_fn = &TypedTask.destroyFn,
@@ -956,7 +948,8 @@ pub const Executor = struct {
 
         task.impl.base.coro.setup(func, args, &task.impl.future_result);
 
-        entry.value_ptr.* = &task.impl.base;
+        // putNoClobber cannot fail since we ensured capacity
+        self.tasks.putAssumeCapacityNoClobber(&task.impl.base, {});
 
         self.ready_queue.push(&task.impl.base.awaitable);
 
@@ -1126,7 +1119,7 @@ pub const Executor = struct {
                         self.metrics.tasks_completed += 1;
 
                         // Remove from tasks hashmap and release runtime's reference
-                        _ = self.tasks.remove(current_task.id);
+                        _ = self.tasks.remove(current_task);
                         self.runtime().releaseAwaitable(current_awaitable);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
                     }
@@ -1866,8 +1859,8 @@ test "runtime: select heterogeneous types" {
             defer bool_handle.deinit();
 
             const result = try rt.select(.{
-                .int = int_handle,
                 .string = string_handle,
+                .int = int_handle,
                 .bool = bool_handle,
             });
 
