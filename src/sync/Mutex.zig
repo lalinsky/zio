@@ -56,7 +56,7 @@ pub fn tryLock(self: *Mutex) bool {
 /// This function must be called from within a coroutine context managed by
 /// the zio runtime.
 ///
-/// Returns `error.Cancelled` if the task is cancelled while waiting for the lock.
+/// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
 /// ```
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     const current = coroutines.getCurrent() orelse unreachable;

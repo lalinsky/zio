@@ -79,7 +79,7 @@ pub const init: Condition = .{};
 /// }
 /// ```
 ///
-/// Returns `error.Cancelled` if the task is cancelled while waiting. The mutex
+/// Returns `error.Canceled` if the task is cancelled while waiting. The mutex
 /// will still be held when returning with an error.
 pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
     const current = coroutines.getCurrent() orelse unreachable;
