@@ -1502,6 +1502,9 @@ pub const Runtime = struct {
     /// `handles` is a struct with each field a `JoinHandle(T)`, where `T` can be different for each field.
     /// Returns a tagged union with the same field names, containing the result of whichever completed first.
     ///
+    /// When multiple handles complete at the same time, fields are checked in declaration order
+    /// and the first ready handle is returned.
+    ///
     /// Example:
     /// ```
     /// var h1 = try rt.spawn(task1, .{}, .{});
@@ -1772,7 +1775,7 @@ test "runtime: select basic - first completes" {
             var fast = try rt.spawn(fastTask, .{}, .{});
             defer fast.deinit();
 
-            const result = try rt.select(.{ .slow = slow, .fast = fast });
+            const result = try rt.select(.{ .fast = fast, .slow = slow });
             switch (result) {
                 .slow => |val| try testing.expectEqual(@as(i32, 42), val),
                 .fast => |val| try testing.expectEqual(@as(i32, 99), val),
@@ -2084,8 +2087,8 @@ test "runtime: select with mixed error types" {
             defer h3.deinit();
 
             // rt.select returns Cancelable!SelectUnion(...)
-            // SelectUnion has: { .h1: ParseError!i32, .h2: IOError![]const u8, .h3: bool }
-            const result = try rt.select(.{ .h1 = h1, .h2 = h2, .h3 = h3 });
+            // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
+            const result = try rt.select(.{ .h2 = h2, .h1 = h1, .h3 = h3 });
 
             switch (result) {
                 .h1 => |val_or_err| {
