@@ -613,6 +613,23 @@ pub fn JoinHandle(comptime T: type) type {
         pub fn cancel(self: *Self) void {
             self.awaitable.requestCancellation();
         }
+
+        /// Cast this JoinHandle to a different error set while keeping the same payload type.
+        /// This is safe because all error sets have the same runtime representation (u16).
+        /// The payload type must remain unchanged.
+        /// This is a move operation - the original handle is consumed.
+        ///
+        /// Example: JoinHandle(MyError!i32) can be cast to JoinHandle(anyerror!i32)
+        pub fn cast(self: Self, comptime T2: type) JoinHandle(T2) {
+            const P1 = meta.Payload(T);
+            const P2 = meta.Payload(T2);
+            if (P1 != P2) {
+                @compileError("cast() can only change error set, not payload type. " ++
+                    "Source payload: " ++ @typeName(P1) ++ ", target payload: " ++ @typeName(P2));
+            }
+
+            return JoinHandle(T2){ .awaitable = self.awaitable };
+        }
     };
 }
 
@@ -2116,6 +2133,49 @@ test "runtime: select with mixed error types" {
                     try testing.expectEqual(true, val);
                     return error.TestUnexpectedResult;
                 },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: JoinHandle.cast() error set conversion" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        const MyError = error{ Foo, Bar };
+
+        fn taskSuccess() MyError!i32 {
+            return 42;
+        }
+
+        fn taskError() MyError!i32 {
+            return error.Foo;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            // Test casting success case
+            {
+                var handle = try rt.spawn(taskSuccess, .{}, .{});
+                var casted = handle.cast(anyerror!i32);
+                defer casted.deinit();
+
+                const result = try casted.join();
+                try testing.expectEqual(@as(i32, 42), result);
+            }
+
+            // Test casting error case
+            {
+                var handle = try rt.spawn(taskError, .{}, .{});
+                var casted = handle.cast(anyerror!i32);
+                defer casted.deinit();
+
+                const result = casted.join();
+                try testing.expectError(error.Foo, result);
             }
         }
     };
