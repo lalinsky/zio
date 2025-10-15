@@ -93,9 +93,10 @@ fn acquireMutationLock(self: *Mutex) State {
 }
 
 /// Release exclusive access to wait queue.
-fn releaseMutationLock(self: *Mutex) void {
-    // Clear mutation bit
-    _ = self.head.fetchXor(0b10, .release);
+/// Returns the state after clearing the mutation bit.
+fn releaseMutationLock(self: *Mutex) State {
+    const val = self.head.fetchXor(0b10, .release);
+    return @enumFromInt(val ^ 0b10);
 }
 
 /// Attempts to acquire the mutex without blocking.
@@ -104,13 +105,13 @@ fn releaseMutationLock(self: *Mutex) void {
 /// This function will never suspend the current task. If you need blocking behavior, use `lock()` instead.
 pub fn tryLock(self: *Mutex) bool {
     // Try to atomically set head from unlocked to locked_once
-    // Memory ordering: acquire synchronizes-with unlock's release to see protected data
-    // On failure: monotonic is sufficient since we don't access shared state
+    // Memory ordering: acquire on success synchronizes-with unlock's release to see protected data
+    // On failure: acquire for consistency with lock() optimization pattern
     return self.head.cmpxchgStrong(
         @intFromEnum(State.unlocked),
         @intFromEnum(State.locked_once),
         .acquire,
-        .monotonic,
+        .acquire,
     ) == null;
 }
 
@@ -129,7 +130,13 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     const executor = Executor.fromCoroutine(current);
 
     // Fast path: try to acquire unlocked mutex
-    if (self.tryLock()) return;
+    // On failure, get current state to avoid extra load
+    var state: State = if (self.head.cmpxchgStrong(
+        @intFromEnum(State.unlocked),
+        @intFromEnum(State.locked_once),
+        .acquire,
+        .acquire,
+    )) |prev| @enumFromInt(prev) else return;
 
     // Slow path: add to FIFO wait queue (enqueue at tail)
     const task = AnyTask.fromCoroutine(current);
@@ -140,9 +147,6 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     awaitable.prev = null;
 
     while (true) {
-        const state_val = self.head.load(.acquire);
-        const state: State = @enumFromInt(state_val);
-
         // Check if became unlocked (race)
         if (state == .unlocked) {
             if (self.head.cmpxchgWeak(
@@ -150,7 +154,8 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
                 @intFromEnum(State.locked_once),
                 .acquire,
                 .acquire,
-            )) |_| {
+            )) |prev| {
+                state = @enumFromInt(prev);
                 continue;
             }
             return; // Got lock
@@ -162,8 +167,9 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
                 @intFromEnum(State.locked_once),
                 @intFromEnum(State.fromPtr(awaitable)),
                 .release,
-                .monotonic,
-            )) |_| {
+                .acquire,
+            )) |prev| {
+                state = @enumFromInt(prev);
                 continue;
             }
             // Success - we're the first and only waiter
@@ -175,6 +181,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
         if (state.hasMutationBit()) {
             // Spin until mutation lock is free
             std.atomic.spinLoopHint();
+            state = @enumFromInt(self.head.load(.acquire));
             continue;
         }
 
@@ -182,7 +189,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 
         // Check state didn't change to unlocked/locked_once while we waited
         if (old_state == .unlocked or old_state == .locked_once) {
-            self.releaseMutationLock();
+            state = self.releaseMutationLock();
             continue;
         }
 
@@ -193,7 +200,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
         old_tail.next = awaitable;
         self.tail = awaitable;
 
-        self.releaseMutationLock();
+        _ = self.releaseMutationLock();
         break; // Successfully enqueued
     }
 
@@ -263,7 +270,7 @@ pub fn unlock(self: *Mutex, runtime: *Runtime) void {
 
         // Check state didn't change
         if (old_state == .locked_once or old_state == .unlocked) {
-            self.releaseMutationLock();
+            _ = self.releaseMutationLock();
             continue;
         }
 
@@ -316,7 +323,7 @@ fn tryRemoveFromQueue(self: *Mutex, awaitable: *Awaitable) bool {
         }
 
         const old_state = self.acquireMutationLock();
-        defer self.releaseMutationLock();
+        defer _ = self.releaseMutationLock();
 
         // Check still in queue
         if (old_state == .unlocked or old_state == .locked_once) {
