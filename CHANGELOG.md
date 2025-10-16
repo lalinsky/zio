@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `JoinHandle.cast()` for converting between compatible error sets
+- Exported `Barrier` and `RefCounter` synchronization primitives
+
+### Changed
+
+- **BREAKING**: Renamed `Queue` to `Channel` with channel-style API
+- **BREAKING**: `JoinHandle(T)` type parameter `T` now represents the full error union type, not just the success payload
+- Updated to use `std.net.Address` directly
+- Internal refactoring to prepare for future multi-threaded runtime support (executor separation, unified waiter lists, improved cancellation-safety)
+
+### Fixed
+
+- macOS crash in event loop (updated libxev with kqueue fixes)
+
 ## [0.2.0] - 2025-10-10
 
 ### Added
