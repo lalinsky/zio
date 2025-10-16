@@ -1082,16 +1082,16 @@ pub const Executor = struct {
                 break;
             }
 
-            // Check for I/O events without blocking if we have pending work
-            const mode: xev.RunMode = if (self.ready_queue.head != null or self.next_ready_queue.head != null)
-                .no_wait
-            else
-                .once;
-
-            try self.loop.run(mode);
+            // First check for I/O events without blocking (processes cancellations and async notifications)
+            try self.loop.run(.no_wait);
 
             // Move yielded coroutines back to ready queue
             self.ready_queue.prependByMoving(&self.next_ready_queue);
+
+            // If no ready work, block waiting for I/O
+            if (self.ready_queue.head == null) {
+                try self.loop.run(.once);
+            }
         }
     }
 
