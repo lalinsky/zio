@@ -5,6 +5,7 @@ const StreamReader = @import("stream.zig").StreamReader;
 const StreamWriter = @import("stream.zig").StreamWriter;
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
+const resumeTask = @import("runtime.zig").resumeTask;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -80,7 +81,7 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -133,7 +134,7 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -192,7 +193,7 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -302,7 +303,7 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -355,7 +356,7 @@ pub const TcpStream = struct {
                 ) xev.CallbackAction {
                     const r = result_ptr.?;
                     r.result = result;
-                    Executor.fromCoroutine(r.coro).markReady(r.coro);
+                    resumeTask(r.coro, .local);
                     return .disarm;
                 }
             }).callback,
@@ -400,7 +401,7 @@ pub const TcpStream = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    Executor.fromCoroutine(r.coro).markReady(r.coro);
+                    resumeTask(r.coro, .local);
                     return .disarm;
                 }
             }).callback,
@@ -443,7 +444,7 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
