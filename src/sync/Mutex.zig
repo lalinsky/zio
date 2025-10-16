@@ -85,6 +85,10 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
         }
         return err;
     };
+
+    // Acquire fence: synchronize-with unlock()'s .release in pop()
+    // Ensures visibility of all writes made by the previous lock holder
+    _ = self.queue.getState();
 }
 
 /// Acquires the mutex with cancellation shielding.

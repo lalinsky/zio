@@ -151,6 +151,14 @@ pub const Awaitable = struct {
     // Cancellation flag - set to request cancellation, consumed by yield()
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+    // Compile-time alignment check for tagged pointer support
+    // ConcurrentAwaitableList uses lower 2 bits for state/mutation lock tagging
+    comptime {
+        if (@alignOf(Awaitable) < 4) {
+            @compileError("Awaitable must be at least 4-byte aligned for tagged pointer operations");
+        }
+    }
+
     /// Wait for this awaitable to complete. Works from both coroutines and threads.
     /// When called from a coroutine, suspends the coroutine.
     /// When called from a thread, parks the thread using futex.

@@ -132,6 +132,10 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
             _ = self.wait_queue.remove(executor, &task.awaitable);
             return err;
         };
+
+        // Acquire fence: synchronize-with set()'s .release swap
+        // Ensures visibility of all writes made before set() was called
+        _ = self.state.load(.acquire);
     }
 
     // If state is is_set, we return immediately (event already set)
@@ -197,6 +201,10 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
         }
         return err;
     };
+
+    // Acquire fence: synchronize-with set()'s .release swap on success path
+    // Ensures visibility of all writes made before set() was called
+    _ = self.state.load(.acquire);
 }
 
 test "ResetEvent basic set/reset/isSet" {

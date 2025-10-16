@@ -87,16 +87,17 @@ pub fn getState(self: *const ConcurrentAwaitableList) State {
 /// Try to atomically transition from one sentinel state to another
 /// Returns true if successful, false if state has changed
 ///
-/// Memory ordering: Uses .release on success to publish any prior modifications.
-/// Uses .acquire on failure to observe the current state.
+/// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
+/// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
+/// the current state.
 pub fn tryTransition(self: *ConcurrentAwaitableList, from: State, to: State) bool {
     std.debug.assert(!from.isPointer() and !to.isPointer());
-    // .release on success: makes prior modifications visible to threads observing the new state
+    // .acq_rel on success: acquires from prior unlock's .release AND releases for future operations
     // .acquire on failure: synchronizes-with prior .release to observe current state
     return self.head.cmpxchgStrong(
         @intFromEnum(from),
         @intFromEnum(to),
-        .release,
+        .acq_rel,
         .acquire,
     ) == null;
 }
