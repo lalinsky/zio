@@ -199,7 +199,7 @@ pub const Loop = struct {
                     // If we're deleting then we create a deletion event and
                     // queue the completion to notify cancellation.
                     .deleting => if (c.kevent()) |ev| {
-                        std.debug.print("[KQUEUE] submit: deleting completion {*} op={s}, marking .dead and pushing\n", .{ c, @tagName(c.op) });
+                        std.debug.print("[KQUEUE] submit: deleting completion {*} op={d}, marking .dead and pushing\n", .{ c, @intFromEnum(c.op) });
                         const ecanceled = -1 * @as(i32, @intCast(@intFromEnum(posix.system.E.CANCELED)));
                         c.result = c.syscall_result(ecanceled);
                         c.flags.state = .dead;
@@ -250,9 +250,11 @@ pub const Loop = struct {
                 // We handle deletions separately.
                 if (ev.flags & std.c.EV.DELETE != 0) continue;
 
+                std.debug.print("[KQUEUE] submit: got event udata=0x{x} ident={} filter={} flags=0x{x}\n", .{ ev.udata, ev.ident, ev.filter, ev.flags });
+
                 const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
 
-                std.debug.print("[KQUEUE] submit: processing completion {*} state={s} op={s}\n", .{ c, @tagName(c.flags.state), @tagName(c.op) });
+                std.debug.print("[KQUEUE] submit: processing completion {*} state={d} op={d}\n", .{ c, @intFromEnum(c.flags.state), @intFromEnum(c.op) });
 
                 // If the completion is already dead, it was already processed in this
                 // batch or pushed during the deleting phase. Skip to avoid double-processing.
@@ -542,9 +544,11 @@ pub const Loop = struct {
                 }
                 wait_rem -|= 1;
 
+                std.debug.print("[KQUEUE] tick: got event udata=0x{x} ident={} filter={} flags=0x{x}\n", .{ ev.udata, ev.ident, ev.filter, ev.flags });
+
                 const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
 
-                std.debug.print("[KQUEUE] tick: processing completion {*} state={s} op={s}\n", .{ c, @tagName(c.flags.state), @tagName(c.op) });
+                std.debug.print("[KQUEUE] tick: processing completion {*} state={d} op={d}\n", .{ c, @intFromEnum(c.flags.state), @intFromEnum(c.op) });
 
                 // If the completion is already dead, it was already processed in this
                 // batch or pushed during the deleting phase. Skip to avoid double-processing.
@@ -1154,8 +1158,8 @@ pub const Completion = struct {
             .timer,
             .shutdown,
             => {
-                log.warn("perform op={s}", .{@tagName(self.op)});
-                std.debug.print("[KQUEUE] perform: UNREACHABLE! completion {*} state={s} op={s}\n", .{ self, @tagName(self.flags.state), @tagName(self.op) });
+                log.warn("perform op={d}", .{@intFromEnum(self.op)});
+                std.debug.print("[KQUEUE] perform: UNREACHABLE! completion {*} state={d} op={d}\n", .{ self, @intFromEnum(self.flags.state), @intFromEnum(self.op) });
                 unreachable;
             },
 
