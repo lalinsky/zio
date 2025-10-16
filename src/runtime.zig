@@ -195,6 +195,8 @@ pub const Awaitable = struct {
                 return err;
             };
 
+            // Pair with markComplete()'s .release
+            _ = self.state.load(.acquire);
             // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: park on the state using futex
@@ -256,6 +258,8 @@ pub const Awaitable = struct {
                 return err;
             };
 
+            // Pair with markComplete()'s .release
+            _ = self.state.load(.acquire);
             // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: use futex timedWait
