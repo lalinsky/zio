@@ -101,7 +101,8 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     executor.async_wakeup.notify() catch {};
 }
 
-// Async callback to drain remote ready tasks (cross-thread resumption)
+// Async callback for remote ready tasks (cross-thread resumption)
+// Drains the remote queue directly into the ready queue.
 fn drainRemoteReadyTasks(
     executor: ?*Executor,
     loop: *xev.Loop,
@@ -113,12 +114,9 @@ fn drainRemoteReadyTasks(
     _ = c;
     const self = executor.?;
 
-    // Atomically drain all remote ready tasks (LIFO order)
+    // Atomically drain all remote ready tasks and prepend to ready queue
     var drained = self.next_ready_queue_remote.popAll();
-    while (drained.pop()) |awaitable| {
-        // Move to local next_ready_queue
-        self.next_ready_queue.push(awaitable);
-    }
+    self.ready_queue.prependByMoving(&drained);
 
     return .rearm;
 }
@@ -1076,6 +1074,9 @@ pub const Executor = struct {
                 // Other states (.ready, .waiting) are handled by yield() or markReady()
             }
 
+            // Run loop once without blocking to process immediate I/O
+            try self.loop.run(.no_wait);
+
             // Move yielded coroutines back to ready queue
             self.ready_queue.prependByMoving(&self.next_ready_queue);
 
@@ -1085,13 +1086,10 @@ pub const Executor = struct {
                 break;
             }
 
-            // Check for I/O events without blocking if we have pending work
-            const mode: xev.RunMode = if (self.ready_queue.head != null or self.next_ready_queue.head != null)
-                .no_wait
-            else
-                .once;
-
-            try self.loop.run(mode);
+            // If no ready work, wait for I/O
+            if (self.ready_queue.head == null) {
+                try self.loop.run(.once);
+            }
         }
     }
 
