@@ -35,7 +35,9 @@ jobs:
       timeout-minutes: 5
 
     - name: Run tests
-      run: TEST_FILTER="UDP: basic send and receive" zig build test
+      env:
+        TEST_FILTER: "UDP: basic send and receive"
+      run: zig build test
       timeout-minutes: 5
 
     - name: Run xev tests
