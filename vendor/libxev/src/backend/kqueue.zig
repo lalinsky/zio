@@ -233,7 +233,7 @@ pub const Loop = struct {
             const completed = try kevent_syscall(
                 self.kqueue_fd,
                 events[0..events_len],
-                events[0..events.len],
+                events[0..0], // Don't return events - only submit changes
                 &timeout,
             );
             events_len = 0;
