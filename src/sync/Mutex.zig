@@ -117,25 +117,10 @@ pub fn lockNoCancel(self: *Mutex, runtime: *Runtime) void {
 ///
 /// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex, runtime: *Runtime) void {
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-
-    while (true) {
-        // Try fast path: no waiters
-        if (self.queue.tryTransition(locked_once, unlocked)) {
-            return;
-        }
-
-        // Slow path: has waiters, pop one and wake it
-        if (self.queue.pop(executor)) |awaitable| {
-            wakeWaiter(awaitable);
-            return;
-        }
-
-        // Race: waiter removed itself (via cancellation) between check and pop.
-        // Loop and retry - either:
-        // 1. New waiter arrived → pop will succeed next iteration
-        // 2. No new waiters → tryTransition will succeed next iteration
+    // Pop one waiter or transition from locked_once to unlocked
+    // Handles cancellation race by retrying internally
+    if (self.queue.popOrTransition(&runtime.executor, locked_once, unlocked)) |awaitable| {
+        wakeWaiter(awaitable);
     }
 }
 

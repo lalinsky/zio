@@ -79,12 +79,12 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// The event remains set until `reset()` is called. Multiple calls to `set()` while
 /// already set have no effect.
 pub fn set(self: *ResetEvent, runtime: *Runtime) void {
-    // Extract all waiters and transition to is_set
-    // Use runtime's executor for acquiring the mutation lock
-    var waiters = self.wait_queue.popAll(&runtime.executor, is_set);
-
-    // Wake all waiters
-    while (waiters.pop()) |awaitable| {
+    // Pop and wake all waiters, then transition to is_set
+    // Loop continues until popOrTransition successfully transitions unset->is_set
+    // This handles: already set (is_set->is_set fails, pop returns null),
+    // has waiters (pops them all until last pop transitions to unset),
+    // and cancellation races (retry loop inside popOrTransition)
+    while (self.wait_queue.popOrTransition(&runtime.executor, unset, is_set)) |awaitable| {
         const task = AnyTask.fromAwaitable(awaitable);
         const task_executor = Executor.fromCoroutine(&task.coro);
         task_executor.markReady(&task.coro);

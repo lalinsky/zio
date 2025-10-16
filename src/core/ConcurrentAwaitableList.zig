@@ -86,21 +86,36 @@ pub fn getState(self: *const ConcurrentAwaitableList) State {
 }
 
 /// Try to atomically transition from one sentinel state to another
+/// Returns the previous state (useful for checking if already at target)
+///
+/// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
+/// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
+/// the current state.
+fn tryTransitionEx(self: *ConcurrentAwaitableList, from: State, to: State) State {
+    std.debug.assert(!from.isPointer() and !to.isPointer());
+    // .acq_rel on success: acquires from prior unlock's .release AND releases for future operations
+    // .acquire on failure: synchronizes-with prior .release to observe current state
+    const result = self.head.cmpxchgStrong(
+        @intFromEnum(from),
+        @intFromEnum(to),
+        .acq_rel,
+        .acquire,
+    );
+    if (result) |prev| {
+        return @enumFromInt(prev);
+    } else {
+        return from; // Success, was in from state
+    }
+}
+
+/// Try to atomically transition from one sentinel state to another
 /// Returns true if successful, false if state has changed
 ///
 /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
 /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
 /// the current state.
 pub fn tryTransition(self: *ConcurrentAwaitableList, from: State, to: State) bool {
-    std.debug.assert(!from.isPointer() and !to.isPointer());
-    // .acq_rel on success: acquires from prior unlock's .release AND releases for future operations
-    // .acquire on failure: synchronizes-with prior .release to observe current state
-    return self.head.cmpxchgStrong(
-        @intFromEnum(from),
-        @intFromEnum(to),
-        .acq_rel,
-        .acquire,
-    ) == null;
+    return self.tryTransitionEx(from, to) == from;
 }
 
 /// Acquire exclusive access to manipulate the wait list.
@@ -156,243 +171,167 @@ pub fn push(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *Awa
     awaitable.next = null;
     awaitable.prev = null;
 
-    // .acquire: synchronizes-with .release from prior operations
-    var state: State = @enumFromInt(self.head.load(.acquire));
-    var spin_count: u4 = 0;
-    while (true) {
-        // First waiter - transition from sentinel to queue with mutation bit set
-        if (!state.isPointer()) {
-            // .release on success: makes awaitable initialization visible to other threads
-            // .acquire on failure: reloads current state for retry
-            if (self.head.cmpxchgWeak(
-                @intFromEnum(state),
-                @intFromEnum(State.fromPtr(awaitable).withMutationBit()),
-                .release,
-                .acquire,
-            )) |prev| {
-                state = @enumFromInt(prev);
-                continue;
-            }
-            // Success - we're the first and only waiter, set tail then release mutation lock
-            self.tail = awaitable;
-            self.releaseMutationLock();
-            return;
-        }
+    const old_state = self.acquireMutationLock(executor);
 
-        // Queue exists - acquire mutation lock to append to tail
-        if (state.hasMutationBit()) {
-            // Spin until mutation lock is free, yielding on overflow (spin_count wraps to 0)
-            spin_count +%= 1;
-            if (spin_count == 0) {
-                executor.yield(.ready, .no_cancel);
-            }
-            std.atomic.spinLoopHint();
-            // .acquire: reload state to check if lock is still held
-            state = @enumFromInt(self.head.load(.acquire));
-            continue;
-        }
-
-        const old_state = self.acquireMutationLock(executor);
-
-        // Check state didn't change to sentinel while we waited
-        if (!old_state.isPointer()) {
-            // State changed to sentinel while we waited, but we already hold the lock
-            // So just transition from sentinel to pointer ourselves
-            self.tail = awaitable;
-            // .release: publishes tail update and awaitable initialization
-            self.head.store(@intFromEnum(State.fromPtr(awaitable)), .release);
-            return;
-        }
-
-        // Append to tail (safe - we have mutation lock)
-        const old_tail = self.tail.?;
-        awaitable.prev = old_tail;
-        awaitable.next = null;
-        old_tail.next = awaitable;
+    // First waiter - transition from sentinel to queue
+    if (!old_state.isPointer()) {
         self.tail = awaitable;
-
-        self.releaseMutationLock();
+        // .release: publishes tail update and awaitable initialization
+        self.head.store(@intFromEnum(State.fromPtr(awaitable)), .release);
         return;
     }
+
+    // Append to tail (safe - we have mutation lock)
+    const old_tail = self.tail.?;
+    awaitable.prev = old_tail;
+    awaitable.next = null;
+    old_tail.next = awaitable;
+    self.tail = awaitable;
+
+    self.releaseMutationLock();
 }
 
 /// Remove and return the awaitable at the front of the list.
 /// Returns null if list is in a sentinel state (empty).
 pub fn pop(self: *ConcurrentAwaitableList, executor: *Executor) ?*Awaitable {
-    var spin_count: u4 = 0;
-    while (true) {
-        // .acquire: synchronizes-with .release from prior operations
-        const state: State = @enumFromInt(self.head.load(.acquire));
+    const old_state = self.acquireMutationLock(executor);
 
-        // No waiters - queue is in sentinel state
-        if (!state.isPointer()) {
-            return null;
-        }
-
-        // Has waiters - acquire mutation lock to pop head
-        if (state.hasMutationBit()) {
-            spin_count +%= 1;
-            if (spin_count == 0) {
-                executor.yield(.ready, .no_cancel);
-            }
-            std.atomic.spinLoopHint();
-            continue;
-        }
-
-        const old_state = self.acquireMutationLock(executor);
-
-        // Check state didn't change
-        if (!old_state.isPointer()) {
-            self.releaseMutationLock();
-            return null;
-        }
-
-        const old_head = old_state.getPtr().?;
-        const next = old_head.next;
-
-        // Mark as removed from list (in debug mode)
-        if (builtin.mode == .Debug) {
-            std.debug.assert(old_head.in_list);
-            old_head.in_list = false;
-        }
-
-        // Clear old head's pointers
-        old_head.next = null;
-        old_head.prev = null;
-
-        if (next == null) {
-            // Last waiter - transition to sentinel0
-            // (implicitly releases mutation lock since sentinel0 = 0b00 has no mutation bit)
-            self.tail = null;
-            // .release: publishes tail update and makes queue empty state visible
-            self.head.store(@intFromEnum(State.sentinel0), .release);
-        } else {
-            // More waiters - update head
-            // (implicitly releases mutation lock since fromPtr() creates state without mutation bit)
-            next.?.prev = null;
-            // .release: publishes new head pointer and doubly-linked list updates
-            self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
-        }
-        // Mutation lock released by store() above
-
-        return old_head;
+    // Check if queue is empty (in sentinel state)
+    if (!old_state.isPointer()) {
+        self.releaseMutationLock();
+        return null;
     }
+
+    const old_head = old_state.getPtr().?;
+    const next = old_head.next;
+
+    // Mark as removed from list (in debug mode)
+    if (builtin.mode == .Debug) {
+        std.debug.assert(old_head.in_list);
+        old_head.in_list = false;
+    }
+
+    // Clear old head's pointers
+    old_head.next = null;
+    old_head.prev = null;
+
+    if (next == null) {
+        // Last waiter - transition to sentinel0
+        // (implicitly releases mutation lock since sentinel0 = 0b00 has no mutation bit)
+        self.tail = null;
+        // .release: publishes tail update and makes queue empty state visible
+        self.head.store(@intFromEnum(State.sentinel0), .release);
+    } else {
+        // More waiters - update head
+        // (implicitly releases mutation lock since fromPtr() creates state without mutation bit)
+        next.?.prev = null;
+        // .release: publishes new head pointer and doubly-linked list updates
+        self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
+    }
+    // Mutation lock released by store() above
+
+    return old_head;
 }
 
 /// Remove a specific awaitable from the list.
 /// Returns true if the awaitable was found and removed, false otherwise.
 pub fn remove(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *Awaitable) bool {
-    var spin_count: u4 = 0;
-    while (true) {
-        // .acquire: synchronizes-with .release from prior operations
-        const state: State = @enumFromInt(self.head.load(.acquire));
-
-        // Not in queue
-        if (!state.isPointer()) {
-            return false;
-        }
-
-        // Spin if mutation in progress
-        if (state.hasMutationBit()) {
-            spin_count +%= 1;
-            if (spin_count == 0) {
-                executor.yield(.ready, .no_cancel);
-            }
-            std.atomic.spinLoopHint();
-            continue;
-        }
-
-        const old_state = self.acquireMutationLock(executor);
-
-        // Check still in queue
-        if (!old_state.isPointer()) {
-            self.releaseMutationLock();
-            return false;
-        }
-
-        const head = old_state.getPtr().?;
-
-        // Debug assertion: awaitable should be marked as in-list
-        if (builtin.mode == .Debug) {
-            std.debug.assert(awaitable.in_list);
-        }
-
-        // Check if we're actually in the list (using prev/next pointers)
-        // If prev is null and we're not head, we're not in the list
-        if (awaitable.prev == null and head != awaitable) {
-            self.releaseMutationLock();
-            return false; // Not in list
-        }
-
-        // Mark as removed from list (in debug mode)
-        if (builtin.mode == .Debug) {
-            awaitable.in_list = false;
-        }
-
-        // O(1) removal with doubly-linked list
-        if (awaitable.prev) |prev| {
-            prev.next = awaitable.next;
-        }
-        if (awaitable.next) |next| {
-            next.prev = awaitable.prev;
-        }
-
-        // Update head if removing head
-        if (head == awaitable) {
-            if (awaitable.next) |next| {
-                // Store new head pointer (implicitly releases mutation lock since
-                // fromPtr() creates a state without the mutation bit)
-                // .release: publishes doubly-linked list updates and new head
-                self.head.store(@intFromEnum(State.fromPtr(next)), .release);
-            } else {
-                // Was only waiter - transition to sentinel0
-                // (implicitly releases mutation lock since sentinel0 = 0b00 has no mutation bit)
-                // .release: publishes tail update and queue empty state
-                self.head.store(@intFromEnum(State.sentinel0), .release);
-                self.tail = null;
-            }
-            // Mutation lock released by store() above
-        } else {
-            // Not removing head, update tail if needed then explicitly release lock
-            if (self.tail == awaitable) {
-                self.tail = awaitable.prev;
-            }
-            self.releaseMutationLock();
-        }
-
-        // Clear pointers
-        awaitable.next = null;
-        awaitable.prev = null;
-
-        return true;
-    }
-}
-
-/// Atomically extract the entire wait queue and reset to target_sentinel.
-/// Returns an AwaitableList containing all waiters (empty if no waiters).
-pub fn popAll(self: *ConcurrentAwaitableList, executor: *Executor, target_sentinel: State) AwaitableList {
-    std.debug.assert(!target_sentinel.isPointer());
-
     const old_state = self.acquireMutationLock(executor);
 
-    // No waiters - just transition to target_sentinel and return empty
+    // Check if queue is empty
     if (!old_state.isPointer()) {
-        self.head.store(@intFromEnum(target_sentinel), .release);
-        return AwaitableList{};
+        self.releaseMutationLock();
+        return false;
     }
 
-    // Extract the queue
-    const result = AwaitableList{
-        .head = old_state.getPtr(),
-        .tail = self.tail,
-    };
+    const head = old_state.getPtr().?;
 
-    // Clear internal state and set to target_sentinel (implicitly releases mutation lock)
-    self.tail = null;
-    // .release: publishes tail update and queue extraction
-    self.head.store(@intFromEnum(target_sentinel), .release);
+    // Debug assertion: awaitable should be marked as in-list
+    if (builtin.mode == .Debug) {
+        std.debug.assert(awaitable.in_list);
+    }
 
-    return result;
+    // Check if we're actually in the list (using prev/next pointers)
+    // If prev is null and we're not head, we're not in the list
+    if (awaitable.prev == null and head != awaitable) {
+        self.releaseMutationLock();
+        return false; // Not in list
+    }
+
+    // Mark as removed from list (in debug mode)
+    if (builtin.mode == .Debug) {
+        awaitable.in_list = false;
+    }
+
+    // O(1) removal with doubly-linked list
+    if (awaitable.prev) |prev| {
+        prev.next = awaitable.next;
+    }
+    if (awaitable.next) |next| {
+        next.prev = awaitable.prev;
+    }
+
+    // Update head if removing head
+    if (head == awaitable) {
+        if (awaitable.next) |next| {
+            // Store new head pointer (implicitly releases mutation lock since
+            // fromPtr() creates a state without the mutation bit)
+            // .release: publishes doubly-linked list updates and new head
+            self.head.store(@intFromEnum(State.fromPtr(next)), .release);
+        } else {
+            // Was only waiter - transition to sentinel0
+            // (implicitly releases mutation lock since sentinel0 = 0b00 has no mutation bit)
+            // .release: publishes tail update and queue empty state
+            self.head.store(@intFromEnum(State.sentinel0), .release);
+            self.tail = null;
+        }
+        // Mutation lock released by store() above
+    } else {
+        // Not removing head, update tail if needed then explicitly release lock
+        if (self.tail == awaitable) {
+            self.tail = awaitable.prev;
+        }
+        self.releaseMutationLock();
+    }
+
+    // Clear pointers
+    awaitable.next = null;
+    awaitable.prev = null;
+
+    return true;
+}
+
+/// Pop one item, retrying until success or queue is empty.
+/// If queue is empty (in from_sentinel state), transitions to to_sentinel.
+/// Returns the popped item, or null if queue was/became empty.
+///
+/// This handles the race where waiters remove themselves (via cancellation)
+/// between the empty check and pop by retrying in a loop.
+pub fn popOrTransition(self: *ConcurrentAwaitableList, executor: *Executor, from_sentinel: State, to_sentinel: State) ?*Awaitable {
+    std.debug.assert(!from_sentinel.isPointer());
+    std.debug.assert(!to_sentinel.isPointer());
+
+    while (true) {
+        // Try to transition from empty state
+        const prev_state = self.tryTransitionEx(from_sentinel, to_sentinel);
+
+        // Success: was in from_sentinel, transitioned to to_sentinel
+        if (prev_state == from_sentinel) {
+            return null;
+        }
+
+        // Already in target state, nothing to do
+        if (prev_state == to_sentinel) {
+            return null;
+        }
+
+        // Has waiters (state is pointer), try to pop one
+        if (self.pop(executor)) |awaitable| {
+            return awaitable;
+        }
+
+        // Race: waiter cancelled between check and pop, retry
+    }
 }
 
 test "ConcurrentAwaitableList basic operations" {
