@@ -57,7 +57,7 @@ pub const UdpSocket = struct {
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
                 result_data.sender_addr = addr;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -113,7 +113,7 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -165,7 +165,7 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }

@@ -63,7 +63,7 @@ fn markReadyFromXevCallback(
     _ = result catch {};
 
     if (userdata) |coro| {
-        resumeTask(coro);
+        resumeTask(coro, .local);
     }
     return .disarm;
 }
@@ -148,176 +148,142 @@ fn drainBlockingCompletions(
     return .rearm;
 }
 
-// Awaitable kind - distinguishes different awaitable types
-pub const AwaitableKind = enum {
-    task,
-    blocking_task,
-    future,
-    select_waiter,
-};
+// Re-export Awaitable types from core module
+const awaitable_module = @import("core/Awaitable.zig");
+pub const Awaitable = awaitable_module.Awaitable;
+pub const AwaitableKind = awaitable_module.AwaitableKind;
 
-// Awaitable - base type for anything that can be waited on
-pub const Awaitable = struct {
-    kind: AwaitableKind,
-    next: ?*Awaitable = null,
-    prev: ?*Awaitable = null,
-    waiting_list: SimpleAwaitableList = .{},
-    ref_count: RefCounter(u32) = RefCounter(u32).init(),
-    destroy_fn: *const fn (*Runtime, *Awaitable) void,
-    in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+/// Wait for an awaitable to complete. Works from both coroutines and threads.
+/// When called from a coroutine, suspends the coroutine.
+/// When called from a thread, parks the thread using futex.
+/// Returns error.Canceled if the coroutine was canceled during the wait.
+pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void {
+    // Fast path: check if already complete
+    const fast_state = awaitable.state.load(.acquire);
+    if (fast_state == 1) return;
 
-    // Universal state for both coroutines and threads
-    // 0 = pending/not ready, 1 = complete/ready
-    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    if (runtime.executor.current_coroutine) |current| {
+        // Coroutine path: add to wait queue and suspend
+        const task = AnyTask.fromCoroutine(current);
 
-    // Cancellation flag - set to request cancellation, consumed by yield()
-    canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        // Check for self-join (would deadlock)
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            if (&task.awaitable == awaitable) {
+                std.debug.panic("cannot wait on self (would deadlock)", .{});
+            }
+        }
+        awaitable.waiting_list.push(&task.awaitable);
 
-    // Compile-time alignment check for tagged pointer support
-    // ConcurrentAwaitableList uses lower 2 bits for state/mutation lock tagging
-    comptime {
-        if (@alignOf(Awaitable) < 4) {
-            @compileError("Awaitable must be at least 4-byte aligned for tagged pointer operations");
+        // Double-check state before suspending (avoid lost wakeup)
+        const double_check_state = awaitable.state.load(.acquire);
+        if (double_check_state == 1) {
+            // Completed while we were adding to queue, remove ourselves
+            _ = awaitable.waiting_list.remove(&task.awaitable);
+            return;
+        }
+
+        const executor = Executor.fromCoroutine(current);
+        executor.yield(.waiting, .allow_cancel) catch |err| {
+            // If yield itself was canceled, remove from wait list
+            _ = awaitable.waiting_list.remove(&task.awaitable);
+            return err;
+        };
+
+        // Pair with markComplete()'s .release
+        _ = awaitable.state.load(.acquire);
+        // Yield returned successfully, awaitable must be complete
+    } else {
+        // Thread path: park on the state using futex
+        while (true) {
+            const current_state = awaitable.state.load(.acquire);
+            if (current_state == 1) return;
+            std.Thread.Futex.wait(&awaitable.state, 0);
         }
     }
+}
 
-    /// Wait for this awaitable to complete. Works from both coroutines and threads.
-    /// When called from a coroutine, suspends the coroutine.
-    /// When called from a thread, parks the thread using futex.
-    /// Returns error.Canceled if the coroutine was canceled during the wait.
-    pub fn waitForComplete(self: *Awaitable, runtime: *Runtime) Cancelable!void {
-        // Fast path: check if already complete
-        const fast_state = self.state.load(.acquire);
-        if (fast_state == 1) return;
+/// Wait for an awaitable to complete with a timeout. Works from both coroutines and threads.
+/// Returns error.Timeout if the timeout expires before completion.
+/// Returns error.Canceled if the coroutine was canceled during the wait.
+/// For coroutines, uses runtime timer infrastructure.
+/// For threads, uses futex timedWait directly.
+pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    // Fast path: check if already complete
+    const fast_state = awaitable.state.load(.acquire);
+    if (fast_state == 1) return;
 
-        if (runtime.executor.current_coroutine) |current| {
-            // Coroutine path: add to wait queue and suspend
-            const task = AnyTask.fromCoroutine(current);
+    if (runtime.executor.current_coroutine) |current| {
+        // Coroutine path: get executor and use timer infrastructure
+        const task = AnyTask.fromCoroutine(current);
+        const executor = Executor.fromCoroutine(current);
 
-            // Check for self-join (would deadlock)
-            if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-                if (&task.awaitable == self) {
-                    std.debug.panic("cannot wait on self (would deadlock)", .{});
+        awaitable.waiting_list.push(&task.awaitable);
+
+        const double_check_state = awaitable.state.load(.acquire);
+        if (double_check_state == 1) {
+            _ = awaitable.waiting_list.remove(&task.awaitable);
+            return;
+        }
+
+        const TimeoutContext = struct {
+            wait_queue: *SimpleAwaitableList,
+            awaitable: *Awaitable,
+        };
+
+        var timeout_ctx = TimeoutContext{
+            .wait_queue = &awaitable.waiting_list,
+            .awaitable = &task.awaitable,
+        };
+
+        executor.timedWaitForReadyWithCallback(
+            timeout_ns,
+            TimeoutContext,
+            &timeout_ctx,
+            struct {
+                fn onTimeout(ctx: *TimeoutContext) bool {
+                    return ctx.wait_queue.remove(ctx.awaitable);
                 }
+            }.onTimeout,
+        ) catch |err| {
+            // Handle both timeout and cancellation from yield
+            if (err == error.Canceled) {
+                _ = awaitable.waiting_list.remove(&task.awaitable);
             }
-            self.waiting_list.push(&task.awaitable);
+            return err;
+        };
 
-            // Double-check state before suspending (avoid lost wakeup)
-            const double_check_state = self.state.load(.acquire);
-            if (double_check_state == 1) {
-                // Completed while we were adding to queue, remove ourselves
-                _ = self.waiting_list.remove(&task.awaitable);
-                return;
-            }
-
-            const executor = Executor.fromCoroutine(current);
-            executor.yield(.waiting, .allow_cancel) catch |err| {
-                // If yield itself was canceled, remove from wait list
-                _ = self.waiting_list.remove(&task.awaitable);
-                return err;
-            };
-
-            // Pair with markComplete()'s .release
-            _ = self.state.load(.acquire);
-            // Yield returned successfully, awaitable must be complete
-        } else {
-            // Thread path: park on the state using futex
-            while (true) {
-                const current_state = self.state.load(.acquire);
-                if (current_state == 1) return;
-                std.Thread.Futex.wait(&self.state, 0);
-            }
+        // Pair with markComplete()'s .release
+        _ = awaitable.state.load(.acquire);
+        // Yield returned successfully, awaitable must be complete
+    } else {
+        // Thread path: use futex timedWait
+        while (true) {
+            const current_state = awaitable.state.load(.acquire);
+            if (current_state == 1) return;
+            try std.Thread.Futex.timedWait(&awaitable.state, 0, timeout_ns);
         }
     }
-
-    /// Wait for this awaitable to complete with a timeout. Works from both coroutines and threads.
-    /// Returns error.Timeout if the timeout expires before completion.
-    /// Returns error.Canceled if the coroutine was canceled during the wait.
-    /// For coroutines, uses runtime timer infrastructure.
-    /// For threads, uses futex timedWait directly.
-    pub fn timedWaitForComplete(self: *Awaitable, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
-        // Fast path: check if already complete
-        const fast_state = self.state.load(.acquire);
-        if (fast_state == 1) return;
-
-        if (runtime.executor.current_coroutine) |current| {
-            // Coroutine path: get executor and use timer infrastructure
-            const task = AnyTask.fromCoroutine(current);
-            const executor = Executor.fromCoroutine(current);
-
-            self.waiting_list.push(&task.awaitable);
-
-            const double_check_state = self.state.load(.acquire);
-            if (double_check_state == 1) {
-                _ = self.waiting_list.remove(&task.awaitable);
-                return;
-            }
-
-            const TimeoutContext = struct {
-                wait_queue: *SimpleAwaitableList,
-                awaitable: *Awaitable,
-            };
-
-            var timeout_ctx = TimeoutContext{
-                .wait_queue = &self.waiting_list,
-                .awaitable = &task.awaitable,
-            };
-
-            executor.timedWaitForReadyWithCallback(
-                timeout_ns,
-                TimeoutContext,
-                &timeout_ctx,
-                struct {
-                    fn onTimeout(ctx: *TimeoutContext) bool {
-                        return ctx.wait_queue.remove(ctx.awaitable);
-                    }
-                }.onTimeout,
-            ) catch |err| {
-                // Handle both timeout and cancellation from yield
-                if (err == error.Canceled) {
-                    _ = self.waiting_list.remove(&task.awaitable);
-                }
-                return err;
-            };
-
-            // Pair with markComplete()'s .release
-            _ = self.state.load(.acquire);
-            // Yield returned successfully, awaitable must be complete
-        } else {
-            // Thread path: use futex timedWait
-            while (true) {
-                const current_state = self.state.load(.acquire);
-                if (current_state == 1) return;
-                try std.Thread.Futex.timedWait(&self.state, 0, timeout_ns);
-            }
-        }
-    }
-
-    /// Request cancellation of this awaitable.
-    /// The cancellation flag will be consumed by the next yield() call.
-    pub fn requestCancellation(self: *Awaitable) void {
-        self.canceled.store(true, .release);
-    }
-};
+}
 
 /// Mark an awaitable as complete and wake all waiters (both coroutines and threads).
 /// This is a standalone helper that can be called on any awaitable.
+/// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
 pub fn markComplete(awaitable: *Awaitable) void {
     // Set state first (release semantics for memory ordering)
     awaitable.state.store(1, .release);
 
-    // Wake all waiting coroutines
+    // Wake all waiting coroutines (always use .maybe_remote since waiters can be on any executor)
     while (awaitable.waiting_list.pop()) |waiting_awaitable| {
         switch (waiting_awaitable.kind) {
             .task => {
                 const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-                resumeTask(&waiting_task.coro);
+                resumeTask(&waiting_task.coro, .maybe_remote);
             },
             .select_waiter => {
                 // For select waiters, extract the SelectWaiter and wake the task directly
                 const waiter: *SelectWaiter = @fieldParentPtr("awaitable", waiting_awaitable);
                 waiter.ready = true;
-                resumeTask(&waiter.task.coro);
+                resumeTask(&waiter.task.coro, .maybe_remote);
             },
             .blocking_task, .future => {
                 // These should not be in waiting lists of other awaitables
@@ -330,10 +296,22 @@ pub fn markComplete(awaitable: *Awaitable) void {
     std.Thread.Futex.wake(&awaitable.state, std.math.maxInt(u32));
 }
 
+/// Resume mode - controls cross-thread checking
+pub const ResumeMode = enum {
+    /// May resume on a different executor - checks thread-local executor
+    maybe_remote,
+    /// Always resumes on the current executor - skips check (use for IO callbacks)
+    local,
+};
+
 /// Resume a coroutine (mark it as ready).
 /// Accepts *Awaitable, *AnyTask, or *Coroutine.
 /// The coroutine must currently be in waiting state.
-pub fn resumeTask(obj: anytype) void {
+///
+/// The `mode` parameter controls cross-thread checking:
+/// - `.maybe_remote`: Checks if we're on the same executor (use for wait lists, futures)
+/// - `.local`: Assumes we're on the same executor (use for IO callbacks)
+pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
     const T = @TypeOf(obj);
     const coro: *Coroutine = switch (T) {
         *Awaitable => blk: {
@@ -346,7 +324,7 @@ pub fn resumeTask(obj: anytype) void {
     };
 
     const executor = Executor.fromCoroutine(coro);
-    executor.markReady(coro);
+    executor.markReady(mode, coro);
 }
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -419,7 +397,7 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
 
             // Wait for completion
             const runtime = Parent.getRuntime(parent);
-            try parent.impl.base.awaitable.waitForComplete(runtime);
+            try waitForComplete(&parent.impl.base.awaitable, runtime);
 
             return parent.impl.future_result.get().?;
         }
@@ -1111,25 +1089,36 @@ pub const Executor = struct {
         }
     }
 
-    pub fn markReady(self: *Executor, coro: *Coroutine) void {
+    /// Mark a coroutine as ready.
+    ///
+    /// The `mode` parameter controls executor checking:
+    /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
+    /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
+    pub fn markReady(self: *Executor, comptime mode: ResumeMode, coro: *Coroutine) void {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = AnyTask.fromCoroutine(coro);
 
-        // Check if we're on the same executor thread
-        if (Runtime.current_executor == self) {
-            // Same executor - use fast local path
-            self.ready_queue.push(&task.awaitable);
+        if (mode == .maybe_remote) {
+            // Check if we're on the same executor thread
+            if (Runtime.current_executor == self) {
+                // Same executor - use fast local path
+                self.ready_queue.push(&task.awaitable);
+            } else {
+                // Different executor (or no current executor) - use remote path
+                // Remote queue must be initialized by run() before cross-thread calls
+                assert(self.remote_initialized);
+
+                // Push to remote ready queue (thread-safe)
+                self.next_ready_queue_remote.push(&task.awaitable);
+
+                // Notify the target executor's event loop
+                self.remote_wakeup.notify() catch {};
+            }
         } else {
-            // Different executor (or no current executor) - use remote path
-            // Remote queue must be initialized by run() before cross-thread calls
-            assert(self.remote_initialized);
-
-            // Push to remote ready queue (thread-safe)
-            self.next_ready_queue_remote.push(&task.awaitable);
-
-            // Notify the target executor's event loop
-            self.remote_wakeup.notify() catch {};
+            // Fast path: we know we're on the same executor
+            assert(Runtime.current_executor == self);
+            self.ready_queue.push(&task.awaitable);
         }
     }
 
@@ -1225,7 +1214,7 @@ pub const Executor = struct {
                     const ctx_ptr = unpacked.ptr;
                     if (onTimeout(ctx_ptr.user_ctx)) {
                         ctx_ptr.timed_out = true;
-                        resumeTask(&t.coro);
+                        resumeTask(&t.coro, .local);
                     }
                     return .disarm;
                 }

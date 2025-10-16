@@ -86,7 +86,7 @@ pub fn set(self: *ResetEvent, runtime: *Runtime) void {
     // has waiters (pops them all until last pop transitions to unset),
     // and cancellation races (retry loop inside popOrTransition)
     while (self.wait_queue.popOrTransition(&runtime.executor, unset, is_set)) |awaitable| {
-        resumeTask(awaitable);
+        resumeTask(awaitable, .maybe_remote);
     }
 }
 

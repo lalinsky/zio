@@ -186,7 +186,7 @@ pub fn signal(self: *Condition, runtime: *Runtime) void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     if (self.wait_queue.pop(executor)) |awaitable| {
-        resumeTask(awaitable);
+        resumeTask(awaitable, .maybe_remote);
     }
 }
 
@@ -209,7 +209,7 @@ pub fn broadcast(self: *Condition, runtime: *Runtime) void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     while (self.wait_queue.pop(executor)) |awaitable| {
-        resumeTask(awaitable);
+        resumeTask(awaitable, .maybe_remote);
     }
 }
 

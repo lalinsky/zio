@@ -121,7 +121,7 @@ pub fn unlock(self: *Mutex, runtime: *Runtime) void {
     // Pop one waiter or transition from locked_once to unlocked
     // Handles cancellation race by retrying internally
     if (self.queue.popOrTransition(&runtime.executor, locked_once, unlocked)) |awaitable| {
-        resumeTask(awaitable);
+        resumeTask(awaitable, .maybe_remote);
     }
 }
 

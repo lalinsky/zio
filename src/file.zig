@@ -55,7 +55,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -107,7 +107,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -183,7 +183,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -232,7 +232,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
@@ -294,7 +294,7 @@ pub const File = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    resumeTask(r.coro);
+                    resumeTask(r.coro, .local);
                     return .disarm;
                 }
             }).callback,
@@ -341,7 +341,7 @@ pub const File = struct {
                 ) xev.CallbackAction {
                     const r = result_ptr.?;
                     r.result = result;
-                    resumeTask(r.coro);
+                    resumeTask(r.coro, .local);
                     return .disarm;
                 }
             }).callback,
@@ -379,7 +379,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro);
+                resumeTask(result_data.coro, .local);
 
                 return .disarm;
             }
