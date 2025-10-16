@@ -140,7 +140,7 @@ fn drainBlockingCompletions(
     var drained = self.blocking_completions.popAll();
     while (drained.pop()) |awaitable| {
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-        markComplete(awaitable);
+        markComplete(awaitable, self);
         // Release the blocking task's reference (initial ref from init)
         runtime.releaseAwaitable(awaitable);
     }
@@ -165,6 +165,7 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
     if (runtime.executor.current_coroutine) |current| {
         // Coroutine path: add to wait queue and suspend
         const task = AnyTask.fromCoroutine(current);
+        const executor = Executor.fromCoroutine(current);
 
         // Check for self-join (would deadlock)
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
@@ -172,20 +173,19 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
                 std.debug.panic("cannot wait on self (would deadlock)", .{});
             }
         }
-        awaitable.waiting_list.push(&task.awaitable);
+        awaitable.waiting_list.push(executor, &task.awaitable);
 
         // Double-check state before suspending (avoid lost wakeup)
         const double_check_state = awaitable.state.load(.acquire);
         if (double_check_state == 1) {
             // Completed while we were adding to queue, remove ourselves
-            _ = awaitable.waiting_list.remove(&task.awaitable);
+            _ = awaitable.waiting_list.remove(executor, &task.awaitable);
             return;
         }
 
-        const executor = Executor.fromCoroutine(current);
         executor.yield(.waiting, .allow_cancel) catch |err| {
             // If yield itself was canceled, remove from wait list
-            _ = awaitable.waiting_list.remove(&task.awaitable);
+            _ = awaitable.waiting_list.remove(executor, &task.awaitable);
             return err;
         };
 
@@ -217,22 +217,24 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
         const task = AnyTask.fromCoroutine(current);
         const executor = Executor.fromCoroutine(current);
 
-        awaitable.waiting_list.push(&task.awaitable);
+        awaitable.waiting_list.push(executor, &task.awaitable);
 
         const double_check_state = awaitable.state.load(.acquire);
         if (double_check_state == 1) {
-            _ = awaitable.waiting_list.remove(&task.awaitable);
+            _ = awaitable.waiting_list.remove(executor, &task.awaitable);
             return;
         }
 
         const TimeoutContext = struct {
-            wait_queue: *SimpleAwaitableList,
+            wait_queue: *ConcurrentAwaitableList,
             awaitable: *Awaitable,
+            executor: *Executor,
         };
 
         var timeout_ctx = TimeoutContext{
             .wait_queue = &awaitable.waiting_list,
             .awaitable = &task.awaitable,
+            .executor = executor,
         };
 
         executor.timedWaitForReadyWithCallback(
@@ -241,13 +243,13 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
             &timeout_ctx,
             struct {
                 fn onTimeout(ctx: *TimeoutContext) bool {
-                    return ctx.wait_queue.remove(ctx.awaitable);
+                    return ctx.wait_queue.remove(ctx.executor, ctx.awaitable);
                 }
             }.onTimeout,
         ) catch |err| {
             // Handle both timeout and cancellation from yield
             if (err == error.Canceled) {
-                _ = awaitable.waiting_list.remove(&task.awaitable);
+                _ = awaitable.waiting_list.remove(executor, &task.awaitable);
             }
             return err;
         };
@@ -268,12 +270,13 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
 /// Mark an awaitable as complete and wake all waiters (both coroutines and threads).
 /// This is a standalone helper that can be called on any awaitable.
 /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
-pub fn markComplete(awaitable: *Awaitable) void {
+/// Can be called from any context - executor parameter is optional (null when called from thread pool).
+pub fn markComplete(awaitable: *Awaitable, executor: ?*Executor) void {
     // Set state first (release semantics for memory ordering)
     awaitable.state.store(1, .release);
 
     // Wake all waiting coroutines (always use .maybe_remote since waiters can be on any executor)
-    while (awaitable.waiting_list.pop()) |waiting_awaitable| {
+    while (awaitable.waiting_list.pop(executor)) |waiting_awaitable| {
         switch (waiting_awaitable.kind) {
             .task => {
                 const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
@@ -506,7 +509,7 @@ pub fn Future(comptime T: type) type {
             }
 
             // Mark awaitable as complete and wake all waiters (coroutines and threads)
-            markComplete(&self.impl.base.awaitable);
+            markComplete(&self.impl.base.awaitable, Runtime.current_executor);
         }
     };
 }
@@ -697,6 +700,9 @@ pub const ConcurrentAwaitableStack = @import("core/ConcurrentAwaitableStack.zig"
 
 // Simple doubly-linked list of awaitables (non-concurrent)
 pub const SimpleAwaitableList = @import("core/AwaitableList.zig");
+
+// Concurrent doubly-linked list of awaitables (thread-safe)
+pub const ConcurrentAwaitableList = @import("core/ConcurrentAwaitableList.zig");
 
 // Executor metrics
 pub const ExecutorMetrics = struct {
@@ -1055,7 +1061,7 @@ pub const Executor = struct {
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        markComplete(current_awaitable);
+                        markComplete(current_awaitable, self);
 
                         // Track task completion
                         self.metrics.tasks_completed += 1;
@@ -1528,7 +1534,7 @@ pub const Runtime = struct {
         // Add waiters to all waiting lists
         inline for (fields, 0..) |field, i| {
             var handle = @field(handles, field.name);
-            handle.awaitable.waiting_list.push(&waiters[i].awaitable);
+            handle.awaitable.waiting_list.push(executor, &waiters[i].awaitable);
         }
 
         // Clean up waiters on all exit paths (skip waiters marked ready by markComplete)
@@ -1536,7 +1542,7 @@ pub const Runtime = struct {
             inline for (0..fields.len) |i| {
                 if (!waiters[i].ready) {
                     var h = @field(handles, fields[i].name);
-                    _ = h.awaitable.waiting_list.remove(&waiters[i].awaitable);
+                    _ = h.awaitable.waiting_list.remove(executor, &waiters[i].awaitable);
                 }
             }
         }

@@ -124,7 +124,9 @@ pub fn tryTransition(self: *ConcurrentAwaitableList, from: State, to: State) boo
 /// Memory ordering: Uses .acquire on fetchOr to synchronize-with the previous
 /// releaseMutationLock(). This ensures visibility of all modifications made
 /// while the lock was previously held, including non-atomic tail pointer updates.
-pub fn acquireMutationLock(self: *ConcurrentAwaitableList, executor: *Executor) State {
+///
+/// If executor is null, spins without yielding (useful for thread pool callbacks).
+pub fn acquireMutationLock(self: *ConcurrentAwaitableList, executor: ?*Executor) State {
     var spin_count: u4 = 0;
     while (true) {
         // Try to set mutation bit atomically
@@ -140,7 +142,9 @@ pub fn acquireMutationLock(self: *ConcurrentAwaitableList, executor: *Executor) 
         // Someone else holds the mutation lock, spin with yielding on overflow
         spin_count +%= 1;
         if (spin_count == 0) {
-            executor.yield(.ready, .no_cancel);
+            if (executor) |e| {
+                e.yield(.ready, .no_cancel);
+            }
         }
         std.atomic.spinLoopHint();
     }
@@ -161,7 +165,7 @@ pub fn releaseMutationLock(self: *ConcurrentAwaitableList) void {
 /// Add awaitable to the end of the list.
 /// If list is currently in a sentinel state, transitions to list state.
 /// Otherwise acquires mutation lock and appends to tail.
-pub fn push(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *Awaitable) void {
+pub fn push(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *Awaitable) void {
     // Initialize awaitable as not in list
     if (builtin.mode == .Debug) {
         std.debug.assert(!awaitable.in_list);
@@ -192,7 +196,7 @@ pub fn push(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *Awa
 
 /// Remove and return the awaitable at the front of the list.
 /// Returns null if list is in a sentinel state (empty).
-pub fn pop(self: *ConcurrentAwaitableList, executor: *Executor) ?*Awaitable {
+pub fn pop(self: *ConcurrentAwaitableList, executor: ?*Executor) ?*Awaitable {
     const old_state = self.acquireMutationLock(executor);
 
     // Check if queue is empty (in sentinel state)
@@ -234,7 +238,7 @@ pub fn pop(self: *ConcurrentAwaitableList, executor: *Executor) ?*Awaitable {
 
 /// Remove a specific awaitable from the list.
 /// Returns true if the awaitable was found and removed, false otherwise.
-pub fn remove(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *Awaitable) bool {
+pub fn remove(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *Awaitable) bool {
     const old_state = self.acquireMutationLock(executor);
 
     // Check if queue is empty
@@ -306,7 +310,7 @@ pub fn remove(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *A
 ///
 /// This handles the race where waiters remove themselves (via cancellation)
 /// between the empty check and pop by retrying in a loop.
-pub fn popOrTransition(self: *ConcurrentAwaitableList, executor: *Executor, from_sentinel: State, to_sentinel: State) ?*Awaitable {
+pub fn popOrTransition(self: *ConcurrentAwaitableList, executor: ?*Executor, from_sentinel: State, to_sentinel: State) ?*Awaitable {
     std.debug.assert(!from_sentinel.isPointer());
     std.debug.assert(!to_sentinel.isPointer());
 
