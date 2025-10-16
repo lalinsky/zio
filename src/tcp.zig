@@ -373,6 +373,20 @@ pub const TcpStream = struct {
         const coro = self.runtime.executor.current_coroutine.?;
         var completion: xev.Completion = undefined;
 
+        // TEMPORARY: Disable vectored I/O on kqueue to test if macOS crash is related
+        var actual_buffer = buffer.*;
+        if (xev.backend == .kqueue and buffer.* == .vectors) {
+            // Use only first vector as a slice
+            const vecs = buffer.vectors;
+            if (vecs.len > 0) {
+                const vec = vecs.data[0];
+                const slice: []u8 = @ptrCast(vec.base[0..vec.len]);
+                actual_buffer = .{ .slice = slice };
+            } else {
+                actual_buffer = .{ .slice = &.{} };
+            }
+        }
+
         const Result = struct {
             coro: *Coroutine,
             buffer: *xev.ReadBuffer,
@@ -383,7 +397,7 @@ pub const TcpStream = struct {
         self.xev_tcp.read(
             &self.runtime.executor.loop,
             &completion,
-            buffer.*,
+            actual_buffer,
             Result,
             &result_data,
             (struct {
