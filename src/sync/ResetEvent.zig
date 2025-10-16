@@ -133,7 +133,9 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     _ = self.wait_queue.getState();
 
     // Debug: verify we were removed from the list by set()
-    std.debug.assert(!task.awaitable.in_list);
+    if (builtin.mode == .Debug) {
+        std.debug.assert(!task.awaitable.in_list);
+    }
 }
 
 /// Waits for the event to be set with a timeout.
@@ -196,7 +198,9 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     _ = self.wait_queue.getState();
 
     // Debug: verify we were removed from the list by set() or timeout
-    std.debug.assert(!task.awaitable.in_list);
+    if (builtin.mode == .Debug) {
+        std.debug.assert(!task.awaitable.in_list);
+    }
 }
 
 test "ResetEvent basic set/reset/isSet" {

@@ -167,8 +167,10 @@ pub fn releaseMutationLock(self: *ConcurrentAwaitableList) void {
 /// Otherwise acquires mutation lock and appends to tail.
 pub fn push(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *Awaitable) void {
     // Initialize awaitable as not in list
-    std.debug.assert(!awaitable.in_list);
-    awaitable.in_list = true;
+    if (builtin.mode == .Debug) {
+        std.debug.assert(!awaitable.in_list);
+        awaitable.in_list = true;
+    }
     awaitable.next = null;
     awaitable.prev = null;
 
@@ -207,8 +209,10 @@ pub fn pop(self: *ConcurrentAwaitableList, executor: ?*Executor) ?*Awaitable {
     const next = old_head.next;
 
     // Mark as removed from list
-    std.debug.assert(old_head.in_list);
-    old_head.in_list = false;
+    if (builtin.mode == .Debug) {
+        std.debug.assert(old_head.in_list);
+        old_head.in_list = false;
+    }
 
     // Clear old head's pointers
     old_head.next = null;
@@ -249,17 +253,18 @@ pub fn remove(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *
     // If prev is null and we're not head, we're not in the list
     if (awaitable.prev == null and head != awaitable) {
         self.releaseMutationLock();
-        return false; // Not in list
+        return false;
     }
-
-    // Check if not in list (may have been removed by concurrent action)
-    if (!awaitable.in_list) {
+    // If next is null and we're not tail, we're not in the list
+    if (awaitable.next == null and self.tail != awaitable) {
         self.releaseMutationLock();
         return false;
     }
 
     // Mark as removed from list
-    awaitable.in_list = false;
+    if (builtin.mode == .Debug) {
+        awaitable.in_list = false;
+    }
 
     // O(1) removal with doubly-linked list
     if (awaitable.prev) |prev| {
@@ -387,5 +392,60 @@ test "ConcurrentAwaitableList state transitions" {
 
     // Failed transition
     try testing.expectEqual(false, list.tryTransition(.sentinel1, .sentinel0));
+    try testing.expectEqual(State.sentinel0, list.getState());
+}
+
+test "ConcurrentAwaitableList double remove" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var list = ConcurrentAwaitableList.init();
+
+    // Create mock awaitables
+    var awaitable1 align(8) = Awaitable{
+        .kind = .task,
+        .destroy_fn = struct {
+            fn dummy(_: *Runtime, _: *Awaitable) void {}
+        }.dummy,
+    };
+    var awaitable2 align(8) = Awaitable{
+        .kind = .task,
+        .destroy_fn = struct {
+            fn dummy(_: *Runtime, _: *Awaitable) void {}
+        }.dummy,
+    };
+    var awaitable3 align(8) = Awaitable{
+        .kind = .task,
+        .destroy_fn = struct {
+            fn dummy(_: *Runtime, _: *Awaitable) void {}
+        }.dummy,
+    };
+
+    // Push three items
+    list.push(&runtime.executor, &awaitable1);
+    list.push(&runtime.executor, &awaitable2);
+    list.push(&runtime.executor, &awaitable3);
+
+    // Remove middle item
+    try testing.expectEqual(true, list.remove(&runtime.executor, &awaitable2));
+
+    // Try to remove the same item again - should return false
+    try testing.expectEqual(false, list.remove(&runtime.executor, &awaitable2));
+
+    // Remove head
+    try testing.expectEqual(true, list.remove(&runtime.executor, &awaitable1));
+
+    // Try to remove head again - should return false
+    try testing.expectEqual(false, list.remove(&runtime.executor, &awaitable1));
+
+    // Remove tail
+    try testing.expectEqual(true, list.remove(&runtime.executor, &awaitable3));
+
+    // Try to remove tail again - should return false
+    try testing.expectEqual(false, list.remove(&runtime.executor, &awaitable3));
+
+    // List should be empty (back to sentinel0)
     try testing.expectEqual(State.sentinel0, list.getState());
 }

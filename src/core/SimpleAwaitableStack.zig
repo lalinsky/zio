@@ -11,15 +11,19 @@ const SimpleAwaitableStack = @This();
 head: ?*Awaitable = null,
 
 pub fn push(self: *SimpleAwaitableStack, item: *Awaitable) void {
-    std.debug.assert(!item.in_list);
-    item.in_list = true;
+    if (builtin.mode == .Debug) {
+        std.debug.assert(!item.in_list);
+        item.in_list = true;
+    }
     item.next = self.head;
     self.head = item;
 }
 
 pub fn pop(self: *SimpleAwaitableStack) ?*Awaitable {
     const head = self.head orelse return null;
-    head.in_list = false;
+    if (builtin.mode == .Debug) {
+        head.in_list = false;
+    }
     self.head = head.next;
     head.next = null;
     return head;
