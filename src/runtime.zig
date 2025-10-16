@@ -101,9 +101,9 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     executor.async_wakeup.notify() catch {};
 }
 
-// Async callback for remote ready tasks (cross-thread resumption)
-// Drains the remote queue directly into the ready queue.
-fn drainRemoteReadyTasks(
+// Async callback for remote ready tasks wakeup (cross-thread resumption)
+// This just wakes up the loop - the actual draining happens in run().
+fn remoteWakeupCallback(
     executor: ?*Executor,
     loop: *xev.Loop,
     c: *xev.Completion,
@@ -112,12 +112,9 @@ fn drainRemoteReadyTasks(
     _ = result catch unreachable;
     _ = loop;
     _ = c;
-    const self = executor.?;
+    _ = executor;
 
-    // Atomically drain all remote ready tasks and prepend to ready queue
-    var drained = self.next_ready_queue_remote.popAll();
-    self.ready_queue.prependByMoving(&drained);
-
+    // Just wake up - draining happens in run() loop
     return .rearm;
 }
 
@@ -964,13 +961,13 @@ pub const Executor = struct {
 
         self.remote_wakeup = try xev.Async.init();
 
-        // Register async completion to drain remote ready tasks
+        // Register async completion to wake up loop (draining happens in run())
         self.remote_wakeup.wait(
             &self.loop,
             &self.remote_completion,
             Executor,
             self,
-            drainRemoteReadyTasks,
+            remoteWakeupCallback,
         );
 
         self.remote_initialized = true;
@@ -1037,6 +1034,11 @@ pub const Executor = struct {
                 self.stack_pool.cleanup();
                 self.last_cleanup_ms = now;
             }
+
+            // Drain remote ready queue (cross-thread tasks)
+            // Atomically drain all remote ready tasks and prepend to ready queue
+            var drained = self.next_ready_queue_remote.popAll();
+            self.ready_queue.prependByMoving(&drained);
 
             // Process all ready coroutines (once)
             while (self.ready_queue.pop()) |awaitable| {
