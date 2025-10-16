@@ -181,7 +181,7 @@ pub const Awaitable = struct {
             }
 
             const executor = Executor.fromCoroutine(current);
-            executor.yield(.waiting) catch |err| {
+            executor.yield(.waiting, .allow_cancel) catch |err| {
                 // If yield itself was canceled, remove from wait list
                 _ = self.waiting_list.remove(&task.awaitable);
                 return err;
@@ -954,15 +954,40 @@ pub const Executor = struct {
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
 
-    pub fn yield(self: *Executor, desired_state: CoroutineState) Cancelable!void {
+    pub const YieldCancelMode = enum { allow_cancel, no_cancel };
+
+    /// Cooperatively yield control to other tasks.
+    ///
+    /// Suspends the current coroutine and allows other tasks to run. The coroutine
+    /// will be rescheduled according to `desired_state`:
+    /// - `.ready`: Reschedule immediately (cooperative yielding)
+    /// - `.waiting`: Suspend until explicitly woken by another task
+    /// - `.dead`: Mark coroutine as complete (internal use only)
+    ///
+    /// ## Cancellation Mode
+    ///
+    /// The `cancel_mode` parameter is comptime and determines the return type:
+    ///
+    /// - `.allow_cancel`: Checks cancellation flag before and after yielding.
+    ///   Returns `Cancelable!void` (may return `error.Canceled`).
+    ///   Use for normal yields where cancellation should be propagated.
+    ///
+    /// - `.no_cancel`: Ignores cancellation flag completely.
+    ///   Returns `void` (never fails, no error handling needed).
+    ///   Use in critical sections where cancellation would break invariants
+    ///   (e.g., lock-free algorithms, while holding locks).
+    ///
+    /// Using `.no_cancel` prevents interruption during critical operations but
+    /// should be used sparingly as it delays cancellation response.
+    pub fn yield(self: *Executor, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
         // Track yield
         self.metrics.yields += 1;
 
-        // Check and consume cancellation flag before yielding (unless shielded)
-        if (current_task.shield_count == 0) {
+        // Check and consume cancellation flag before yielding (unless shielded or no_cancel)
+        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
             // cmpxchgStrong returns null on success, current value on failure
             if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
                 // CAS succeeded: we consumed true, return canceled
@@ -992,8 +1017,8 @@ pub const Executor = struct {
 
         std.debug.assert(self.current_coroutine == current_coro);
 
-        // Check again after resuming in case we were canceled while suspended (unless shielded)
-        if (current_task.shield_count == 0) {
+        // Check again after resuming in case we were canceled while suspended (unless shielded or no_cancel)
+        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
             if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
                 return error.Canceled;
             }
@@ -1258,7 +1283,7 @@ pub const Executor = struct {
         );
 
         // Wait for either timeout or external markReady
-        self.yield(.waiting) catch |err| {
+        self.yield(.waiting, .allow_cancel) catch |err| {
             // Invalidate pending callbacks before unwinding so they ignore this stack frame.
             task.timer_generation +%= 1;
             timer.cancel(
@@ -1325,7 +1350,7 @@ pub const Executor = struct {
         var cancel_completion: xev.Completion = .{};
 
         while (completion.state() != .dead) {
-            self.yield(.waiting) catch |err| switch (err) {
+            self.yield(.waiting, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     // First cancellation - try to cancel the xev operation
                     if (!was_canceled) {
@@ -1447,7 +1472,7 @@ pub const Runtime = struct {
     /// No-op if not called from within a coroutine.
     pub fn yield(self: *Runtime) Cancelable!void {
         if (self.executor.current_coroutine == null) return;
-        return self.executor.yield(.ready);
+        return self.executor.yield(.ready, .allow_cancel);
     }
 
     /// Sleep for the specified number of milliseconds.
@@ -1585,7 +1610,7 @@ pub const Runtime = struct {
         }
 
         // Yield and wait for one to complete
-        try executor.yield(.waiting);
+        try executor.yield(.waiting, .allow_cancel);
 
         // We were woken up - find which one completed
         inline for (fields, 0..) |field, i| {

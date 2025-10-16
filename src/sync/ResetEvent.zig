@@ -45,11 +45,12 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
-const AwaitableList = @import("../runtime.zig").AwaitableList;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
+const LockFreeAwaitableQueue = @import("LockFreeAwaitableQueue.zig");
+
 state: std.atomic.Value(State) = std.atomic.Value(State).init(.unset),
-wait_queue: AwaitableList = .{},
+wait_queue: LockFreeAwaitableQueue = LockFreeAwaitableQueue.init(),
 
 const ResetEvent = @This();
 
@@ -76,7 +77,6 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// The event remains set until `reset()` is called. Multiple calls to `set()` while
 /// already set have no effect.
 pub fn set(self: *ResetEvent, runtime: *Runtime) void {
-    _ = runtime;
     // Quick check if already set to avoid unnecessary atomic operations
     if (self.state.load(.monotonic) == .is_set) {
         return;
@@ -87,10 +87,12 @@ pub fn set(self: *ResetEvent, runtime: *Runtime) void {
 
     // Only wake waiters if previous state was waiting (there were waiters)
     if (prev_state == .waiting) {
-        while (self.wait_queue.pop()) |awaitable| {
+        const current = runtime.executor.current_coroutine orelse unreachable;
+        const executor = Executor.fromCoroutine(current);
+        while (self.wait_queue.pop(executor)) |awaitable| {
             const task = AnyTask.fromAwaitable(awaitable);
-            const executor = Executor.fromCoroutine(&task.coro);
-            executor.markReady(&task.coro);
+            const task_executor = Executor.fromCoroutine(&task.coro);
+            task_executor.markReady(&task.coro);
         }
     }
 }
@@ -122,12 +124,12 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
         const current = runtime.executor.current_coroutine orelse unreachable;
         const executor = Executor.fromCoroutine(current);
         const task = AnyTask.fromCoroutine(current);
-        self.wait_queue.push(&task.awaitable);
+        self.wait_queue.push(executor, &task.awaitable);
 
         // Suspend until woken by set()
-        executor.yield(.waiting) catch |err| {
+        executor.yield(.waiting, .allow_cancel) catch |err| {
             // On cancellation, remove from queue
-            _ = self.wait_queue.remove(&task.awaitable);
+            _ = self.wait_queue.remove(executor, &task.awaitable);
             return err;
         };
     }
@@ -163,16 +165,18 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 
-    self.wait_queue.push(&task.awaitable);
+    self.wait_queue.push(executor, &task.awaitable);
 
     const TimeoutContext = struct {
-        wait_queue: *AwaitableList,
+        wait_queue: *LockFreeAwaitableQueue,
         awaitable: *Awaitable,
+        executor: *Executor,
     };
 
     var timeout_ctx = TimeoutContext{
         .wait_queue = &self.wait_queue,
         .awaitable = &task.awaitable,
+        .executor = executor,
     };
 
     executor.timedWaitForReadyWithCallback(
@@ -183,13 +187,13 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
             fn onTimeout(ctx: *TimeoutContext) bool {
                 // Try to remove from wait queue - if successful, we timed out
                 // If failed, we were already signaled
-                return ctx.wait_queue.remove(ctx.awaitable);
+                return ctx.wait_queue.remove(ctx.executor, ctx.awaitable);
             }
         }.onTimeout,
     ) catch |err| {
         // Remove from queue if canceled (timeout already handled by callback)
         if (err == error.Canceled) {
-            _ = self.wait_queue.remove(&task.awaitable);
+            _ = self.wait_queue.remove(executor, &task.awaitable);
         }
         return err;
     };
