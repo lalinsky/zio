@@ -199,6 +199,7 @@ pub const Loop = struct {
                     // If we're deleting then we create a deletion event and
                     // queue the completion to notify cancellation.
                     .deleting => if (c.kevent()) |ev| {
+                        std.debug.print("[KQUEUE] submit: deleting completion {*} op={s}, marking .dead and pushing\n", .{ c, @tagName(c.op) });
                         const ecanceled = -1 * @as(i32, @intCast(@intFromEnum(posix.system.E.CANCELED)));
                         c.result = c.syscall_result(ecanceled);
                         c.flags.state = .dead;
@@ -533,10 +534,13 @@ pub const Loop = struct {
 
                 const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
 
+                std.debug.print("[KQUEUE] tick: processing completion {*} state={s} op={s}\n", .{ c, @tagName(c.flags.state), @tagName(c.op) });
+
                 // c is ready to be reused rigt away if we're dearming
                 // so we mark it as dead.
                 c.flags.state = .dead;
 
+                std.debug.print("[KQUEUE] tick: calling perform on {*}\n", .{c});
                 const result = c.perform(&ev);
                 const action = c.callback(c.userdata, self, c, result);
                 switch (action) {
@@ -1134,6 +1138,7 @@ pub const Completion = struct {
             .shutdown,
             => {
                 log.warn("perform op={s}", .{@tagName(self.op)});
+                std.debug.print("[KQUEUE] perform: UNREACHABLE! completion {*} state={s} op={s}\n", .{ self, @tagName(self.flags.state), @tagName(self.op) });
                 unreachable;
             },
 
