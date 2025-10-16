@@ -1473,6 +1473,12 @@ pub const Runtime = struct {
         self.executor.resetMetrics();
     }
 
+    /// Get the current time in milliseconds.
+    /// This uses the event loop's cached monotonic time for efficiency.
+    pub fn now(self: *Runtime) i64 {
+        return self.executor.loop.now();
+    }
+
     fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
         if (awaitable.ref_count.decr()) {
             awaitable.destroy_fn(self, awaitable);
@@ -2114,6 +2120,29 @@ test "runtime: JoinHandle.cast() error set conversion" {
                 const result = casted.join();
                 try testing.expectError(error.Foo, result);
             }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: now() returns monotonic time" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn asyncTask(rt: *Runtime) !void {
+            const start = rt.now();
+            try testing.expect(start > 0);
+
+            // Sleep to ensure time advances
+            rt.sleep(10);
+
+            const end = rt.now();
+            try testing.expect(end > start);
+            try testing.expect(end - start >= 10);
         }
     };
 
