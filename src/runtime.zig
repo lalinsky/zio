@@ -1074,22 +1074,22 @@ pub const Executor = struct {
                 // Other states (.ready, .waiting) are handled by yield() or markReady()
             }
 
-            // Run loop once without blocking to process immediate I/O
-            try self.loop.run(.no_wait);
-
-            // Move yielded coroutines back to ready queue
-            self.ready_queue.prependByMoving(&self.next_ready_queue);
-
             // If we have no active coroutines, exit
             if (self.tasks.size == 0) {
                 self.loop.stop();
                 break;
             }
 
-            // If no ready work, wait for I/O
-            if (self.ready_queue.head == null) {
-                try self.loop.run(.once);
-            }
+            // Check for I/O events without blocking if we have pending work
+            const mode: xev.RunMode = if (self.ready_queue.head != null or self.next_ready_queue.head != null)
+                .no_wait
+            else
+                .once;
+
+            try self.loop.run(mode);
+
+            // Move yielded coroutines back to ready queue
+            self.ready_queue.prependByMoving(&self.next_ready_queue);
         }
     }
 
