@@ -48,6 +48,7 @@ const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
+const resumeTask = @import("../runtime.zig").resumeTask;
 const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
 wait_queue: ConcurrentAwaitableList = ConcurrentAwaitableList.init(),
@@ -85,9 +86,7 @@ pub fn set(self: *ResetEvent, runtime: *Runtime) void {
     // has waiters (pops them all until last pop transitions to unset),
     // and cancellation races (retry loop inside popOrTransition)
     while (self.wait_queue.popOrTransition(&runtime.executor, unset, is_set)) |awaitable| {
-        const task = AnyTask.fromAwaitable(awaitable);
-        const task_executor = Executor.fromCoroutine(&task.coro);
-        task_executor.markReady(&task.coro);
+        resumeTask(awaitable);
     }
 }
 

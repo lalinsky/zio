@@ -2,6 +2,7 @@ const std = @import("std");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
+const resumeTask = @import("runtime.zig").resumeTask;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
 
@@ -56,7 +57,7 @@ pub const UdpSocket = struct {
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
                 result_data.sender_addr = addr;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }
@@ -112,7 +113,7 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }
@@ -164,7 +165,7 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }

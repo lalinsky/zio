@@ -63,7 +63,7 @@ fn markReadyFromXevCallback(
     _ = result catch {};
 
     if (userdata) |coro| {
-        Executor.fromCoroutine(coro).markReady(coro);
+        resumeTask(coro);
     }
     return .disarm;
 }
@@ -118,7 +118,7 @@ fn drainBlockingCompletions(
     var drained = self.blocking_completions.popAll();
     while (drained.pop()) |awaitable| {
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-        awaitable.markComplete();
+        markComplete(awaitable);
         // Release the blocking task's reference (initial ref from init)
         runtime.releaseAwaitable(awaitable);
     }
@@ -271,43 +271,61 @@ pub const Awaitable = struct {
         }
     }
 
-    /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
-    pub fn markComplete(self: *Awaitable) void {
-        // Set state first (release semantics for memory ordering)
-        self.state.store(1, .release);
-
-        // Wake all waiting coroutines
-        while (self.waiting_list.pop()) |waiting_awaitable| {
-            switch (waiting_awaitable.kind) {
-                .task => {
-                    const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-                    const executor = Executor.fromCoroutine(&waiting_task.coro);
-                    executor.markReady(&waiting_task.coro);
-                },
-                .select_waiter => {
-                    // For select waiters, extract the SelectWaiter and wake the task directly
-                    const waiter: *SelectWaiter = @fieldParentPtr("awaitable", waiting_awaitable);
-                    waiter.ready = true;
-                    const executor = Executor.fromCoroutine(&waiter.task.coro);
-                    executor.markReady(&waiter.task.coro);
-                },
-                .blocking_task, .future => {
-                    // These should not be in waiting lists of other awaitables
-                    unreachable;
-                },
-            }
-        }
-
-        // Wake all waiting threads
-        std.Thread.Futex.wake(&self.state, std.math.maxInt(u32));
-    }
-
     /// Request cancellation of this awaitable.
     /// The cancellation flag will be consumed by the next yield() call.
     pub fn requestCancellation(self: *Awaitable) void {
         self.canceled.store(true, .release);
     }
 };
+
+/// Mark an awaitable as complete and wake all waiters (both coroutines and threads).
+/// This is a standalone helper that can be called on any awaitable.
+pub fn markComplete(awaitable: *Awaitable) void {
+    // Set state first (release semantics for memory ordering)
+    awaitable.state.store(1, .release);
+
+    // Wake all waiting coroutines
+    while (awaitable.waiting_list.pop()) |waiting_awaitable| {
+        switch (waiting_awaitable.kind) {
+            .task => {
+                const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
+                resumeTask(&waiting_task.coro);
+            },
+            .select_waiter => {
+                // For select waiters, extract the SelectWaiter and wake the task directly
+                const waiter: *SelectWaiter = @fieldParentPtr("awaitable", waiting_awaitable);
+                waiter.ready = true;
+                resumeTask(&waiter.task.coro);
+            },
+            .blocking_task, .future => {
+                // These should not be in waiting lists of other awaitables
+                unreachable;
+            },
+        }
+    }
+
+    // Wake all waiting threads
+    std.Thread.Futex.wake(&awaitable.state, std.math.maxInt(u32));
+}
+
+/// Resume a coroutine (mark it as ready).
+/// Accepts *Awaitable, *AnyTask, or *Coroutine.
+/// The coroutine must currently be in waiting state.
+pub fn resumeTask(obj: anytype) void {
+    const T = @TypeOf(obj);
+    const coro: *Coroutine = switch (T) {
+        *Awaitable => blk: {
+            const task = AnyTask.fromAwaitable(obj);
+            break :blk &task.coro;
+        },
+        *AnyTask => &obj.coro,
+        *Coroutine => obj,
+        else => @compileError("resumeTask() requires *Awaitable, *AnyTask, or *Coroutine, got " ++ @typeName(T)),
+    };
+
+    const executor = Executor.fromCoroutine(coro);
+    executor.markReady(coro);
+}
 
 // Task for runtime scheduling - coroutine-based tasks
 pub const AnyTask = struct {
@@ -488,7 +506,7 @@ pub fn Future(comptime T: type) type {
             }
 
             // Mark awaitable as complete and wake all waiters (coroutines and threads)
-            self.impl.base.awaitable.markComplete();
+            markComplete(&self.impl.base.awaitable);
         }
     };
 }
@@ -1002,7 +1020,7 @@ pub const Executor = struct {
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        current_awaitable.markComplete();
+                        markComplete(current_awaitable);
 
                         // Track task completion
                         self.metrics.tasks_completed += 1;
@@ -1135,7 +1153,7 @@ pub const Executor = struct {
                     const ctx_ptr = unpacked.ptr;
                     if (onTimeout(ctx_ptr.user_ctx)) {
                         ctx_ptr.timed_out = true;
-                        Executor.fromCoroutine(&t.coro).markReady(&t.coro);
+                        resumeTask(&t.coro);
                     }
                     return .disarm;
                 }

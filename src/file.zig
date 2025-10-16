@@ -5,6 +5,7 @@ const StreamReader = @import("stream.zig").StreamReader;
 const StreamWriter = @import("stream.zig").StreamWriter;
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
+const resumeTask = @import("runtime.zig").resumeTask;
 const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -54,7 +55,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }
@@ -106,7 +107,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }
@@ -182,7 +183,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }
@@ -231,7 +232,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }
@@ -293,7 +294,7 @@ pub const File = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    Executor.fromCoroutine(r.coro).markReady(r.coro);
+                    resumeTask(r.coro);
                     return .disarm;
                 }
             }).callback,
@@ -340,7 +341,7 @@ pub const File = struct {
                 ) xev.CallbackAction {
                     const r = result_ptr.?;
                     r.result = result;
-                    Executor.fromCoroutine(r.coro).markReady(r.coro);
+                    resumeTask(r.coro);
                     return .disarm;
                 }
             }).callback,
@@ -378,7 +379,7 @@ pub const File = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                Executor.fromCoroutine(result_data.coro).markReady(result_data.coro);
+                resumeTask(result_data.coro);
 
                 return .disarm;
             }

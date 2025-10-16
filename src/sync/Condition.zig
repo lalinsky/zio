@@ -52,6 +52,7 @@ const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
+const resumeTask = @import("../runtime.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
 const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
@@ -185,9 +186,7 @@ pub fn signal(self: *Condition, runtime: *Runtime) void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     if (self.wait_queue.pop(executor)) |awaitable| {
-        const task = AnyTask.fromAwaitable(awaitable);
-        const task_executor = Executor.fromCoroutine(&task.coro);
-        task_executor.markReady(&task.coro);
+        resumeTask(awaitable);
     }
 }
 
@@ -210,9 +209,7 @@ pub fn broadcast(self: *Condition, runtime: *Runtime) void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     while (self.wait_queue.pop(executor)) |awaitable| {
-        const task = AnyTask.fromAwaitable(awaitable);
-        const task_executor = Executor.fromCoroutine(&task.coro);
-        task_executor.markReady(&task.coro);
+        resumeTask(awaitable);
     }
 }
 

@@ -26,6 +26,7 @@ const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
+const resumeTask = @import("../runtime.zig").resumeTask;
 const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
 const Mutex = @This();
@@ -120,14 +121,8 @@ pub fn unlock(self: *Mutex, runtime: *Runtime) void {
     // Pop one waiter or transition from locked_once to unlocked
     // Handles cancellation race by retrying internally
     if (self.queue.popOrTransition(&runtime.executor, locked_once, unlocked)) |awaitable| {
-        wakeWaiter(awaitable);
+        resumeTask(awaitable);
     }
-}
-
-fn wakeWaiter(awaitable: *Awaitable) void {
-    const task = AnyTask.fromAwaitable(awaitable);
-    const executor = Executor.fromCoroutine(&task.coro);
-    executor.markReady(&task.coro);
 }
 
 test "Mutex basic lock/unlock" {
