@@ -151,6 +151,14 @@ pub const Awaitable = struct {
     // Cancellation flag - set to request cancellation, consumed by yield()
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+    // Compile-time alignment check for tagged pointer support
+    // ConcurrentAwaitableList uses lower 2 bits for state/mutation lock tagging
+    comptime {
+        if (@alignOf(Awaitable) < 4) {
+            @compileError("Awaitable must be at least 4-byte aligned for tagged pointer operations");
+        }
+    }
+
     /// Wait for this awaitable to complete. Works from both coroutines and threads.
     /// When called from a coroutine, suspends the coroutine.
     /// When called from a thread, parks the thread using futex.
@@ -181,12 +189,14 @@ pub const Awaitable = struct {
             }
 
             const executor = Executor.fromCoroutine(current);
-            executor.yield(.waiting) catch |err| {
+            executor.yield(.waiting, .allow_cancel) catch |err| {
                 // If yield itself was canceled, remove from wait list
                 _ = self.waiting_list.remove(&task.awaitable);
                 return err;
             };
 
+            // Pair with markComplete()'s .release
+            _ = self.state.load(.acquire);
             // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: park on the state using futex
@@ -248,6 +258,8 @@ pub const Awaitable = struct {
                 return err;
             };
 
+            // Pair with markComplete()'s .release
+            _ = self.state.load(.acquire);
             // Yield returned successfully, awaitable must be complete
         } else {
             // Thread path: use futex timedWait
@@ -731,94 +743,8 @@ pub const AwaitableStack = struct {
     }
 };
 
-// Simple singly-linked list of awaitables
-pub const AwaitableList = struct {
-    head: ?*Awaitable = null,
-    tail: ?*Awaitable = null,
-
-    pub fn push(self: *AwaitableList, awaitable: *Awaitable) void {
-        if (builtin.mode == .Debug) {
-            std.debug.assert(!awaitable.in_list);
-            awaitable.in_list = true;
-        }
-        awaitable.next = null;
-        if (self.tail) |tail| {
-            tail.next = awaitable;
-            awaitable.prev = tail;
-            self.tail = awaitable;
-        } else {
-            awaitable.prev = null;
-            self.head = awaitable;
-            self.tail = awaitable;
-        }
-    }
-
-    pub fn pop(self: *AwaitableList) ?*Awaitable {
-        const head = self.head orelse return null;
-        if (builtin.mode == .Debug) {
-            head.in_list = false;
-        }
-        self.head = head.next;
-        if (self.head) |new_head| {
-            new_head.prev = null;
-        } else {
-            self.tail = null;
-        }
-        head.next = null;
-        head.prev = null;
-        return head;
-    }
-
-    pub fn concatByMoving(self: *AwaitableList, other: *AwaitableList) void {
-        if (other.head == null) return;
-
-        if (self.tail) |tail| {
-            tail.next = other.head;
-            if (other.head) |other_head| {
-                other_head.prev = tail;
-            }
-            self.tail = other.tail;
-        } else {
-            self.head = other.head;
-            self.tail = other.tail;
-        }
-
-        other.head = null;
-        other.tail = null;
-    }
-
-    pub fn remove(self: *AwaitableList, awaitable: *Awaitable) bool {
-        // Handle empty list
-        if (self.head == null) return false;
-
-        if (builtin.mode == .Debug) {
-            std.debug.assert(awaitable.in_list);
-            awaitable.in_list = false;
-        }
-
-        // Update prev node's next pointer (or head if removing first node)
-        if (awaitable.prev) |prev_node| {
-            prev_node.next = awaitable.next;
-        } else {
-            // No prev means this is the head
-            self.head = awaitable.next;
-        }
-
-        // Update next node's prev pointer (or tail if removing last node)
-        if (awaitable.next) |next_node| {
-            next_node.prev = awaitable.prev;
-        } else {
-            // No next means this is the tail
-            self.tail = awaitable.prev;
-        }
-
-        // Clear pointers
-        awaitable.next = null;
-        awaitable.prev = null;
-
-        return true;
-    }
-};
+// Simple doubly-linked list of awaitables (non-concurrent)
+pub const AwaitableList = @import("core/AwaitableList.zig");
 
 // Executor metrics
 pub const ExecutorMetrics = struct {
@@ -954,15 +880,40 @@ pub const Executor = struct {
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
 
-    pub fn yield(self: *Executor, desired_state: CoroutineState) Cancelable!void {
+    pub const YieldCancelMode = enum { allow_cancel, no_cancel };
+
+    /// Cooperatively yield control to other tasks.
+    ///
+    /// Suspends the current coroutine and allows other tasks to run. The coroutine
+    /// will be rescheduled according to `desired_state`:
+    /// - `.ready`: Reschedule immediately (cooperative yielding)
+    /// - `.waiting`: Suspend until explicitly woken by another task
+    /// - `.dead`: Mark coroutine as complete (internal use only)
+    ///
+    /// ## Cancellation Mode
+    ///
+    /// The `cancel_mode` parameter is comptime and determines the return type:
+    ///
+    /// - `.allow_cancel`: Checks cancellation flag before and after yielding.
+    ///   Returns `Cancelable!void` (may return `error.Canceled`).
+    ///   Use for normal yields where cancellation should be propagated.
+    ///
+    /// - `.no_cancel`: Ignores cancellation flag completely.
+    ///   Returns `void` (never fails, no error handling needed).
+    ///   Use in critical sections where cancellation would break invariants
+    ///   (e.g., lock-free algorithms, while holding locks).
+    ///
+    /// Using `.no_cancel` prevents interruption during critical operations but
+    /// should be used sparingly as it delays cancellation response.
+    pub fn yield(self: *Executor, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
         // Track yield
         self.metrics.yields += 1;
 
-        // Check and consume cancellation flag before yielding (unless shielded)
-        if (current_task.shield_count == 0) {
+        // Check and consume cancellation flag before yielding (unless shielded or no_cancel)
+        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
             // cmpxchgStrong returns null on success, current value on failure
             if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
                 // CAS succeeded: we consumed true, return canceled
@@ -992,8 +943,8 @@ pub const Executor = struct {
 
         std.debug.assert(self.current_coroutine == current_coro);
 
-        // Check again after resuming in case we were canceled while suspended (unless shielded)
-        if (current_task.shield_count == 0) {
+        // Check again after resuming in case we were canceled while suspended (unless shielded or no_cancel)
+        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
             if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
                 return error.Canceled;
             }
@@ -1258,7 +1209,7 @@ pub const Executor = struct {
         );
 
         // Wait for either timeout or external markReady
-        self.yield(.waiting) catch |err| {
+        self.yield(.waiting, .allow_cancel) catch |err| {
             // Invalidate pending callbacks before unwinding so they ignore this stack frame.
             task.timer_generation +%= 1;
             timer.cancel(
@@ -1325,7 +1276,7 @@ pub const Executor = struct {
         var cancel_completion: xev.Completion = .{};
 
         while (completion.state() != .dead) {
-            self.yield(.waiting) catch |err| switch (err) {
+            self.yield(.waiting, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     // First cancellation - try to cancel the xev operation
                     if (!was_canceled) {
@@ -1447,7 +1398,7 @@ pub const Runtime = struct {
     /// No-op if not called from within a coroutine.
     pub fn yield(self: *Runtime) Cancelable!void {
         if (self.executor.current_coroutine == null) return;
-        return self.executor.yield(.ready);
+        return self.executor.yield(.ready, .allow_cancel);
     }
 
     /// Sleep for the specified number of milliseconds.
@@ -1585,7 +1536,7 @@ pub const Runtime = struct {
         }
 
         // Yield and wait for one to complete
-        try executor.yield(.waiting);
+        try executor.yield(.waiting, .allow_cancel);
 
         // We were woken up - find which one completed
         inline for (fields, 0..) |field, i| {

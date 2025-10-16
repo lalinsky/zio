@@ -24,27 +24,31 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
-const coroutines = @import("../coroutines.zig");
-const AwaitableList = @import("../runtime.zig").AwaitableList;
+const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-
-owner: std.atomic.Value(?*coroutines.Coroutine) = std.atomic.Value(?*coroutines.Coroutine).init(null),
-wait_queue: AwaitableList = .{},
+const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
 const Mutex = @This();
+
+/// FIFO wait queue with lock state encoded in sentinel values:
+/// - sentinel0 (0b00) = locked, no waiters
+/// - sentinel1 (0b01) = unlocked
+/// - pointer = locked with waiters
+queue: ConcurrentAwaitableList = ConcurrentAwaitableList.initWithState(.sentinel1),
+
+const State = ConcurrentAwaitableList.State;
+const locked_once: State = .sentinel0;
+const unlocked: State = .sentinel1;
 
 /// Creates a new unlocked mutex.
 pub const init: Mutex = .{};
 
 /// Attempts to acquire the mutex without blocking.
 /// Returns `true` if the lock was successfully acquired, `false` if the mutex
-/// is already locked by another coroutine or if called outside a coroutine context.
+/// is already locked by another coroutine.
 /// This function will never suspend the current task. If you need blocking behavior, use `lock()` instead.
-pub fn tryLock(self: *Mutex, runtime: *Runtime) bool {
-    const current = runtime.executor.current_coroutine orelse return false;
-
-    // Try to atomically set owner from null to current
-    return self.owner.cmpxchgStrong(null, current, .acquire, .monotonic) == null;
+pub fn tryLock(self: *Mutex) bool {
+    return self.queue.tryTransition(unlocked, locked_once);
 }
 
 /// Acquires the mutex, blocking if it is already locked.
@@ -57,30 +61,34 @@ pub fn tryLock(self: *Mutex, runtime: *Runtime) bool {
 /// the zio runtime.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
-/// ```
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
 
     // Fast path: try to acquire unlocked mutex
-    if (self.tryLock(runtime)) return;
+    if (self.queue.tryTransition(unlocked, locked_once)) {
+        return;
+    }
 
-    // Slow path: add current task to wait queue and suspend
+    // Slow path: add to FIFO wait queue
     const task = AnyTask.fromCoroutine(current);
-    self.wait_queue.push(&task.awaitable);
+    const awaitable = &task.awaitable;
+
+    self.queue.push(executor, awaitable);
 
     // Suspend until woken by unlock()
-    executor.yield(.waiting) catch |err| {
-        if (!self.wait_queue.remove(&task.awaitable)) {
-            // We already inherited the lock; drop it so others can proceed.
+    executor.yield(.waiting, .allow_cancel) catch |err| {
+        // Cancellation - try to remove ourselves from queue
+        if (!self.queue.remove(executor, awaitable)) {
+            // Already inherited the lock
             self.unlock(runtime);
         }
         return err;
     };
 
-    // When we wake up, unlock() has already transferred ownership to us
-    const owner = self.owner.load(.acquire);
-    std.debug.assert(owner == current);
+    // Acquire fence: synchronize-with unlock()'s .release in pop()
+    // Ensures visibility of all writes made by the previous lock holder
+    _ = self.queue.getState();
 }
 
 /// Acquires the mutex with cancellation shielding.
@@ -109,21 +117,17 @@ pub fn lockNoCancel(self: *Mutex, runtime: *Runtime) void {
 ///
 /// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex, runtime: *Runtime) void {
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-    std.debug.assert(self.owner.load(.monotonic) == current);
-
-    // Check if there are waiters
-    if (self.wait_queue.pop()) |awaitable| {
-        const task = AnyTask.fromAwaitable(awaitable);
-        // Transfer ownership directly to next waiter
-        self.owner.store(&task.coro, .release);
-        // Wake them up (they already own the lock)
-        executor.markReady(&task.coro);
-    } else {
-        // No waiters, release the lock completely
-        self.owner.store(null, .release);
+    // Pop one waiter or transition from locked_once to unlocked
+    // Handles cancellation race by retrying internally
+    if (self.queue.popOrTransition(&runtime.executor, locked_once, unlocked)) |awaitable| {
+        wakeWaiter(awaitable);
     }
+}
+
+fn wakeWaiter(awaitable: *Awaitable) void {
+    const task = AnyTask.fromAwaitable(awaitable);
+    const executor = Executor.fromCoroutine(&task.coro);
+    executor.markReady(&task.coro);
 }
 
 test "Mutex basic lock/unlock" {
@@ -165,10 +169,10 @@ test "Mutex tryLock" {
 
     const TestFn = struct {
         fn testTryLock(rt: *Runtime, mtx: *Mutex, results: *[3]bool) void {
-            results[0] = mtx.tryLock(rt); // Should succeed
-            results[1] = mtx.tryLock(rt); // Should fail (already locked)
+            results[0] = mtx.tryLock(); // Should succeed
+            results[1] = mtx.tryLock(); // Should fail (already locked)
             mtx.unlock(rt);
-            results[2] = mtx.tryLock(rt); // Should succeed again
+            results[2] = mtx.tryLock(); // Should succeed again
             mtx.unlock(rt);
         }
     };

@@ -50,12 +50,12 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
-const AwaitableList = @import("../runtime.zig").AwaitableList;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const Mutex = @import("Mutex.zig");
+const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
-wait_queue: AwaitableList = .{},
+wait_queue: ConcurrentAwaitableList = ConcurrentAwaitableList.init(),
 
 const Condition = @This();
 
@@ -87,13 +87,13 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     const task = AnyTask.fromCoroutine(current);
 
     // Add to wait queue before releasing mutex
-    self.wait_queue.push(&task.awaitable);
+    self.wait_queue.push(executor, &task.awaitable);
 
     // Atomically release mutex and wait
     mutex.unlock(runtime);
-    executor.yield(.waiting) catch |err| {
+    executor.yield(.waiting, .allow_cancel) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
-        _ = self.wait_queue.remove(&task.awaitable);
+        _ = self.wait_queue.remove(executor, &task.awaitable);
         // Must reacquire mutex before returning
         mutex.lockNoCancel(runtime);
         return err;
@@ -121,16 +121,18 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 
-    self.wait_queue.push(&task.awaitable);
+    self.wait_queue.push(executor, &task.awaitable);
 
     const TimeoutContext = struct {
-        wait_queue: *AwaitableList,
+        wait_queue: *ConcurrentAwaitableList,
         awaitable: *Awaitable,
+        executor: *Executor,
     };
 
     var timeout_ctx = TimeoutContext{
         .wait_queue = &self.wait_queue,
         .awaitable = &task.awaitable,
+        .executor = executor,
     };
 
     // Atomically release mutex and wait
@@ -144,13 +146,13 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
             fn onTimeout(ctx: *TimeoutContext) bool {
                 // Try to remove from wait queue - if successful, we timed out
                 // If failed, we were already signaled
-                return ctx.wait_queue.remove(ctx.awaitable);
+                return ctx.wait_queue.remove(ctx.executor, ctx.awaitable);
             }
         }.onTimeout,
     ) catch |err| {
         // Remove from queue if canceled (timeout already handled by callback)
         if (err == error.Canceled) {
-            _ = self.wait_queue.remove(&task.awaitable);
+            _ = self.wait_queue.remove(executor, &task.awaitable);
         }
         // Must reacquire mutex before returning
         mutex.lockNoCancel(runtime);
@@ -180,11 +182,12 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
 /// condition.signal(rt);
 /// ```
 pub fn signal(self: *Condition, runtime: *Runtime) void {
-    _ = runtime;
-    if (self.wait_queue.pop()) |awaitable| {
+    const current = runtime.executor.current_coroutine orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
+    if (self.wait_queue.pop(executor)) |awaitable| {
         const task = AnyTask.fromAwaitable(awaitable);
-        const executor = Executor.fromCoroutine(&task.coro);
-        executor.markReady(&task.coro);
+        const task_executor = Executor.fromCoroutine(&task.coro);
+        task_executor.markReady(&task.coro);
     }
 }
 
@@ -204,11 +207,12 @@ pub fn signal(self: *Condition, runtime: *Runtime) void {
 /// condition.broadcast(rt);
 /// ```
 pub fn broadcast(self: *Condition, runtime: *Runtime) void {
-    _ = runtime;
-    while (self.wait_queue.pop()) |awaitable| {
+    const current = runtime.executor.current_coroutine orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
+    while (self.wait_queue.pop(executor)) |awaitable| {
         const task = AnyTask.fromAwaitable(awaitable);
-        const executor = Executor.fromCoroutine(&task.coro);
-        executor.markReady(&task.coro);
+        const task_executor = Executor.fromCoroutine(&task.coro);
+        task_executor.markReady(&task.coro);
     }
 }
 
