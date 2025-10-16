@@ -451,3 +451,296 @@ test "ConcurrentAwaitableList double remove" {
     // List should be empty (back to sentinel0)
     try testing.expectEqual(State.sentinel0, list.getState());
 }
+
+test "ConcurrentAwaitableList concurrent push and pop" {
+    const testing = std.testing;
+
+    var list = ConcurrentAwaitableList.init();
+
+    const num_threads = 4;
+    const items_per_thread = 100;
+    const total_items = num_threads * items_per_thread;
+
+    // Create awaitables for pushing
+    const awaitables = try testing.allocator.alloc(Awaitable, total_items);
+    defer testing.allocator.free(awaitables);
+
+    for (awaitables) |*a| {
+        a.* = .{
+            .kind = .task,
+            .destroy_fn = struct {
+                fn dummy(_: *Runtime, _: *Awaitable) void {}
+            }.dummy,
+        };
+    }
+
+    // Spawn threads to push items concurrently
+    var push_threads: [num_threads]std.Thread = undefined;
+    for (0..num_threads) |i| {
+        const start = i * items_per_thread;
+        const end = (i + 1) * items_per_thread;
+        push_threads[i] = try std.Thread.spawn(.{}, struct {
+            fn pushItems(l: *ConcurrentAwaitableList, items: []Awaitable) void {
+                for (items) |*item| {
+                    l.push(null, item);
+                }
+            }
+        }.pushItems, .{ &list, awaitables[start..end] });
+    }
+
+    // Wait for all pushes to complete
+    for (push_threads) |t| {
+        t.join();
+    }
+
+    // Verify all items are in the list by popping them
+    var popped_count: usize = 0;
+    while (list.pop(null)) |_| {
+        popped_count += 1;
+    }
+
+    try testing.expectEqual(total_items, popped_count);
+    try testing.expectEqual(State.sentinel0, list.getState());
+}
+
+test "ConcurrentAwaitableList concurrent remove during modifications" {
+    const testing = std.testing;
+
+    var list = ConcurrentAwaitableList.init();
+
+    const num_items = 200;
+
+    // Create awaitables
+    const awaitables = try testing.allocator.alloc(Awaitable, num_items);
+    defer testing.allocator.free(awaitables);
+
+    for (awaitables) |*a| {
+        a.* = .{
+            .kind = .task,
+            .destroy_fn = struct {
+                fn dummy(_: *Runtime, _: *Awaitable) void {}
+            }.dummy,
+        };
+    }
+
+    // Thread 1: Push all items
+    const push_thread = try std.Thread.spawn(.{}, struct {
+        fn pushItems(l: *ConcurrentAwaitableList, items: []Awaitable) void {
+            for (items) |*item| {
+                l.push(null, item);
+            }
+        }
+    }.pushItems, .{ &list, awaitables });
+
+    // Thread 2: Pop items
+    var pop_count = std.atomic.Value(usize).init(0);
+    const pop_thread = try std.Thread.spawn(.{}, struct {
+        fn popItems(l: *ConcurrentAwaitableList, count: *std.atomic.Value(usize)) void {
+            var local_count: usize = 0;
+            while (local_count < 100) {
+                if (l.pop(null)) |_| {
+                    local_count += 1;
+                }
+            }
+            count.store(local_count, .monotonic);
+        }
+    }.popItems, .{ &list, &pop_count });
+
+    // Thread 3: Remove specific items (every 3rd item)
+    var remove_count = std.atomic.Value(usize).init(0);
+    const remove_thread = try std.Thread.spawn(.{}, struct {
+        fn removeItems(l: *ConcurrentAwaitableList, items: []Awaitable, count: *std.atomic.Value(usize)) void {
+            var local_count: usize = 0;
+            var i: usize = 0;
+            while (i < items.len) : (i += 3) {
+                if (l.remove(null, &items[i])) {
+                    local_count += 1;
+                }
+            }
+            count.store(local_count, .monotonic);
+        }
+    }.removeItems, .{ &list, awaitables, &remove_count });
+
+    // Wait for all threads
+    push_thread.join();
+    pop_thread.join();
+    remove_thread.join();
+
+    // Drain remaining items
+    var remaining_count: usize = 0;
+    while (list.pop(null)) |_| {
+        remaining_count += 1;
+    }
+
+    const total_processed = pop_count.load(.monotonic) + remove_count.load(.monotonic) + remaining_count;
+
+    // Verify all items were accounted for
+    try testing.expectEqual(num_items, total_processed);
+    try testing.expectEqual(State.sentinel0, list.getState());
+}
+
+test "ConcurrentAwaitableList popOrTransition with concurrent removals" {
+    const testing = std.testing;
+
+    var list = ConcurrentAwaitableList.initWithState(.sentinel0);
+
+    const num_items = 500;
+
+    // Create awaitables
+    const awaitables = try testing.allocator.alloc(Awaitable, num_items);
+    defer testing.allocator.free(awaitables);
+
+    for (awaitables) |*a| {
+        a.* = .{
+            .kind = .task,
+            .destroy_fn = struct {
+                fn dummy(_: *Runtime, _: *Awaitable) void {}
+            }.dummy,
+        };
+    }
+
+    // Push all items first
+    for (awaitables) |*a| {
+        list.push(null, a);
+    }
+
+    // Thread 1: popOrTransition from sentinel0 to sentinel1
+    var pop_count = std.atomic.Value(usize).init(0);
+    var pops_done = std.atomic.Value(bool).init(false);
+    const pop_thread = try std.Thread.spawn(.{}, struct {
+        fn popItems(l: *ConcurrentAwaitableList, count: *std.atomic.Value(usize), done: *std.atomic.Value(bool)) void {
+            var local_count: usize = 0;
+            while (true) {
+                if (l.popOrTransition(null, .sentinel0, .sentinel1)) |_| {
+                    local_count += 1;
+                } else {
+                    // Queue became empty and transitioned
+                    break;
+                }
+            }
+            count.store(local_count, .monotonic);
+            done.store(true, .monotonic);
+        }
+    }.popItems, .{ &list, &pop_count, &pops_done });
+
+    // Thread 2: Remove random items while popping
+    var remove_count = std.atomic.Value(usize).init(0);
+    const remove_thread = try std.Thread.spawn(.{}, struct {
+        fn removeItems(l: *ConcurrentAwaitableList, items: []Awaitable, count: *std.atomic.Value(usize), done: *std.atomic.Value(bool)) void {
+            var local_count: usize = 0;
+            // Try to remove items while the other thread is popping
+            for (items) |*item| {
+                if (done.load(.monotonic)) break;
+                if (l.remove(null, item)) {
+                    local_count += 1;
+                }
+            }
+            count.store(local_count, .monotonic);
+        }
+    }.removeItems, .{ &list, awaitables, &remove_count, &pops_done });
+
+    pop_thread.join();
+    remove_thread.join();
+
+    const total_processed = pop_count.load(.monotonic) + remove_count.load(.monotonic);
+
+    // Verify all items were accounted for and state transitioned
+    try testing.expectEqual(num_items, total_processed);
+    try testing.expectEqual(State.sentinel1, list.getState());
+}
+
+test "ConcurrentAwaitableList stress test with heavy contention" {
+    const testing = std.testing;
+
+    var list = ConcurrentAwaitableList.init();
+
+    const num_threads = 8;
+    const items_per_thread = 200;
+    const total_items = num_threads * items_per_thread;
+
+    // Create awaitables
+    const awaitables = try testing.allocator.alloc(Awaitable, total_items);
+    defer testing.allocator.free(awaitables);
+
+    for (awaitables) |*a| {
+        a.* = .{
+            .kind = .task,
+            .destroy_fn = struct {
+                fn dummy(_: *Runtime, _: *Awaitable) void {}
+            }.dummy,
+        };
+    }
+
+    // All threads do the same thing: push their items, then simultaneously pop AND remove
+    // This creates maximum contention on the mutation lock
+    const ThreadCounts = struct {
+        popped: std.atomic.Value(usize),
+        removed: std.atomic.Value(usize),
+    };
+    var threads: [num_threads]std.Thread = undefined;
+    var counts: [num_threads]ThreadCounts = undefined;
+
+    for (0..num_threads) |i| {
+        counts[i] = .{
+            .popped = std.atomic.Value(usize).init(0),
+            .removed = std.atomic.Value(usize).init(0),
+        };
+    }
+
+    for (0..num_threads) |i| {
+        const start = i * items_per_thread;
+        const end = (i + 1) * items_per_thread;
+        threads[i] = try std.Thread.spawn(.{}, struct {
+            fn stressTest(l: *ConcurrentAwaitableList, my_items: []Awaitable, all_items: []Awaitable, thread_counts: *ThreadCounts, thread_id: usize) void {
+                // Phase 1: Push all my items
+                for (my_items) |*item| {
+                    l.push(null, item);
+                }
+
+                // Phase 2: Simultaneously pop and remove
+                var local_pop_count: usize = 0;
+                var local_remove_count: usize = 0;
+                for (0..100) |j| {
+                    // Try to pop
+                    if (l.pop(null)) |_| {
+                        local_pop_count += 1;
+                    }
+
+                    // Try to remove a specific item (deterministically based on thread_id)
+                    const idx = (thread_id * 13 + j * 7) % all_items.len;
+                    if (l.remove(null, &all_items[idx])) {
+                        local_remove_count += 1;
+                    }
+                }
+
+                thread_counts.popped.store(local_pop_count, .monotonic);
+                thread_counts.removed.store(local_remove_count, .monotonic);
+            }
+        }.stressTest, .{ &list, awaitables[start..end], awaitables, &counts[i], i });
+    }
+
+    // Wait for all threads
+    for (threads) |t| {
+        t.join();
+    }
+
+    // Count operations
+    var total_popped: usize = 0;
+    var total_removed: usize = 0;
+    for (&counts) |*c| {
+        total_popped += c.popped.load(.monotonic);
+        total_removed += c.removed.load(.monotonic);
+    }
+
+    // Drain any remaining items
+    var remaining: usize = 0;
+    while (list.pop(null)) |_| {
+        remaining += 1;
+    }
+
+    const total_accounted = total_popped + total_removed + remaining;
+
+    // All items must be accounted for
+    try testing.expectEqual(total_items, total_accounted);
+    try testing.expectEqual(State.sentinel0, list.getState());
+}
