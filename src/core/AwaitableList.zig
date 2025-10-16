@@ -12,10 +12,8 @@ head: ?*Awaitable = null,
 tail: ?*Awaitable = null,
 
 pub fn push(self: *SimpleAwaitableList, awaitable: *Awaitable) void {
-    if (builtin.mode == .Debug) {
-        std.debug.assert(!awaitable.in_list);
-        awaitable.in_list = true;
-    }
+    std.debug.assert(!awaitable.in_list);
+    awaitable.in_list = true;
     awaitable.next = null;
     if (self.tail) |tail| {
         tail.next = awaitable;
@@ -30,9 +28,7 @@ pub fn push(self: *SimpleAwaitableList, awaitable: *Awaitable) void {
 
 pub fn pop(self: *SimpleAwaitableList) ?*Awaitable {
     const head = self.head orelse return null;
-    if (builtin.mode == .Debug) {
-        head.in_list = false;
-    }
+    head.in_list = false;
     self.head = head.next;
     if (self.head) |new_head| {
         new_head.prev = null;
@@ -66,10 +62,16 @@ pub fn remove(self: *SimpleAwaitableList, awaitable: *Awaitable) bool {
     // Handle empty list
     if (self.head == null) return false;
 
-    if (builtin.mode == .Debug) {
-        std.debug.assert(awaitable.in_list);
-        awaitable.in_list = false;
-    }
+    // Check if not in list (may have been removed already)
+    if (!awaitable.in_list) return false;
+
+    // Validate membership (if no prev, must be head)
+    if (awaitable.prev == null and self.head != awaitable) return false;
+    // Validate membership (if no next, must be tail)
+    if (awaitable.next == null and self.tail != awaitable) return false;
+
+    // Mark as removed
+    awaitable.in_list = false;
 
     // Update prev node's next pointer (or head if removing first node)
     if (awaitable.prev) |prev_node| {

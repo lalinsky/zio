@@ -167,10 +167,8 @@ pub fn releaseMutationLock(self: *ConcurrentAwaitableList) void {
 /// Otherwise acquires mutation lock and appends to tail.
 pub fn push(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *Awaitable) void {
     // Initialize awaitable as not in list
-    if (builtin.mode == .Debug) {
-        std.debug.assert(!awaitable.in_list);
-        awaitable.in_list = true;
-    }
+    std.debug.assert(!awaitable.in_list);
+    awaitable.in_list = true;
     awaitable.next = null;
     awaitable.prev = null;
 
@@ -208,11 +206,9 @@ pub fn pop(self: *ConcurrentAwaitableList, executor: ?*Executor) ?*Awaitable {
     const old_head = old_state.getPtr().?;
     const next = old_head.next;
 
-    // Mark as removed from list (in debug mode)
-    if (builtin.mode == .Debug) {
-        std.debug.assert(old_head.in_list);
-        old_head.in_list = false;
-    }
+    // Mark as removed from list
+    std.debug.assert(old_head.in_list);
+    old_head.in_list = false;
 
     // Clear old head's pointers
     old_head.next = null;
@@ -249,11 +245,6 @@ pub fn remove(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *
 
     const head = old_state.getPtr().?;
 
-    // Debug assertion: awaitable should be marked as in-list
-    if (builtin.mode == .Debug) {
-        std.debug.assert(awaitable.in_list);
-    }
-
     // Check if we're actually in the list (using prev/next pointers)
     // If prev is null and we're not head, we're not in the list
     if (awaitable.prev == null and head != awaitable) {
@@ -261,10 +252,14 @@ pub fn remove(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *
         return false; // Not in list
     }
 
-    // Mark as removed from list (in debug mode)
-    if (builtin.mode == .Debug) {
-        awaitable.in_list = false;
+    // Check if not in list (may have been removed by concurrent action)
+    if (!awaitable.in_list) {
+        self.releaseMutationLock();
+        return false;
     }
+
+    // Mark as removed from list
+    awaitable.in_list = false;
 
     // O(1) removal with doubly-linked list
     if (awaitable.prev) |prev| {
@@ -283,10 +278,11 @@ pub fn remove(self: *ConcurrentAwaitableList, executor: ?*Executor, awaitable: *
             self.head.store(@intFromEnum(State.fromPtr(next)), .release);
         } else {
             // Was only waiter - transition to sentinel0
+            // Update tail first, then clear the mutation bit via store(.release)
+            self.tail = null;
             // (implicitly releases mutation lock since sentinel0 = 0b00 has no mutation bit)
             // .release: publishes tail update and queue empty state
             self.head.store(@intFromEnum(State.sentinel0), .release);
-            self.tail = null;
         }
         // Mutation lock released by store() above
     } else {

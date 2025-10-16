@@ -23,7 +23,7 @@ pub const Awaitable = struct {
     waiting_list: ConcurrentAwaitableList = ConcurrentAwaitableList.init(),
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
     destroy_fn: *const fn (*Runtime, *Awaitable) void,
-    in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+    in_list: bool = false,
 
     // Universal state for both coroutines and threads
     // 0 = pending/not ready, 1 = complete/ready
