@@ -41,6 +41,7 @@
 //! ```
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
@@ -49,16 +50,17 @@ const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
-state: std.atomic.Value(State) = std.atomic.Value(State).init(.unset),
 wait_queue: ConcurrentAwaitableList = ConcurrentAwaitableList.init(),
 
 const ResetEvent = @This();
 
-const State = enum(u8) {
-    unset = 0,
-    waiting = 1,
-    is_set = 2,
-};
+// Use ConcurrentAwaitableList sentinel states to encode event state:
+// - sentinel0 = unset (no waiters, event not signaled)
+// - sentinel1 = set (no waiters, event signaled)
+// - pointer = waiting (has waiters, event not signaled)
+const State = ConcurrentAwaitableList.State;
+const unset = State.sentinel0;
+const is_set = State.sentinel1;
 
 /// Creates a new ResetEvent in the unset state.
 pub const init: ResetEvent = .{};
@@ -68,7 +70,7 @@ pub const init: ResetEvent = .{};
 /// Returns `true` if `set()` has been called and `reset()` has not been called since.
 /// Returns `false` otherwise.
 pub fn isSet(self: *const ResetEvent) bool {
-    return self.state.load(.acquire) == .is_set;
+    return self.wait_queue.getState() == is_set;
 }
 
 /// Sets the event and wakes all waiting tasks.
@@ -77,23 +79,15 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// The event remains set until `reset()` is called. Multiple calls to `set()` while
 /// already set have no effect.
 pub fn set(self: *ResetEvent, runtime: *Runtime) void {
-    // Quick check if already set to avoid unnecessary atomic operations
-    if (self.state.load(.monotonic) == .is_set) {
-        return;
-    }
+    // Extract all waiters and transition to is_set
+    // Use runtime's executor for acquiring the mutation lock
+    var waiters = self.wait_queue.popAll(&runtime.executor, is_set);
 
-    // Atomically set to is_set and get the previous state
-    const prev_state = self.state.swap(.is_set, .release);
-
-    // Only wake waiters if previous state was waiting (there were waiters)
-    if (prev_state == .waiting) {
-        const current = runtime.executor.current_coroutine orelse unreachable;
-        const executor = Executor.fromCoroutine(current);
-        while (self.wait_queue.pop(executor)) |awaitable| {
-            const task = AnyTask.fromAwaitable(awaitable);
-            const task_executor = Executor.fromCoroutine(&task.coro);
-            task_executor.markReady(&task.coro);
-        }
+    // Wake all waiters
+    while (waiters.pop()) |awaitable| {
+        const task = AnyTask.fromAwaitable(awaitable);
+        const task_executor = Executor.fromCoroutine(&task.coro);
+        task_executor.markReady(&task.coro);
     }
 }
 
@@ -103,7 +97,9 @@ pub fn set(self: *ResetEvent, runtime: *Runtime) void {
 /// on it again. It is undefined behavior to call `reset()` while tasks are waiting
 /// in `wait()` or `timedWait()`.
 pub fn reset(self: *ResetEvent) void {
-    self.state.store(.unset, .monotonic);
+    // Transition from is_set to unset
+    const success = self.wait_queue.tryTransition(is_set, unset);
+    std.debug.assert(success); // Must be in is_set state when reset() is called
 }
 
 /// Waits for the event to be set.
@@ -113,33 +109,34 @@ pub fn reset(self: *ResetEvent) void {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
-    // Try to atomically register as a waiter
-    var state = self.state.load(.acquire);
-    if (state == .unset) {
-        state = self.state.cmpxchgStrong(.unset, .waiting, .acquire, .acquire) orelse .waiting;
+    const state = self.wait_queue.getState();
+
+    // Fast path: already set
+    if (state == is_set) {
+        return;
     }
 
-    // If we're now in waiting state, add to queue and block
-    if (state == .waiting) {
-        const current = runtime.executor.current_coroutine orelse unreachable;
-        const executor = Executor.fromCoroutine(current);
-        const task = AnyTask.fromCoroutine(current);
-        self.wait_queue.push(executor, &task.awaitable);
+    // Add to wait queue and suspend
+    const current = runtime.executor.current_coroutine orelse unreachable;
+    const executor = Executor.fromCoroutine(current);
+    const task = AnyTask.fromCoroutine(current);
+    self.wait_queue.push(executor, &task.awaitable);
 
-        // Suspend until woken by set()
-        executor.yield(.waiting, .allow_cancel) catch |err| {
-            // On cancellation, remove from queue
-            _ = self.wait_queue.remove(executor, &task.awaitable);
-            return err;
-        };
+    // Suspend until woken by set()
+    executor.yield(.waiting, .allow_cancel) catch |err| {
+        // On cancellation, remove from queue
+        _ = self.wait_queue.remove(executor, &task.awaitable);
+        return err;
+    };
 
-        // Acquire fence: synchronize-with set()'s .release swap
-        // Ensures visibility of all writes made before set() was called
-        _ = self.state.load(.acquire);
+    // Acquire fence: synchronize-with set()'s .release in popAll
+    // Ensures visibility of all writes made before set() was called
+    _ = self.wait_queue.getState();
+
+    // Debug: verify we were removed from the list by set()
+    if (builtin.mode == .Debug) {
+        std.debug.assert(!task.awaitable.in_list);
     }
-
-    // If state is is_set, we return immediately (event already set)
-    std.debug.assert(state == .is_set or state == .waiting);
 }
 
 /// Waits for the event to be set with a timeout.
@@ -152,19 +149,14 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
-    // Try to atomically register as a waiter
-    var state = self.state.load(.acquire);
-    if (state == .unset) {
-        state = self.state.cmpxchgStrong(.unset, .waiting, .acquire, .acquire) orelse .waiting;
-    }
+    const state = self.wait_queue.getState();
 
-    // If event is already set, return immediately
-    if (state == .is_set) {
+    // Fast path: already set
+    if (state == is_set) {
         return;
     }
 
-    // We're now in waiting state, add to queue and wait with timeout
-    std.debug.assert(state == .waiting);
+    // Add to wait queue and wait with timeout
     const current = runtime.executor.current_coroutine orelse unreachable;
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
@@ -202,9 +194,14 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
         return err;
     };
 
-    // Acquire fence: synchronize-with set()'s .release swap on success path
+    // Acquire fence: synchronize-with set()'s .release in popAll
     // Ensures visibility of all writes made before set() was called
-    _ = self.state.load(.acquire);
+    _ = self.wait_queue.getState();
+
+    // Debug: verify we were removed from the list by set() or timeout
+    if (builtin.mode == .Debug) {
+        std.debug.assert(!task.awaitable.in_list);
+    }
 }
 
 test "ResetEvent basic set/reset/isSet" {

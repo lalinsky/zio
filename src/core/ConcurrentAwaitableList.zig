@@ -19,6 +19,7 @@ const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("../runtime.zig").Awaitable;
+const AwaitableList = @import("AwaitableList.zig");
 
 const ConcurrentAwaitableList = @This();
 
@@ -365,6 +366,33 @@ pub fn remove(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *A
 
         return true;
     }
+}
+
+/// Atomically extract the entire wait queue and reset to target_sentinel.
+/// Returns an AwaitableList containing all waiters (empty if no waiters).
+pub fn popAll(self: *ConcurrentAwaitableList, executor: *Executor, target_sentinel: State) AwaitableList {
+    std.debug.assert(!target_sentinel.isPointer());
+
+    const old_state = self.acquireMutationLock(executor);
+
+    // No waiters - just transition to target_sentinel and return empty
+    if (!old_state.isPointer()) {
+        self.head.store(@intFromEnum(target_sentinel), .release);
+        return AwaitableList{};
+    }
+
+    // Extract the queue
+    const result = AwaitableList{
+        .head = old_state.getPtr(),
+        .tail = self.tail,
+    };
+
+    // Clear internal state and set to target_sentinel (implicitly releases mutation lock)
+    self.tail = null;
+    // .release: publishes tail update and queue extraction
+    self.head.store(@intFromEnum(target_sentinel), .release);
+
+    return result;
 }
 
 test "ConcurrentAwaitableList basic operations" {
