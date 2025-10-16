@@ -19,7 +19,6 @@ const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("../runtime.zig").Awaitable;
-const AwaitableList = @import("AwaitableList.zig");
 
 const ConcurrentAwaitableList = @This();
 

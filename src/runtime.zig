@@ -139,7 +139,7 @@ pub const Awaitable = struct {
     kind: AwaitableKind,
     next: ?*Awaitable = null,
     prev: ?*Awaitable = null,
-    waiting_list: AwaitableList = .{},
+    waiting_list: SimpleAwaitableList = .{},
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
     destroy_fn: *const fn (*Runtime, *Awaitable) void,
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
@@ -232,7 +232,7 @@ pub const Awaitable = struct {
             }
 
             const TimeoutContext = struct {
-                wait_queue: *AwaitableList,
+                wait_queue: *SimpleAwaitableList,
                 awaitable: *Awaitable,
             };
 
@@ -672,79 +672,13 @@ pub fn SelectUnion(comptime S: type) type {
 }
 
 // Simple singly-linked stack (LIFO) for single-threaded use
-pub const SimpleAwaitableStack = struct {
-    head: ?*Awaitable = null,
-
-    pub fn push(self: *SimpleAwaitableStack, item: *Awaitable) void {
-        if (builtin.mode == .Debug) {
-            std.debug.assert(!item.in_list);
-            item.in_list = true;
-        }
-        item.next = self.head;
-        self.head = item;
-    }
-
-    pub fn pop(self: *SimpleAwaitableStack) ?*Awaitable {
-        const head = self.head orelse return null;
-        if (builtin.mode == .Debug) {
-            head.in_list = false;
-        }
-        self.head = head.next;
-        head.next = null;
-        return head;
-    }
-
-    /// Move all items from other stack to this stack (prepends).
-    pub fn prependByMoving(self: *SimpleAwaitableStack, other: *SimpleAwaitableStack) void {
-        const other_head = other.head orelse return;
-
-        // Find tail of other stack
-        var tail = other_head;
-        while (tail.next) |next| {
-            tail = next;
-        }
-
-        // Link tail to our current head
-        tail.next = self.head;
-        self.head = other_head;
-
-        other.head = null;
-    }
-};
+pub const SimpleAwaitableStack = @import("core/SimpleAwaitableStack.zig");
 
 // Lock-free intrusive stack for cross-thread communication
-pub const AwaitableStack = struct {
-    head: std.atomic.Value(?*Awaitable) = std.atomic.Value(?*Awaitable).init(null),
-
-    /// Push an item onto the stack. Thread-safe, can be called from any thread.
-    pub fn push(self: *AwaitableStack, item: *Awaitable) void {
-        while (true) {
-            const current_head = self.head.load(.acquire);
-            item.next = current_head;
-
-            // Try to swing head to new item
-            if (self.head.cmpxchgWeak(
-                current_head,
-                item,
-                .release,
-                .acquire,
-            ) == null) {
-                return; // Success!
-            }
-            // CAS failed, retry
-        }
-    }
-
-    /// Atomically drain all items from the stack.
-    /// Returns a SimpleAwaitableStack containing all drained items (LIFO order).
-    pub fn popAll(self: *AwaitableStack) SimpleAwaitableStack {
-        const head = self.head.swap(null, .acq_rel);
-        return SimpleAwaitableStack{ .head = head };
-    }
-};
+pub const ConcurrentAwaitableStack = @import("core/ConcurrentAwaitableStack.zig");
 
 // Simple doubly-linked list of awaitables (non-concurrent)
-pub const AwaitableList = @import("core/AwaitableList.zig");
+pub const SimpleAwaitableList = @import("core/AwaitableList.zig");
 
 // Executor metrics
 pub const ExecutorMetrics = struct {
@@ -768,7 +702,7 @@ pub const Executor = struct {
     next_ready_queue: SimpleAwaitableStack = .{},
 
     // Blocking task support - lock-free LIFO stack
-    blocking_completions: AwaitableStack = .{},
+    blocking_completions: ConcurrentAwaitableStack = .{},
     async_wakeup: xev.Async = undefined,
     async_completion: xev.Completion = undefined,
     blocking_initialized: bool = false,

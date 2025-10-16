@@ -6,12 +6,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Awaitable = @import("../runtime.zig").Awaitable;
 
-const AwaitableList = @This();
+const SimpleAwaitableList = @This();
 
 head: ?*Awaitable = null,
 tail: ?*Awaitable = null,
 
-pub fn push(self: *AwaitableList, awaitable: *Awaitable) void {
+pub fn push(self: *SimpleAwaitableList, awaitable: *Awaitable) void {
     if (builtin.mode == .Debug) {
         std.debug.assert(!awaitable.in_list);
         awaitable.in_list = true;
@@ -28,7 +28,7 @@ pub fn push(self: *AwaitableList, awaitable: *Awaitable) void {
     }
 }
 
-pub fn pop(self: *AwaitableList) ?*Awaitable {
+pub fn pop(self: *SimpleAwaitableList) ?*Awaitable {
     const head = self.head orelse return null;
     if (builtin.mode == .Debug) {
         head.in_list = false;
@@ -44,7 +44,7 @@ pub fn pop(self: *AwaitableList) ?*Awaitable {
     return head;
 }
 
-pub fn concatByMoving(self: *AwaitableList, other: *AwaitableList) void {
+pub fn concatByMoving(self: *SimpleAwaitableList, other: *SimpleAwaitableList) void {
     if (other.head == null) return;
 
     if (self.tail) |tail| {
@@ -62,7 +62,7 @@ pub fn concatByMoving(self: *AwaitableList, other: *AwaitableList) void {
     other.tail = null;
 }
 
-pub fn remove(self: *AwaitableList, awaitable: *Awaitable) bool {
+pub fn remove(self: *SimpleAwaitableList, awaitable: *Awaitable) bool {
     // Handle empty list
     if (self.head == null) return false;
 
