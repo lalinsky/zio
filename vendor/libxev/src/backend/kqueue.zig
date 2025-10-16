@@ -543,10 +543,16 @@ pub const Loop = struct {
 
                 std.debug.print("[KQUEUE] tick: processing completion {*} state={d} op={d}\n", .{ c, @intFromEnum(c.flags.state), @intFromEnum(c.op) });
 
-                // If completion is already dead, skip it. This can happen when
-                // kqueue returns the same event multiple times.
+                // If completion is already dead, skip performing it but queue DELETE.
+                // This can happen when kqueue returns the same event multiple times.
                 if (c.flags.state == .dead) {
-                    std.debug.print("[KQUEUE] tick: skipping already .dead completion {*}\n", .{c});
+                    std.debug.print("[KQUEUE] tick: skipping already .dead completion {*}, queuing DELETE\n", .{c});
+                    // Queue DELETE so kqueue stops returning this event
+                    events[changes] = ev;
+                    events[changes].flags = std.c.EV.DELETE;
+                    events[changes].udata = 0;
+                    changes += 1;
+                    if (changes >= events.len) break;
                     continue;
                 }
 
