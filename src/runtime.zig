@@ -699,7 +699,7 @@ pub const SimpleAwaitableStack = @import("core/SimpleAwaitableStack.zig");
 pub const ConcurrentAwaitableStack = @import("core/ConcurrentAwaitableStack.zig");
 
 // Simple doubly-linked list of awaitables (non-concurrent)
-pub const SimpleAwaitableList = @import("core/AwaitableList.zig");
+pub const SimpleAwaitableList = @import("core/SimpleAwaitableList.zig");
 
 // Concurrent doubly-linked list of awaitables (thread-safe)
 pub const ConcurrentAwaitableList = @import("core/ConcurrentAwaitableList.zig");
