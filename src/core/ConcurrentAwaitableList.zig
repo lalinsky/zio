@@ -144,6 +144,8 @@ pub fn acquireMutationLock(self: *ConcurrentAwaitableList, executor: ?*Executor)
         if (spin_count == 0) {
             if (executor) |e| {
                 e.yield(.ready, .no_cancel);
+            } else {
+                std.Thread.yield() catch {};
             }
         }
         std.atomic.spinLoopHint();
