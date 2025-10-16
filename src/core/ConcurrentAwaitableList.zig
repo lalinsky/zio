@@ -375,7 +375,7 @@ test "ConcurrentAwaitableList basic operations" {
     var list = ConcurrentAwaitableList.init();
 
     // Initially in sentinel0 state
-    try testing.expect(list.getState() == .sentinel0);
+    try testing.expectEqual(State.sentinel0, list.getState());
 
     // Create mock awaitables - ensure proper alignment
     var awaitable1 align(8) = Awaitable{
@@ -398,27 +398,27 @@ test "ConcurrentAwaitableList basic operations" {
 
     // Pop items (FIFO order)
     const popped1 = list.pop(&runtime.executor);
-    try testing.expect(popped1 == &awaitable1);
+    try testing.expectEqual(&awaitable1, popped1);
 
     // Remove specific item
-    try testing.expect(list.remove(&runtime.executor, &awaitable2));
-    try testing.expect(list.getState() == .sentinel0);
+    try testing.expectEqual(true, list.remove(&runtime.executor, &awaitable2));
+    try testing.expectEqual(State.sentinel0, list.getState());
 
     // Remove non-existent item
-    try testing.expect(!list.remove(&runtime.executor, &awaitable1));
+    try testing.expectEqual(false, list.remove(&runtime.executor, &awaitable1));
 }
 
 test "ConcurrentAwaitableList state transitions" {
     const testing = std.testing;
 
     var list = ConcurrentAwaitableList.initWithState(.sentinel1);
-    try testing.expect(list.getState() == .sentinel1);
+    try testing.expectEqual(State.sentinel1, list.getState());
 
     // Transition between sentinels
-    try testing.expect(list.tryTransition(.sentinel1, .sentinel0));
-    try testing.expect(list.getState() == .sentinel0);
+    try testing.expectEqual(true, list.tryTransition(.sentinel1, .sentinel0));
+    try testing.expectEqual(State.sentinel0, list.getState());
 
     // Failed transition
-    try testing.expect(!list.tryTransition(.sentinel1, .sentinel0));
-    try testing.expect(list.getState() == .sentinel0);
+    try testing.expectEqual(false, list.tryTransition(.sentinel1, .sentinel0));
+    try testing.expectEqual(State.sentinel0, list.getState());
 }
