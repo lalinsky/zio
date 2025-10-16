@@ -543,7 +543,14 @@ pub const Loop = struct {
 
                 std.debug.print("[KQUEUE] tick: processing completion {*} state={d} op={d}\n", .{ c, @intFromEnum(c.flags.state), @intFromEnum(c.op) });
 
-                // c is ready to be reused rigt away if we're dearming
+                // If completion is already dead, skip it. This can happen when
+                // kqueue returns the same event multiple times.
+                if (c.flags.state == .dead) {
+                    std.debug.print("[KQUEUE] tick: skipping already .dead completion {*}\n", .{c});
+                    continue;
+                }
+
+                // c is ready to be reused right away if we're dearming
                 // so we mark it as dead.
                 c.flags.state = .dead;
 
