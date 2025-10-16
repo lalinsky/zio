@@ -101,6 +101,28 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     executor.async_wakeup.notify() catch {};
 }
 
+// Async callback to drain remote ready tasks (cross-thread resumption)
+fn drainRemoteReadyTasks(
+    executor: ?*Executor,
+    loop: *xev.Loop,
+    c: *xev.Completion,
+    result: xev.Async.WaitError!void,
+) xev.CallbackAction {
+    _ = result catch unreachable;
+    _ = loop;
+    _ = c;
+    const self = executor.?;
+
+    // Atomically drain all remote ready tasks (LIFO order)
+    var drained = self.next_ready_queue_remote.popAll();
+    while (drained.pop()) |awaitable| {
+        // Move to local next_ready_queue
+        self.next_ready_queue.push(awaitable);
+    }
+
+    return .rearm;
+}
+
 // Async callback to drain completed blocking tasks
 fn drainBlockingCompletions(
     executor: ?*Executor,
@@ -719,6 +741,12 @@ pub const Executor = struct {
     ready_queue: SimpleAwaitableStack = .{},
     next_ready_queue: SimpleAwaitableStack = .{},
 
+    // Remote task support - lock-free LIFO stack for cross-thread resumption
+    next_ready_queue_remote: ConcurrentAwaitableStack = .{},
+    remote_wakeup: xev.Async = undefined,
+    remote_completion: xev.Completion = undefined,
+    remote_initialized: bool = false,
+
     // Blocking task support - lock-free LIFO stack
     blocking_completions: ConcurrentAwaitableStack = .{},
     async_wakeup: xev.Async = undefined,
@@ -768,6 +796,11 @@ pub const Executor = struct {
             rt.releaseAwaitable(&task.awaitable);
         }
         self.tasks.deinit(self.allocator);
+
+        // Clean up remote task support
+        if (self.remote_initialized) {
+            self.remote_wakeup.deinit();
+        }
 
         // Clean up blocking task support
         if (self.blocking_initialized) {
@@ -944,6 +977,23 @@ pub const Executor = struct {
         unreachable; // Should always timeout - waking without timeout is a bug
     }
 
+    fn ensureRemoteInitialized(self: *Executor) !void {
+        if (self.remote_initialized) return;
+
+        self.remote_wakeup = try xev.Async.init();
+
+        // Register async completion to drain remote ready tasks
+        self.remote_wakeup.wait(
+            &self.loop,
+            &self.remote_completion,
+            Executor,
+            self,
+            drainRemoteReadyTasks,
+        );
+
+        self.remote_initialized = true;
+    }
+
     fn ensureBlockingInitialized(self: *Executor) !void {
         if (self.blocking_initialized) return;
         if (self.thread_pool == null) return error.ThreadPoolRequired;
@@ -991,6 +1041,13 @@ pub const Executor = struct {
     }
 
     pub fn run(self: *Executor) !void {
+        // Set thread-local current executor
+        Runtime.current_executor = self;
+        defer Runtime.current_executor = null;
+
+        // Initialize remote task support (for cross-thread resumption)
+        try self.ensureRemoteInitialized();
+
         while (true) {
             // Time-based stack pool cleanup
             const now = std.time.milliTimestamp();
@@ -1058,7 +1115,22 @@ pub const Executor = struct {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = AnyTask.fromCoroutine(coro);
-        self.ready_queue.push(&task.awaitable);
+
+        // Check if we're on the same executor thread
+        if (Runtime.current_executor == self) {
+            // Same executor - use fast local path
+            self.ready_queue.push(&task.awaitable);
+        } else {
+            // Different executor (or no current executor) - use remote path
+            // Remote queue must be initialized by run() before cross-thread calls
+            assert(self.remote_initialized);
+
+            // Push to remote ready queue (thread-safe)
+            self.next_ready_queue_remote.push(&task.awaitable);
+
+            // Notify the target executor's event loop
+            self.remote_wakeup.notify() catch {};
+        }
     }
 
     /// Get a copy of the current metrics
@@ -1281,6 +1353,9 @@ pub const Runtime = struct {
     executor: Executor,
     thread_pool: ?*xev.ThreadPool,
     allocator: Allocator,
+
+    /// Thread-local storage for the current executor
+    threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
         // Initialize ThreadPool if enabled (shared resource)
