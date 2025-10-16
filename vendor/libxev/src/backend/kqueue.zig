@@ -230,6 +230,13 @@ pub const Loop = struct {
 
             // Zero timeout so that kevent returns immediately.
             var timeout = std.mem.zeroes(posix.timespec);
+
+            // Log what we're submitting
+            std.debug.print("[KQUEUE] submit: submitting {} changes to kevent:\n", .{events_len});
+            for (events[0..events_len]) |ev| {
+                std.debug.print("  udata=0x{x} ident={} filter={} flags=0x{x}\n", .{ ev.udata, ev.ident, ev.filter, ev.flags });
+            }
+
             const completed = try kevent_syscall(
                 self.kqueue_fd,
                 events[0..events_len],
@@ -237,6 +244,8 @@ pub const Loop = struct {
                 &timeout,
             );
             events_len = 0;
+
+            std.debug.print("[KQUEUE] submit: kevent returned {} events\n", .{completed});
 
             // Go through the completed events and queue them.
             // NOTE: we currently never process completions (we set
@@ -493,6 +502,13 @@ pub const Loop = struct {
             // back even if are done waiting (wait_rem == 0) because if we have
             // to make a syscall to submit changes, we might as well also check
             // for done events too.
+
+            // Log what we're submitting
+            std.debug.print("[KQUEUE] tick: submitting {} changes to kevent:\n", .{changes});
+            for (events[0..changes]) |ev| {
+                std.debug.print("  udata=0x{x} ident={} filter={} flags=0x{x}\n", .{ ev.udata, ev.ident, ev.filter, ev.flags });
+            }
+
             const completed = completed: while (true) {
                 break :completed kevent_syscall(
                     self.kqueue_fd,
@@ -511,6 +527,8 @@ pub const Loop = struct {
                     else => return err,
                 };
             };
+
+            std.debug.print("[KQUEUE] tick: kevent returned {} events\n", .{completed});
 
             // Reset changes since they're not submitted
             changes = 0;
