@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Runtime.now()` for getting the current monotonic time in milliseconds
 - `JoinHandle.cast()` for converting between compatible error sets
 - Exported `Barrier` and `RefCounter` synchronization primitives
 
