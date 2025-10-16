@@ -26,7 +26,7 @@ const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../runtime.zig").Cancelable;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-const LockFreeAwaitableQueue = @import("LockFreeAwaitableQueue.zig");
+const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
 const Mutex = @This();
 
@@ -34,9 +34,9 @@ const Mutex = @This();
 /// - sentinel0 (0b00) = locked, no waiters
 /// - sentinel1 (0b01) = unlocked
 /// - pointer = locked with waiters
-queue: LockFreeAwaitableQueue = LockFreeAwaitableQueue.initWithState(.sentinel1),
+queue: ConcurrentAwaitableList = ConcurrentAwaitableList.initWithState(.sentinel1),
 
-const State = LockFreeAwaitableQueue.State;
+const State = ConcurrentAwaitableList.State;
 const locked_once: State = .sentinel0;
 const unlocked: State = .sentinel1;
 

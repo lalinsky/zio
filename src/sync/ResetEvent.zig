@@ -47,10 +47,10 @@ const Cancelable = @import("../runtime.zig").Cancelable;
 const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-const LockFreeAwaitableQueue = @import("LockFreeAwaitableQueue.zig");
+const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
 state: std.atomic.Value(State) = std.atomic.Value(State).init(.unset),
-wait_queue: LockFreeAwaitableQueue = LockFreeAwaitableQueue.init(),
+wait_queue: ConcurrentAwaitableList = ConcurrentAwaitableList.init(),
 
 const ResetEvent = @This();
 
@@ -168,7 +168,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     self.wait_queue.push(executor, &task.awaitable);
 
     const TimeoutContext = struct {
-        wait_queue: *LockFreeAwaitableQueue,
+        wait_queue: *ConcurrentAwaitableList,
         awaitable: *Awaitable,
         executor: *Executor,
     };

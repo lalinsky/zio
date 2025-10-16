@@ -1,6 +1,6 @@
-//! Lock-free FIFO queue for awaitables with two sentinel states.
+//! Concurrent FIFO list for awaitables with two sentinel states.
 //!
-//! Uses tagged pointers with mutation spinlock for thread-safe queue operations:
+//! Uses tagged pointers with mutation spinlock for thread-safe operations:
 //! - 0b00: Sentinel state 0
 //! - 0b01: Sentinel state 1
 //! - ptr (>1): Pointer to head of wait queue
@@ -9,7 +9,7 @@
 //! Provides O(1) push, pop, and remove operations using a doubly-linked list
 //! with atomic head pointer and non-atomic tail pointer (protected by mutation lock).
 //!
-//! This pattern enables efficient lock-free synchronization primitives where:
+//! This pattern enables efficient concurrent synchronization primitives where:
 //! - Sentinel states can encode additional information (e.g., locked vs unlocked)
 //! - Wait queues need thread-safe access with minimal overhead
 //! - Critical sections are very short (just pointer manipulation)
@@ -20,7 +20,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("../runtime.zig").Awaitable;
 
-const LockFreeAwaitableQueue = @This();
+const ConcurrentAwaitableList = @This();
 
 /// Head of FIFO wait queue with state encoded in lower bits
 head: std.atomic.Value(usize),
@@ -60,15 +60,15 @@ pub const State = enum(usize) {
     }
 };
 
-/// Initialize queue in sentinel0 state
-pub fn init() LockFreeAwaitableQueue {
+/// Initialize list in sentinel0 state
+pub fn init() ConcurrentAwaitableList {
     return .{
         .head = std.atomic.Value(usize).init(@intFromEnum(State.sentinel0)),
     };
 }
 
-/// Initialize queue in a specific sentinel state
-pub fn initWithState(state: State) LockFreeAwaitableQueue {
+/// Initialize list in a specific sentinel state
+pub fn initWithState(state: State) ConcurrentAwaitableList {
     std.debug.assert(!state.isPointer());
     return .{
         .head = std.atomic.Value(usize).init(@intFromEnum(state)),
@@ -78,8 +78,8 @@ pub fn initWithState(state: State) LockFreeAwaitableQueue {
 /// Get current state (atomic load)
 ///
 /// Memory ordering: Uses .acquire to ensure visibility of any prior modifications
-/// to the queue structure if the state is a pointer.
-pub fn getState(self: *const LockFreeAwaitableQueue) State {
+/// to the list structure if the state is a pointer.
+pub fn getState(self: *const ConcurrentAwaitableList) State {
     // .acquire: synchronizes-with .release from any prior state transitions
     return @enumFromInt(self.head.load(.acquire));
 }
@@ -89,7 +89,7 @@ pub fn getState(self: *const LockFreeAwaitableQueue) State {
 ///
 /// Memory ordering: Uses .release on success to publish any prior modifications.
 /// Uses .acquire on failure to observe the current state.
-pub fn tryTransition(self: *LockFreeAwaitableQueue, from: State, to: State) bool {
+pub fn tryTransition(self: *ConcurrentAwaitableList, from: State, to: State) bool {
     std.debug.assert(!from.isPointer() and !to.isPointer());
     // .release on success: makes prior modifications visible to threads observing the new state
     // .acquire on failure: synchronizes-with prior .release to observe current state
@@ -101,14 +101,14 @@ pub fn tryTransition(self: *LockFreeAwaitableQueue, from: State, to: State) bool
     ) == null;
 }
 
-/// Acquire exclusive access to manipulate the wait queue.
+/// Acquire exclusive access to manipulate the wait list.
 /// Spins until mutation lock is acquired.
 /// Returns the state before mutation bit was set.
 ///
 /// Memory ordering: Uses .acquire on fetchOr to synchronize-with the previous
 /// releaseMutationLock(). This ensures visibility of all modifications made
 /// while the lock was previously held, including non-atomic tail pointer updates.
-pub fn acquireMutationLock(self: *LockFreeAwaitableQueue, executor: *Executor) State {
+pub fn acquireMutationLock(self: *ConcurrentAwaitableList, executor: *Executor) State {
     var spin_count: u4 = 0;
     while (true) {
         // Try to set mutation bit atomically
@@ -130,22 +130,22 @@ pub fn acquireMutationLock(self: *LockFreeAwaitableQueue, executor: *Executor) S
     }
 }
 
-/// Release exclusive access to wait queue.
+/// Release exclusive access to wait list.
 ///
 /// Memory ordering: Uses .release on fetchAnd to make all modifications
 /// visible to future lock acquires. This includes non-atomic writes to tail
 /// and doubly-linked list pointer updates performed while holding the lock.
-pub fn releaseMutationLock(self: *LockFreeAwaitableQueue) void {
+pub fn releaseMutationLock(self: *ConcurrentAwaitableList) void {
     // .release: makes all prior writes visible to future acquireMutationLock calls
     // Clear mutation bit (bit 1) by ANDing with ~0b10
     const prev = self.head.fetchAnd(~@as(usize, 0b10), .release);
     std.debug.assert(prev & 0b10 != 0); // Must have been holding the lock
 }
 
-/// Add awaitable to the end of the queue.
-/// If queue is currently in a sentinel state, transitions to queue state.
+/// Add awaitable to the end of the list.
+/// If list is currently in a sentinel state, transitions to list state.
 /// Otherwise acquires mutation lock and appends to tail.
-pub fn push(self: *LockFreeAwaitableQueue, executor: *Executor, awaitable: *Awaitable) void {
+pub fn push(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *Awaitable) void {
     // Initialize awaitable as not in list
     if (builtin.mode == .Debug) {
         std.debug.assert(!awaitable.in_list);
@@ -214,9 +214,9 @@ pub fn push(self: *LockFreeAwaitableQueue, executor: *Executor, awaitable: *Awai
     }
 }
 
-/// Remove and return the awaitable at the front of the queue.
-/// Returns null if queue is in a sentinel state (empty).
-pub fn pop(self: *LockFreeAwaitableQueue, executor: *Executor) ?*Awaitable {
+/// Remove and return the awaitable at the front of the list.
+/// Returns null if list is in a sentinel state (empty).
+pub fn pop(self: *ConcurrentAwaitableList, executor: *Executor) ?*Awaitable {
     var spin_count: u4 = 0;
     while (true) {
         // .acquire: synchronizes-with .release from prior operations
@@ -277,9 +277,9 @@ pub fn pop(self: *LockFreeAwaitableQueue, executor: *Executor) ?*Awaitable {
     }
 }
 
-/// Remove a specific awaitable from the queue.
+/// Remove a specific awaitable from the list.
 /// Returns true if the awaitable was found and removed, false otherwise.
-pub fn remove(self: *LockFreeAwaitableQueue, executor: *Executor, awaitable: *Awaitable) bool {
+pub fn remove(self: *ConcurrentAwaitableList, executor: *Executor, awaitable: *Awaitable) bool {
     var spin_count: u4 = 0;
     while (true) {
         // .acquire: synchronizes-with .release from prior operations
@@ -366,16 +366,16 @@ pub fn remove(self: *LockFreeAwaitableQueue, executor: *Executor, awaitable: *Aw
     }
 }
 
-test "LockFreeAwaitableQueue basic operations" {
+test "ConcurrentAwaitableList basic operations" {
     const testing = std.testing;
 
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    var queue = LockFreeAwaitableQueue.init();
+    var list = ConcurrentAwaitableList.init();
 
     // Initially in sentinel0 state
-    try testing.expect(queue.getState() == .sentinel0);
+    try testing.expect(list.getState() == .sentinel0);
 
     // Create mock awaitables - ensure proper alignment
     var awaitable1 align(8) = Awaitable{
@@ -392,33 +392,33 @@ test "LockFreeAwaitableQueue basic operations" {
     };
 
     // Push items
-    queue.push(&runtime.executor, &awaitable1);
-    try testing.expect(queue.getState().isPointer());
-    queue.push(&runtime.executor, &awaitable2);
+    list.push(&runtime.executor, &awaitable1);
+    try testing.expect(list.getState().isPointer());
+    list.push(&runtime.executor, &awaitable2);
 
     // Pop items (FIFO order)
-    const popped1 = queue.pop(&runtime.executor);
+    const popped1 = list.pop(&runtime.executor);
     try testing.expect(popped1 == &awaitable1);
 
     // Remove specific item
-    try testing.expect(queue.remove(&runtime.executor, &awaitable2));
-    try testing.expect(queue.getState() == .sentinel0);
+    try testing.expect(list.remove(&runtime.executor, &awaitable2));
+    try testing.expect(list.getState() == .sentinel0);
 
     // Remove non-existent item
-    try testing.expect(!queue.remove(&runtime.executor, &awaitable1));
+    try testing.expect(!list.remove(&runtime.executor, &awaitable1));
 }
 
-test "LockFreeAwaitableQueue state transitions" {
+test "ConcurrentAwaitableList state transitions" {
     const testing = std.testing;
 
-    var queue = LockFreeAwaitableQueue.initWithState(.sentinel1);
-    try testing.expect(queue.getState() == .sentinel1);
+    var list = ConcurrentAwaitableList.initWithState(.sentinel1);
+    try testing.expect(list.getState() == .sentinel1);
 
     // Transition between sentinels
-    try testing.expect(queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expect(queue.getState() == .sentinel0);
+    try testing.expect(list.tryTransition(.sentinel1, .sentinel0));
+    try testing.expect(list.getState() == .sentinel0);
 
     // Failed transition
-    try testing.expect(!queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expect(queue.getState() == .sentinel0);
+    try testing.expect(!list.tryTransition(.sentinel1, .sentinel0));
+    try testing.expect(list.getState() == .sentinel0);
 }

@@ -53,9 +53,9 @@ const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const Mutex = @import("Mutex.zig");
-const LockFreeAwaitableQueue = @import("LockFreeAwaitableQueue.zig");
+const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
 
-wait_queue: LockFreeAwaitableQueue = LockFreeAwaitableQueue.init(),
+wait_queue: ConcurrentAwaitableList = ConcurrentAwaitableList.init(),
 
 const Condition = @This();
 
@@ -124,7 +124,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     self.wait_queue.push(executor, &task.awaitable);
 
     const TimeoutContext = struct {
-        wait_queue: *LockFreeAwaitableQueue,
+        wait_queue: *ConcurrentAwaitableList,
         awaitable: *Awaitable,
         executor: *Executor,
     };
