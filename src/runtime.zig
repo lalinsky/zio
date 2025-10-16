@@ -1083,14 +1083,18 @@ pub const Executor = struct {
             }
 
             // First check for I/O events without blocking (processes cancellations)
+            std.debug.print("[RUNTIME] calling loop.run(.no_wait)\n", .{});
             try self.loop.run(.no_wait);
+            std.debug.print("[RUNTIME] loop.run(.no_wait) completed\n", .{});
 
             // Move yielded coroutines back to ready queue
             self.ready_queue.prependByMoving(&self.next_ready_queue);
 
             // If no ready work, block waiting for I/O
             if (self.ready_queue.head == null and self.next_ready_queue.head == null) {
+                std.debug.print("[RUNTIME] calling loop.run(.once)\n", .{});
                 try self.loop.run(.once);
+                std.debug.print("[RUNTIME] loop.run(.once) completed\n", .{});
             }
         }
     }

@@ -252,6 +252,15 @@ pub const Loop = struct {
 
                 const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
 
+                std.debug.print("[KQUEUE] submit: processing completion {*} state={s} op={s}\n", .{ c, @tagName(c.flags.state), @tagName(c.op) });
+
+                // If the completion is already dead, it was already processed in this
+                // batch or pushed during the deleting phase. Skip to avoid double-processing.
+                if (c.flags.state == .dead) {
+                    std.debug.print("[KQUEUE] submit: skipping .dead completion {*}\n", .{c});
+                    continue;
+                }
+
                 // If EV_ERROR is set, then submission failed for this
                 // completion. We get the syscall errorcode from data and
                 // store it.
@@ -259,6 +268,7 @@ pub const Loop = struct {
                     c.result = c.syscall_result(-@as(i32, @intCast(ev.data)));
                 } else {
                     // No error, means that this completion is ready to work.
+                    std.debug.print("[KQUEUE] submit: calling perform on {*}\n", .{c});
                     c.result = c.perform(&ev);
                 }
 
@@ -535,6 +545,13 @@ pub const Loop = struct {
                 const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
 
                 std.debug.print("[KQUEUE] tick: processing completion {*} state={s} op={s}\n", .{ c, @tagName(c.flags.state), @tagName(c.op) });
+
+                // If the completion is already dead, it was already processed in this
+                // batch or pushed during the deleting phase. Skip to avoid double-processing.
+                if (c.flags.state == .dead) {
+                    std.debug.print("[KQUEUE] tick: skipping .dead completion {*}\n", .{c});
+                    continue;
+                }
 
                 // c is ready to be reused rigt away if we're dearming
                 // so we mark it as dead.
