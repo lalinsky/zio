@@ -4,20 +4,33 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const xev = b.dependency("libxev", .{ .target = target, .optimize = optimize });
-
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    // Include xev as a dependency
+    const xev = b.dependency("libxev", .{ .target = target, .optimize = optimize });
     zio.addImport("xev", xev.module("xev"));
+
+    // Build llhttp
+    zio.addCSourceFiles(.{
+        .files = &[_][]const u8{
+            "vendor/llhttp/llhttp.c",
+            "vendor/llhttp/api.c",
+            "vendor/llhttp/http.c",
+        },
+        .flags = &.{"-std=c99"},
+    });
+    zio.addIncludePath(b.path("vendor/llhttp"));
 
     const zio_lib = b.addLibrary(.{
         .name = "zio",
         .root_module = zio,
         .linkage = .static,
     });
+    zio_lib.linkLibC();
     b.installArtifact(zio_lib);
 
     const install_docs = b.addInstallDirectory(.{
@@ -38,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig" },
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
         .{ .name = "mini-redis", .file = "examples/mini_redis.zig" },
+        .{ .name = "http-server", .file = "examples/http_server.zig" },
         //.{ .name = "udp-echo", .file = "examples/udp_echo.zig" },
     };
 

@@ -33,6 +33,9 @@ pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
 pub const RefCounter = @import("sync.zig").RefCounter;
 
+// Re-export HTTP functionality
+pub const http = @import("http.zig");
+
 test {
     std.testing.refAllDecls(@This());
 }
