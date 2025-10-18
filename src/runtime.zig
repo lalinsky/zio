@@ -320,8 +320,12 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
         else => @compileError("resumeTask() requires *Awaitable, *AnyTask, or *Coroutine, got " ++ @typeName(T)),
     };
 
+    // Validate state before resuming
+    assert(coro.state == .waiting);
+
+    const task = AnyTask.fromCoroutine(coro);
     const executor = Executor.fromCoroutine(coro);
-    executor.markReady(mode, coro);
+    executor.scheduleTask(task, mode);
 }
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -909,7 +913,7 @@ pub const Executor = struct {
         self.tasks.putAssumeCapacityNoClobber(&task.impl.base, {});
 
         // Schedule the task to run
-        self.scheduleTask(&task.impl.base.awaitable.wait_node, .maybe_remote);
+        self.scheduleTask(&task.impl.base, .maybe_remote);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
@@ -1140,12 +1144,18 @@ pub const Executor = struct {
     }
 
     /// Schedule a task to run on this executor.
+    /// Sets the task state to ready and adds it to the appropriate queue.
     /// Uses local queue if called from the same executor, otherwise uses remote queue.
     ///
     /// The `mode` parameter controls executor checking:
     /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
     /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
-    fn scheduleTask(self: *Executor, wait_node: *WaitNode, comptime mode: ResumeMode) void {
+    pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
+        // Mark task as ready (idempotent for spawn, necessary for resumeTask)
+        task.coro.state = .ready;
+
+        const wait_node = &task.awaitable.wait_node;
+
         if (mode == .maybe_remote) {
             // Check if we're on the same executor thread
             if (Runtime.current_executor == self) {
@@ -1166,18 +1176,6 @@ pub const Executor = struct {
             assert(Runtime.current_executor == self);
             self.ready_queue.push(wait_node);
         }
-    }
-
-    /// Mark a coroutine as ready.
-    ///
-    /// The `mode` parameter controls executor checking:
-    /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
-    /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
-    pub fn markReady(self: *Executor, comptime mode: ResumeMode, coro: *Coroutine) void {
-        if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
-        coro.state = .ready;
-        const task = AnyTask.fromCoroutine(coro);
-        self.scheduleTask(&task.awaitable.wait_node, mode);
     }
 
     /// Get a copy of the current metrics
