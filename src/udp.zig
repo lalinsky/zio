@@ -1,8 +1,10 @@
 const std = @import("std");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
+const AnyTask = @import("runtime.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const resumeTask = @import("runtime.zig").resumeTask;
+const Cancelable = @import("runtime.zig").Cancelable;
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
 
@@ -29,12 +31,13 @@ pub const UdpSocket = struct {
     }
 
     pub fn read(self: *UdpSocket, buffer: []u8) !UdpReadResult {
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.ReadError!usize = undefined,
             sender_addr: std.net.Address = undefined,
 
@@ -57,16 +60,16 @@ pub const UdpSocket = struct {
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
                 result_data.sender_addr = addr;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_udp.read(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             &state,
             .{ .slice = buffer },
@@ -75,7 +78,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        try self.runtime.executor.waitForXevCompletion(&completion);
+        try executor.waitForXevCompletion(&completion);
 
         const bytes_read = result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -88,12 +91,13 @@ pub const UdpSocket = struct {
     }
 
     pub fn write(self: *UdpSocket, addr: std.net.Address, data: []const u8) !usize {
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
         var state: xev.UDP.State = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.WriteError!usize = undefined,
 
             pub fn callback(
@@ -113,16 +117,16 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_udp.write(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             &state,
             addr,
@@ -132,7 +136,7 @@ pub const UdpSocket = struct {
             Result.callback,
         );
 
-        try self.runtime.executor.waitForXevCompletion(&completion);
+        try executor.waitForXevCompletion(&completion);
 
         return result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -145,11 +149,12 @@ pub const UdpSocket = struct {
         self.runtime.beginShield();
         defer self.runtime.endShield();
 
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.CloseError!void = undefined,
 
             pub fn callback(
@@ -165,16 +170,16 @@ pub const UdpSocket = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_udp.close(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             Result,
             &result_data,
@@ -182,7 +187,7 @@ pub const UdpSocket = struct {
         );
 
         // Shield ensures this never returns error.Canceled
-        self.runtime.executor.waitForXevCompletion(&completion) catch unreachable;
+        executor.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};

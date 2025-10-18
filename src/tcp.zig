@@ -4,6 +4,7 @@ const xev = @import("xev");
 const StreamReader = @import("stream.zig").StreamReader;
 const StreamWriter = @import("stream.zig").StreamWriter;
 const Runtime = @import("runtime.zig").Runtime;
+const AnyTask = @import("runtime.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const resumeTask = @import("runtime.zig").resumeTask;
 const Cancelable = @import("runtime.zig").Cancelable;
@@ -63,11 +64,12 @@ pub const TcpListener = struct {
     }
 
     pub fn accept(self: *TcpListener) !TcpStream {
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.AcceptError!xev.TCP = undefined,
 
             pub fn callback(
@@ -81,23 +83,23 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_tcp.accept(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             Result,
             &result_data,
             Result.callback,
         );
 
-        try self.runtime.executor.waitForXevCompletion(&completion);
+        try executor.waitForXevCompletion(&completion);
 
         const accepted_tcp = result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -114,11 +116,12 @@ pub const TcpListener = struct {
         self.runtime.beginShield();
         defer self.runtime.endShield();
 
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.CloseError!void = undefined,
 
             pub fn callback(
@@ -134,16 +137,16 @@ pub const TcpListener = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_tcp.close(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             Result,
             &result_data,
@@ -151,7 +154,7 @@ pub const TcpListener = struct {
         );
 
         // Shield ensures this never returns error.Canceled
-        self.runtime.executor.waitForXevCompletion(&completion) catch unreachable;
+        executor.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
@@ -173,11 +176,12 @@ pub const TcpStream = struct {
     /// Returns a connected TcpStream on success.
     pub fn connect(runtime: *Runtime, addr: std.net.Address) !TcpStream {
         var tcp = try xev.TCP.init(addr);
-        const coro = runtime.executor.current_coroutine.?;
+        const task = runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.ConnectError!void = undefined,
 
             pub fn callback(
@@ -193,16 +197,16 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         tcp.connect(
-            &runtime.executor.loop,
+            &executor.loop,
             &completion,
             addr,
             Result,
@@ -210,7 +214,7 @@ pub const TcpStream = struct {
             Result.callback,
         );
 
-        try runtime.executor.waitForXevCompletion(&completion);
+        try executor.waitForXevCompletion(&completion);
 
         result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -283,11 +287,12 @@ pub const TcpStream = struct {
     /// Shuts down the write side of the TCP connection.
     /// This sends a FIN packet to signal that no more data will be sent.
     pub fn shutdown(self: *TcpStream) !void {
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.ShutdownError!void = undefined,
 
             pub fn callback(
@@ -303,23 +308,23 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_tcp.shutdown(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             Result,
             &result_data,
             Result.callback,
         );
 
-        try self.runtime.executor.waitForXevCompletion(&completion);
+        try executor.waitForXevCompletion(&completion);
 
         result_data.result catch |err| {
             if (err == error.Canceled) return error.Unexpected;
@@ -330,17 +335,18 @@ pub const TcpStream = struct {
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
     pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.WriteError!usize = undefined,
         };
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_tcp.write(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             buffer,
             Result,
@@ -356,13 +362,13 @@ pub const TcpStream = struct {
                 ) xev.CallbackAction {
                     const r = result_ptr.?;
                     r.result = result;
-                    resumeTask(r.coro, .local);
+                    resumeTask(r.task, .local);
                     return .disarm;
                 }
             }).callback,
         );
 
-        try self.runtime.executor.waitForXevCompletion(&completion);
+        try executor.waitForXevCompletion(&completion);
 
         return result_data.result catch return error.WriteFailed;
     }
@@ -370,18 +376,19 @@ pub const TcpStream = struct {
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
     pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             buffer: *xev.ReadBuffer,
             result: xev.ReadError!usize = undefined,
         };
-        var result_data: Result = .{ .coro = coro, .buffer = buffer };
+        var result_data: Result = .{ .task = task, .buffer = buffer };
 
         self.xev_tcp.read(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             buffer.*,
             Result,
@@ -401,13 +408,13 @@ pub const TcpStream = struct {
                     if (buf == .array) {
                         r.buffer.array = buf.array;
                     }
-                    resumeTask(r.coro, .local);
+                    resumeTask(r.task, .local);
                     return .disarm;
                 }
             }).callback,
         );
 
-        try self.runtime.executor.waitForXevCompletion(&completion);
+        try executor.waitForXevCompletion(&completion);
 
         const n = result_data.result catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -424,11 +431,12 @@ pub const TcpStream = struct {
         self.runtime.beginShield();
         defer self.runtime.endShield();
 
-        const coro = self.runtime.executor.current_coroutine.?;
+        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
         const Result = struct {
-            coro: *Coroutine,
+            task: *AnyTask,
             result: xev.CloseError!void = undefined,
 
             pub fn callback(
@@ -444,16 +452,16 @@ pub const TcpStream = struct {
 
                 const result_data = result_data_ptr.?;
                 result_data.result = result;
-                resumeTask(result_data.coro, .local);
+                resumeTask(result_data.task, .local);
 
                 return .disarm;
             }
         };
 
-        var result_data: Result = .{ .coro = coro };
+        var result_data: Result = .{ .task = task };
 
         self.xev_tcp.close(
-            &self.runtime.executor.loop,
+            &executor.loop,
             &completion,
             Result,
             &result_data,
@@ -461,7 +469,7 @@ pub const TcpStream = struct {
         );
 
         // Shield ensures this never returns error.Canceled
-        self.runtime.executor.waitForXevCompletion(&completion) catch unreachable;
+        executor.waitForXevCompletion(&completion) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
