@@ -668,6 +668,20 @@ pub fn JoinHandle(comptime T: type) type {
             self.awaitable.requestCancellation();
         }
 
+        /// Get the executor ID for this task.
+        /// Only valid for coroutine tasks (not blocking tasks or futures).
+        /// Returns null if this is not a coroutine task.
+        pub fn getExecutorId(self: *const Self) ?usize {
+            return switch (self.awaitable.kind) {
+                .task => {
+                    const task = Task(T).fromAwaitable(self.awaitable);
+                    const executor = task.impl.base.getExecutor();
+                    return executor.id;
+                },
+                .blocking_task, .future => null,
+            };
+        }
+
         /// Cast this JoinHandle to a different error set while keeping the same payload type.
         /// This is safe because all error sets have the same runtime representation (u16).
         /// The payload type must remain unchanged.
@@ -1916,6 +1930,45 @@ test "runtime: multi-threaded with executor pinning" {
                 const result = try handle.join();
                 try testing.expectEqual(i, result);
             }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
+}
+
+test "runtime: task colocation with getExecutorId" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{
+        .num_executors = 4,
+    });
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn getExecutorId() usize {
+            const executor = Runtime.current_executor.?;
+            return executor.id;
+        }
+
+        fn mainTask(rt: *Runtime) !void {
+            // Spawn first task on executor 2
+            var handle1 = try rt.spawn(getExecutorId, .{}, .{ .executor_id = 2 });
+            defer handle1.deinit();
+
+            // Get the executor ID from the first task
+            const executor_id = handle1.getExecutorId();
+            try testing.expect(executor_id != null);
+            try testing.expectEqual(@as(usize, 2), executor_id.?);
+
+            // Spawn second task colocated with the first task
+            var handle2 = try rt.spawn(getExecutorId, .{}, .{ .executor_id = executor_id });
+            defer handle2.deinit();
+
+            // Verify both tasks ran on the same executor
+            const result1 = try handle1.join();
+            const result2 = try handle2.join();
+            try testing.expectEqual(result1, result2);
+            try testing.expectEqual(@as(usize, 2), result1);
         }
     };
 
