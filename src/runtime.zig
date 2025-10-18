@@ -533,6 +533,8 @@ pub fn BlockingTask(comptime T: type) type {
             func: anytype,
             args: meta.ArgsType(func),
         ) !*Self {
+            const thread_pool = runtime.thread_pool orelse return error.NoThreadPool;
+
             const Args = @TypeOf(args);
 
             const TaskData = struct {
@@ -582,7 +584,7 @@ pub fn BlockingTask(comptime T: type) type {
             // Increment ref count for the JoinHandle
             task_data.blocking_task.impl.base.awaitable.ref_count.incr();
 
-            runtime.thread_pool.?.schedule(
+            thread_pool.schedule(
                 xev.ThreadPool.Batch.from(&task_data.blocking_task.impl.base.thread_pool_task),
             );
 
