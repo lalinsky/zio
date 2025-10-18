@@ -1191,6 +1191,9 @@ pub const Executor = struct {
     /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
     /// Uses lower 2 bits for generation (pointers are aligned).
     inline fn packTimerUserdata(comptime T: type, ptr: *T, generation: u2) ?*anyopaque {
+        comptime {
+            if (@alignOf(T) < 4) @compileError("Timer userdata T must be at least 4-byte aligned");
+        }
         const addr = @intFromPtr(ptr);
         const tagged = addr | @as(usize, generation);
         return @ptrFromInt(tagged);
@@ -1198,6 +1201,9 @@ pub const Executor = struct {
 
     /// Unpack a tagged pointer into the original pointer and generation.
     inline fn unpackTimerUserdata(comptime T: type, userdata: ?*anyopaque) struct { ptr: *T, generation: u2 } {
+        comptime {
+            if (@alignOf(T) < 4) @compileError("Timer userdata T must be at least 4-byte aligned");
+        }
         const addr = @intFromPtr(userdata);
         const generation: u2 = @truncate(addr & 0x3);
         const ptr_addr = addr & ~@as(usize, 0x3);
