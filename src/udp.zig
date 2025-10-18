@@ -219,7 +219,7 @@ test "UDP: basic send and receive" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, server_port: *u16) !void {
-            rt.sleep(10); // Give server time to bind
+            try rt.sleep(10); // Give server time to bind
 
             const client_addr = try std.net.Address.parseIp4("127.0.0.1", 0);
             var socket = try UdpSocket.init(rt, client_addr);

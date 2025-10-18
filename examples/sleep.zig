@@ -1,10 +1,10 @@
 const std = @import("std");
 const zio = @import("zio");
 
-fn sleepTask(rt: *zio.Runtime) void {
+fn sleepTask(rt: *zio.Runtime) !void {
     for (0..10) |_| {
         std.log.info("Sleeping...", .{});
-        rt.sleep(1000);
+        try rt.sleep(1000);
     }
 }
 

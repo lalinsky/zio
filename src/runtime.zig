@@ -951,9 +951,12 @@ pub const Executor = struct {
         return &task.awaitable;
     }
 
-    pub fn sleep(self: *Executor, milliseconds: u64) void {
-        self.timedWaitForReady(milliseconds * 1_000_000) catch return;
-        unreachable; // Should always timeout - waking without timeout is a bug
+    pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
+        self.timedWaitForReady(milliseconds * 1_000_000) catch |err| switch (err) {
+            error.Timeout => return, // Expected for sleep - not an error
+            error.Canceled => return error.Canceled, // Propagate cancellation
+        };
+        unreachable; // Should always timeout or be canceled
     }
 
     fn ensureRemoteInitialized(self: *Executor) !void {
@@ -1425,11 +1428,12 @@ pub const Runtime = struct {
 
     /// Sleep for the specified number of milliseconds.
     /// Uses async sleep if in a coroutine, blocking sleep otherwise.
-    pub fn sleep(self: *Runtime, milliseconds: u64) void {
+    /// Returns error.Canceled if the coroutine was canceled during sleep.
+    pub fn sleep(self: *Runtime, milliseconds: u64) Cancelable!void {
         if (self.executor.current_coroutine) |_| {
-            self.executor.sleep(milliseconds);
+            return self.executor.sleep(milliseconds);
         } else {
-            // Not in coroutine - use blocking sleep
+            // Not in coroutine - use blocking sleep (cannot be canceled)
             std.Thread.sleep(milliseconds * std.time.ns_per_ms);
         }
     }
@@ -1741,13 +1745,13 @@ test "runtime: select basic - first completes" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn slowTask(rt: *Runtime) i32 {
-            rt.sleep(100);
+        fn slowTask(rt: *Runtime) !i32 {
+            try rt.sleep(100);
             return 42;
         }
 
-        fn fastTask(rt: *Runtime) i32 {
-            rt.sleep(10);
+        fn fastTask(rt: *Runtime) !i32 {
+            try rt.sleep(10);
             return 99;
         }
 
@@ -1781,8 +1785,8 @@ test "runtime: select already complete - fast path" {
             return 123;
         }
 
-        fn slowTask(rt: *Runtime) i32 {
-            rt.sleep(100);
+        fn slowTask(rt: *Runtime) !i32 {
+            try rt.sleep(100);
             return 456;
         }
 
@@ -1816,18 +1820,18 @@ test "runtime: select heterogeneous types" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn intTask(rt: *Runtime) i32 {
-            rt.sleep(100);
+        fn intTask(rt: *Runtime) Cancelable!i32 {
+            try rt.sleep(100);
             return 42;
         }
 
-        fn stringTask(rt: *Runtime) []const u8 {
-            rt.sleep(10);
+        fn stringTask(rt: *Runtime) Cancelable![]const u8 {
+            try rt.sleep(10);
             return "hello";
         }
 
-        fn boolTask(rt: *Runtime) bool {
-            rt.sleep(150);
+        fn boolTask(rt: *Runtime) Cancelable!bool {
+            try rt.sleep(150);
             return true;
         }
 
@@ -1847,15 +1851,15 @@ test "runtime: select heterogeneous types" {
 
             switch (result) {
                 .int => |val| {
-                    try testing.expectEqual(@as(i32, 42), val);
+                    try testing.expectEqual(@as(i32, 42), try val);
                     return error.TestUnexpectedResult; // Should not complete first
                 },
                 .string => |val| {
-                    try testing.expectEqualStrings("hello", val);
+                    try testing.expectEqualStrings("hello", try val);
                     // This should win
                 },
                 .bool => |val| {
-                    try testing.expectEqual(true, val);
+                    try testing.expectEqual(true, try val);
                     return error.TestUnexpectedResult; // Should not complete first
                 },
             }
@@ -1872,13 +1876,13 @@ test "runtime: select with cancellation" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn slowTask1(rt: *Runtime) i32 {
-            rt.sleep(1000);
+        fn slowTask1(rt: *Runtime) !i32 {
+            try rt.sleep(1000);
             return 1;
         }
 
-        fn slowTask2(rt: *Runtime) i32 {
-            rt.sleep(1000);
+        fn slowTask2(rt: *Runtime) !i32 {
+            try rt.sleep(1000);
             return 2;
         }
 
@@ -1925,13 +1929,13 @@ test "runtime: select with error unions - success case" {
         const ParseError = error{ InvalidFormat, OutOfRange };
         const ValidationError = error{ TooShort, TooLong };
 
-        fn parseTask(rt: *Runtime) ParseError!i32 {
-            rt.sleep(100);
+        fn parseTask(rt: *Runtime) (ParseError || Cancelable)!i32 {
+            try rt.sleep(100);
             return 42;
         }
 
-        fn validateTask(rt: *Runtime) ValidationError![]const u8 {
-            rt.sleep(10);
+        fn validateTask(rt: *Runtime) (ValidationError || Cancelable)![]const u8 {
+            try rt.sleep(10);
             return "valid";
         }
 
@@ -1982,13 +1986,13 @@ test "runtime: select with error unions - error case" {
     const TestContext = struct {
         const ParseError = error{ InvalidFormat, OutOfRange };
 
-        fn failingTask(rt: *Runtime) ParseError!i32 {
-            rt.sleep(10);
+        fn failingTask(rt: *Runtime) (ParseError || Cancelable)!i32 {
+            try rt.sleep(10);
             return error.OutOfRange;
         }
 
-        fn slowTask(rt: *Runtime) i32 {
-            rt.sleep(100);
+        fn slowTask(rt: *Runtime) !i32 {
+            try rt.sleep(100);
             return 99;
         }
 
@@ -2031,18 +2035,18 @@ test "runtime: select with mixed error types" {
         const ParseError = error{ InvalidFormat, OutOfRange };
         const IOError = error{ FileNotFound, PermissionDenied };
 
-        fn task1(rt: *Runtime) ParseError!i32 {
-            rt.sleep(100);
+        fn task1(rt: *Runtime) (ParseError || Cancelable)!i32 {
+            try rt.sleep(100);
             return 100;
         }
 
-        fn task2(rt: *Runtime) IOError![]const u8 {
-            rt.sleep(10);
+        fn task2(rt: *Runtime) (IOError || Cancelable)![]const u8 {
+            try rt.sleep(10);
             return error.FileNotFound;
         }
 
-        fn task3(rt: *Runtime) bool {
-            rt.sleep(150);
+        fn task3(rt: *Runtime) !bool {
+            try rt.sleep(150);
             return true;
         }
 
@@ -2138,11 +2142,45 @@ test "runtime: now() returns monotonic time" {
             try testing.expect(start > 0);
 
             // Sleep to ensure time advances
-            rt.sleep(10);
+            try rt.sleep(10);
 
             const end = rt.now();
             try testing.expect(end > start);
             try testing.expect(end - start >= 10);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: sleep is cancelable" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn sleepingTask(rt: *Runtime) !void {
+            // This will sleep for 1 second but should be canceled before completion
+            try rt.sleep(1000);
+            // Should not reach here
+            return error.TestUnexpectedResult;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var handle = try rt.spawn(sleepingTask, .{rt}, .{});
+            defer handle.deinit();
+
+            // Give it a chance to start sleeping
+            try rt.yield();
+            try rt.yield();
+
+            // Cancel the sleeping task
+            handle.cancel();
+
+            // Should return error.Canceled
+            const result = handle.join();
+            try testing.expectError(error.Canceled, result);
         }
     };
 
