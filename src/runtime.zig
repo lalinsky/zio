@@ -128,6 +128,21 @@ fn remoteWakeupCallback(
     return .rearm;
 }
 
+fn shutdownCallback(
+    executor: ?*Executor,
+    loop: *xev.Loop,
+    c: *xev.Completion,
+    result: xev.Async.WaitError!void,
+) xev.CallbackAction {
+    _ = result catch unreachable;
+    _ = c;
+    _ = executor;
+
+    // Stop the event loop
+    loop.stop();
+    return .disarm;
+}
+
 // Re-export Awaitable types from core module
 const awaitable_module = @import("core/Awaitable.zig");
 pub const Awaitable = awaitable_module.Awaitable;
@@ -735,6 +750,10 @@ pub const Executor = struct {
     remote_completion: xev.Completion = undefined,
     remote_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+    // Shutdown support
+    shutdown_async: xev.Async = undefined,
+    shutdown_completion: xev.Completion = undefined,
+
     // Stack pool cleanup tracking
     cleanup_interval_ms: i64,
     last_cleanup_ms: i64 = 0,
@@ -796,10 +815,24 @@ pub const Executor = struct {
             remoteWakeupCallback,
         );
 
+        // Initialize shutdown async
+        self.shutdown_async = try xev.Async.init();
+        errdefer self.shutdown_async.deinit();
+
+        // Register shutdown callback
+        self.shutdown_async.wait(
+            &self.loop,
+            &self.shutdown_completion,
+            Executor,
+            self,
+            shutdownCallback,
+        );
+
         self.remote_initialized.store(true, .release);
     }
 
     fn deinitLoop(self: *Executor) void {
+        self.shutdown_async.deinit();
         self.remote_wakeup.deinit();
         self.loop.deinit();
     }
@@ -1026,11 +1059,9 @@ pub const Executor = struct {
         const is_main = self.id == 0;
 
         while (true) {
-            // Worker executors: check shutdown flag first (before processing)
-            if (!is_main and self.runtime_ptr.shutdown.load(.acquire)) {
-                self.loop.stop();
-                break;
-            }
+            // Exit if loop was stopped (by shutdown callback)
+            if (self.loop.stopped()) break;
+
             // Time-based stack pool cleanup
             const now = std.time.milliTimestamp();
             if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
@@ -1084,17 +1115,12 @@ pub const Executor = struct {
 
             // Main executor: check if all tasks are complete (after processing)
             if (is_main and self.runtime_ptr.global_task_count.load(.monotonic) == 0) {
-                self.loop.stop();
-
-                // Signal all workers to shut down
-                self.runtime_ptr.shutdown.store(true, .release);
-
-                // Wake all worker executors
-                for (self.runtime_ptr.executors.items[1..]) |*executor| {
-                    executor.remote_wakeup.notify() catch {};
+                // Trigger shutdown for all executors (including self)
+                for (self.runtime_ptr.executors.items) |*executor| {
+                    executor.shutdown_async.notify() catch {};
                 }
 
-                break;
+                // Loop will be stopped by shutdown callback
             }
 
             // Move yielded coroutines back to ready queue
@@ -1407,7 +1433,6 @@ pub const Runtime = struct {
     // Multi-executor coordination
     next_executor: std.atomic.Value(usize),
     global_task_count: std.atomic.Value(usize),
-    shutdown: std.atomic.Value(bool),
 
     /// Thread-local storage for the current executor
     pub threadlocal var current_executor: ?*Executor = null;
@@ -1460,7 +1485,6 @@ pub const Runtime = struct {
             .options = options,
             .next_executor = std.atomic.Value(usize).init(0),
             .global_task_count = std.atomic.Value(usize).init(0),
-            .shutdown = std.atomic.Value(bool).init(false),
         };
     }
 
@@ -1543,9 +1567,6 @@ pub const Runtime = struct {
         for (self.executors.items) |*exec| {
             exec.runtime_ptr = self;
         }
-
-        // Reset shutdown flag
-        self.shutdown.store(false, .release);
 
         // If single-threaded, just run the main executor
         if (self.executors.items.len == 1) {
