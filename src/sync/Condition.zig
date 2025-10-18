@@ -54,9 +54,10 @@ const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
-const ConcurrentAwaitableList = @import("../core/ConcurrentAwaitableList.zig");
+const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
+const WaitNode = @import("../core/WaitNode.zig");
 
-wait_queue: ConcurrentAwaitableList = ConcurrentAwaitableList.init(),
+wait_queue: ConcurrentQueue(WaitNode) = .empty,
 
 const Condition = @This();
 
@@ -88,13 +89,13 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     const task = AnyTask.fromCoroutine(current);
 
     // Add to wait queue before releasing mutex
-    self.wait_queue.push(executor, &task.awaitable);
+    self.wait_queue.push(&task.awaitable.wait_node);
 
     // Atomically release mutex and wait
     mutex.unlock(runtime);
     executor.yield(.waiting, .allow_cancel) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
-        _ = self.wait_queue.remove(executor, &task.awaitable);
+        _ = self.wait_queue.remove(&task.awaitable.wait_node);
         // Must reacquire mutex before returning
         mutex.lockNoCancel(runtime);
         return err;
@@ -122,18 +123,16 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     const executor = Executor.fromCoroutine(current);
     const task = AnyTask.fromCoroutine(current);
 
-    self.wait_queue.push(executor, &task.awaitable);
+    self.wait_queue.push(&task.awaitable.wait_node);
 
     const TimeoutContext = struct {
-        wait_queue: *ConcurrentAwaitableList,
-        awaitable: *Awaitable,
-        executor: *Executor,
+        wait_queue: *ConcurrentQueue(WaitNode),
+        wait_node: *WaitNode,
     };
 
     var timeout_ctx = TimeoutContext{
         .wait_queue = &self.wait_queue,
-        .awaitable = &task.awaitable,
-        .executor = executor,
+        .wait_node = &task.awaitable.wait_node,
     };
 
     // Atomically release mutex and wait
@@ -147,13 +146,13 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
             fn onTimeout(ctx: *TimeoutContext) bool {
                 // Try to remove from wait queue - if successful, we timed out
                 // If failed, we were already signaled
-                return ctx.wait_queue.remove(ctx.executor, ctx.awaitable);
+                return ctx.wait_queue.remove(ctx.wait_node);
             }
         }.onTimeout,
     ) catch |err| {
         // Remove from queue if canceled (timeout already handled by callback)
         if (err == error.Canceled) {
-            _ = self.wait_queue.remove(executor, &task.awaitable);
+            _ = self.wait_queue.remove(&task.awaitable.wait_node);
         }
         // Must reacquire mutex before returning
         mutex.lockNoCancel(runtime);
@@ -183,10 +182,9 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
 /// condition.signal(rt);
 /// ```
 pub fn signal(self: *Condition, runtime: *Runtime) void {
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-    if (self.wait_queue.pop(executor)) |awaitable| {
-        resumeTask(awaitable, .maybe_remote);
+    _ = runtime;
+    if (self.wait_queue.pop()) |wait_node| {
+        wait_node.wake();
     }
 }
 
@@ -206,10 +204,9 @@ pub fn signal(self: *Condition, runtime: *Runtime) void {
 /// condition.broadcast(rt);
 /// ```
 pub fn broadcast(self: *Condition, runtime: *Runtime) void {
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-    while (self.wait_queue.pop(executor)) |awaitable| {
-        resumeTask(awaitable, .maybe_remote);
+    _ = runtime;
+    while (self.wait_queue.pop()) |wait_node| {
+        wait_node.wake();
     }
 }
 

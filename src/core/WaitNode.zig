@@ -1,0 +1,25 @@
+const builtin = @import("builtin");
+
+const WaitNode = @This();
+
+vtable: *const VTable,
+
+// For participation in wait queues
+prev: ?*WaitNode = null,
+next: ?*WaitNode = null,
+in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+
+pub const VTable = struct {
+    // Called when this node should be woken
+    wake: *const fn (self: *WaitNode) void = defaultWake,
+};
+
+fn defaultWake(self: *WaitNode) void {
+    // Default wake implementation does nothing
+    _ = self;
+}
+
+/// Wake this wait node
+pub fn wake(self: *WaitNode) void {
+    self.vtable.wake(self);
+}

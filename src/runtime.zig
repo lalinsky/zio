@@ -95,7 +95,7 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     // Push to completion queue (thread-safe lock-free stack)
     // Even if canceled, we still mark as complete so waiters wake up
     const executor = &any_blocking_task.runtime.executor;
-    executor.blocking_completions.push(&any_blocking_task.awaitable);
+    executor.blocking_completions.push(&any_blocking_task.awaitable.wait_node);
 
     // Wake up main loop
     executor.async_wakeup.notify() catch {};
@@ -133,7 +133,9 @@ fn drainBlockingCompletions(
 
     // Atomically drain all completed blocking tasks (LIFO order)
     var drained = self.blocking_completions.popAll();
-    while (drained.pop()) |awaitable| {
+    while (drained.pop()) |wait_node| {
+        // Get awaitable from wait_node
+        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
         markComplete(awaitable, self);
         // Release the blocking task's reference (initial ref from init)
@@ -168,19 +170,19 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
                 std.debug.panic("cannot wait on self (would deadlock)", .{});
             }
         }
-        awaitable.waiting_list.push(executor, &task.awaitable);
+        awaitable.waiting_list.push(&task.awaitable.wait_node);
 
         // Double-check state before suspending (avoid lost wakeup)
         const double_check_state = awaitable.state.load(.acquire);
         if (double_check_state == 1) {
             // Completed while we were adding to queue, remove ourselves
-            _ = awaitable.waiting_list.remove(executor, &task.awaitable);
+            _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return;
         }
 
         executor.yield(.waiting, .allow_cancel) catch |err| {
             // If yield itself was canceled, remove from wait list
-            _ = awaitable.waiting_list.remove(executor, &task.awaitable);
+            _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return err;
         };
 
@@ -212,24 +214,22 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
         const task = AnyTask.fromCoroutine(current);
         const executor = Executor.fromCoroutine(current);
 
-        awaitable.waiting_list.push(executor, &task.awaitable);
+        awaitable.waiting_list.push(&task.awaitable.wait_node);
 
         const double_check_state = awaitable.state.load(.acquire);
         if (double_check_state == 1) {
-            _ = awaitable.waiting_list.remove(executor, &task.awaitable);
+            _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return;
         }
 
         const TimeoutContext = struct {
-            wait_queue: *ConcurrentAwaitableList,
-            awaitable: *Awaitable,
-            executor: *Executor,
+            wait_queue: *ConcurrentQueue(WaitNode),
+            wait_node: *WaitNode,
         };
 
         var timeout_ctx = TimeoutContext{
             .wait_queue = &awaitable.waiting_list,
-            .awaitable = &task.awaitable,
-            .executor = executor,
+            .wait_node = &task.awaitable.wait_node,
         };
 
         executor.timedWaitForReadyWithCallback(
@@ -238,13 +238,13 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
             &timeout_ctx,
             struct {
                 fn onTimeout(ctx: *TimeoutContext) bool {
-                    return ctx.wait_queue.remove(ctx.executor, ctx.awaitable);
+                    return ctx.wait_queue.remove(ctx.wait_node);
                 }
             }.onTimeout,
         ) catch |err| {
             // Handle both timeout and cancellation from yield
             if (err == error.Canceled) {
-                _ = awaitable.waiting_list.remove(executor, &task.awaitable);
+                _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             }
             return err;
         };
@@ -267,27 +267,13 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
 /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
 /// Can be called from any context - executor parameter is optional (null when called from thread pool).
 pub fn markComplete(awaitable: *Awaitable, executor: ?*Executor) void {
+    _ = executor;
     // Set state first (release semantics for memory ordering)
     awaitable.state.store(1, .release);
 
     // Wake all waiting coroutines (always use .maybe_remote since waiters can be on any executor)
-    while (awaitable.waiting_list.pop(executor)) |waiting_awaitable| {
-        switch (waiting_awaitable.kind) {
-            .task => {
-                const waiting_task = AnyTask.fromAwaitable(waiting_awaitable);
-                resumeTask(&waiting_task.coro, .maybe_remote);
-            },
-            .select_waiter => {
-                // For select waiters, extract the SelectWaiter and wake the task directly
-                const waiter: *SelectWaiter = @fieldParentPtr("awaitable", waiting_awaitable);
-                waiter.ready = true;
-                resumeTask(&waiter.task.coro, .maybe_remote);
-            },
-            .blocking_task, .future => {
-                // These should not be in waiting lists of other awaitables
-                unreachable;
-            },
-        }
+    while (awaitable.waiting_list.pop()) |wait_node| {
+        wait_node.wake();
     }
 
     // Wake all waiting threads
@@ -334,7 +320,22 @@ pub const AnyTask = struct {
     timer_generation: u2 = 0,
     shield_count: u32 = 0,
 
+    const wait_node_vtable = WaitNode.VTable{
+        .wake = waitNodeWake,
+    };
+
+    fn waitNodeWake(wait_node: *WaitNode) void {
+        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
+        resumeTask(awaitable, .maybe_remote);
+    }
+
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
+        assert(awaitable.kind == .task);
+        return @fieldParentPtr("awaitable", awaitable);
+    }
+
+    pub inline fn fromWaitNode(wait_node: *WaitNode) *AnyTask {
+        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
         assert(awaitable.kind == .task);
         return @fieldParentPtr("awaitable", awaitable);
     }
@@ -357,6 +358,8 @@ pub const AnyBlockingTask = struct {
     runtime: *Runtime,
     execute_fn: *const fn (*AnyBlockingTask) void,
 
+    const wait_node_vtable = WaitNode.VTable{};
+
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
         return @fieldParentPtr("awaitable", awaitable);
@@ -374,6 +377,8 @@ pub const AnyBlockingTask = struct {
 pub const AnyFuture = struct {
     awaitable: Awaitable,
     runtime: *Runtime,
+
+    const wait_node_vtable = WaitNode.VTable{};
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyFuture {
         assert(awaitable.kind == .future);
@@ -484,6 +489,9 @@ pub fn Future(comptime T: type) type {
                         .awaitable = .{
                             .kind = .future,
                             .destroy_fn = destroyFn,
+                            .wait_node = .{
+                                .vtable = &AnyFuture.wait_node_vtable,
+                            },
                         },
                         .runtime = runtime,
                     },
@@ -565,6 +573,9 @@ pub fn BlockingTask(comptime T: type) type {
                             .awaitable = .{
                                 .kind = .blocking_task,
                                 .destroy_fn = &TaskData.destroy,
+                                .wait_node = .{
+                                    .vtable = &AnyBlockingTask.wait_node_vtable,
+                                },
                             },
                             .thread_pool_task = .{ .callback = threadPoolCallback },
                             .runtime = runtime,
@@ -601,7 +612,6 @@ pub fn JoinHandle(comptime T: type) type {
                 .task => Task(T).fromAwaitable(self.awaitable).getRuntime(),
                 .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).getRuntime(),
                 .future => Future(T).fromAwaitable(self.awaitable).getRuntime(),
-                .select_waiter => unreachable, // JoinHandles never point to select waiters
             };
             runtime.releaseAwaitable(self.awaitable);
         }
@@ -611,7 +621,6 @@ pub fn JoinHandle(comptime T: type) type {
                 .task => Task(T).fromAwaitable(self.awaitable).wait(),
                 .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).wait(),
                 .future => Future(T).fromAwaitable(self.awaitable).wait(),
-                .select_waiter => unreachable, // JoinHandles never point to select waiters
             };
         }
 
@@ -631,7 +640,6 @@ pub fn JoinHandle(comptime T: type) type {
                 .task => Task(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
                 .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
                 .future => Future(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
-                .select_waiter => unreachable,
             };
         }
 
@@ -687,17 +695,12 @@ pub fn SelectUnion(comptime S: type) type {
     } });
 }
 
-// Simple singly-linked stack (LIFO) for single-threaded use
-pub const SimpleAwaitableStack = @import("core/SimpleAwaitableStack.zig");
-
-// Lock-free intrusive stack for cross-thread communication
-pub const ConcurrentAwaitableStack = @import("core/ConcurrentAwaitableStack.zig");
-
-// Simple doubly-linked list of awaitables (non-concurrent)
-pub const SimpleAwaitableList = @import("core/SimpleAwaitableList.zig");
-
-// Concurrent doubly-linked list of awaitables (thread-safe)
-pub const ConcurrentAwaitableList = @import("core/ConcurrentAwaitableList.zig");
+// Generic data structures (private)
+const WaitNode = @import("core/WaitNode.zig");
+const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
+const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
+const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
+const ConcurrentQueue = @import("utils/concurrent_queue.zig").ConcurrentQueue;
 
 // Executor metrics
 pub const ExecutorMetrics = struct {
@@ -705,6 +708,10 @@ pub const ExecutorMetrics = struct {
     tasks_spawned: u64 = 0,
     tasks_completed: u64 = 0,
 };
+
+comptime {
+    std.debug.assert(@alignOf(WaitNode) == 8);
+}
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
@@ -717,17 +724,17 @@ pub const Executor = struct {
 
     tasks: std.AutoHashMapUnmanaged(*AnyTask, void) = .{},
 
-    ready_queue: SimpleAwaitableStack = .{},
-    next_ready_queue: SimpleAwaitableStack = .{},
+    ready_queue: SimpleStack(WaitNode) = .{},
+    next_ready_queue: SimpleStack(WaitNode) = .{},
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
-    next_ready_queue_remote: ConcurrentAwaitableStack = .{},
+    next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
     remote_wakeup: xev.Async = undefined,
     remote_completion: xev.Completion = undefined,
     remote_initialized: bool = false,
 
     // Blocking task support - lock-free LIFO stack
-    blocking_completions: ConcurrentAwaitableStack = .{},
+    blocking_completions: ConcurrentStack(WaitNode) = .{},
     async_wakeup: xev.Async = undefined,
     async_completion: xev.Completion = undefined,
     blocking_initialized: bool = false,
@@ -819,6 +826,9 @@ pub const Executor = struct {
                     .awaitable = .{
                         .kind = .task,
                         .destroy_fn = &TypedTask.destroyFn,
+                        .wait_node = .{
+                            .vtable = &AnyTask.wait_node_vtable,
+                        },
                     },
                     .coro = .{
                         .stack = stack,
@@ -835,7 +845,7 @@ pub const Executor = struct {
         // putNoClobber cannot fail since we ensured capacity
         self.tasks.putAssumeCapacityNoClobber(&task.impl.base, {});
 
-        self.ready_queue.push(&task.impl.base.awaitable);
+        self.ready_queue.push(&task.impl.base.awaitable.wait_node);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
@@ -870,7 +880,7 @@ pub const Executor = struct {
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
     pub fn yield(self: *Executor, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        const current_coro = self.current_coroutine orelse unreachable;
+        const current_coro = self.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
         // Track yield
@@ -887,7 +897,7 @@ pub const Executor = struct {
 
         current_coro.state = desired_state;
         if (desired_state == .ready) {
-            self.next_ready_queue.push(&current_task.awaitable);
+            self.next_ready_queue.push(&current_task.awaitable.wait_node);
         }
 
         // If dead, always switch to scheduler for cleanup
@@ -896,8 +906,8 @@ pub const Executor = struct {
             unreachable;
         }
 
-        if (self.ready_queue.pop()) |next_awaitable| {
-            const next_task = AnyTask.fromAwaitable(next_awaitable);
+        if (self.ready_queue.pop()) |next_wait_node| {
+            const next_task = AnyTask.fromWaitNode(next_wait_node);
 
             self.current_coroutine = &next_task.coro;
             coroutines.switchContext(&current_coro.context, &next_task.coro.context);
@@ -1041,8 +1051,8 @@ pub const Executor = struct {
             self.ready_queue.prependByMoving(&drained);
 
             // Process all ready coroutines (once)
-            while (self.ready_queue.pop()) |awaitable| {
-                const task = AnyTask.fromAwaitable(awaitable);
+            while (self.ready_queue.pop()) |wait_node| {
+                const task = AnyTask.fromWaitNode(wait_node);
 
                 self.current_coroutine = &task.coro;
                 defer self.current_coroutine = null;
@@ -1109,14 +1119,14 @@ pub const Executor = struct {
             // Check if we're on the same executor thread
             if (Runtime.current_executor == self) {
                 // Same executor - use fast local path
-                self.ready_queue.push(&task.awaitable);
+                self.ready_queue.push(&task.awaitable.wait_node);
             } else {
                 // Different executor (or no current executor) - use remote path
                 // Remote queue must be initialized by run() before cross-thread calls
                 assert(self.remote_initialized);
 
                 // Push to remote ready queue (thread-safe)
-                self.next_ready_queue_remote.push(&task.awaitable);
+                self.next_ready_queue_remote.push(&task.awaitable.wait_node);
 
                 // Notify the target executor's event loop
                 self.remote_wakeup.notify() catch {};
@@ -1124,7 +1134,7 @@ pub const Executor = struct {
         } else {
             // Fast path: we know we're on the same executor
             assert(Runtime.current_executor == self);
-            self.ready_queue.push(&task.awaitable);
+            self.ready_queue.push(&task.awaitable.wait_node);
         }
     }
 
@@ -1338,9 +1348,28 @@ pub const Executor = struct {
 
 // SelectWaiter - used by Runtime.select to wait on multiple handles
 pub const SelectWaiter = struct {
-    awaitable: Awaitable,
+    wait_node: WaitNode,
     task: *AnyTask,
     ready: bool = false,
+
+    const wait_node_vtable = WaitNode.VTable{
+        .wake = waitNodeWake,
+    };
+
+    pub fn init(task: *AnyTask) SelectWaiter {
+        return .{
+            .wait_node = .{
+                .vtable = &wait_node_vtable,
+            },
+            .task = task,
+        };
+    }
+
+    fn waitNodeWake(wait_node: *WaitNode) void {
+        const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
+        self.ready = true;
+        resumeTask(self.task, .maybe_remote);
+    }
 };
 
 // Runtime - orchestrator that wraps a single Executor (for now)
@@ -1350,7 +1379,7 @@ pub const Runtime = struct {
     allocator: Allocator,
 
     /// Thread-local storage for the current executor
-    threadlocal var current_executor: ?*Executor = null;
+    pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
         // Initialize ThreadPool if enabled (shared resource)
@@ -1525,22 +1554,14 @@ pub const Runtime = struct {
         // Create waiter structures on the stack
         var waiters: [fields.len]SelectWaiter = undefined;
         inline for (&waiters, 0..) |*waiter, i| {
-            waiter.* = .{
-                .awaitable = .{
-                    .kind = .select_waiter,
-                    .destroy_fn = struct {
-                        fn dummy(_: *Runtime, _: *Awaitable) void {}
-                    }.dummy,
-                },
-                .task = current_task,
-            };
+            waiter.* = SelectWaiter.init(current_task);
             _ = i; // Will use below
         }
 
         // Add waiters to all waiting lists
         inline for (fields, 0..) |field, i| {
             var handle = @field(handles, field.name);
-            handle.awaitable.waiting_list.push(executor, &waiters[i].awaitable);
+            handle.awaitable.waiting_list.push(&waiters[i].wait_node);
         }
 
         // Clean up waiters on all exit paths (skip waiters marked ready by markComplete)
@@ -1548,7 +1569,7 @@ pub const Runtime = struct {
             inline for (0..fields.len) |i| {
                 if (!waiters[i].ready) {
                     var h = @field(handles, fields[i].name);
-                    _ = h.awaitable.waiting_list.remove(executor, &waiters[i].awaitable);
+                    _ = h.awaitable.waiting_list.remove(&waiters[i].wait_node);
                 }
             }
         }
