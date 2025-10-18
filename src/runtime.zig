@@ -1008,9 +1008,10 @@ pub const Executor = struct {
         return handle.join();
     }
 
-    /// Run as the main executor (on calling thread).
-    /// Exits when global_task_count reaches zero, then signals workers to shut down.
-    pub fn runMain(self: *Executor) !void {
+    /// Run the executor event loop.
+    /// Main executor (id=0) orchestrates shutdown when all tasks complete.
+    /// Worker executors (id>0) run until signaled to shut down by main executor.
+    pub fn run(self: *Executor) !void {
         // Initialize loop on this thread
         try self.initLoop();
         defer self.deinitLoop();
@@ -1022,7 +1023,14 @@ pub const Executor = struct {
         Runtime.current_executor = self;
         defer Runtime.current_executor = null;
 
+        const is_main = self.id == 0;
+
         while (true) {
+            // Worker executors: check shutdown flag first (before processing)
+            if (!is_main and self.runtime_ptr.shutdown.load(.acquire)) {
+                self.loop.stop();
+                break;
+            }
             // Time-based stack pool cleanup
             const now = std.time.milliTimestamp();
             if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
@@ -1074,14 +1082,14 @@ pub const Executor = struct {
                 // Other states (.ready, .waiting) are handled by yield() or markReady()
             }
 
-            // Check global task count for shutdown (main executor orchestrates shutdown)
-            if (self.runtime_ptr.global_task_count.load(.monotonic) == 0) {
+            // Main executor: check if all tasks are complete (after processing)
+            if (is_main and self.runtime_ptr.global_task_count.load(.monotonic) == 0) {
                 self.loop.stop();
 
                 // Signal all workers to shut down
                 self.runtime_ptr.shutdown.store(true, .release);
 
-                // Wake all worker executors (always initialized in Executor.init())
+                // Wake all worker executors
                 for (self.runtime_ptr.executors.items[1..]) |*executor| {
                     executor.remote_wakeup.notify() catch {};
                 }
@@ -1095,91 +1103,6 @@ pub const Executor = struct {
             // If no ready work, block waiting for I/O
             try self.loop.run(if (self.ready_queue.head == null) .once else .no_wait);
         }
-    }
-
-    /// Run as a worker executor (on spawned thread).
-    /// Exits when the shutdown flag is set by the main executor.
-    pub fn runWorker(self: *Executor) !void {
-        // Initialize loop on this thread
-        try self.initLoop();
-        defer self.deinitLoop();
-
-        // Signal that executor is ready
-        self.ready.set();
-
-        // Set thread-local current executor
-        Runtime.current_executor = self;
-        defer Runtime.current_executor = null;
-
-        while (true) {
-            // Check shutdown flag
-            if (self.runtime_ptr.shutdown.load(.acquire)) {
-                self.loop.stop();
-                break;
-            }
-
-            // Time-based stack pool cleanup
-            const now = std.time.milliTimestamp();
-            if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
-                self.stack_pool.cleanup();
-                self.last_cleanup_ms = now;
-            }
-
-            // Drain remote ready queue (cross-thread tasks)
-            // Atomically drain all remote ready tasks and prepend to ready queue
-            var drained = self.next_ready_queue_remote.popAll();
-            self.ready_queue.prependByMoving(&drained);
-
-            // Process all ready coroutines (once)
-            while (self.ready_queue.pop()) |wait_node| {
-                const task = AnyTask.fromWaitNode(wait_node);
-
-                self.current_coroutine = &task.coro;
-                defer self.current_coroutine = null;
-                coroutines.switchContext(&self.main_context, &task.coro.context);
-
-                // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
-                if (self.current_coroutine) |current_coro| {
-                    if (current_coro.state == .dead) {
-                        const current_task = AnyTask.fromCoroutine(current_coro);
-                        const current_awaitable = &current_task.awaitable;
-
-                        // Release stack immediately since coroutine execution is complete
-                        if (current_coro.stack) |stack| {
-                            self.stack_pool.release(stack);
-                            current_coro.stack = null;
-                        }
-
-                        // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        markComplete(current_awaitable);
-
-                        // Track task completion
-                        self.metrics.tasks_completed += 1;
-
-                        // Decrement global task count
-                        _ = self.runtime_ptr.global_task_count.fetchSub(1, .monotonic);
-
-                        // Remove from tasks hashmap and release runtime's reference
-                        _ = self.tasks.remove(current_task);
-                        self.runtime().releaseAwaitable(current_awaitable);
-                        // If ref_count > 0, Task(T) handles still exist, keep the task alive
-                    }
-                }
-
-                // Other states (.ready, .waiting) are handled by yield() or markReady()
-            }
-
-            // Move yielded coroutines back to ready queue
-            self.ready_queue.prependByMoving(&self.next_ready_queue);
-
-            // If no ready work, block waiting for I/O
-            try self.loop.run(if (self.ready_queue.head == null) .once else .no_wait);
-        }
-    }
-
-    /// Legacy run() method for backward compatibility - delegates to runMain()
-    pub fn run(self: *Executor) !void {
-        return self.runMain();
     }
 
     /// Mark a coroutine as ready.
@@ -1610,7 +1533,7 @@ pub const Runtime = struct {
 
     /// Worker thread entry point
     fn workerThreadFn(self: *Runtime, executor_index: usize) void {
-        self.executors.items[executor_index].runWorker() catch |err| {
+        self.executors.items[executor_index].run() catch |err| {
             std.log.err("Worker executor {} failed: {}", .{ executor_index, err });
         };
     }
@@ -1626,7 +1549,7 @@ pub const Runtime = struct {
 
         // If single-threaded, just run the main executor
         if (self.executors.items.len == 1) {
-            return self.executors.items[0].runMain();
+            return self.executors.items[0].run();
         }
 
         // Multi-threaded: spawn worker threads for executors[1..]
@@ -1640,7 +1563,7 @@ pub const Runtime = struct {
         }
 
         // Run main executor on current thread
-        const main_result = self.executors.items[0].runMain();
+        const main_result = self.executors.items[0].run();
 
         // Join all worker threads
         for (self.executors.items[1..]) |*executor| {
