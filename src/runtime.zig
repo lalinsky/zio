@@ -156,8 +156,7 @@ pub const AwaitableKind = awaitable_module.AwaitableKind;
 /// Returns error.Canceled if the coroutine was canceled during the wait.
 pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void {
     // Fast path: check if already complete
-    const fast_state = awaitable.state.load(.acquire);
-    if (fast_state == 1) return;
+    if (awaitable.done.load(.acquire)) return;
 
     if (runtime.executor.current_coroutine) |current| {
         // Coroutine path: add to wait queue and suspend
@@ -173,8 +172,7 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
         awaitable.waiting_list.push(&task.awaitable.wait_node);
 
         // Double-check state before suspending (avoid lost wakeup)
-        const double_check_state = awaitable.state.load(.acquire);
-        if (double_check_state == 1) {
+        if (awaitable.done.load(.acquire)) {
             // Completed while we were adding to queue, remove ourselves
             _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return;
@@ -187,14 +185,23 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
         };
 
         // Pair with markComplete()'s .release
-        _ = awaitable.state.load(.acquire);
+        _ = awaitable.done.load(.acquire);
         // Yield returned successfully, awaitable must be complete
     } else {
-        // Thread path: park on the state using futex
+        // Thread path: use ThreadWaiter for futex-based parking
+        var thread_waiter = ThreadWaiter.init();
+        awaitable.waiting_list.push(&thread_waiter.wait_node);
+
+        // Double-check before parking (avoid lost wakeup)
+        if (awaitable.done.load(.acquire)) {
+            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
+            return;
+        }
+
+        // Wait loop - check done flag and park on thread_waiter futex
         while (true) {
-            const current_state = awaitable.state.load(.acquire);
-            if (current_state == 1) return;
-            std.Thread.Futex.wait(&awaitable.state, 0);
+            if (awaitable.done.load(.acquire)) break;
+            std.Thread.Futex.wait(&thread_waiter.futex_state, 0);
         }
     }
 }
@@ -206,8 +213,7 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
 /// For threads, uses futex timedWait directly.
 pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
     // Fast path: check if already complete
-    const fast_state = awaitable.state.load(.acquire);
-    if (fast_state == 1) return;
+    if (awaitable.done.load(.acquire)) return;
 
     if (runtime.executor.current_coroutine) |current| {
         // Coroutine path: get executor and use timer infrastructure
@@ -216,8 +222,7 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
 
         awaitable.waiting_list.push(&task.awaitable.wait_node);
 
-        const double_check_state = awaitable.state.load(.acquire);
-        if (double_check_state == 1) {
+        if (awaitable.done.load(.acquire)) {
             _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return;
         }
@@ -250,14 +255,23 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
         };
 
         // Pair with markComplete()'s .release
-        _ = awaitable.state.load(.acquire);
+        _ = awaitable.done.load(.acquire);
         // Yield returned successfully, awaitable must be complete
     } else {
-        // Thread path: use futex timedWait
+        // Thread path: use ThreadWaiter with futex timedWait
+        var thread_waiter = ThreadWaiter.init();
+        awaitable.waiting_list.push(&thread_waiter.wait_node);
+
+        // Double-check before parking (avoid lost wakeup)
+        if (awaitable.done.load(.acquire)) {
+            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
+            return;
+        }
+
+        // Wait loop with timeout - check done flag and park on thread_waiter futex
         while (true) {
-            const current_state = awaitable.state.load(.acquire);
-            if (current_state == 1) return;
-            try std.Thread.Futex.timedWait(&awaitable.state, 0, timeout_ns);
+            if (awaitable.done.load(.acquire)) break;
+            try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns);
         }
     }
 }
@@ -268,16 +282,13 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
 /// Can be called from any context - executor parameter is optional (null when called from thread pool).
 pub fn markComplete(awaitable: *Awaitable, executor: ?*Executor) void {
     _ = executor;
-    // Set state first (release semantics for memory ordering)
-    awaitable.state.store(1, .release);
+    // Set done flag first (release semantics for memory ordering)
+    awaitable.done.store(true, .release);
 
-    // Wake all waiting coroutines (always use .maybe_remote since waiters can be on any executor)
+    // Wake all waiters (both coroutines and threads via WaitNode)
     while (awaitable.waiting_list.pop()) |wait_node| {
         wait_node.wake();
     }
-
-    // Wake all waiting threads
-    std.Thread.Futex.wake(&awaitable.state, std.math.maxInt(u32));
 }
 
 /// Resume mode - controls cross-thread checking
@@ -626,7 +637,7 @@ pub fn JoinHandle(comptime T: type) type {
 
         /// Check if the task has completed and a result is available.
         pub fn hasResult(self: *const Self) bool {
-            return self.awaitable.state.load(.acquire) == 1;
+            return self.awaitable.done.load(.acquire);
         }
 
         /// Get the result value of type T (preserving any error union).
@@ -1369,6 +1380,31 @@ pub const SelectWaiter = struct {
         const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
         self.ready = true;
         resumeTask(self.task, .maybe_remote);
+    }
+};
+
+// ThreadWaiter - used by external threads to wait on Awaitables
+pub const ThreadWaiter = struct {
+    wait_node: WaitNode,
+    futex_state: std.atomic.Value(u32),
+
+    const wait_node_vtable = WaitNode.VTable{
+        .wake = waitNodeWake,
+    };
+
+    pub fn init() ThreadWaiter {
+        return .{
+            .wait_node = .{
+                .vtable = &wait_node_vtable,
+            },
+            .futex_state = std.atomic.Value(u32).init(0),
+        };
+    }
+
+    fn waitNodeWake(wait_node: *WaitNode) void {
+        const self: *ThreadWaiter = @fieldParentPtr("wait_node", wait_node);
+        self.futex_state.store(1, .release);
+        std.Thread.Futex.wake(&self.futex_state, 1);
     }
 };
 

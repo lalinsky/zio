@@ -23,9 +23,8 @@ pub const Awaitable = struct {
 
     wait_node: WaitNode,
 
-    // Universal state for both coroutines and threads
-    // 0 = pending/not ready, 1 = complete/ready
-    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    // Completion status - true when awaitable has completed
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Cancellation flag - set to request cancellation, consumed by yield()
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
