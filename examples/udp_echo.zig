@@ -40,7 +40,7 @@ fn udpEchoServer(rt: *zio.Runtime, port: u16) !void {
 
 fn udpClient(rt: *zio.Runtime, server_port: u16, client_id: u32, message: []const u8) !void {
     // Give server time to start
-    rt.sleep(50 * client_id);
+    try rt.sleep(50 * client_id);
 
     const elapsed_start = getTimestamp() - start_time;
     print("[{}ms] [Client-{}] Starting\n", .{ elapsed_start, client_id });

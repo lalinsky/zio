@@ -1,7 +1,7 @@
 const std = @import("std");
 const zio = @import("zio");
 
-fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) void {
+fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     for (0..5) |i| {
         const item = @as(i32, @intCast(id * 100 + i));
         channel.send(rt, item) catch |err| switch (err) {
@@ -15,12 +15,12 @@ fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) void {
             },
         };
         std.log.info("Produced: {}", .{item});
-        rt.sleep(100); // Small delay between productions
+        try rt.sleep(100); // Small delay between productions
     }
     std.log.info("Producer {} finished", .{id});
 }
 
-fn consumer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) void {
+fn consumer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     for (0..5) |_| {
         const item = channel.receive(rt) catch |err| switch (err) {
             error.ChannelClosed => {
@@ -33,7 +33,7 @@ fn consumer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) void {
             },
         };
         std.log.info("Consumed: {}", .{item});
-        rt.sleep(150); // Small delay between consumptions
+        try rt.sleep(150); // Small delay between consumptions
     }
     std.log.info("Consumer {} finished", .{id});
 }
@@ -49,8 +49,8 @@ pub fn main() !void {
     var channel = zio.Channel(i32).init(&buffer);
 
     // Start 2 producers and 2 consumers
-    var producers: [2]zio.JoinHandle(void) = undefined;
-    var consumers: [2]zio.JoinHandle(void) = undefined;
+    var producers: [2]zio.JoinHandle(zio.Cancelable!void) = undefined;
+    var consumers: [2]zio.JoinHandle(zio.Cancelable!void) = undefined;
     var producer_count: usize = 0;
     var consumer_count: usize = 0;
 
