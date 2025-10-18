@@ -127,6 +127,11 @@ pub fn main() !void {
             log_capture.startCapture(&log_buffer.writer);
         }
 
+        // Print which test is starting (for debugging hangs)
+        if (env.verbose) {
+            Printer.fmt("Starting: {s}\n", .{friendly_name});
+        }
+
         const result = t.func();
 
         if (env.do_log_capture) {
