@@ -232,17 +232,23 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
         // Thread path: use ThreadWaiter with futex timedWait
         var thread_waiter = ThreadWaiter.init();
         awaitable.waiting_list.push(&thread_waiter.wait_node);
+        defer {
+            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
+        }
 
         // Double-check before parking (avoid lost wakeup)
         if (awaitable.done.load(.acquire)) {
-            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
             return;
         }
 
         // Wait loop with timeout - check done flag and park on thread_waiter futex
-        while (true) {
-            if (awaitable.done.load(.acquire)) break;
-            try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns);
+        var timer = std.time.Timer.start() catch unreachable;
+        while (!awaitable.done.load(.acquire)) {
+            const elapsed_ns = timer.read();
+            if (elapsed_ns >= timeout_ns) {
+                return error.Timeout;
+            }
+            try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns - elapsed_ns);
         }
     }
 }
