@@ -1032,16 +1032,11 @@ pub const Executor = struct {
                 break;
             }
 
-            // First check for I/O events without blocking (processes cancellations and async notifications)
-            try self.loop.run(.no_wait);
-
             // Move yielded coroutines back to ready queue
             self.ready_queue.prependByMoving(&self.next_ready_queue);
 
             // If no ready work, block waiting for I/O
-            if (self.ready_queue.head == null) {
-                try self.loop.run(.once);
-            }
+            try self.loop.run(if (self.ready_queue.head == null) .once else .no_wait);
         }
     }
 
