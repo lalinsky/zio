@@ -137,7 +137,7 @@ fn drainBlockingCompletions(
         // Get awaitable from wait_node
         const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-        markComplete(awaitable, self);
+        markComplete(awaitable);
         // Release the blocking task's reference (initial ref from init)
         runtime.releaseAwaitable(awaitable);
     }
@@ -277,9 +277,8 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
 /// Mark an awaitable as complete and wake all waiters (both coroutines and threads).
 /// This is a standalone helper that can be called on any awaitable.
 /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
-/// Can be called from any context - executor parameter is optional (null when called from thread pool).
-pub fn markComplete(awaitable: *Awaitable, executor: ?*Executor) void {
-    _ = executor;
+/// Can be called from any context.
+pub fn markComplete(awaitable: *Awaitable) void {
     // Set done flag first (release semantics for memory ordering)
     awaitable.done.store(true, .release);
 
@@ -526,7 +525,7 @@ pub fn Future(comptime T: type) type {
             }
 
             // Mark awaitable as complete and wake all waiters (coroutines and threads)
-            markComplete(&self.impl.base.awaitable, Runtime.current_executor);
+            markComplete(&self.impl.base.awaitable);
         }
     };
 }
@@ -1085,7 +1084,7 @@ pub const Executor = struct {
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        markComplete(current_awaitable, self);
+                        markComplete(current_awaitable);
 
                         // Track task completion
                         self.metrics.tasks_completed += 1;
