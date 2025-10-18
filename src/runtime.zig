@@ -1531,14 +1531,8 @@ pub const Runtime = struct {
             id
         else if (Runtime.current_executor) |current_exec|
             // In coroutine context - inherit current executor
-            blk: {
-                // Find index of current executor
-                for (self.executors.items, 0..) |*exec, i| {
-                    if (exec == current_exec) break :blk i;
-                }
-                // Fallback to round-robin if not found (shouldn't happen)
-                break :blk self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len;
-            } else
+            current_exec.id
+        else
             // Not in coroutine context - use round-robin
             self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len;
 
