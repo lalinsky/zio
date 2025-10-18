@@ -908,18 +908,8 @@ pub const Executor = struct {
         // putNoClobber cannot fail since we ensured capacity
         self.tasks.putAssumeCapacityNoClobber(&task.impl.base, {});
 
-        // Add to ready queue (check if local or remote)
-        if (Runtime.current_executor == self) {
-            // Same executor - use fast local path
-            self.ready_queue.push(&task.impl.base.awaitable.wait_node);
-        } else {
-            // Different executor (or no current executor) - use remote path
-            self.next_ready_queue_remote.push(&task.impl.base.awaitable.wait_node);
-            // Notify the target executor's event loop
-            if (self.remote_initialized.load(.acquire)) {
-                self.remote_wakeup.notify() catch {};
-            }
-        }
+        // Schedule the task to run
+        self.scheduleTask(&task.impl.base.awaitable.wait_node, .maybe_remote);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
@@ -1149,6 +1139,35 @@ pub const Executor = struct {
         }
     }
 
+    /// Schedule a task to run on this executor.
+    /// Uses local queue if called from the same executor, otherwise uses remote queue.
+    ///
+    /// The `mode` parameter controls executor checking:
+    /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
+    /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
+    fn scheduleTask(self: *Executor, wait_node: *WaitNode, comptime mode: ResumeMode) void {
+        if (mode == .maybe_remote) {
+            // Check if we're on the same executor thread
+            if (Runtime.current_executor == self) {
+                // Same executor - use fast local path
+                self.ready_queue.push(wait_node);
+            } else {
+                // Different executor (or no current executor) - use remote path
+                // Push to remote ready queue (thread-safe)
+                self.next_ready_queue_remote.push(wait_node);
+
+                // Notify the target executor's event loop (only if initialized)
+                if (self.remote_initialized.load(.acquire)) {
+                    self.remote_wakeup.notify() catch {};
+                }
+            }
+        } else {
+            // Fast path: we know we're on the same executor
+            assert(Runtime.current_executor == self);
+            self.ready_queue.push(wait_node);
+        }
+    }
+
     /// Mark a coroutine as ready.
     ///
     /// The `mode` parameter controls executor checking:
@@ -1158,28 +1177,7 @@ pub const Executor = struct {
         if (coro.state != .waiting) std.debug.panic("coroutine is not waiting", .{});
         coro.state = .ready;
         const task = AnyTask.fromCoroutine(coro);
-
-        if (mode == .maybe_remote) {
-            // Check if we're on the same executor thread
-            if (Runtime.current_executor == self) {
-                // Same executor - use fast local path
-                self.ready_queue.push(&task.awaitable.wait_node);
-            } else {
-                // Different executor (or no current executor) - use remote path
-                // Remote queue is always initialized in Executor.init()
-                assert(self.remote_initialized.load(.acquire));
-
-                // Push to remote ready queue (thread-safe)
-                self.next_ready_queue_remote.push(&task.awaitable.wait_node);
-
-                // Notify the target executor's event loop
-                self.remote_wakeup.notify() catch {};
-            }
-        } else {
-            // Fast path: we know we're on the same executor
-            assert(Runtime.current_executor == self);
-            self.ready_queue.push(&task.awaitable.wait_node);
-        }
+        self.scheduleTask(&task.awaitable.wait_node, mode);
     }
 
     /// Get a copy of the current metrics
