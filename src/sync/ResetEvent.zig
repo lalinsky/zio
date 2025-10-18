@@ -118,9 +118,8 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     }
 
     // Add to wait queue and suspend
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-    const task = AnyTask.fromCoroutine(current);
+    const task = runtime.getCurrentTask() orelse unreachable;
+    const executor = task.getExecutor();
     self.wait_queue.push(&task.awaitable.wait_node);
 
     // Suspend until woken by set()
@@ -158,9 +157,8 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     }
 
     // Add to wait queue and wait with timeout
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-    const task = AnyTask.fromCoroutine(current);
+    const task = runtime.getCurrentTask() orelse unreachable;
+    const executor = task.getExecutor();
 
     self.wait_queue.push(&task.awaitable.wait_node);
 

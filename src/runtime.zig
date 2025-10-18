@@ -158,10 +158,9 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
     // Fast path: check if already complete
     if (awaitable.done.load(.acquire)) return;
 
-    if (runtime.executor.current_coroutine) |current| {
+    if (runtime.getCurrentTask()) |task| {
         // Coroutine path: add to wait queue and suspend
-        const task = AnyTask.fromCoroutine(current);
-        const executor = Executor.fromCoroutine(current);
+        const executor = task.getExecutor();
 
         // Check for self-join (would deadlock)
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
@@ -215,10 +214,9 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
     // Fast path: check if already complete
     if (awaitable.done.load(.acquire)) return;
 
-    if (runtime.executor.current_coroutine) |current| {
+    if (runtime.getCurrentTask()) |task| {
         // Coroutine path: get executor and use timer infrastructure
-        const task = AnyTask.fromCoroutine(current);
-        const executor = Executor.fromCoroutine(current);
+        const executor = task.getExecutor();
 
         awaitable.waiting_list.push(&task.awaitable.wait_node);
 
@@ -353,6 +351,11 @@ pub const AnyTask = struct {
 
     pub inline fn fromCoroutine(coro: *Coroutine) *AnyTask {
         return @fieldParentPtr("coro", coro);
+    }
+
+    /// Get the executor that owns this task.
+    pub inline fn getExecutor(self: *AnyTask) *Executor {
+        return Executor.fromCoroutine(&self.coro);
     }
 
     /// Request cancellation of this task.
@@ -1522,6 +1525,14 @@ pub const Runtime = struct {
         return self.executor.checkCanceled();
     }
 
+    /// Get the currently executing task, or null if not in a coroutine.
+    /// Uses the threadlocal current_executor to support multiple executors.
+    pub fn getCurrentTask(_: *Runtime) ?*AnyTask {
+        const executor = Runtime.current_executor orelse return null;
+        const current = executor.current_coroutine orelse return null;
+        return AnyTask.fromCoroutine(current);
+    }
+
     pub fn getCurrent() ?*Runtime {
         // This function has no way to access the runtime without threadlocal
         // It should not be used - tests that use it need Runtime passed as parameter
@@ -1583,9 +1594,8 @@ pub const Runtime = struct {
 
         // Multi-wait path: Create separate waiter awaitables for each handle
         // We can't add the same awaitable to multiple lists (next/prev pointers conflict)
-        const current_coro = self.executor.current_coroutine orelse return error.NotInCoroutine;
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        const executor = Executor.fromCoroutine(current_coro);
+        const current_task = self.getCurrentTask() orelse return error.NotInCoroutine;
+        const executor = current_task.getExecutor();
 
         // Create waiter structures on the stack
         var waiters: [fields.len]SelectWaiter = undefined;

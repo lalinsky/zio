@@ -64,8 +64,8 @@ pub fn tryLock(self: *Mutex) bool {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
+    const task = runtime.getCurrentTask() orelse unreachable;
+    const executor = task.getExecutor();
 
     // Fast path: try to acquire unlocked mutex
     if (self.queue.tryTransition(unlocked, locked_once)) {
@@ -73,7 +73,6 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     }
 
     // Slow path: add to FIFO wait queue
-    const task = AnyTask.fromCoroutine(current);
 
     self.queue.push(&task.awaitable.wait_node);
 

@@ -84,9 +84,8 @@ pub const init: Condition = .{};
 /// Returns `error.Canceled` if the task is cancelled while waiting. The mutex
 /// will still be held when returning with an error.
 pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-    const task = AnyTask.fromCoroutine(current);
+    const task = runtime.getCurrentTask() orelse unreachable;
+    const executor = task.getExecutor();
 
     // Add to wait queue before releasing mutex
     self.wait_queue.push(&task.awaitable.wait_node);
@@ -119,9 +118,8 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 /// takes priority over timeout - if both occur, `error.Canceled` is returned.
 /// The mutex will be held when returning with any error.
 pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) error{ Timeout, Canceled }!void {
-    const current = runtime.executor.current_coroutine orelse unreachable;
-    const executor = Executor.fromCoroutine(current);
-    const task = AnyTask.fromCoroutine(current);
+    const task = runtime.getCurrentTask() orelse unreachable;
+    const executor = task.getExecutor();
 
     self.wait_queue.push(&task.awaitable.wait_node);
 
