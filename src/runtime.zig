@@ -54,6 +54,7 @@ pub const ZioError = error{
     XevError,
     NotInCoroutine,
     InvalidExecutorId,
+    RuntimeShutdown,
 };
 
 // Cancelable error set
@@ -1129,6 +1130,9 @@ pub const Executor = struct {
 
             // Main executor: check if all tasks are complete (after processing)
             if (is_main and self.runtime_ptr.global_task_count.load(.monotonic) == 0) {
+                // Set shutdown flag to prevent new tasks from spawning
+                self.runtime_ptr.shutting_down.store(true, .release);
+
                 // Trigger shutdown for all executors (including self)
                 for (self.runtime_ptr.executors.items) |*executor| {
                     executor.shutdown_async.notify() catch {};
@@ -1453,6 +1457,7 @@ pub const Runtime = struct {
     // Multi-executor coordination
     next_executor: std.atomic.Value(usize),
     global_task_count: std.atomic.Value(usize),
+    shutting_down: std.atomic.Value(bool),
 
     /// Thread-local storage for the current executor
     pub threadlocal var current_executor: ?*Executor = null;
@@ -1505,6 +1510,7 @@ pub const Runtime = struct {
             .options = options,
             .next_executor = std.atomic.Value(usize).init(0),
             .global_task_count = std.atomic.Value(usize).init(0),
+            .shutting_down = std.atomic.Value(bool).init(false),
         };
     }
 
@@ -1531,6 +1537,11 @@ pub const Runtime = struct {
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
+        // Check if runtime is shutting down
+        if (self.shutting_down.load(.acquire)) {
+            return error.RuntimeShutdown;
+        }
+
         // Determine target executor
         const executor_id = if (options.executor_id) |id|
             // Explicit executor specified
@@ -1556,6 +1567,11 @@ pub const Runtime = struct {
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
+        // Check if runtime is shutting down
+        if (self.shutting_down.load(.acquire)) {
+            return error.RuntimeShutdown;
+        }
+
         if (self.thread_pool == null) return error.ThreadPoolRequired;
 
         const Result = meta.ReturnType(func);
@@ -1998,6 +2014,60 @@ test "runtime: spawnBlocking smoke test" {
     };
 
     try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "runtime: spawn during shutdown returns error" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn task() void {}
+
+        fn mainTask(rt: *Runtime) !void {
+            // First task spawns successfully
+            var handle1 = try rt.spawn(task, .{}, .{});
+            defer handle1.deinit();
+
+            // Manually trigger shutdown
+            rt.shutting_down.store(true, .release);
+
+            // Attempting to spawn during shutdown should fail
+            const result = rt.spawn(task, .{}, .{});
+            try testing.expectError(error.RuntimeShutdown, result);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
+}
+
+test "runtime: spawnBlocking during shutdown returns error" {
+    const testing = std.testing;
+
+    var runtime = try Runtime.init(testing.allocator, .{
+        .thread_pool = .{ .enabled = true },
+    });
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn blockingWork() void {}
+
+        fn mainTask(rt: *Runtime) !void {
+            // First task spawns successfully
+            var handle1 = try rt.spawnBlocking(blockingWork, .{});
+            defer handle1.deinit();
+
+            // Manually trigger shutdown
+            rt.shutting_down.store(true, .release);
+
+            // Attempting to spawn during shutdown should fail
+            const result = rt.spawnBlocking(blockingWork, .{});
+            try testing.expectError(error.RuntimeShutdown, result);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
 }
 
 test "runtime: Future basic set and get" {
