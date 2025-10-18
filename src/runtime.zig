@@ -92,13 +92,13 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
         any_blocking_task.execute_fn(any_blocking_task);
     }
 
-    // Push to completion queue (thread-safe lock-free stack)
+    // Mark awaitable as complete and wake all waiters (thread-safe)
     // Even if canceled, we still mark as complete so waiters wake up
-    const executor = &any_blocking_task.runtime.executor;
-    executor.blocking_completions.push(&any_blocking_task.awaitable.wait_node);
+    markComplete(&any_blocking_task.awaitable);
 
-    // Wake up main loop
-    executor.async_wakeup.notify() catch {};
+    // Release the blocking task's reference
+    const runtime = any_blocking_task.runtime;
+    runtime.releaseAwaitable(&any_blocking_task.awaitable);
 }
 
 // Async callback for remote ready tasks wakeup (cross-thread resumption)
@@ -115,33 +115,6 @@ fn remoteWakeupCallback(
     _ = executor;
 
     // Just wake up - draining happens in run() loop
-    return .rearm;
-}
-
-// Async callback to drain completed blocking tasks
-fn drainBlockingCompletions(
-    executor: ?*Executor,
-    loop: *xev.Loop,
-    c: *xev.Completion,
-    result: xev.Async.WaitError!void,
-) xev.CallbackAction {
-    _ = result catch unreachable;
-    _ = loop;
-    _ = c;
-    const self = executor.?;
-    const runtime = self.runtime();
-
-    // Atomically drain all completed blocking tasks (LIFO order)
-    var drained = self.blocking_completions.popAll();
-    while (drained.pop()) |wait_node| {
-        // Get awaitable from wait_node
-        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
-        // Mark awaitable as complete and wake all waiters (coroutines and threads)
-        markComplete(awaitable);
-        // Release the blocking task's reference (initial ref from init)
-        runtime.releaseAwaitable(awaitable);
-    }
-
     return .rearm;
 }
 
@@ -259,17 +232,23 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
         // Thread path: use ThreadWaiter with futex timedWait
         var thread_waiter = ThreadWaiter.init();
         awaitable.waiting_list.push(&thread_waiter.wait_node);
+        defer {
+            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
+        }
 
         // Double-check before parking (avoid lost wakeup)
         if (awaitable.done.load(.acquire)) {
-            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
             return;
         }
 
         // Wait loop with timeout - check done flag and park on thread_waiter futex
-        while (true) {
-            if (awaitable.done.load(.acquire)) break;
-            try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns);
+        var timer = std.time.Timer.start() catch unreachable;
+        while (!awaitable.done.load(.acquire)) {
+            const elapsed_ns = timer.read();
+            if (elapsed_ns >= timeout_ns) {
+                return error.Timeout;
+            }
+            try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns - elapsed_ns);
         }
     }
 }
@@ -603,7 +582,7 @@ pub fn BlockingTask(comptime T: type) type {
             // Increment ref count for the JoinHandle
             task_data.blocking_task.impl.base.awaitable.ref_count.incr();
 
-            runtime.executor.thread_pool.?.schedule(
+            runtime.thread_pool.?.schedule(
                 xev.ThreadPool.Batch.from(&task_data.blocking_task.impl.base.thread_pool_task),
             );
 
@@ -729,7 +708,6 @@ comptime {
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     loop: xev.Loop,
-    thread_pool: ?*xev.ThreadPool, // Reference to Runtime's thread pool
     stack_pool: StackPool,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -745,12 +723,6 @@ pub const Executor = struct {
     remote_wakeup: xev.Async = undefined,
     remote_completion: xev.Completion = undefined,
     remote_initialized: bool = false,
-
-    // Blocking task support - lock-free LIFO stack
-    blocking_completions: ConcurrentStack(WaitNode) = .{},
-    async_wakeup: xev.Async = undefined,
-    async_completion: xev.Completion = undefined,
-    blocking_initialized: bool = false,
 
     // Stack pool cleanup tracking
     cleanup_interval_ms: i64,
@@ -778,7 +750,6 @@ pub const Executor = struct {
         return Executor{
             .allocator = allocator,
             .loop = loop,
-            .thread_pool = thread_pool,
             .stack_pool = StackPool.init(allocator, options.stack_pool),
             .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
             .main_context = undefined,
@@ -799,11 +770,6 @@ pub const Executor = struct {
         // Clean up remote task support
         if (self.remote_initialized) {
             self.remote_wakeup.deinit();
-        }
-
-        // Clean up blocking task support
-        if (self.blocking_initialized) {
-            self.async_wakeup.deinit();
         }
 
         self.loop.deinit();
@@ -999,42 +965,6 @@ pub const Executor = struct {
         self.remote_initialized = true;
     }
 
-    fn ensureBlockingInitialized(self: *Executor) !void {
-        if (self.blocking_initialized) return;
-        if (self.thread_pool == null) return error.ThreadPoolRequired;
-
-        self.async_wakeup = try xev.Async.init();
-
-        // Register async completion to drain blocking tasks
-        self.async_wakeup.wait(
-            &self.loop,
-            &self.async_completion,
-            Executor,
-            self,
-            drainBlockingCompletions,
-        );
-
-        self.blocking_initialized = true;
-    }
-
-    pub fn spawnBlocking(
-        self: *Executor,
-        func: anytype,
-        args: meta.ArgsType(func),
-    ) !JoinHandle(meta.ReturnType(func)) {
-        try self.ensureBlockingInitialized();
-
-        const Result = meta.ReturnType(func);
-        const task = try BlockingTask(Result).init(
-            self.runtime(),
-            self.allocator,
-            func,
-            args,
-        );
-
-        return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
-    }
-
     /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
     /// This is equivalent to: `spawn()` + `run()` + `result()`, but in a single call.
     /// Returns an error union that includes errors from `spawn()`, `run()`, and the task itself.
@@ -1108,16 +1038,11 @@ pub const Executor = struct {
                 break;
             }
 
-            // First check for I/O events without blocking (processes cancellations and async notifications)
-            try self.loop.run(.no_wait);
-
             // Move yielded coroutines back to ready queue
             self.ready_queue.prependByMoving(&self.next_ready_queue);
 
             // If no ready work, block waiting for I/O
-            if (self.ready_queue.head == null) {
-                try self.loop.run(.once);
-            }
+            try self.loop.run(if (self.ready_queue.head == null) .once else .no_wait);
         }
     }
 
@@ -1470,7 +1395,17 @@ pub const Runtime = struct {
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
-        return self.executor.spawnBlocking(func, args);
+        if (self.thread_pool == null) return error.ThreadPoolRequired;
+
+        const Result = meta.ReturnType(func);
+        const task = try BlockingTask(Result).init(
+            self,
+            self.allocator,
+            func,
+            args,
+        );
+
+        return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
 
     pub fn run(self: *Runtime) !void {
