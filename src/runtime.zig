@@ -921,9 +921,6 @@ pub const Executor = struct {
         // Track task spawn
         self.metrics.tasks_spawned += 1;
 
-        // Increment global task count
-        _ = self.runtime_ptr.global_task_count.fetchAdd(1, .monotonic);
-
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
 
@@ -1112,7 +1109,7 @@ pub const Executor = struct {
                         self.metrics.tasks_completed += 1;
 
                         // Decrement global task count
-                        _ = self.runtime_ptr.global_task_count.fetchSub(1, .monotonic);
+                        _ = self.runtime_ptr.global_task_count.fetchSub(1, .release);
 
                         // Remove from tasks queue and release runtime's reference
                         _ = self.tasks.remove(current_task);
@@ -1125,7 +1122,7 @@ pub const Executor = struct {
             }
 
             // Main executor: check if all tasks are complete (after processing)
-            if (is_main and self.runtime_ptr.global_task_count.load(.monotonic) == 0) {
+            if (is_main and self.runtime_ptr.global_task_count.load(.acquire) == 0) {
                 // Set shutdown flag to prevent new tasks from spawning
                 self.runtime_ptr.shutting_down.store(true, .release);
 
@@ -1535,6 +1532,12 @@ pub const Runtime = struct {
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
+        // Optimistically increment global task count before shutdown check
+        // This prevents race condition where task count reaches 0, shutdown flag
+        // is set, but spawn() sneaks in between the check and flag set.
+        _ = self.global_task_count.fetchAdd(1, .release);
+        errdefer _ = self.global_task_count.fetchSub(1, .release);
+
         // Check if runtime is shutting down
         if (self.shutting_down.load(.acquire)) {
             return error.RuntimeShutdown;
