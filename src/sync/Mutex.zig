@@ -28,7 +28,7 @@ const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
 const WaitNode = @import("../core/WaitNode.zig");
-const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
+const CompactConcurrentQueue = @import("../utils/concurrent_queue.zig").CompactConcurrentQueue;
 
 const Mutex = @This();
 
@@ -36,9 +36,9 @@ const Mutex = @This();
 /// - sentinel0 (0b00) = locked, no waiters
 /// - sentinel1 (0b01) = unlocked
 /// - pointer = locked with waiters
-queue: ConcurrentQueue(WaitNode) = .initWithState(.sentinel1),
+queue: CompactConcurrentQueue(WaitNode) = .initWithState(.sentinel1),
 
-const State = ConcurrentQueue(WaitNode).State;
+const State = CompactConcurrentQueue(WaitNode).State;
 const locked_once: State = .sentinel0;
 const unlocked: State = .sentinel1;
 

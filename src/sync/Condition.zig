@@ -54,10 +54,10 @@ const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
-const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
+const CompactConcurrentQueue = @import("../utils/concurrent_queue.zig").CompactConcurrentQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 
-wait_queue: ConcurrentQueue(WaitNode) = .empty,
+wait_queue: CompactConcurrentQueue(WaitNode) = .empty,
 
 const Condition = @This();
 
@@ -124,7 +124,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     self.wait_queue.push(&task.awaitable.wait_node);
 
     const TimeoutContext = struct {
-        wait_queue: *ConcurrentQueue(WaitNode),
+        wait_queue: *CompactConcurrentQueue(WaitNode),
         wait_node: *WaitNode,
     };
 

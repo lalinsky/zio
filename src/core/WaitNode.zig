@@ -7,6 +7,7 @@ vtable: *const VTable,
 // For participation in wait queues
 prev: ?*WaitNode = null,
 next: ?*WaitNode = null,
+tail: ?*WaitNode = null, // For CompactConcurrentQueue
 in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 
 pub const VTable = struct {
