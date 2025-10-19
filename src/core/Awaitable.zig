@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const RefCounter = @import("../sync/ref_counter.zig").RefCounter;
+const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("WaitNode.zig");
 const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
 

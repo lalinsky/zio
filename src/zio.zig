@@ -32,12 +32,9 @@ pub const Semaphore = @import("sync.zig").Semaphore;
 pub const Barrier = @import("sync.zig").Barrier;
 pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
-pub const RefCounter = @import("sync.zig").RefCounter;
 
-// Re-export concurrent data structures
-const concurrent_queue = @import("utils/concurrent_queue.zig");
-pub const ConcurrentQueue = concurrent_queue.ConcurrentQueue;
-pub const CompactConcurrentQueue = concurrent_queue.CompactConcurrentQueue;
+// Re-export low-level utilities
+pub const util = @import("utils.zig");
 
 test {
     std.testing.refAllDecls(@This());

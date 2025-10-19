@@ -1,8 +1,8 @@
 const std = @import("std");
 const zio = @import("zio");
 const Runtime = zio.Runtime;
-const ConcurrentQueue = @import("zio").ConcurrentQueue;
-const CompactConcurrentQueue = @import("zio").CompactConcurrentQueue;
+const ConcurrentQueue = zio.util.ConcurrentQueue;
+const CompactConcurrentQueue = zio.util.CompactConcurrentQueue;
 
 const StandardNode = struct {
     next: ?*@This() = null,

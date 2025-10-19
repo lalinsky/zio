@@ -12,7 +12,7 @@ const Coroutine = coroutines.Coroutine;
 const CoroutineState = coroutines.CoroutineState;
 
 // const Error = coroutines.Error;
-const RefCounter = @import("sync/ref_counter.zig").RefCounter;
+const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 const FutureResult = @import("future_result.zig").FutureResult;
 const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
