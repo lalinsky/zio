@@ -1,41 +1,55 @@
-//! Generic concurrent FIFO queue with two sentinel states.
+//! Concurrent FIFO queues for thread-safe synchronization primitives.
 //!
-//! Uses tagged pointers with mutation spinlock for thread-safe operations:
-//! - 0b00: Sentinel state 0
-//! - 0b01: Sentinel state 1
-//! - ptr (>1): Pointer to head of wait queue
-//! - ptr | 0b10: Mutation lock bit (queue is being modified)
+//! This is a low-level building block for implementing synchronization primitives
+//! (mutexes, condition variables, semaphores, etc.). Application code should use
+//! higher-level primitives from the sync module instead of using these queues directly.
 //!
-//! Provides O(1) push, pop, and remove operations using a doubly-linked list
-//! with atomic head pointer and non-atomic tail pointer (protected by mutation lock).
-//!
-//! This pattern enables efficient concurrent synchronization primitives where:
-//! - Sentinel states can encode additional information (e.g., locked vs unlocked)
-//! - Wait queues need thread-safe access with minimal overhead
-//! - Critical sections are very short (just pointer manipulation)
-//!
-//! Usage:
-//! ```zig
-//! const MyNode = struct {
-//!     next: ?*MyNode = null,
-//!     prev: ?*MyNode = null,
-//!     in_list: bool = false, // Required in debug mode
-//!     data: i32,
-//! };
-//! // Use .empty for initialization:
-//! var queue: ConcurrentQueue(MyNode) = .empty;
-//! // Or for convenient field initialization:
-//! waiters: ConcurrentQueue(MyNode) = .empty,
-//! ```
+//! Provides two variants:
+//! - ConcurrentQueue: 16-byte queue with separate head and tail pointers
+//! - CompactConcurrentQueue: 8-byte queue with tail stored in head node
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 
-/// Generic concurrent FIFO queue.
-/// T must be a struct type with `next` and `prev` fields of type ?*T.
-/// In debug mode, the struct must also have an `in_list` field of type bool.
+/// Generic concurrent FIFO queue with two sentinel states.
+///
+/// **Low-level primitive**: This is intended for implementing synchronization primitives.
+/// Application code should use higher-level abstractions from the sync module instead.
+///
+/// Uses tagged pointers with mutation spinlock for thread-safe operations:
+/// - 0b00: Sentinel state 0
+/// - 0b01: Sentinel state 1
+/// - ptr (>1): Pointer to head of wait queue
+/// - ptr | 0b10: Mutation lock bit (queue is being modified)
+///
+/// Provides O(1) push, pop, and remove operations using a doubly-linked list
+/// with atomic head pointer and non-atomic tail pointer (protected by mutation lock).
+///
+/// This pattern enables efficient concurrent synchronization primitives where:
+/// - Sentinel states can encode additional information (e.g., locked vs unlocked)
+/// - Wait queues need thread-safe access with minimal overhead
+/// - Critical sections are very short (just pointer manipulation)
+///
+/// T must be a struct type with:
+/// - `next` field of type ?*T
+/// - `prev` field of type ?*T
+/// - `in_list` field of type bool (debug mode only)
+///
+/// Usage:
+/// ```zig
+/// const MyNode = struct {
+///     next: ?*MyNode = null,
+///     prev: ?*MyNode = null,
+///     in_list: bool = false, // Required in debug mode
+///     data: i32,
+/// };
+/// // Use .empty for initialization:
+/// var queue: ConcurrentQueue(MyNode) = .empty;
+/// // Or for convenient field initialization:
+/// waiters: ConcurrentQueue(MyNode) = .empty,
+/// ```
 pub fn ConcurrentQueue(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -57,25 +71,30 @@ pub fn ConcurrentQueue(comptime T: type) type {
             sentinel1 = 0b01,
             _,
 
+            /// Returns true if state is a pointer (not a sentinel).
             pub fn isPointer(s: State) bool {
                 const val = @intFromEnum(s);
                 return val > 1; // Not a sentinel (0 or 1) = pointer
             }
 
+            /// Returns true if the mutation lock bit is set.
             pub fn hasMutationBit(s: State) bool {
                 return @intFromEnum(s) & 0b10 != 0;
             }
 
+            /// Returns state with mutation lock bit set.
             pub fn withMutationBit(s: State) State {
                 return @enumFromInt(@intFromEnum(s) | 0b10);
             }
 
+            /// Extract pointer from state, or null if state is a sentinel.
             pub fn getPtr(s: State) ?*T {
                 if (!s.isPointer()) return null;
                 const addr = @intFromEnum(s) & ~@as(usize, 0b11);
                 return @ptrFromInt(addr);
             }
 
+            /// Create state from pointer. Pointer must be 4-byte aligned.
             pub fn fromPtr(ptr: *T) State {
                 const addr = @intFromPtr(ptr);
                 std.debug.assert(addr & 0b11 == 0); // Must be aligned
@@ -83,7 +102,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
             }
         };
 
-        /// Initialize list in a specific sentinel state
+        /// Initialize queue in a specific sentinel state.
         pub fn initWithState(state: State) Self {
             std.debug.assert(!state.isPointer());
             return .{
@@ -91,7 +110,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
             };
         }
 
-        /// Get current state (atomic load)
+        /// Get current state (atomic load).
         ///
         /// Memory ordering: Uses .acquire to ensure visibility of any prior modifications
         /// to the list structure if the state is a pointer.
@@ -100,8 +119,8 @@ pub fn ConcurrentQueue(comptime T: type) type {
             return @enumFromInt(self.head.load(.acquire));
         }
 
-        /// Try to atomically transition from one sentinel state to another
-        /// Returns the previous state (useful for checking if already at target)
+        /// Try to atomically transition from one sentinel state to another.
+        /// Returns the previous state (useful for checking if already at target).
         ///
         /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
         /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
@@ -123,8 +142,8 @@ pub fn ConcurrentQueue(comptime T: type) type {
             }
         }
 
-        /// Try to atomically transition from one sentinel state to another
-        /// Returns true if successful, false if state has changed
+        /// Try to atomically transition from one sentinel state to another.
+        /// Returns true if successful, false if state has changed.
         ///
         /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
         /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
@@ -133,16 +152,13 @@ pub fn ConcurrentQueue(comptime T: type) type {
             return self.tryTransitionEx(from, to) == from;
         }
 
-        /// Acquire exclusive access to manipulate the wait list.
-        /// Spins until mutation lock is acquired.
+        /// Acquire exclusive access to manipulate the queue.
+        /// Spins until mutation lock is acquired, yielding if running in a coroutine.
         /// Returns the state before mutation bit was set.
         ///
         /// Memory ordering: Uses .acquire on fetchOr to synchronize-with the previous
         /// releaseMutationLock(). This ensures visibility of all modifications made
         /// while the lock was previously held, including non-atomic tail pointer updates.
-        ///
-        /// If running in a coroutine, will yield to allow other tasks to run.
-        /// Otherwise spins (useful for thread pool callbacks).
         pub fn acquireMutationLock(self: *Self) State {
             var spin_count: u4 = 0;
             while (true) {
@@ -169,7 +185,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
             }
         }
 
-        /// Release exclusive access to wait list.
+        /// Release exclusive access to the queue.
         ///
         /// Memory ordering: Uses .release on fetchAnd to make all modifications
         /// visible to future lock acquires. This includes non-atomic writes to tail
@@ -181,8 +197,8 @@ pub fn ConcurrentQueue(comptime T: type) type {
             std.debug.assert(prev & 0b10 != 0); // Must have been holding the lock
         }
 
-        /// Add awaitable to the end of the list.
-        /// If list is currently in a sentinel state, transitions to list state.
+        /// Add item to the end of the queue.
+        /// If queue is currently in a sentinel state, transitions to queue state.
         /// Otherwise acquires mutation lock and appends to tail.
         pub fn push(self: *Self, item: *T) void {
             // Initialize item as not in list
@@ -213,8 +229,8 @@ pub fn ConcurrentQueue(comptime T: type) type {
             self.releaseMutationLock();
         }
 
-        /// Remove and return the awaitable at the front of the list.
-        /// Returns null if list is in a sentinel state (empty).
+        /// Remove and return the item at the front of the queue.
+        /// Returns null if queue is in a sentinel state (empty).
         pub fn pop(self: *Self) ?*T {
             const old_state = self.acquireMutationLock();
 
@@ -255,8 +271,8 @@ pub fn ConcurrentQueue(comptime T: type) type {
             return old_head;
         }
 
-        /// Remove a specific awaitable from the list.
-        /// Returns true if the awaitable was found and removed, false otherwise.
+        /// Remove a specific item from the queue.
+        /// Returns true if the item was found and removed, false otherwise.
         pub fn remove(self: *Self, item: *T) bool {
             const old_state = self.acquireMutationLock();
 
@@ -328,8 +344,8 @@ pub fn ConcurrentQueue(comptime T: type) type {
         /// If queue is empty (in from_sentinel state), transitions to to_sentinel.
         /// Returns the popped item, or null if queue was/became empty.
         ///
-        /// This handles the race where waiters remove themselves (via cancellation)
-        /// between the empty check and pop by retrying in a loop.
+        /// Handles races where items are removed (via cancellation) between
+        /// the empty check and pop by retrying in a loop.
         pub fn popOrTransition(self: *Self, from_sentinel: State, to_sentinel: State) ?*T {
             std.debug.assert(!from_sentinel.isPointer());
             std.debug.assert(!to_sentinel.isPointer());
@@ -802,8 +818,17 @@ test "ConcurrentQueue stress test with heavy contention" {
 
 /// Compact 8-byte concurrent FIFO queue variant.
 ///
-/// This is a space-optimized version of ConcurrentQueue that fits in 8 bytes
-/// by storing only the head pointer. The tail pointer is stored in the head node itself.
+/// **Low-level primitive**: This is intended for implementing synchronization primitives.
+/// Application code should use higher-level abstractions from the sync module instead.
+///
+/// Space-optimized version of ConcurrentQueue that fits in 8 bytes by storing
+/// only the head pointer. The tail pointer is stored in the head node itself.
+///
+/// Uses the same tagged pointer mechanism as ConcurrentQueue:
+/// - 0b00: Sentinel state 0
+/// - 0b01: Sentinel state 1
+/// - ptr (>1): Pointer to head of queue (head node contains tail pointer)
+/// - ptr | 0b10: Mutation lock bit
 ///
 /// Memory layout:
 /// - Queue structure: 8 bytes (only head atomic pointer)
@@ -818,7 +843,7 @@ test "ConcurrentQueue stress test with heavy contention" {
 /// T must be a struct type with:
 /// - `next` field of type ?*T
 /// - `prev` field of type ?*T
-/// - `tail` field of type ?*T (NEW: stores tail when this node is head)
+/// - `tail` field of type ?*T (stores tail when this node is head)
 /// - `in_list` field of type bool (debug mode only)
 pub fn CompactConcurrentQueue(comptime T: type) type {
     return struct {
@@ -838,25 +863,30 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
             sentinel1 = 0b01,
             _,
 
+            /// Returns true if state is a pointer (not a sentinel).
             pub fn isPointer(s: State) bool {
                 const val = @intFromEnum(s);
                 return val > 1;
             }
 
+            /// Returns true if the mutation lock bit is set.
             pub fn hasMutationBit(s: State) bool {
                 return @intFromEnum(s) & 0b10 != 0;
             }
 
+            /// Returns state with mutation lock bit set.
             pub fn withMutationBit(s: State) State {
                 return @enumFromInt(@intFromEnum(s) | 0b10);
             }
 
+            /// Extract pointer from state, or null if state is a sentinel.
             pub fn getPtr(s: State) ?*T {
                 if (!s.isPointer()) return null;
                 const addr = @intFromEnum(s) & ~@as(usize, 0b11);
                 return @ptrFromInt(addr);
             }
 
+            /// Create state from pointer. Pointer must be 4-byte aligned.
             pub fn fromPtr(ptr: *T) State {
                 const addr = @intFromPtr(ptr);
                 std.debug.assert(addr & 0b11 == 0);
@@ -864,6 +894,7 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
             }
         };
 
+        /// Initialize queue in a specific sentinel state.
         pub fn initWithState(state: State) Self {
             std.debug.assert(!state.isPointer());
             return .{
@@ -871,10 +902,20 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
             };
         }
 
+        /// Get current state (atomic load).
+        ///
+        /// Memory ordering: Uses .acquire to ensure visibility of any prior modifications
+        /// to the queue structure if the state is a pointer.
         pub fn getState(self: *const Self) State {
             return @enumFromInt(self.head.load(.acquire));
         }
 
+        /// Try to atomically transition from one sentinel state to another.
+        /// Returns the previous state (useful for checking if already at target).
+        ///
+        /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
+        /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
+        /// the current state.
         fn tryTransitionEx(self: *Self, from: State, to: State) State {
             std.debug.assert(!from.isPointer() and !to.isPointer());
             const result = self.head.cmpxchgStrong(
@@ -890,10 +931,23 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
             }
         }
 
+        /// Try to atomically transition from one sentinel state to another.
+        /// Returns true if successful, false if state has changed.
+        ///
+        /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
+        /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
+        /// the current state.
         pub fn tryTransition(self: *Self, from: State, to: State) bool {
             return self.tryTransitionEx(from, to) == from;
         }
 
+        /// Acquire exclusive access to manipulate the queue.
+        /// Spins until mutation lock is acquired, yielding if running in a coroutine.
+        /// Returns the state before mutation bit was set.
+        ///
+        /// Memory ordering: Uses .acquire on fetchOr to synchronize-with the previous
+        /// releaseMutationLock(). This ensures visibility of all modifications made
+        /// while the lock was previously held, including non-atomic tail pointer updates.
         pub fn acquireMutationLock(self: *Self) State {
             var spin_count: u4 = 0;
             while (true) {
@@ -916,12 +970,19 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
             }
         }
 
+        /// Release exclusive access to the queue.
+        ///
+        /// Memory ordering: Uses .release on fetchAnd to make all modifications
+        /// visible to future lock acquires. This includes non-atomic writes to tail
+        /// and doubly-linked list pointer updates performed while holding the lock.
         pub fn releaseMutationLock(self: *Self) void {
             const prev = self.head.fetchAnd(~@as(usize, 0b10), .release);
             std.debug.assert(prev & 0b10 != 0);
         }
 
         /// Add item to the end of the queue.
+        /// If queue is currently in a sentinel state, transitions to queue state.
+        /// Otherwise acquires mutation lock and appends to tail.
         pub fn push(self: *Self, item: *T) void {
             if (builtin.mode == .Debug) {
                 std.debug.assert(!item.in_list);
@@ -954,7 +1015,8 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
             self.releaseMutationLock();
         }
 
-        /// Remove and return item at front of queue.
+        /// Remove and return the item at the front of the queue.
+        /// Returns null if queue is in a sentinel state (empty).
         pub fn pop(self: *Self) ?*T {
             const old_state = self.acquireMutationLock();
 
@@ -990,6 +1052,7 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
         }
 
         /// Remove a specific item from the queue.
+        /// Returns true if the item was found and removed, false otherwise.
         pub fn remove(self: *Self, item: *T) bool {
             const old_state = self.acquireMutationLock();
 
@@ -1051,6 +1114,12 @@ pub fn CompactConcurrentQueue(comptime T: type) type {
             return true;
         }
 
+        /// Pop one item, retrying until success or queue is empty.
+        /// If queue is empty (in from_sentinel state), transitions to to_sentinel.
+        /// Returns the popped item, or null if queue was/became empty.
+        ///
+        /// Handles races where items are removed (via cancellation) between
+        /// the empty check and pop by retrying in a loop.
         pub fn popOrTransition(self: *Self, from_sentinel: State, to_sentinel: State) ?*T {
             std.debug.assert(!from_sentinel.isPointer());
             std.debug.assert(!to_sentinel.isPointer());
