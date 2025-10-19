@@ -1123,15 +1123,25 @@ pub const Executor = struct {
 
             // Main executor: check if all tasks are complete (after processing)
             if (is_main and self.runtime_ptr.global_task_count.load(.acquire) == 0) {
-                // Set shutdown flag to prevent new tasks from spawning
-                self.runtime_ptr.shutting_down.store(true, .release);
+                // Temporarily stop accepting new spawns
+                self.runtime_ptr.accepting_spawns.store(false, .release);
 
-                // Trigger shutdown for all executors (including self)
-                for (self.runtime_ptr.executors.items) |*executor| {
-                    executor.shutdown_async.notify() catch {};
+                // Re-check task count after setting accepting_spawns flag
+                // This catches tasks that incremented between our check and setting the flag
+                if (self.runtime_ptr.global_task_count.load(.acquire) == 0) {
+                    // Confirmed: no tasks running, initiate shutdown
+                    self.runtime_ptr.shutting_down.store(true, .release);
+
+                    // Trigger shutdown for all executors (including self)
+                    for (self.runtime_ptr.executors.items) |*executor| {
+                        executor.shutdown_async.notify() catch {};
+                    }
+
+                    // Loop will be stopped by shutdown callback
+                } else {
+                    // New task(s) spawned during the check - resume accepting spawns
+                    self.runtime_ptr.accepting_spawns.store(true, .release);
                 }
-
-                // Loop will be stopped by shutdown callback
             }
 
             // Move yielded coroutines back to ready queue
@@ -1452,7 +1462,8 @@ pub const Runtime = struct {
     // Multi-executor coordination
     next_executor: std.atomic.Value(usize),
     global_task_count: std.atomic.Value(usize),
-    shutting_down: std.atomic.Value(bool),
+    accepting_spawns: std.atomic.Value(bool), // Controls whether new tasks can be spawned
+    shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
 
     /// Thread-local storage for the current executor
     pub threadlocal var current_executor: ?*Executor = null;
@@ -1505,6 +1516,7 @@ pub const Runtime = struct {
             .options = options,
             .next_executor = std.atomic.Value(usize).init(0),
             .global_task_count = std.atomic.Value(usize).init(0),
+            .accepting_spawns = std.atomic.Value(bool).init(true),
             .shutting_down = std.atomic.Value(bool).init(false),
         };
     }
@@ -1532,14 +1544,14 @@ pub const Runtime = struct {
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        // Optimistically increment global task count before shutdown check
-        // This prevents race condition where task count reaches 0, shutdown flag
-        // is set, but spawn() sneaks in between the check and flag set.
+        // Optimistically increment global task count before spawn check
+        // This prevents race condition where task count reaches 0, accepting_spawns
+        // is set to false, but spawn() sneaks in between the check and flag set.
         _ = self.global_task_count.fetchAdd(1, .release);
         errdefer _ = self.global_task_count.fetchSub(1, .release);
 
-        // Check if runtime is shutting down
-        if (self.shutting_down.load(.acquire)) {
+        // Check if runtime is accepting new spawns
+        if (!self.accepting_spawns.load(.acquire)) {
             return error.RuntimeShutdown;
         }
 
@@ -1568,8 +1580,8 @@ pub const Runtime = struct {
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
-        // Check if runtime is shutting down
-        if (self.shutting_down.load(.acquire)) {
+        // Check if runtime is accepting new spawns
+        if (!self.accepting_spawns.load(.acquire)) {
             return error.RuntimeShutdown;
         }
 
@@ -2031,8 +2043,8 @@ test "runtime: spawn during shutdown returns error" {
             var handle1 = try rt.spawn(task, .{}, .{});
             defer handle1.deinit();
 
-            // Manually trigger shutdown
-            rt.shutting_down.store(true, .release);
+            // Manually trigger shutdown by stopping accepting spawns
+            rt.accepting_spawns.store(false, .release);
 
             // Attempting to spawn during shutdown should fail
             const result = rt.spawn(task, .{}, .{});
@@ -2059,8 +2071,8 @@ test "runtime: spawnBlocking during shutdown returns error" {
             var handle1 = try rt.spawnBlocking(blockingWork, .{});
             defer handle1.deinit();
 
-            // Manually trigger shutdown
-            rt.shutting_down.store(true, .release);
+            // Manually trigger shutdown by stopping accepting spawns
+            rt.accepting_spawns.store(false, .release);
 
             // Attempting to spawn during shutdown should fail
             const result = rt.spawnBlocking(blockingWork, .{});
