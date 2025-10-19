@@ -337,6 +337,11 @@ pub const AnyTask = struct {
     timer_generation: u2 = 0,
     shield_count: u32 = 0,
 
+    // Intrusive list node for Executor.tasks queue (ConcurrentQueue)
+    next: ?*AnyTask = null,
+    prev: ?*AnyTask = null,
+    in_list: bool = false,
+
     const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
     };
@@ -734,9 +739,9 @@ pub fn SelectUnion(comptime S: type) type {
 // Generic data structures (private)
 const WaitNode = @import("core/WaitNode.zig");
 const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
+const ConcurrentQueue = @import("utils/concurrent_queue.zig").ConcurrentQueue;
 const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
-const ConcurrentQueue = @import("utils/concurrent_queue.zig").ConcurrentQueue;
 
 // Executor metrics
 pub const ExecutorMetrics = struct {
@@ -758,7 +763,7 @@ pub const Executor = struct {
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
-    tasks: std.AutoHashMapUnmanaged(*AnyTask, void) = .{},
+    tasks: ConcurrentQueue(AnyTask) = .empty,
 
     ready_queue: SimpleStack(WaitNode) = .{},
     next_ready_queue: SimpleStack(WaitNode) = .{},
@@ -861,21 +866,16 @@ pub const Executor = struct {
         // Loop cleanup is handled in deinitLoop() called from run*()
 
         const rt = self.runtime();
-        var iter = self.tasks.keyIterator();
-        while (iter.next()) |task_ptr| {
-            const task = task_ptr.*;
+        // Drain all remaining tasks from queue
+        while (self.tasks.pop()) |task| {
             rt.releaseAwaitable(&task.awaitable);
         }
-        self.tasks.deinit(self.allocator);
 
         // Clean up stack pool
         self.stack_pool.deinit();
     }
 
     pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        // Ensure hashmap capacity first, before any allocations
-        try self.tasks.ensureUnusedCapacity(self.allocator, 1);
-
         const Result = meta.ReturnType(func);
         const TypedTask = Task(Result);
 
@@ -883,7 +883,7 @@ pub const Executor = struct {
         const task = try self.allocator.create(TypedTask);
         errdefer self.allocator.destroy(task);
 
-        // Acquire stack from pool
+        // Acquire stack from pool (thread-safe with stack pool changes)
         const stack = try self.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
         errdefer self.stack_pool.release(stack);
 
@@ -909,10 +909,13 @@ pub const Executor = struct {
 
         task.impl.base.coro.setup(func, args, &task.impl.future_result);
 
-        // putNoClobber cannot fail since we ensured capacity
-        self.tasks.putAssumeCapacityNoClobber(&task.impl.base, {});
+        // Increment ref count for JoinHandle
+        task.impl.base.awaitable.ref_count.incr();
 
-        // Schedule the task to run
+        // Add to tasks queue (thread-safe)
+        self.tasks.push(&task.impl.base);
+
+        // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(&task.impl.base, .maybe_remote);
 
         // Track task spawn
@@ -921,7 +924,6 @@ pub const Executor = struct {
         // Increment global task count
         _ = self.runtime_ptr.global_task_count.fetchAdd(1, .monotonic);
 
-        task.impl.base.awaitable.ref_count.incr();
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
 
@@ -1112,7 +1114,7 @@ pub const Executor = struct {
                         // Decrement global task count
                         _ = self.runtime_ptr.global_task_count.fetchSub(1, .monotonic);
 
-                        // Remove from tasks hashmap and release runtime's reference
+                        // Remove from tasks queue and release runtime's reference
                         _ = self.tasks.remove(current_task);
                         self.runtime().releaseAwaitable(current_awaitable);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
