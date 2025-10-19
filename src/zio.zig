@@ -34,6 +34,11 @@ pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
 pub const RefCounter = @import("sync.zig").RefCounter;
 
+// Re-export concurrent data structures
+const concurrent_queue = @import("utils/concurrent_queue.zig");
+pub const ConcurrentQueue = concurrent_queue.ConcurrentQueue;
+pub const CompactConcurrentQueue = concurrent_queue.CompactConcurrentQueue;
+
 test {
     std.testing.refAllDecls(@This());
 }
