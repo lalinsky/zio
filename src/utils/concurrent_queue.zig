@@ -799,3 +799,402 @@ test "ConcurrentQueue stress test with heavy contention" {
     try testing.expectEqual(total_items, total_accounted);
     try testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
+
+/// Compact 8-byte concurrent FIFO queue variant.
+///
+/// This is a space-optimized version of ConcurrentQueue that fits in 8 bytes
+/// by storing only the head pointer. The tail pointer is stored in the head node itself.
+///
+/// Memory layout:
+/// - Queue structure: 8 bytes (only head atomic pointer)
+/// - Node requirement: Must have a `tail` field of type ?*T in addition to next/prev
+///
+/// Trade-offs vs standard ConcurrentQueue:
+/// - Pro: Fits in 8 bytes (compatible with std.Io.Mutex/Condition 64-bit state)
+/// - Pro: Same O(1) operations
+/// - Con: Each node needs extra 8 bytes for tail pointer (mostly unused)
+/// - Con: Slightly more complex operations (must copy tail on head updates)
+///
+/// T must be a struct type with:
+/// - `next` field of type ?*T
+/// - `prev` field of type ?*T
+/// - `tail` field of type ?*T (NEW: stores tail when this node is head)
+/// - `in_list` field of type bool (debug mode only)
+pub fn CompactConcurrentQueue(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        /// Head of FIFO queue with state encoded in lower bits
+        /// When head points to a node, that node's `tail` field contains the tail pointer
+        head: std.atomic.Value(usize),
+
+        /// Empty queue constant for convenient initialization
+        pub const empty: Self = .{
+            .head = std.atomic.Value(usize).init(@intFromEnum(State.sentinel0)),
+        };
+
+        pub const State = enum(usize) {
+            sentinel0 = 0b00,
+            sentinel1 = 0b01,
+            _,
+
+            pub fn isPointer(s: State) bool {
+                const val = @intFromEnum(s);
+                return val > 1;
+            }
+
+            pub fn hasMutationBit(s: State) bool {
+                return @intFromEnum(s) & 0b10 != 0;
+            }
+
+            pub fn withMutationBit(s: State) State {
+                return @enumFromInt(@intFromEnum(s) | 0b10);
+            }
+
+            pub fn getPtr(s: State) ?*T {
+                if (!s.isPointer()) return null;
+                const addr = @intFromEnum(s) & ~@as(usize, 0b11);
+                return @ptrFromInt(addr);
+            }
+
+            pub fn fromPtr(ptr: *T) State {
+                const addr = @intFromPtr(ptr);
+                std.debug.assert(addr & 0b11 == 0);
+                return @enumFromInt(addr);
+            }
+        };
+
+        pub fn initWithState(state: State) Self {
+            std.debug.assert(!state.isPointer());
+            return .{
+                .head = std.atomic.Value(usize).init(@intFromEnum(state)),
+            };
+        }
+
+        pub fn getState(self: *const Self) State {
+            return @enumFromInt(self.head.load(.acquire));
+        }
+
+        fn tryTransitionEx(self: *Self, from: State, to: State) State {
+            std.debug.assert(!from.isPointer() and !to.isPointer());
+            const result = self.head.cmpxchgStrong(
+                @intFromEnum(from),
+                @intFromEnum(to),
+                .acq_rel,
+                .acquire,
+            );
+            if (result) |prev| {
+                return @enumFromInt(prev);
+            } else {
+                return from;
+            }
+        }
+
+        pub fn tryTransition(self: *Self, from: State, to: State) bool {
+            return self.tryTransitionEx(from, to) == from;
+        }
+
+        pub fn acquireMutationLock(self: *Self) State {
+            var spin_count: u4 = 0;
+            while (true) {
+                const old = self.head.fetchOr(0b10, .acquire);
+                const old_state: State = @enumFromInt(old);
+
+                if (!old_state.hasMutationBit()) {
+                    return old_state;
+                }
+
+                spin_count +%= 1;
+                if (spin_count == 0) {
+                    if (Runtime.current_executor) |executor| {
+                        executor.yield(.ready, .no_cancel);
+                    } else {
+                        std.Thread.yield() catch {};
+                    }
+                }
+                std.atomic.spinLoopHint();
+            }
+        }
+
+        pub fn releaseMutationLock(self: *Self) void {
+            const prev = self.head.fetchAnd(~@as(usize, 0b10), .release);
+            std.debug.assert(prev & 0b10 != 0);
+        }
+
+        /// Add item to the end of the queue.
+        pub fn push(self: *Self, item: *T) void {
+            if (builtin.mode == .Debug) {
+                std.debug.assert(!item.in_list);
+                item.in_list = true;
+            }
+            item.next = null;
+            item.prev = null;
+            item.tail = null;
+
+            const old_state = self.acquireMutationLock();
+
+            if (!old_state.isPointer()) {
+                // First item - it becomes both head and tail
+                item.tail = item;
+                self.head.store(@intFromEnum(State.fromPtr(item)), .release);
+                return;
+            }
+
+            // Get current head to access tail
+            const head = old_state.getPtr().?;
+            const old_tail = head.tail.?;
+
+            // Append to tail
+            item.prev = old_tail;
+            old_tail.next = item;
+
+            // Update tail pointer in head node
+            head.tail = item;
+
+            self.releaseMutationLock();
+        }
+
+        /// Remove and return item at front of queue.
+        pub fn pop(self: *Self) ?*T {
+            const old_state = self.acquireMutationLock();
+
+            if (!old_state.isPointer()) {
+                self.releaseMutationLock();
+                return null;
+            }
+
+            const old_head = old_state.getPtr().?;
+            const next = old_head.next;
+
+            if (builtin.mode == .Debug) {
+                std.debug.assert(old_head.in_list);
+                old_head.in_list = false;
+            }
+
+            if (next == null) {
+                // Last item - transition to sentinel
+                self.head.store(@intFromEnum(State.sentinel0), .release);
+            } else {
+                // Copy tail to new head and update
+                next.?.tail = old_head.tail;
+                next.?.prev = null;
+                self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
+            }
+
+            // Clear old head's pointers
+            old_head.next = null;
+            old_head.prev = null;
+            old_head.tail = null;
+
+            return old_head;
+        }
+
+        /// Remove a specific item from the queue.
+        pub fn remove(self: *Self, item: *T) bool {
+            const old_state = self.acquireMutationLock();
+
+            if (!old_state.isPointer()) {
+                self.releaseMutationLock();
+                return false;
+            }
+
+            const head = old_state.getPtr().?;
+
+            // Check if item is in the list
+            if (item.prev == null and head != item) {
+                self.releaseMutationLock();
+                return false;
+            }
+
+            // Get tail from head node
+            const tail = head.tail.?;
+            if (item.next == null and tail != item) {
+                self.releaseMutationLock();
+                return false;
+            }
+
+            if (builtin.mode == .Debug) {
+                item.in_list = false;
+            }
+
+            // Update doubly-linked list
+            if (item.prev) |prev| {
+                prev.next = item.next;
+            }
+            if (item.next) |next| {
+                next.prev = item.prev;
+            }
+
+            // Update head if removing head
+            if (head == item) {
+                if (item.next) |next| {
+                    // Copy tail to new head
+                    next.tail = head.tail;
+                    self.head.store(@intFromEnum(State.fromPtr(next)), .release);
+                } else {
+                    // Was only item
+                    self.head.store(@intFromEnum(State.sentinel0), .release);
+                }
+            } else {
+                // Update tail in head if removing tail
+                if (tail == item) {
+                    head.tail = item.prev;
+                }
+                self.releaseMutationLock();
+            }
+
+            // Clear pointers
+            item.next = null;
+            item.prev = null;
+            item.tail = null;
+
+            return true;
+        }
+
+        pub fn popOrTransition(self: *Self, from_sentinel: State, to_sentinel: State) ?*T {
+            std.debug.assert(!from_sentinel.isPointer());
+            std.debug.assert(!to_sentinel.isPointer());
+
+            while (true) {
+                const prev_state = self.tryTransitionEx(from_sentinel, to_sentinel);
+
+                if (prev_state == from_sentinel) {
+                    return null;
+                }
+
+                if (prev_state == to_sentinel) {
+                    return null;
+                }
+
+                if (self.pop()) |item| {
+                    return item;
+                }
+            }
+        }
+    };
+}
+
+test "CompactConcurrentQueue basic operations" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        tail: ?*@This() = null,
+        in_list: bool = false,
+        value: i32,
+    };
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const Queue = CompactConcurrentQueue(TestNode);
+    var queue: Queue = .empty;
+
+    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+
+    var node1 align(8) = TestNode{ .value = 1 };
+    var node2 align(8) = TestNode{ .value = 2 };
+
+    queue.push(&node1);
+    try testing.expect(queue.getState().isPointer());
+    queue.push(&node2);
+
+    const popped1 = queue.pop();
+    try testing.expectEqual(&node1, popped1);
+
+    try testing.expectEqual(true, queue.remove(&node2));
+    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+
+    try testing.expectEqual(false, queue.remove(&node1));
+}
+
+test "CompactConcurrentQueue state transitions" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        tail: ?*@This() = null,
+        in_list: bool = false,
+        value: i32,
+    };
+
+    const Queue = CompactConcurrentQueue(TestNode);
+    var queue = Queue.initWithState(.sentinel1);
+    try testing.expectEqual(Queue.State.sentinel1, queue.getState());
+
+    try testing.expectEqual(true, queue.tryTransition(.sentinel1, .sentinel0));
+    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+
+    try testing.expectEqual(false, queue.tryTransition(.sentinel1, .sentinel0));
+    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+}
+
+test "CompactConcurrentQueue verify 8-byte size" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        tail: ?*@This() = null,
+        in_list: bool = false,
+        value: i32,
+    };
+
+    const Queue = CompactConcurrentQueue(TestNode);
+
+    // The whole point: verify it's only 8 bytes!
+    try testing.expectEqual(8, @sizeOf(Queue));
+}
+
+test "CompactConcurrentQueue concurrent operations" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        tail: ?*@This() = null,
+        in_list: bool = false,
+        value: usize,
+    };
+
+    const Queue = CompactConcurrentQueue(TestNode);
+    var queue: Queue = .empty;
+
+    const num_threads = 4;
+    const items_per_thread = 100;
+    const total_items = num_threads * items_per_thread;
+
+    const nodes = try testing.allocator.alloc(TestNode, total_items);
+    defer testing.allocator.free(nodes);
+
+    for (nodes, 0..) |*n, i| {
+        n.* = .{ .value = i };
+    }
+
+    var push_threads: [num_threads]std.Thread = undefined;
+    for (0..num_threads) |i| {
+        const start = i * items_per_thread;
+        const end = (i + 1) * items_per_thread;
+        push_threads[i] = try std.Thread.spawn(.{}, struct {
+            fn pushItems(q: *Queue, items: []TestNode) void {
+                for (items) |*item| {
+                    q.push(item);
+                }
+            }
+        }.pushItems, .{ &queue, nodes[start..end] });
+    }
+
+    for (push_threads) |t| {
+        t.join();
+    }
+
+    var popped_count: usize = 0;
+    while (queue.pop()) |_| {
+        popped_count += 1;
+    }
+
+    try testing.expectEqual(total_items, popped_count);
+    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+}
