@@ -20,7 +20,7 @@ the interface, or deprecate this library.
 ## Features
 
 - Supports Linux, Windows and macOS
-- Single-threaded event loop (similar to Python's asyncio, but I'm exploring options how to introduce multiple I/O threads)
+- Single-threaded or multi-threaded runtime with one I/O event loop per executor thread
 - Spawn stackful coroutines, and wait for the results
 - Spawn blocking tasks in a thread pool, and wait for the results
 - File I/O on all platforms, Linux and Windows are truly non-blocking, other platforms are simulated using a thread pool

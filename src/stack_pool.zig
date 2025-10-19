@@ -5,6 +5,7 @@ const coroutines = @import("coroutines.zig");
 const Stack = coroutines.Stack;
 const StackPtr = coroutines.StackPtr;
 const stack_alignment = coroutines.stack_alignment;
+const ConcurrentQueue = @import("utils/concurrent_queue.zig").ConcurrentQueue;
 
 pub const MIN_STACK_SIZE = 64 * 1024; // 64KB
 const NUM_BUCKETS = 8; // 64KB, 128KB, 256KB, 512KB, 1MB, 2MB, 4MB, 8MB
@@ -19,7 +20,9 @@ fn bucketSize(index: usize) usize {
 }
 
 const FreeListNode = struct {
-    next: ?*FreeListNode,
+    next: ?*FreeListNode = null,
+    prev: ?*FreeListNode = null,
+    in_list: bool = false,
     returned_at: i64,
 
     fn fromStack(stack: Stack, returned_at: i64) *FreeListNode {
@@ -27,6 +30,8 @@ const FreeListNode = struct {
         const node: *FreeListNode = @ptrCast(@alignCast(stack.ptr));
         node.* = .{
             .next = null,
+            .prev = null,
+            .in_list = false,
             .returned_at = returned_at,
         };
         return node;
@@ -39,14 +44,11 @@ const FreeListNode = struct {
 };
 
 const Bucket = struct {
-    head: ?*FreeListNode = null,
-    count: usize = 0,
+    queue: ConcurrentQueue(FreeListNode) = ConcurrentQueue(FreeListNode).empty,
 
     fn acquire(self: *Bucket, size: usize, allocator: Allocator) !Stack {
-        // Pop from head (LIFO)
-        if (self.head) |node| {
-            self.head = node.next;
-            self.count -= 1;
+        // Pop from front (FIFO - gets oldest stack)
+        if (self.queue.pop()) |node| {
             return node.toStack(size);
         }
 
@@ -57,45 +59,35 @@ const Bucket = struct {
 
     fn release(self: *Bucket, stack: Stack) void {
         const node = FreeListNode.fromStack(stack, std.time.milliTimestamp());
-        node.next = self.head;
-        self.head = node;
-        self.count += 1;
+        self.queue.push(node);
     }
 
     fn cleanupOld(self: *Bucket, size: usize, allocator: Allocator, now: i64, retention_ms: i64, min_warm: usize) void {
-        var prev: ?*FreeListNode = null;
-        var curr = self.head;
+        var kept_count: usize = 0;
 
-        while (curr) |node| {
-            if (self.count <= min_warm) break;
-
-            if (node.returned_at + retention_ms < now) {
-                // Remove this node
-                const next = node.next;
-                if (prev) |p| {
-                    p.next = next;
-                } else {
-                    self.head = next;
-                }
+        // Pop from front (oldest first due to FIFO)
+        while (self.queue.pop()) |node| {
+            // Check if stack is too old
+            if (node.returned_at + retention_ms < now and kept_count >= min_warm) {
+                // Too old and we have enough warm stacks - free it
                 allocator.free(node.toStack(size));
-                self.count -= 1;
-                curr = next; // don't update prev
             } else {
-                prev = node;
-                curr = node.next;
+                // Still young or need to keep for min_warm - push back to queue
+                self.queue.push(node);
+                kept_count += 1;
+
+                // Since queue is FIFO, once we find a young stack, all following are younger
+                // So we can stop here
+                break;
             }
         }
     }
 
     fn deinit(self: *Bucket, size: usize, allocator: Allocator) void {
-        var curr = self.head;
-        while (curr) |node| {
-            const next = node.next;
+        // Drain the queue and free all stacks
+        while (self.queue.pop()) |node| {
             allocator.free(node.toStack(size));
-            curr = next;
         }
-        self.head = null;
-        self.count = 0;
     }
 };
 
