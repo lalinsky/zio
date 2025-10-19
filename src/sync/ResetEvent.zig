@@ -49,18 +49,18 @@ const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
-const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
+const CompactConcurrentQueue = @import("../utils/concurrent_queue.zig").CompactConcurrentQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 
-wait_queue: ConcurrentQueue(WaitNode) = .empty,
+wait_queue: CompactConcurrentQueue(WaitNode) = .empty,
 
 const ResetEvent = @This();
 
-// Use ConcurrentAwaitableList sentinel states to encode event state:
+// Use CompactConcurrentQueue sentinel states to encode event state:
 // - sentinel0 = unset (no waiters, event not signaled)
 // - sentinel1 = set (no waiters, event signaled)
 // - pointer = waiting (has waiters, event not signaled)
-const State = ConcurrentQueue(WaitNode).State;
+const State = CompactConcurrentQueue(WaitNode).State;
 const unset = State.sentinel0;
 const is_set = State.sentinel1;
 
@@ -163,7 +163,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     self.wait_queue.push(&task.awaitable.wait_node);
 
     const TimeoutContext = struct {
-        wait_queue: *ConcurrentQueue(WaitNode),
+        wait_queue: *CompactConcurrentQueue(WaitNode),
         wait_node: *WaitNode,
     };
 
@@ -345,4 +345,10 @@ test "ResetEvent wait on already set event" {
 
     try testing.expect(wait_completed);
     try testing.expect(reset_event.isSet());
+}
+
+test "ResetEvent size equals usize" {
+    const testing = std.testing;
+    // Verify CompactConcurrentQueue reduces size to single pointer
+    try testing.expectEqual(@sizeOf(usize), @sizeOf(ResetEvent));
 }
