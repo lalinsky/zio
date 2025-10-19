@@ -23,13 +23,24 @@ fn backendNeedsThreadPool() bool {
     return @hasField(xev.Loop, "thread_pool");
 }
 
+/// Executor selection for spawning a coroutine
+pub const ExecutorId = enum(usize) {
+    /// Round-robin assignment across all executors
+    any = std.math.maxInt(usize),
+    /// Inherit from current coroutine, or round-robin if not in a coroutine
+    same = std.math.maxInt(usize) - 1,
+    _,
+
+    /// Pin to a specific executor ID
+    pub fn id(n: usize) ExecutorId {
+        return @enumFromInt(n);
+    }
+};
+
 /// Options for spawning a coroutine
 pub const SpawnOptions = struct {
     stack_size: ?usize = null,
-    /// Executor to run this task on.
-    /// - null: round-robin assignment (or inherit if spawned from within a coroutine)
-    /// - specific value: pin to that executor ID
-    executor_id: ?usize = null,
+    executor: ExecutorId = .any,
 };
 
 // Runtime configuration options
@@ -1556,20 +1567,20 @@ pub const Runtime = struct {
         }
 
         // Determine target executor
-        const executor_id = if (options.executor_id) |id|
-            // Explicit executor specified
-            id
-        else if (Runtime.current_executor) |current_exec|
-            // In coroutine context - inherit current executor
-            current_exec.id
-        else
-            // Not in coroutine context - use round-robin
-            self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len;
-
-        // Bounds check
-        if (executor_id >= self.executors.items.len) {
-            return error.InvalidExecutorId;
-        }
+        const executor_id = switch (options.executor) {
+            .any => self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
+            .same => if (Runtime.current_executor) |current_exec|
+                current_exec.id
+            else
+                self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
+            _ => |id| blk: {
+                const raw_id = @intFromEnum(id);
+                if (raw_id >= self.executors.items.len) {
+                    return error.InvalidExecutorId;
+                }
+                break :blk raw_id;
+            },
+        };
 
         const executor = &self.executors.items[executor_id];
 
@@ -1642,7 +1653,7 @@ pub const Runtime = struct {
     pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
         // Spawn on first executor (explicit pinning)
         var spawn_options = options;
-        spawn_options.executor_id = 0;
+        spawn_options.executor = ExecutorId.id(0);
         var handle = try self.spawn(func, args, spawn_options);
         defer handle.deinit();
 
@@ -1950,7 +1961,7 @@ test "runtime: multi-threaded with executor pinning" {
             // Pin tasks to specific executors
             var handles: [4]JoinHandle(usize) = undefined;
             for (&handles, 0..) |*handle, i| {
-                handle.* = try rt.spawn(task, .{i}, .{ .executor_id = i });
+                handle.* = try rt.spawn(task, .{i}, .{ .executor = ExecutorId.id(i) });
             }
             defer for (&handles) |*handle| handle.deinit();
 
@@ -1981,7 +1992,7 @@ test "runtime: task colocation with getExecutorId" {
 
         fn mainTask(rt: *Runtime) !void {
             // Spawn first task on executor 2
-            var handle1 = try rt.spawn(getExecutorId, .{}, .{ .executor_id = 2 });
+            var handle1 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(2) });
             defer handle1.deinit();
 
             // Get the executor ID from the first task
@@ -1990,7 +2001,7 @@ test "runtime: task colocation with getExecutorId" {
             try testing.expectEqual(@as(usize, 2), executor_id.?);
 
             // Spawn second task colocated with the first task
-            var handle2 = try rt.spawn(getExecutorId, .{}, .{ .executor_id = executor_id });
+            var handle2 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(executor_id.?) });
             defer handle2.deinit();
 
             // Verify both tasks ran on the same executor
