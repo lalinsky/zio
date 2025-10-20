@@ -193,9 +193,9 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
             return;
         }
 
-        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
         // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+        executor.yield(.preparing_to_wait, .waiting_sync, .allow_cancel) catch |err| {
             // If yield itself was canceled, remove from wait list
             _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return err;
@@ -254,6 +254,8 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
         };
 
         executor.timedWaitForReadyWithCallback(
+            .ready,
+            .waiting_sync,
             timeout_ns,
             TimeoutContext,
             &timeout_ctx,
@@ -347,13 +349,13 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
 
     // Only schedule if the task was actually suspended
     // If it was in .preparing_to_wait, it will see the state change and skip yield
-    if (old_state == .waiting) {
+    if (old_state == .waiting_io or old_state == .waiting_sync) {
         executor.scheduleTask(task, mode);
     } else if (old_state == .preparing_to_wait) {
         // Task hasn't yielded yet - it will see .ready and skip the yield
         // No need to schedule
     } else {
-        // Shouldn't happen - task should be either .waiting or .preparing_to_wait
+        // Shouldn't happen - task should be either .waiting_io, .waiting_sync, or .preparing_to_wait
         std.debug.panic("resumeTask: unexpected state {} for task {*}", .{ old_state, task });
     }
 }
@@ -1014,7 +1016,8 @@ pub const Executor = struct {
     /// Suspends the current coroutine and allows other tasks to run. The coroutine
     /// will be rescheduled according to `desired_state`:
     /// - `.ready`: Reschedule immediately (cooperative yielding)
-    /// - `.waiting`: Suspend until explicitly woken by another task
+    /// - `.waiting_io`: Suspend until I/O completes (e.g., waiting for xev completion)
+    /// - `.waiting_sync`: Suspend until sync primitive signals (e.g., mutex, condition, channel)
     /// - `.dead`: Mark coroutine as complete (internal use only)
     ///
     /// ## Cancellation Mode
@@ -1125,7 +1128,7 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        self.timedWaitForReady(.ready, milliseconds * 1_000_000) catch |err| switch (err) {
+        self.timedWaitForReady(.ready, .waiting_io, milliseconds * 1_000_000) catch |err| switch (err) {
             error.Timeout => return, // Expected for sleep - not an error
             error.Canceled => return error.Canceled, // Propagate cancellation
         };
@@ -1233,7 +1236,7 @@ pub const Executor = struct {
                     }
                 }
 
-                // Other states (.ready, .waiting) are handled by yield() or markReady()
+                // Other states (.ready, .waiting_io, .waiting_sync) are handled by yield() or markReady()
             }
 
             // Move yielded coroutines back to ready queue
@@ -1345,6 +1348,7 @@ pub const Executor = struct {
     pub fn timedWaitForReadyWithCallback(
         self: *Executor,
         expected_state: CoroutineState,
+        desired_state: CoroutineState,
         timeout_ns: u64,
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
@@ -1410,7 +1414,7 @@ pub const Executor = struct {
         );
 
         // Wait for either timeout or external markReady
-        self.yield(expected_state, .waiting, .allow_cancel) catch |err| {
+        self.yield(expected_state, desired_state, .allow_cancel) catch |err| {
             // Invalidate pending callbacks before unwinding so they ignore this stack frame.
             task.timer_generation +%= 1;
             timer.cancel(
@@ -1446,11 +1450,12 @@ pub const Executor = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, timeout_ns: u64) error{ Timeout, Canceled }!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(
             expected_state,
+            desired_state,
             timeout_ns,
             DummyContext,
             &dummy,
@@ -1478,7 +1483,7 @@ pub const Executor = struct {
         var cancel_completion: xev.Completion = .{};
 
         while (completion.state() != .dead) {
-            self.yield(.ready, .waiting, .allow_cancel) catch |err| switch (err) {
+            self.yield(.ready, .waiting_io, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     // First cancellation - try to cancel the xev operation
                     if (!was_canceled) {
@@ -1934,7 +1939,7 @@ pub const Runtime = struct {
         }
 
         // Yield and wait for one to complete
-        try executor.yield(.ready, .waiting, .allow_cancel);
+        try executor.yield(.ready, .waiting_sync, .allow_cancel);
 
         // We were woken up - find which one completed
         inline for (fields, 0..) |field, i| {
