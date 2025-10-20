@@ -11,8 +11,9 @@ pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 e
 pub const CoroutineState = enum(u8) {
     ready = 0,
     preparing_to_wait = 1,
-    waiting = 2,
-    dead = 3,
+    waiting_io = 2,
+    waiting_sync = 3,
+    dead = 4,
 };
 
 pub const stack_alignment = 16;

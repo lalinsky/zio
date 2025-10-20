@@ -132,9 +132,9 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
         return;
     }
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+    executor.yield(.preparing_to_wait, .waiting_sync, .allow_cancel) catch |err| {
         // On cancellation, remove from queue
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
         return err;
@@ -192,10 +192,11 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
         .wait_node = &task.awaitable.wait_node,
     };
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.timedWaitForReadyWithCallback(
         .preparing_to_wait,
+        .waiting_sync,
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
