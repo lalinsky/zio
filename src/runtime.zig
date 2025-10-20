@@ -1187,8 +1187,31 @@ pub const Executor = struct {
             // Move yielded coroutines back to ready queue
             self.ready_queue.prependByMoving(&self.next_ready_queue);
 
-            // If no ready work, block waiting for I/O
-            try self.loop.run(if (self.ready_queue.head == null) .once else .no_wait);
+            // If no ready work, run event loop
+            if (self.ready_queue.head == null) {
+                // Spin briefly with non-blocking I/O checks before blocking
+                // This reduces cross-thread wakeup latency for high-frequency remote scheduling
+                var spin_count: usize = 0;
+                while (spin_count < 100) : (spin_count += 1) {
+                    // Run event loop without blocking to check I/O and remote wakeups
+                    try self.loop.run(.no_wait);
+
+                    // Check if remote work arrived
+                    var remote_drained = self.next_ready_queue_remote.popAll();
+                    if (remote_drained.head != null) {
+                        self.ready_queue.prependByMoving(&remote_drained);
+                        break;
+                    }
+                }
+
+                // If still no work, block waiting for I/O
+                if (self.ready_queue.head == null) {
+                    try self.loop.run(.once);
+                }
+            } else {
+                // Have ready work, run event loop without blocking
+                try self.loop.run(.no_wait);
+            }
         }
     }
 
