@@ -197,19 +197,17 @@ pub fn ConcurrentQueue(comptime T: type) type {
             std.debug.assert(prev & 0b10 != 0); // Must have been holding the lock
         }
 
-        /// Add item to the end of the queue.
-        /// If queue is currently in a sentinel state, transitions to queue state.
-        /// Otherwise acquires mutation lock and appends to tail.
-        pub fn push(self: *Self, item: *T) void {
-            // Initialize item as not in list
+        /// Internal helper: perform the actual push after lock is acquired.
+        /// Assumes mutation lock is held. Releases lock before returning.
+        /// Releases lock implicitly (via head.store) if queue was empty, or explicitly otherwise.
+        fn pushInternal(self: *Self, old_state: State, item: *T) void {
+            // Initialize item
             if (builtin.mode == .Debug) {
                 std.debug.assert(!item.in_list);
                 item.in_list = true;
             }
             item.next = null;
             item.prev = null;
-
-            const old_state = self.acquireMutationLock();
 
             // First waiter - transition from sentinel to queue
             if (!old_state.isPointer()) {
@@ -229,6 +227,14 @@ pub fn ConcurrentQueue(comptime T: type) type {
             self.releaseMutationLock();
         }
 
+        /// Add item to the end of the queue.
+        /// If queue is currently in a sentinel state, transitions to queue state.
+        /// Otherwise acquires mutation lock and appends to tail.
+        pub fn push(self: *Self, item: *T) void {
+            const old_state = self.acquireMutationLock();
+            self.pushInternal(old_state, item);
+        }
+
         /// Add item to the end of the queue, unless queue is in forbidden_state.
         ///
         /// Returns true if item was pushed, false if queue was in forbidden_state.
@@ -239,36 +245,12 @@ pub fn ConcurrentQueue(comptime T: type) type {
         pub fn pushUnless(self: *Self, forbidden_state: State, item: *T) bool {
             const old_state = self.acquireMutationLock();
 
-            // Don't push if we're in the forbidden state
             if (old_state == forbidden_state) {
                 self.releaseMutationLock();
                 return false;
             }
 
-            // Initialize item as not in list
-            if (builtin.mode == .Debug) {
-                std.debug.assert(!item.in_list);
-                item.in_list = true;
-            }
-            item.next = null;
-            item.prev = null;
-
-            // First waiter - transition from sentinel to queue
-            if (!old_state.isPointer()) {
-                self.tail = item;
-                // .release: publishes tail update and item initialization
-                self.head.store(@intFromEnum(State.fromPtr(item)), .release);
-                return true;
-            }
-
-            // Append to tail (safe - we have mutation lock)
-            const old_tail = self.tail.?;
-            item.prev = old_tail;
-            item.next = null;
-            old_tail.next = item;
-            self.tail = item;
-
-            self.releaseMutationLock();
+            self.pushInternal(old_state, item);
             return true;
         }
 
@@ -291,37 +273,12 @@ pub fn ConcurrentQueue(comptime T: type) type {
         pub fn pushOrTransition(self: *Self, from_state: State, to_state: State, item: *T) PushOrTransitionResult {
             const old_state = self.acquireMutationLock();
 
-            // If current state matches from_state, transition to to_state instead of pushing
             if (old_state == from_state) {
                 self.head.store(@intFromEnum(to_state), .release);
                 return .transitioned;
             }
 
-            // Otherwise, push the item normally
-            // Initialize item as not in list
-            if (builtin.mode == .Debug) {
-                std.debug.assert(!item.in_list);
-                item.in_list = true;
-            }
-            item.next = null;
-            item.prev = null;
-
-            // First waiter - transition from sentinel to queue
-            if (!old_state.isPointer()) {
-                self.tail = item;
-                // .release: publishes tail update and item initialization
-                self.head.store(@intFromEnum(State.fromPtr(item)), .release);
-                return .pushed;
-            }
-
-            // Append to tail (safe - we have mutation lock)
-            const old_tail = self.tail.?;
-            item.prev = old_tail;
-            item.next = null;
-            old_tail.next = item;
-            self.tail = item;
-
-            self.releaseMutationLock();
+            self.pushInternal(old_state, item);
             return .pushed;
         }
 
