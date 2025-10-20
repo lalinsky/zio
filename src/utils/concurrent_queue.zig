@@ -58,11 +58,8 @@ pub fn ConcurrentQueue(comptime T: type) type {
         head: std.atomic.Value(usize),
 
         /// Tail of FIFO wait queue (only valid when head is a pointer)
-        /// Protected by mutex
+        /// Not atomic - only accessed while holding mutation lock (bit 0b10 in head)
         tail: ?*T = null,
-
-        /// Mutex for protecting queue modifications
-        mutex: std.Thread.Mutex = .{},
 
         /// Empty queue constant for convenient initialization
         pub const empty: Self = .{
@@ -118,43 +115,92 @@ pub fn ConcurrentQueue(comptime T: type) type {
         /// Memory ordering: Uses .acquire to ensure visibility of any prior modifications
         /// to the list structure if the state is a pointer.
         pub fn getState(self: *const Self) State {
-            // Need to cast away const to lock mutex
-            const mutable_self: *Self = @constCast(self);
-            mutable_self.mutex.lock();
-            defer mutable_self.mutex.unlock();
-
             // .acquire: synchronizes-with .release from any prior state transitions
             return @enumFromInt(self.head.load(.acquire));
         }
 
         /// Try to atomically transition from one sentinel state to another.
         /// Returns the previous state (useful for checking if already at target).
+        ///
+        /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
+        /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
+        /// the current state.
         fn tryTransitionEx(self: *Self, from: State, to: State) State {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
             std.debug.assert(!from.isPointer() and !to.isPointer());
-            const current: State = @enumFromInt(self.head.load(.acquire));
-            if (current == from) {
-                self.head.store(@intFromEnum(to), .release);
-                return from;
+            // .acq_rel on success: acquires from prior unlock's .release AND releases for future operations
+            // .acquire on failure: synchronizes-with prior .release to observe current state
+            const result = self.head.cmpxchgStrong(
+                @intFromEnum(from),
+                @intFromEnum(to),
+                .acq_rel,
+                .acquire,
+            );
+            if (result) |prev| {
+                return @enumFromInt(prev);
+            } else {
+                return from; // Success, was in from state
             }
-            return current;
         }
 
         /// Try to atomically transition from one sentinel state to another.
         /// Returns true if successful, false if state has changed.
+        ///
+        /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
+        /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
+        /// the current state.
         pub fn tryTransition(self: *Self, from: State, to: State) bool {
             return self.tryTransitionEx(from, to) == from;
+        }
+
+        /// Acquire exclusive access to manipulate the wait list.
+        /// Spins until mutation lock is acquired.
+        /// Returns the state before mutation bit was set.
+        ///
+        /// Memory ordering: Uses .acquire on fetchOr to synchronize-with the previous
+        /// releaseMutationLock(). This ensures visibility of all modifications made
+        /// while the lock was previously held, including non-atomic tail pointer updates.
+        ///
+        /// If running in a coroutine, will yield to allow other tasks to run.
+        /// Otherwise spins (useful for thread pool callbacks).
+        pub fn acquireMutationLock(self: *Self) State {
+            var spin_count: u4 = 0;
+            while (true) {
+                // Try to set mutation bit atomically
+                // .acquire: synchronizes-with previous .release from releaseMutationLock
+                const old = self.head.fetchOr(0b10, .acquire);
+                const old_state: State = @enumFromInt(old);
+
+                if (!old_state.hasMutationBit()) {
+                    // We got it! old_state is the state before we set the bit
+                    return old_state;
+                }
+
+                // Someone else holds the mutation lock, spin with yielding on overflow
+                spin_count +%= 1;
+                if (spin_count == 0) {
+                    // Yield at OS thread level to prevent live-lock in multi-threaded scenarios
+                    std.Thread.yield() catch {};
+                }
+                std.atomic.spinLoopHint();
+            }
+        }
+
+        /// Release exclusive access to wait list.
+        ///
+        /// Memory ordering: Uses .release on fetchAnd to make all modifications
+        /// visible to future lock acquires. This includes non-atomic writes to tail
+        /// and doubly-linked list pointer updates performed while holding the lock.
+        pub fn releaseMutationLock(self: *Self) void {
+            // .release: makes all prior writes visible to future acquireMutationLock calls
+            // Clear mutation bit (bit 1) by ANDing with ~0b10
+            const prev = self.head.fetchAnd(~@as(usize, 0b10), .release);
+            std.debug.assert(prev & 0b10 != 0); // Must have been holding the lock
         }
 
         /// Add item to the end of the queue.
         /// If queue is currently in a sentinel state, transitions to queue state.
         /// Otherwise acquires mutation lock and appends to tail.
         pub fn push(self: *Self, item: *T) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
             // Initialize item as not in list
             if (builtin.mode == .Debug) {
                 std.debug.assert(!item.in_list);
@@ -163,7 +209,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
             item.next = null;
             item.prev = null;
 
-            const old_state: State = @enumFromInt(self.head.load(.acquire));
+            const old_state = self.acquireMutationLock();
 
             // First waiter - transition from sentinel to queue
             if (!old_state.isPointer()) {
@@ -173,12 +219,14 @@ pub fn ConcurrentQueue(comptime T: type) type {
                 return;
             }
 
-            // Append to tail (safe - we have mutex)
+            // Append to tail (safe - we have mutation lock)
             const old_tail = self.tail.?;
             item.prev = old_tail;
             item.next = null;
             old_tail.next = item;
             self.tail = item;
+
+            self.releaseMutationLock();
         }
 
         /// Add item to the end of the queue, unless queue is in forbidden_state.
@@ -189,13 +237,11 @@ pub fn ConcurrentQueue(comptime T: type) type {
         /// the event is already in a signaled state:
         /// - `pushUnless(is_set, wait_node)` → push unless queue is `is_set`, return false if already set
         pub fn pushUnless(self: *Self, forbidden_state: State, item: *T) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            const old_state: State = @enumFromInt(self.head.load(.acquire));
+            const old_state = self.acquireMutationLock();
 
             // Don't push if we're in the forbidden state
             if (old_state == forbidden_state) {
+                self.releaseMutationLock();
                 return false;
             }
 
@@ -215,12 +261,14 @@ pub fn ConcurrentQueue(comptime T: type) type {
                 return true;
             }
 
-            // Append to tail (safe - we have mutex)
+            // Append to tail (safe - we have mutation lock)
             const old_tail = self.tail.?;
             item.prev = old_tail;
             item.next = null;
             old_tail.next = item;
             self.tail = item;
+
+            self.releaseMutationLock();
             return true;
         }
 
@@ -241,10 +289,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
         /// - Otherwise, push to wait queue (add waiter to locked mutex)
         /// This prevents the invalid transition: unlocked -> has_waiters (skipping locked_once).
         pub fn pushOrTransition(self: *Self, from_state: State, to_state: State, item: *T) PushOrTransitionResult {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            const old_state: State = @enumFromInt(self.head.load(.acquire));
+            const old_state = self.acquireMutationLock();
 
             // If current state matches from_state, transition to to_state instead of pushing
             if (old_state == from_state) {
@@ -269,25 +314,25 @@ pub fn ConcurrentQueue(comptime T: type) type {
                 return .pushed;
             }
 
-            // Append to tail (safe - we have mutex)
+            // Append to tail (safe - we have mutation lock)
             const old_tail = self.tail.?;
             item.prev = old_tail;
             item.next = null;
             old_tail.next = item;
             self.tail = item;
+
+            self.releaseMutationLock();
             return .pushed;
         }
 
         /// Remove and return the item at the front of the queue.
         /// Returns null if queue is in a sentinel state (empty).
         pub fn pop(self: *Self) ?*T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            const old_state: State = @enumFromInt(self.head.load(.acquire));
+            const old_state = self.acquireMutationLock();
 
             // Check if queue is empty (in sentinel state)
             if (!old_state.isPointer()) {
+                self.releaseMutationLock();
                 return null;
             }
 
@@ -306,15 +351,18 @@ pub fn ConcurrentQueue(comptime T: type) type {
 
             if (next == null) {
                 // Last waiter - transition to sentinel0
+                // (implicitly releases mutation lock since sentinel0 = 0b00 has no mutation bit)
                 self.tail = null;
                 // .release: publishes tail update and makes queue empty state visible
                 self.head.store(@intFromEnum(State.sentinel0), .release);
             } else {
                 // More waiters - update head
+                // (implicitly releases mutation lock since fromPtr() creates state without mutation bit)
                 next.?.prev = null;
                 // .release: publishes new head pointer and doubly-linked list updates
                 self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
             }
+            // Mutation lock released by store() above
 
             return old_head;
         }
@@ -322,13 +370,11 @@ pub fn ConcurrentQueue(comptime T: type) type {
         /// Remove a specific item from the queue.
         /// Returns true if the item was found and removed, false otherwise.
         pub fn remove(self: *Self, item: *T) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            const old_state: State = @enumFromInt(self.head.load(.acquire));
+            const old_state = self.acquireMutationLock();
 
             // Check if queue is empty
             if (!old_state.isPointer()) {
+                self.releaseMutationLock();
                 return false;
             }
 
@@ -337,10 +383,12 @@ pub fn ConcurrentQueue(comptime T: type) type {
             // Check if we're actually in the list (using prev/next pointers)
             // If prev is null and we're not head, we're not in the list
             if (item.prev == null and head != item) {
+                self.releaseMutationLock();
                 return false;
             }
             // If next is null and we're not tail, we're not in the list
             if (item.next == null and self.tail != item) {
+                self.releaseMutationLock();
                 return false;
             }
 
@@ -360,19 +408,25 @@ pub fn ConcurrentQueue(comptime T: type) type {
             // Update head if removing head
             if (head == item) {
                 if (item.next) |next| {
+                    // Store new head pointer (implicitly releases mutation lock since
+                    // fromPtr() creates a state without the mutation bit)
                     // .release: publishes doubly-linked list updates and new head
                     self.head.store(@intFromEnum(State.fromPtr(next)), .release);
                 } else {
                     // Was only waiter - transition to sentinel0
+                    // Update tail first, then clear the mutation bit via store(.release)
                     self.tail = null;
+                    // (implicitly releases mutation lock since sentinel0 = 0b00 has no mutation bit)
                     // .release: publishes tail update and queue empty state
                     self.head.store(@intFromEnum(State.sentinel0), .release);
                 }
+                // Mutation lock released by store() above
             } else {
-                // Not removing head, update tail if needed
+                // Not removing head, update tail if needed then explicitly release lock
                 if (self.tail == item) {
                     self.tail = item.prev;
                 }
+                self.releaseMutationLock();
             }
 
             // Clear pointers
@@ -392,10 +446,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
             std.debug.assert(!from_sentinel.isPointer());
             std.debug.assert(!to_sentinel.isPointer());
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            const old_state: State = @enumFromInt(self.head.load(.acquire));
+            const old_state = self.acquireMutationLock();
 
             // If in from_sentinel, transition to to_sentinel
             if (old_state == from_sentinel) {
@@ -405,6 +456,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
 
             // Already in target state, nothing to do
             if (old_state == to_sentinel) {
+                self.releaseMutationLock();
                 return null;
             }
 
@@ -412,6 +464,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
             if (!old_state.isPointer()) {
                 // Some other sentinel state - this shouldn't happen
                 // but be defensive and return null
+                self.releaseMutationLock();
                 return null;
             }
 
@@ -881,483 +934,5 @@ test "ConcurrentQueue stress test with heavy contention" {
 
     // All items must be accounted for
     try testing.expectEqual(total_items, total_accounted);
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
-}
-
-/// Compact 8-byte concurrent FIFO queue variant.
-///
-/// **Low-level primitive**: This is intended for implementing synchronization primitives.
-/// Application code should use higher-level abstractions from the sync module instead.
-///
-/// Space-optimized version of ConcurrentQueue that fits in 8 bytes by storing
-/// only the head pointer. The tail pointer is stored in the head node itself.
-///
-/// Uses the same tagged pointer mechanism as ConcurrentQueue:
-/// - 0b00: Sentinel state 0
-/// - 0b01: Sentinel state 1
-/// - ptr (>1): Pointer to head of queue (head node contains tail pointer)
-/// - ptr | 0b10: Mutation lock bit
-///
-/// Memory layout:
-/// - Queue structure: 8 bytes (only head atomic pointer)
-/// - Node requirement: Must have a `tail` field of type ?*T in addition to next/prev
-///
-/// Trade-offs vs standard ConcurrentQueue:
-/// - Pro: Fits in 8 bytes (compatible with std.Io.Mutex/Condition 64-bit state)
-/// - Pro: Same O(1) operations
-/// - Con: Each node needs extra 8 bytes for tail pointer (mostly unused)
-/// - Con: Slightly more complex operations (must copy tail on head updates)
-///
-/// T must be a struct type with:
-/// - `next` field of type ?*T
-/// - `prev` field of type ?*T
-/// - `tail` field of type ?*T (stores tail when this node is head)
-/// - `in_list` field of type bool (debug mode only)
-pub fn CompactConcurrentQueue(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        /// Head of FIFO queue with state encoded in lower bits
-        /// When head points to a node, that node's `tail` field contains the tail pointer
-        head: std.atomic.Value(usize),
-
-        /// Empty queue constant for convenient initialization
-        pub const empty: Self = .{
-            .head = std.atomic.Value(usize).init(@intFromEnum(State.sentinel0)),
-        };
-
-        pub const State = enum(usize) {
-            sentinel0 = 0b00,
-            sentinel1 = 0b01,
-            _,
-
-            /// Returns true if state is a pointer (not a sentinel).
-            pub fn isPointer(s: State) bool {
-                const val = @intFromEnum(s);
-                return val > 1;
-            }
-
-            /// Returns true if the mutation lock bit is set.
-            pub fn hasMutationBit(s: State) bool {
-                return @intFromEnum(s) & 0b10 != 0;
-            }
-
-            /// Returns state with mutation lock bit set.
-            pub fn withMutationBit(s: State) State {
-                return @enumFromInt(@intFromEnum(s) | 0b10);
-            }
-
-            /// Extract pointer from state, or null if state is a sentinel.
-            pub fn getPtr(s: State) ?*T {
-                if (!s.isPointer()) return null;
-                const addr = @intFromEnum(s) & ~@as(usize, 0b11);
-                return @ptrFromInt(addr);
-            }
-
-            /// Create state from pointer. Pointer must be 4-byte aligned.
-            pub fn fromPtr(ptr: *T) State {
-                const addr = @intFromPtr(ptr);
-                std.debug.assert(addr & 0b11 == 0);
-                return @enumFromInt(addr);
-            }
-        };
-
-        /// Initialize queue in a specific sentinel state.
-        pub fn initWithState(state: State) Self {
-            std.debug.assert(!state.isPointer());
-            return .{
-                .head = std.atomic.Value(usize).init(@intFromEnum(state)),
-            };
-        }
-
-        /// Get current state (atomic load).
-        ///
-        /// Memory ordering: Uses .acquire to ensure visibility of any prior modifications
-        /// to the queue structure if the state is a pointer.
-        pub fn getState(self: *const Self) State {
-            return @enumFromInt(self.head.load(.acquire));
-        }
-
-        /// Try to atomically transition from one sentinel state to another.
-        /// Returns the previous state (useful for checking if already at target).
-        ///
-        /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
-        /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
-        /// the current state.
-        fn tryTransitionEx(self: *Self, from: State, to: State) State {
-            std.debug.assert(!from.isPointer() and !to.isPointer());
-            const result = self.head.cmpxchgStrong(
-                @intFromEnum(from),
-                @intFromEnum(to),
-                .acq_rel,
-                .acquire,
-            );
-            if (result) |prev| {
-                return @enumFromInt(prev);
-            } else {
-                return from;
-            }
-        }
-
-        /// Try to atomically transition from one sentinel state to another.
-        /// Returns true if successful, false if state has changed.
-        ///
-        /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
-        /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
-        /// the current state.
-        pub fn tryTransition(self: *Self, from: State, to: State) bool {
-            return self.tryTransitionEx(from, to) == from;
-        }
-
-        /// Acquire exclusive access to manipulate the queue.
-        /// Spins until mutation lock is acquired, with periodic thread yields.
-        /// Returns the state before mutation bit was set.
-        ///
-        /// Memory ordering: Uses .acquire on fetchOr to synchronize-with the previous
-        /// releaseMutationLock(). This ensures visibility of all modifications made
-        /// while the lock was previously held, including non-atomic tail pointer updates.
-        pub fn acquireMutationLock(self: *Self) State {
-            var spin_count: u4 = 0;
-            while (true) {
-                const old = self.head.fetchOr(0b10, .acquire);
-                const old_state: State = @enumFromInt(old);
-
-                if (!old_state.hasMutationBit()) {
-                    return old_state;
-                }
-
-                // Someone else holds the mutation lock, spin with periodic OS-level yields
-                spin_count +%= 1;
-                if (spin_count == 0) {
-                    // Yield at OS thread level to prevent live-lock in multi-threaded scenarios
-                    std.Thread.yield() catch {};
-                }
-                std.atomic.spinLoopHint();
-            }
-        }
-
-        /// Release exclusive access to the queue.
-        ///
-        /// Memory ordering: Uses .release on fetchAnd to make all modifications
-        /// visible to future lock acquires. This includes non-atomic writes to tail
-        /// and doubly-linked list pointer updates performed while holding the lock.
-        pub fn releaseMutationLock(self: *Self) void {
-            const prev = self.head.fetchAnd(~@as(usize, 0b10), .release);
-            std.debug.assert(prev & 0b10 != 0);
-        }
-
-        /// Add item to the end of the queue.
-        /// If queue is currently in a sentinel state, transitions to queue state.
-        /// Otherwise acquires mutation lock and appends to tail.
-        pub fn push(self: *Self, item: *T) void {
-            if (builtin.mode == .Debug) {
-                std.debug.assert(!item.in_list);
-                item.in_list = true;
-            }
-            item.next = null;
-            item.prev = null;
-            item.tail = null;
-
-            const old_state = self.acquireMutationLock();
-
-            if (!old_state.isPointer()) {
-                // First item - it becomes both head and tail
-                item.tail = item;
-                self.head.store(@intFromEnum(State.fromPtr(item)), .release);
-                return;
-            }
-
-            // Get current head to access tail
-            const head = old_state.getPtr().?;
-            const old_tail = head.tail.?;
-
-            // Append to tail
-            item.prev = old_tail;
-            old_tail.next = item;
-
-            // Update tail pointer in head node
-            head.tail = item;
-
-            self.releaseMutationLock();
-        }
-
-        /// Remove and return the item at the front of the queue.
-        /// Returns null if queue is in a sentinel state (empty).
-        pub fn pop(self: *Self) ?*T {
-            const old_state = self.acquireMutationLock();
-
-            if (!old_state.isPointer()) {
-                self.releaseMutationLock();
-                return null;
-            }
-
-            const old_head = old_state.getPtr().?;
-            const next = old_head.next;
-
-            if (builtin.mode == .Debug) {
-                std.debug.assert(old_head.in_list);
-                old_head.in_list = false;
-            }
-
-            if (next == null) {
-                // Last item - transition to sentinel
-                self.head.store(@intFromEnum(State.sentinel0), .release);
-            } else {
-                // Copy tail to new head and update
-                next.?.tail = old_head.tail;
-                next.?.prev = null;
-                self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
-            }
-
-            // Clear old head's pointers
-            old_head.next = null;
-            old_head.prev = null;
-            old_head.tail = null;
-
-            return old_head;
-        }
-
-        /// Remove a specific item from the queue.
-        /// Returns true if the item was found and removed, false otherwise.
-        pub fn remove(self: *Self, item: *T) bool {
-            const old_state = self.acquireMutationLock();
-
-            if (!old_state.isPointer()) {
-                self.releaseMutationLock();
-                return false;
-            }
-
-            const head = old_state.getPtr().?;
-
-            // Check if item is in the list
-            if (item.prev == null and head != item) {
-                self.releaseMutationLock();
-                return false;
-            }
-
-            // Get tail from head node
-            const tail = head.tail.?;
-            if (item.next == null and tail != item) {
-                self.releaseMutationLock();
-                return false;
-            }
-
-            if (builtin.mode == .Debug) {
-                item.in_list = false;
-            }
-
-            // Update doubly-linked list
-            if (item.prev) |prev| {
-                prev.next = item.next;
-            }
-            if (item.next) |next| {
-                next.prev = item.prev;
-            }
-
-            // Update head if removing head
-            if (head == item) {
-                if (item.next) |next| {
-                    // Copy tail to new head
-                    next.tail = head.tail;
-                    self.head.store(@intFromEnum(State.fromPtr(next)), .release);
-                } else {
-                    // Was only item
-                    self.head.store(@intFromEnum(State.sentinel0), .release);
-                }
-            } else {
-                // Update tail in head if removing tail
-                if (tail == item) {
-                    head.tail = item.prev;
-                }
-                self.releaseMutationLock();
-            }
-
-            // Clear pointers
-            item.next = null;
-            item.prev = null;
-            item.tail = null;
-
-            return true;
-        }
-
-        /// Pop one item, retrying until success or queue is empty.
-        /// If queue is empty (in from_sentinel state), transitions to to_sentinel.
-        /// Returns the popped item, or null if queue was/became empty.
-        ///
-        /// Handles races where items are removed (via cancellation) between
-        /// the empty check and pop by retrying in a loop.
-        pub fn popOrTransition(self: *Self, from_sentinel: State, to_sentinel: State) ?*T {
-            std.debug.assert(!from_sentinel.isPointer());
-            std.debug.assert(!to_sentinel.isPointer());
-
-            const old_state = self.acquireMutationLock();
-            defer self.releaseMutationLock();
-
-            // If in from_sentinel, transition to to_sentinel
-            if (old_state == from_sentinel) {
-                self.head.store(@intFromEnum(to_sentinel), .release);
-                return null;
-            }
-
-            // Already in target state, nothing to do
-            if (old_state == to_sentinel) {
-                return null;
-            }
-
-            // Must be a pointer (has waiters)
-            if (!old_state.isPointer()) {
-                return null;
-            }
-
-            const old_head = old_state.getPtr().?;
-            const next = old_head.next;
-
-            if (builtin.mode == .Debug) {
-                std.debug.assert(old_head.in_list);
-                old_head.in_list = false;
-            }
-
-            if (next == null) {
-                // Last item - transition to to_sentinel (not sentinel0!)
-                self.head.store(@intFromEnum(to_sentinel), .release);
-            } else {
-                // Copy tail to new head and update
-                next.?.tail = old_head.tail;
-                next.?.prev = null;
-                self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
-            }
-
-            // Clear old head's pointers
-            old_head.next = null;
-            old_head.prev = null;
-            old_head.tail = null;
-
-            return old_head;
-        }
-    };
-}
-
-test "CompactConcurrentQueue basic operations" {
-    const testing = std.testing;
-
-    const TestNode = struct {
-        next: ?*@This() = null,
-        prev: ?*@This() = null,
-        tail: ?*@This() = null,
-        in_list: bool = false,
-        value: i32,
-    };
-
-    var runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const Queue = CompactConcurrentQueue(TestNode);
-    var queue: Queue = .empty;
-
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
-
-    var node1 align(8) = TestNode{ .value = 1 };
-    var node2 align(8) = TestNode{ .value = 2 };
-
-    queue.push(&node1);
-    try testing.expect(queue.getState().isPointer());
-    queue.push(&node2);
-
-    const popped1 = queue.pop();
-    try testing.expectEqual(&node1, popped1);
-
-    try testing.expectEqual(true, queue.remove(&node2));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
-
-    try testing.expectEqual(false, queue.remove(&node1));
-}
-
-test "CompactConcurrentQueue state transitions" {
-    const testing = std.testing;
-
-    const TestNode = struct {
-        next: ?*@This() = null,
-        prev: ?*@This() = null,
-        tail: ?*@This() = null,
-        in_list: bool = false,
-        value: i32,
-    };
-
-    const Queue = CompactConcurrentQueue(TestNode);
-    var queue = Queue.initWithState(.sentinel1);
-    try testing.expectEqual(Queue.State.sentinel1, queue.getState());
-
-    try testing.expectEqual(true, queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
-
-    try testing.expectEqual(false, queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
-}
-
-test "CompactConcurrentQueue verify 8-byte size" {
-    const testing = std.testing;
-
-    const TestNode = struct {
-        next: ?*@This() = null,
-        prev: ?*@This() = null,
-        tail: ?*@This() = null,
-        in_list: bool = false,
-        value: i32,
-    };
-
-    const Queue = CompactConcurrentQueue(TestNode);
-
-    // The whole point: verify it's only 8 bytes!
-    try testing.expectEqual(8, @sizeOf(Queue));
-}
-
-test "CompactConcurrentQueue concurrent operations" {
-    const testing = std.testing;
-
-    const TestNode = struct {
-        next: ?*@This() = null,
-        prev: ?*@This() = null,
-        tail: ?*@This() = null,
-        in_list: bool = false,
-        value: usize,
-    };
-
-    const Queue = CompactConcurrentQueue(TestNode);
-    var queue: Queue = .empty;
-
-    const num_threads = 4;
-    const items_per_thread = 100;
-    const total_items = num_threads * items_per_thread;
-
-    const nodes = try testing.allocator.alloc(TestNode, total_items);
-    defer testing.allocator.free(nodes);
-
-    for (nodes, 0..) |*n, i| {
-        n.* = .{ .value = i };
-    }
-
-    var push_threads: [num_threads]std.Thread = undefined;
-    for (0..num_threads) |i| {
-        const start = i * items_per_thread;
-        const end = (i + 1) * items_per_thread;
-        push_threads[i] = try std.Thread.spawn(.{}, struct {
-            fn pushItems(q: *Queue, items: []TestNode) void {
-                for (items) |*item| {
-                    q.push(item);
-                }
-            }
-        }.pushItems, .{ &queue, nodes[start..end] });
-    }
-
-    for (push_threads) |t| {
-        t.join();
-    }
-
-    var popped_count: usize = 0;
-    while (queue.pop()) |_| {
-        popped_count += 1;
-    }
-
-    try testing.expectEqual(total_items, popped_count);
     try testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
