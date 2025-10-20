@@ -2,19 +2,10 @@ const std = @import("std");
 const zio = @import("zio");
 const Runtime = zio.Runtime;
 const ConcurrentQueue = zio.util.ConcurrentQueue;
-const CompactConcurrentQueue = zio.util.CompactConcurrentQueue;
 
 const StandardNode = struct {
     next: ?*@This() = null,
     prev: ?*@This() = null,
-    in_list: bool = false,
-    value: usize,
-};
-
-const CompactNode = struct {
-    next: ?*@This() = null,
-    prev: ?*@This() = null,
-    tail: ?*@This() = null,
     in_list: bool = false,
     value: usize,
 };
@@ -24,39 +15,6 @@ fn benchmarkStandardQueue(allocator: std.mem.Allocator, num_operations: usize) !
     var queue: Queue = .empty;
 
     const nodes = try allocator.alloc(StandardNode, num_operations);
-    defer allocator.free(nodes);
-
-    for (nodes, 0..) |*n, i| {
-        n.* = .{ .value = i };
-    }
-
-    var timer = try std.time.Timer.start();
-
-    // Push all items
-    for (nodes) |*n| {
-        queue.push(n);
-    }
-
-    // Pop all items
-    var count: usize = 0;
-    while (queue.pop()) |_| {
-        count += 1;
-    }
-
-    const elapsed = timer.read();
-
-    if (count != num_operations) {
-        return error.IncorrectCount;
-    }
-
-    return elapsed;
-}
-
-fn benchmarkCompactQueue(allocator: std.mem.Allocator, num_operations: usize) !u64 {
-    const Queue = CompactConcurrentQueue(CompactNode);
-    var queue: Queue = .empty;
-
-    const nodes = try allocator.alloc(CompactNode, num_operations);
     defer allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
@@ -108,55 +66,6 @@ fn benchmarkStandardQueueConcurrent(allocator: std.mem.Allocator, num_threads: u
         const end = (i + 1) * ops_per_thread;
         threads[i] = try std.Thread.spawn(.{}, struct {
             fn pushItems(q: *Queue, items: []StandardNode) void {
-                for (items) |*item| {
-                    q.push(item);
-                }
-            }
-        }.pushItems, .{ &queue, nodes[start..end] });
-    }
-
-    for (threads) |t| {
-        t.join();
-    }
-
-    // Pop all items in main thread
-    var count: usize = 0;
-    while (queue.pop()) |_| {
-        count += 1;
-    }
-
-    const elapsed = timer.read();
-
-    if (count != total_ops) {
-        return error.IncorrectCount;
-    }
-
-    return elapsed;
-}
-
-fn benchmarkCompactQueueConcurrent(allocator: std.mem.Allocator, num_threads: usize, ops_per_thread: usize) !u64 {
-    const Queue = CompactConcurrentQueue(CompactNode);
-    var queue: Queue = .empty;
-
-    const total_ops = num_threads * ops_per_thread;
-    const nodes = try allocator.alloc(CompactNode, total_ops);
-    defer allocator.free(nodes);
-
-    for (nodes, 0..) |*n, i| {
-        n.* = .{ .value = i };
-    }
-
-    var timer = try std.time.Timer.start();
-
-    var threads = try allocator.alloc(std.Thread, num_threads);
-    defer allocator.free(threads);
-
-    // Spawn threads to push items
-    for (0..num_threads) |i| {
-        const start = i * ops_per_thread;
-        const end = (i + 1) * ops_per_thread;
-        threads[i] = try std.Thread.spawn(.{}, struct {
-            fn pushItems(q: *Queue, items: []CompactNode) void {
                 for (items) |*item| {
                     q.push(item);
                 }
@@ -262,25 +171,18 @@ pub fn main() !void {
     const iterations = 100;
 
     std.debug.print("=== ConcurrentQueue Benchmark ===\n\n", .{});
-    std.debug.print("Queue sizes:\n", .{});
-    std.debug.print("  Standard:    {d} bytes\n", .{@sizeOf(ConcurrentQueue(StandardNode))});
-    std.debug.print("  Compact:     {d} bytes\n\n", .{@sizeOf(CompactConcurrentQueue(CompactNode))});
-
-    std.debug.print("Node sizes:\n", .{});
-    std.debug.print("  Standard:    {d} bytes\n", .{@sizeOf(StandardNode)});
-    std.debug.print("  Compact:     {d} bytes\n\n", .{@sizeOf(CompactNode)});
+    std.debug.print("Queue size: {d} bytes\n", .{@sizeOf(ConcurrentQueue(StandardNode))});
+    std.debug.print("Node size:  {d} bytes\n\n", .{@sizeOf(StandardNode)});
 
     std.debug.print("Single-threaded ({d} operations, {d} iterations):\n\n", .{ num_operations, iterations });
 
-    try runBenchmark("Standard Queue", allocator, benchmarkStandardQueue, num_operations, iterations);
-    try runBenchmark("Compact Queue", allocator, benchmarkCompactQueue, num_operations, iterations);
+    try runBenchmark("ConcurrentQueue", allocator, benchmarkStandardQueue, num_operations, iterations);
 
-    const num_threads = 4;
+    const num_threads = try std.Thread.getCpuCount();
     const ops_per_thread = 2_500;
     const concurrent_iterations = 50;
 
     std.debug.print("Concurrent ({d} threads × {d} ops, {d} iterations):\n\n", .{ num_threads, ops_per_thread, concurrent_iterations });
 
-    try runConcurrentBenchmark("Standard Queue (concurrent)", allocator, benchmarkStandardQueueConcurrent, num_threads, ops_per_thread, concurrent_iterations);
-    try runConcurrentBenchmark("Compact Queue (concurrent)", allocator, benchmarkCompactQueueConcurrent, num_threads, ops_per_thread, concurrent_iterations);
+    try runConcurrentBenchmark("ConcurrentQueue (concurrent)", allocator, benchmarkStandardQueueConcurrent, num_threads, ops_per_thread, concurrent_iterations);
 }

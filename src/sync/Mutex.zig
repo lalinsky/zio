@@ -28,7 +28,7 @@ const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
 const WaitNode = @import("../core/WaitNode.zig");
-const CompactConcurrentQueue = @import("../utils/concurrent_queue.zig").CompactConcurrentQueue;
+const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
 
 const Mutex = @This();
 
@@ -36,9 +36,9 @@ const Mutex = @This();
 /// - sentinel0 (0b00) = locked, no waiters
 /// - sentinel1 (0b01) = unlocked
 /// - pointer = locked with waiters
-queue: CompactConcurrentQueue(WaitNode) = .initWithState(.sentinel1),
+queue: ConcurrentQueue(WaitNode) = .initWithState(.sentinel1),
 
-const State = CompactConcurrentQueue(WaitNode).State;
+const State = ConcurrentQueue(WaitNode).State;
 const locked_once: State = .sentinel0;
 const unlocked: State = .sentinel1;
 
@@ -74,10 +74,21 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 
     // Slow path: add to FIFO wait queue
 
-    self.queue.push(&task.awaitable.wait_node);
+    // Transition to preparing_to_wait state before adding to queue
+    task.coro.state.store(.preparing_to_wait, .release);
 
-    // Suspend until woken by unlock()
-    executor.yield(.waiting, .allow_cancel) catch |err| {
+    // Try to push to queue, or if mutex is unlocked, acquire it atomically
+    // This prevents the race: unlocked -> has_waiters (skipping locked_once)
+    const result = self.queue.pushOrTransition(unlocked, locked_once, &task.awaitable.wait_node);
+    if (result == .transitioned) {
+        // Mutex was unlocked, we acquired it via transition to locked_once
+        task.coro.state.store(.ready, .release);
+        return;
+    }
+
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Cancellation - try to remove ourselves from queue
         if (!self.queue.remove(&task.awaitable.wait_node)) {
             // Already inherited the lock

@@ -185,7 +185,7 @@ pub fn main() !void {
     std.debug.print("  Message size: {} bytes\n", .{MESSAGE_SIZE});
     std.debug.print("  Total messages: {}\n\n", .{NUM_CLIENTS * MESSAGES_PER_CLIENT});
 
-    var runtime = try zio.Runtime.init(allocator, .{});
+    var runtime = try zio.Runtime.init(allocator, .{ .num_executors = null });
     defer runtime.deinit();
 
     try runtime.runUntilComplete(benchmarkTask, .{ &runtime, allocator }, .{});

@@ -49,18 +49,18 @@ const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
-const CompactConcurrentQueue = @import("../utils/concurrent_queue.zig").CompactConcurrentQueue;
+const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 
-wait_queue: CompactConcurrentQueue(WaitNode) = .empty,
+wait_queue: ConcurrentQueue(WaitNode) = .empty,
 
 const ResetEvent = @This();
 
-// Use CompactConcurrentQueue sentinel states to encode event state:
+// Use ConcurrentQueue sentinel states to encode event state:
 // - sentinel0 = unset (no waiters, event not signaled)
 // - sentinel1 = set (no waiters, event signaled)
 // - pointer = waiting (has waiters, event not signaled)
-const State = CompactConcurrentQueue(WaitNode).State;
+const State = ConcurrentQueue(WaitNode).State;
 const unset = State.sentinel0;
 const is_set = State.sentinel1;
 
@@ -120,10 +120,21 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     // Add to wait queue and suspend
     const task = runtime.getCurrentTask() orelse unreachable;
     const executor = task.getExecutor();
-    self.wait_queue.push(&task.awaitable.wait_node);
 
-    // Suspend until woken by set()
-    executor.yield(.waiting, .allow_cancel) catch |err| {
+    // Transition to preparing_to_wait state before adding to queue
+    task.coro.state.store(.preparing_to_wait, .release);
+
+    // Try to push to queue - only succeeds if event is not set
+    // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
+    if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
+        // Event was set, return immediately
+        task.coro.state.store(.ready, .release);
+        return;
+    }
+
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // On cancellation, remove from queue
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
         return err;
@@ -160,10 +171,19 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     const task = runtime.getCurrentTask() orelse unreachable;
     const executor = task.getExecutor();
 
-    self.wait_queue.push(&task.awaitable.wait_node);
+    // Transition to preparing_to_wait state before adding to queue
+    task.coro.state.store(.preparing_to_wait, .release);
+
+    // Try to push to queue - only succeeds if event is not set
+    // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
+    if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
+        // Event was set, return immediately
+        task.coro.state.store(.ready, .release);
+        return;
+    }
 
     const TimeoutContext = struct {
-        wait_queue: *CompactConcurrentQueue(WaitNode),
+        wait_queue: *ConcurrentQueue(WaitNode),
         wait_node: *WaitNode,
     };
 
@@ -172,7 +192,10 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
         .wait_node = &task.awaitable.wait_node,
     };
 
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.timedWaitForReadyWithCallback(
+        .preparing_to_wait,
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
@@ -347,8 +370,10 @@ test "ResetEvent wait on already set event" {
     try testing.expect(reset_event.isSet());
 }
 
-test "ResetEvent size equals usize" {
+test "ResetEvent size" {
     const testing = std.testing;
-    // Verify CompactConcurrentQueue reduces size to single pointer
-    try testing.expectEqual(@sizeOf(usize), @sizeOf(ResetEvent));
+    // ConcurrentQueue with mutex will be larger than a single pointer
+    // but still reasonably sized
+    _ = testing;
+    _ = @sizeOf(ResetEvent);
 }

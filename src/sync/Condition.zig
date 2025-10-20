@@ -54,10 +54,10 @@ const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
-const CompactConcurrentQueue = @import("../utils/concurrent_queue.zig").CompactConcurrentQueue;
+const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 
-wait_queue: CompactConcurrentQueue(WaitNode) = .empty,
+wait_queue: ConcurrentQueue(WaitNode) = .empty,
 
 const Condition = @This();
 
@@ -87,12 +87,18 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     const task = runtime.getCurrentTask() orelse unreachable;
     const executor = task.getExecutor();
 
+    // Transition to preparing_to_wait state before adding to queue
+    task.coro.state.store(.preparing_to_wait, .release);
+
     // Add to wait queue before releasing mutex
     self.wait_queue.push(&task.awaitable.wait_node);
 
-    // Atomically release mutex and wait
+    // Atomically release mutex
     mutex.unlock(runtime);
-    executor.yield(.waiting, .allow_cancel) catch |err| {
+
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
         // Must reacquire mutex before returning
@@ -121,10 +127,13 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     const task = runtime.getCurrentTask() orelse unreachable;
     const executor = task.getExecutor();
 
+    // Transition to preparing_to_wait state before adding to queue
+    task.coro.state.store(.preparing_to_wait, .release);
+
     self.wait_queue.push(&task.awaitable.wait_node);
 
     const TimeoutContext = struct {
-        wait_queue: *CompactConcurrentQueue(WaitNode),
+        wait_queue: *ConcurrentQueue(WaitNode),
         wait_node: *WaitNode,
     };
 
@@ -133,10 +142,13 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         .wait_node = &task.awaitable.wait_node,
     };
 
-    // Atomically release mutex and wait
+    // Atomically release mutex
     mutex.unlock(runtime);
 
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.timedWaitForReadyWithCallback(
+        .preparing_to_wait,
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,

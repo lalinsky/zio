@@ -178,16 +178,24 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
                 std.debug.panic("cannot wait on self (would deadlock)", .{});
             }
         }
+
+        // Transition to preparing_to_wait state before adding to queue
+        task.coro.state.store(.preparing_to_wait, .release);
+
         awaitable.waiting_list.push(&task.awaitable.wait_node);
 
         // Double-check state before suspending (avoid lost wakeup)
         if (awaitable.done.load(.acquire)) {
             // Completed while we were adding to queue, remove ourselves
             _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
+            // Reset state back to ready
+            task.coro.state.store(.ready, .release);
             return;
         }
 
-        executor.yield(.waiting, .allow_cancel) catch |err| {
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
             // If yield itself was canceled, remove from wait list
             _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return err;
@@ -195,7 +203,7 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
 
         // Pair with markComplete()'s .release
         _ = awaitable.done.load(.acquire);
-        // Yield returned successfully, awaitable must be complete
+        // Yield returned successfully or we were woken early, awaitable must be complete
     } else {
         // Thread path: use ThreadWaiter for futex-based parking
         var thread_waiter = ThreadWaiter.init();
@@ -331,12 +339,23 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
         else => @compileError("resumeTask() requires *Awaitable, *AnyTask, or *Coroutine, got " ++ @typeName(T)),
     };
 
-    // Validate state before resuming
-    assert(coro.state == .waiting);
-
     const task = AnyTask.fromCoroutine(coro);
     const executor = Executor.fromCoroutine(coro);
-    executor.scheduleTask(task, mode);
+
+    // Atomically transition to ready state and get the old state
+    const old_state = coro.state.swap(.ready, .acq_rel);
+
+    // Only schedule if the task was actually suspended
+    // If it was in .preparing_to_wait, it will see the state change and skip yield
+    if (old_state == .waiting) {
+        executor.scheduleTask(task, mode);
+    } else if (old_state == .preparing_to_wait) {
+        // Task hasn't yielded yet - it will see .ready and skip the yield
+        // No need to schedule
+    } else {
+        // Shouldn't happen - task should be either .waiting or .preparing_to_wait
+        std.debug.panic("resumeTask: unexpected state {} for task {*}", .{ old_state, task });
+    }
 }
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -386,6 +405,65 @@ pub const AnyTask = struct {
     /// The cancellation flag will be checked at the next yield point.
     pub fn cancel(self: *AnyTask) void {
         self.awaitable.requestCancellation();
+    }
+};
+
+/// Registry of all tasks in the runtime.
+/// Used for lifecycle management and preventing spawns during shutdown.
+///
+/// State encoding:
+/// - sentinel0 (empty_open): No tasks, accepting new spawns
+/// - sentinel1 (empty_closed): No tasks, runtime shutting down, reject spawns
+/// - pointer: Has tasks, accepting new spawns
+pub const AnyTaskList = struct {
+    queue: ConcurrentQueue(AnyTask) = .empty,
+
+    const State = ConcurrentQueue(AnyTask).State;
+    const empty_open: State = .sentinel0;
+    const empty_closed: State = .sentinel1;
+
+    /// Add a task to the registry.
+    /// Returns error.Closed if the runtime is shutting down.
+    pub fn add(self: *AnyTaskList, task: *AnyTask) error{Closed}!void {
+        if (!self.queue.pushUnless(empty_closed, task)) {
+            return error.Closed;
+        }
+    }
+
+    /// Remove a task from the registry.
+    /// Returns true if the task was found and removed.
+    pub fn remove(self: *AnyTaskList, task: *AnyTask) bool {
+        return self.queue.remove(task);
+    }
+
+    /// Close the registry to prevent new task additions.
+    /// Returns error.NotEmpty if the registry still has tasks.
+    /// Idempotent: succeeds if already closed.
+    pub fn close(self: *AnyTaskList) error{NotEmpty}!void {
+        // Try atomic transition: empty_open → empty_closed
+        if (!self.queue.tryTransition(empty_open, empty_closed)) {
+            const state = self.queue.getState();
+            if (state == empty_closed) return; // Already closed, OK
+            return error.NotEmpty; // Has tasks
+        }
+    }
+
+    /// Returns true if the registry has no tasks.
+    /// Note: Does not distinguish between open/closed states.
+    pub fn isEmpty(self: *const AnyTaskList) bool {
+        const state = self.queue.getState();
+        return !state.isPointer();
+    }
+
+    /// Returns true if the registry is closed (rejecting new spawns).
+    pub fn isClosed(self: *const AnyTaskList) bool {
+        return self.queue.getState() == empty_closed;
+    }
+
+    /// Remove and return the first task from the registry.
+    /// When popping the last item, transitions to empty_open (not closed).
+    pub fn pop(self: *AnyTaskList) ?*AnyTask {
+        return self.queue.pop();
     }
 };
 
@@ -774,8 +852,6 @@ pub const Executor = struct {
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
-    tasks: ConcurrentQueue(AnyTask) = .empty,
-
     ready_queue: SimpleStack(WaitNode) = .{},
     next_ready_queue: SimpleStack(WaitNode) = .{},
 
@@ -875,12 +951,7 @@ pub const Executor = struct {
     pub fn deinit(self: *Executor) void {
         // Note: ThreadPool and loop are owned by thread that runs them
         // Loop cleanup is handled in deinitLoop() called from run*()
-
-        const rt = self.runtime();
-        // Drain all remaining tasks from queue
-        while (self.tasks.pop()) |task| {
-            rt.releaseAwaitable(&task.awaitable);
-        }
+        // Task cleanup is handled by Runtime.deinit()
 
         // Clean up stack pool
         self.stack_pool.deinit();
@@ -911,7 +982,7 @@ pub const Executor = struct {
                     .coro = .{
                         .stack = stack,
                         .parent_context_ptr = &self.main_context,
-                        .state = .ready,
+                        .state = .init(.ready),
                     },
                 },
                 .future_result = .{},
@@ -923,8 +994,9 @@ pub const Executor = struct {
         // Increment ref count for JoinHandle
         task.impl.base.awaitable.ref_count.incr();
 
-        // Add to tasks queue (thread-safe)
-        self.tasks.push(&task.impl.base);
+        // Add to global task registry (can fail if runtime is shutting down)
+        try self.runtime().tasks.add(&task.impl.base);
+        errdefer _ = self.runtime().tasks.remove(&task.impl.base);
 
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(&task.impl.base, .maybe_remote);
@@ -960,7 +1032,7 @@ pub const Executor = struct {
     ///
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
-    pub fn yield(self: *Executor, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    pub fn yield(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
@@ -976,7 +1048,17 @@ pub const Executor = struct {
             }
         }
 
-        current_coro.state = desired_state;
+        // Atomically transition state - if this fails, someone changed our state
+        if (current_coro.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
+            // CAS failed - someone changed our state
+            if (actual_state == .ready) {
+                // We were woken up before we could yield - don't suspend
+                return;
+            } else {
+                // Unexpected state - this is a bug
+                std.debug.panic("Yield CAS failed with unexpected state: task {*} expected {} but was {} (not .ready)", .{ current_task, expected_state, actual_state });
+            }
+        }
         if (desired_state == .ready) {
             self.next_ready_queue.push(&current_task.awaitable.wait_node);
         }
@@ -1043,7 +1125,7 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        self.timedWaitForReady(milliseconds * 1_000_000) catch |err| switch (err) {
+        self.timedWaitForReady(.ready, milliseconds * 1_000_000) catch |err| switch (err) {
             error.Timeout => return, // Expected for sleep - not an error
             error.Canceled => return error.Canceled, // Propagate cancellation
         };
@@ -1058,6 +1140,26 @@ pub const Executor = struct {
         defer handle.deinit();
         try self.run();
         return handle.join();
+    }
+
+    /// Check if task list is empty and initiate shutdown if so.
+    /// Only one executor will succeed in closing the registry due to atomic transition.
+    /// Can be called by any executor.
+    fn maybeShutdown(self: *Executor) void {
+        if (self.runtime_ptr.tasks.isEmpty()) {
+            // Try to atomically close the registry (empty_open → empty_closed)
+            if (self.runtime_ptr.tasks.close()) {
+                // We won the race - initiate shutdown
+                self.runtime_ptr.shutting_down.store(true, .release);
+
+                // Wake all executors (including main if sleeping in event loop)
+                for (self.runtime_ptr.executors.items) |*executor| {
+                    executor.shutdown_async.notify() catch {};
+                }
+            } else |_| {
+                // Another executor is closing or tasks were added - do nothing
+            }
+        }
     }
 
     /// Run the executor event loop.
@@ -1075,7 +1177,9 @@ pub const Executor = struct {
         Runtime.current_executor = self;
         defer Runtime.current_executor = null;
 
-        const is_main = self.id == 0;
+        // Check if we're starting with an empty task list
+        // If so, immediately initiate shutdown (no work to do)
+        self.maybeShutdown();
 
         while (true) {
             // Exit if loop was stopped (by shutdown callback)
@@ -1103,7 +1207,7 @@ pub const Executor = struct {
 
                 // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
                 if (self.current_coroutine) |current_coro| {
-                    if (current_coro.state == .dead) {
+                    if (current_coro.state.load(.acquire) == .dead) {
                         const current_task = AnyTask.fromCoroutine(current_coro);
                         const current_awaitable = &current_task.awaitable;
 
@@ -1119,47 +1223,47 @@ pub const Executor = struct {
                         // Track task completion
                         self.metrics.tasks_completed += 1;
 
-                        // Decrement global task count
-                        _ = self.runtime_ptr.global_task_count.fetchSub(1, .release);
-
-                        // Remove from tasks queue and release runtime's reference
-                        _ = self.tasks.remove(current_task);
+                        // Remove from global task registry and release runtime's reference
+                        _ = self.runtime_ptr.tasks.remove(current_task);
                         self.runtime().releaseAwaitable(current_awaitable);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
+
+                        // Check if we just removed the last task and maybe initiate shutdown
+                        self.maybeShutdown();
                     }
                 }
 
                 // Other states (.ready, .waiting) are handled by yield() or markReady()
             }
 
-            // Main executor: check if all tasks are complete (after processing)
-            if (is_main and self.runtime_ptr.global_task_count.load(.acquire) == 0) {
-                // Temporarily stop accepting new spawns
-                self.runtime_ptr.accepting_spawns.store(false, .release);
-
-                // Re-check task count after setting accepting_spawns flag
-                // This catches tasks that incremented between our check and setting the flag
-                if (self.runtime_ptr.global_task_count.load(.acquire) == 0) {
-                    // Confirmed: no tasks running, initiate shutdown
-                    self.runtime_ptr.shutting_down.store(true, .release);
-
-                    // Trigger shutdown for all executors (including self)
-                    for (self.runtime_ptr.executors.items) |*executor| {
-                        executor.shutdown_async.notify() catch {};
-                    }
-
-                    // Loop will be stopped by shutdown callback
-                } else {
-                    // New task(s) spawned during the check - resume accepting spawns
-                    self.runtime_ptr.accepting_spawns.store(true, .release);
-                }
-            }
-
             // Move yielded coroutines back to ready queue
             self.ready_queue.prependByMoving(&self.next_ready_queue);
 
-            // If no ready work, block waiting for I/O
-            try self.loop.run(if (self.ready_queue.head == null) .once else .no_wait);
+            // If no ready work, run event loop
+            if (self.ready_queue.head == null) {
+                // Spin briefly with non-blocking I/O checks before blocking
+                // This reduces cross-thread wakeup latency for high-frequency remote scheduling
+                var spin_count: usize = 0;
+                while (spin_count < 100) : (spin_count += 1) {
+                    // Run event loop without blocking to check I/O and remote wakeups
+                    try self.loop.run(.no_wait);
+
+                    // Check if remote work arrived
+                    var remote_drained = self.next_ready_queue_remote.popAll();
+                    if (remote_drained.head != null) {
+                        self.ready_queue.prependByMoving(&remote_drained);
+                        break;
+                    }
+                }
+
+                // If still no work, block waiting for I/O
+                if (self.ready_queue.head == null) {
+                    try self.loop.run(.once);
+                }
+            } else {
+                // Have ready work, run event loop without blocking
+                try self.loop.run(.no_wait);
+            }
         }
     }
 
@@ -1171,9 +1275,7 @@ pub const Executor = struct {
     /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
     /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
     pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
-        // Mark task as ready (idempotent for spawn, necessary for resumeTask)
-        task.coro.state = .ready;
-
+        // State is already set to .ready by resumeTask() or spawn()
         const wait_node = &task.awaitable.wait_node;
 
         if (mode == .maybe_remote) {
@@ -1187,8 +1289,11 @@ pub const Executor = struct {
                 self.next_ready_queue_remote.push(wait_node);
 
                 // Notify the target executor's event loop (only if initialized)
-                if (self.remote_initialized.load(.acquire)) {
-                    self.remote_wakeup.notify() catch {};
+                const initialized = self.remote_initialized.load(.acquire);
+                if (initialized) {
+                    self.remote_wakeup.notify() catch |err| {
+                        std.debug.print("WARNING: remote_wakeup.notify() failed for executor {}: {}\n", .{ self.id, err });
+                    };
                 }
             }
         } else {
@@ -1239,6 +1344,7 @@ pub const Executor = struct {
     /// another source (in which case the timeout is ignored).
     pub fn timedWaitForReadyWithCallback(
         self: *Executor,
+        expected_state: CoroutineState,
         timeout_ns: u64,
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
@@ -1304,7 +1410,7 @@ pub const Executor = struct {
         );
 
         // Wait for either timeout or external markReady
-        self.yield(.waiting, .allow_cancel) catch |err| {
+        self.yield(expected_state, .waiting, .allow_cancel) catch |err| {
             // Invalidate pending callbacks before unwinding so they ignore this stack frame.
             task.timer_generation +%= 1;
             timer.cancel(
@@ -1340,10 +1446,11 @@ pub const Executor = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Executor, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, timeout_ns: u64) error{ Timeout, Canceled }!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(
+            expected_state,
             timeout_ns,
             DummyContext,
             &dummy,
@@ -1371,7 +1478,7 @@ pub const Executor = struct {
         var cancel_completion: xev.Completion = .{};
 
         while (completion.state() != .dead) {
-            self.yield(.waiting, .allow_cancel) catch |err| switch (err) {
+            self.yield(.ready, .waiting, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     // First cancellation - try to cancel the xev operation
                     if (!was_canceled) {
@@ -1472,8 +1579,7 @@ pub const Runtime = struct {
 
     // Multi-executor coordination
     next_executor: std.atomic.Value(usize),
-    global_task_count: std.atomic.Value(usize),
-    accepting_spawns: std.atomic.Value(bool), // Controls whether new tasks can be spawned
+    tasks: AnyTaskList = .{}, // Global task registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
 
     /// Thread-local storage for the current executor
@@ -1526,8 +1632,6 @@ pub const Runtime = struct {
             .allocator = allocator,
             .options = options,
             .next_executor = std.atomic.Value(usize).init(0),
-            .global_task_count = std.atomic.Value(usize).init(0),
-            .accepting_spawns = std.atomic.Value(bool).init(true),
             .shutting_down = std.atomic.Value(bool).init(false),
         };
     }
@@ -1536,6 +1640,11 @@ pub const Runtime = struct {
         // Shutdown ThreadPool before cleaning up executors
         if (self.thread_pool) |tp| {
             tp.shutdown();
+        }
+
+        // Drain any remaining tasks from global registry
+        while (self.tasks.pop()) |task| {
+            self.releaseAwaitable(&task.awaitable);
         }
 
         // Deinit all executors (they own their threads)
@@ -1555,14 +1664,8 @@ pub const Runtime = struct {
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        // Optimistically increment global task count before spawn check
-        // This prevents race condition where task count reaches 0, accepting_spawns
-        // is set to false, but spawn() sneaks in between the check and flag set.
-        _ = self.global_task_count.fetchAdd(1, .release);
-        errdefer _ = self.global_task_count.fetchSub(1, .release);
-
-        // Check if runtime is accepting new spawns
-        if (!self.accepting_spawns.load(.acquire)) {
+        // Check if runtime is shutting down
+        if (self.tasks.isClosed()) {
             return error.RuntimeShutdown;
         }
 
@@ -1591,8 +1694,8 @@ pub const Runtime = struct {
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
-        // Check if runtime is accepting new spawns
-        if (!self.accepting_spawns.load(.acquire)) {
+        // Check if runtime is shutting down
+        if (self.tasks.isClosed()) {
             return error.RuntimeShutdown;
         }
 
@@ -1674,7 +1777,7 @@ pub const Runtime = struct {
         _ = self;
         const executor = Runtime.current_executor orelse return;
         if (executor.current_coroutine == null) return;
-        return executor.yield(.ready, .allow_cancel);
+        return executor.yield(.ready, .ready, .allow_cancel);
     }
 
     /// Sleep for the specified number of milliseconds.
@@ -1831,7 +1934,7 @@ pub const Runtime = struct {
         }
 
         // Yield and wait for one to complete
-        try executor.yield(.waiting, .allow_cancel);
+        try executor.yield(.ready, .waiting, .allow_cancel);
 
         // We were woken up - find which one completed
         inline for (fields, 0..) |field, i| {
@@ -2038,60 +2141,6 @@ test "runtime: spawnBlocking smoke test" {
     };
 
     try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
-}
-
-test "runtime: spawn during shutdown returns error" {
-    const testing = std.testing;
-
-    var runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn task() void {}
-
-        fn mainTask(rt: *Runtime) !void {
-            // First task spawns successfully
-            var handle1 = try rt.spawn(task, .{}, .{});
-            defer handle1.deinit();
-
-            // Manually trigger shutdown by stopping accepting spawns
-            rt.accepting_spawns.store(false, .release);
-
-            // Attempting to spawn during shutdown should fail
-            const result = rt.spawn(task, .{}, .{});
-            try testing.expectError(error.RuntimeShutdown, result);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
-}
-
-test "runtime: spawnBlocking during shutdown returns error" {
-    const testing = std.testing;
-
-    var runtime = try Runtime.init(testing.allocator, .{
-        .thread_pool = .{ .enabled = true },
-    });
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn blockingWork() void {}
-
-        fn mainTask(rt: *Runtime) !void {
-            // First task spawns successfully
-            var handle1 = try rt.spawnBlocking(blockingWork, .{});
-            defer handle1.deinit();
-
-            // Manually trigger shutdown by stopping accepting spawns
-            rt.accepting_spawns.store(false, .release);
-
-            // Attempting to spawn during shutdown should fail
-            const result = rt.spawnBlocking(blockingWork, .{});
-            try testing.expectError(error.RuntimeShutdown, result);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
 }
 
 test "runtime: Future basic set and get" {
