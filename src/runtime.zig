@@ -337,33 +337,15 @@ pub const ResumeMode = enum {
 /// - `.local`: Assumes we're on the same executor (use for IO callbacks)
 pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
     const T = @TypeOf(obj);
-    const coro: *Coroutine = switch (T) {
-        *Awaitable => blk: {
-            const task = AnyTask.fromAwaitable(obj);
-            break :blk &task.coro;
-        },
-        *AnyTask => &obj.coro,
-        *Coroutine => obj,
-        else => @compileError("resumeTask() requires *Awaitable, *AnyTask, or *Coroutine, got " ++ @typeName(T)),
+    const task: *AnyTask = switch (T) {
+        *AnyTask => obj,
+        *Awaitable => AnyTask.fromAwaitable(obj),
+        *Coroutine => AnyTask.fromCoroutine(obj),
+        else => @compileError("resumeTask() requires, *AnyTask, *Awaitable or *Coroutine, got " ++ @typeName(T)),
     };
 
-    const task = AnyTask.fromCoroutine(coro);
-    const executor = Executor.fromCoroutine(coro);
-
-    // Atomically transition to ready state and get the old state
-    const old_state = coro.state.swap(.ready, .acq_rel);
-
-    // Only schedule if the task was actually suspended
-    // If it was in .preparing_to_wait, it will see the state change and skip yield
-    if (old_state == .waiting_io or old_state == .waiting_sync) {
-        executor.scheduleTask(task, mode);
-    } else if (old_state == .preparing_to_wait) {
-        // Task hasn't yielded yet - it will see .ready and skip the yield
-        // No need to schedule
-    } else {
-        // Shouldn't happen - task should be either .waiting_io, .waiting_sync, or .preparing_to_wait
-        std.debug.panic("resumeTask: unexpected state {} for task {*}", .{ old_state, task });
-    }
+    const home_executor = Executor.fromCoroutine(&task.coro);
+    home_executor.scheduleTask(task, mode);
 }
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -1086,7 +1068,7 @@ pub const Executor = struct {
         // If yielding with .ready state (cooperative yield), schedule for later execution
         // This bypasses LIFO slot for fairness - yields always go to back of queue
         if (desired_state == .ready) {
-            self.scheduleLocal(&current_task.awaitable.wait_node, true); // is_yield = true
+            self.scheduleTaskLocal(current_task, true); // is_yield = true
         }
 
         // If dead, always switch to scheduler for cleanup
@@ -1106,7 +1088,10 @@ pub const Executor = struct {
             coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
         }
 
-        std.debug.assert(self.current_coroutine == current_coro);
+        // After resuming, the task may have migrated to a different executor.
+        // Re-derive the current executor from TLS instead of using the captured `self`.
+        const resumed_executor = Runtime.current_executor orelse unreachable;
+        std.debug.assert(resumed_executor.current_coroutine == current_coro);
 
         // Check again after resuming in case we were canceled while suspended (unless shielded or no_cancel)
         if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
@@ -1335,7 +1320,8 @@ pub const Executor = struct {
     /// The `is_yield` parameter determines scheduling behavior:
     /// - `true`: Task is yielding - goes to next_ready_queue (runs next iteration)
     /// - `false`: Task is being woken - goes to LIFO slot (immediate) or ready_queue (FIFO)
-    fn scheduleLocal(self: *Executor, wait_node: *WaitNode, is_yield: bool) void {
+    fn scheduleTaskLocal(self: *Executor, task: *AnyTask, is_yield: bool) void {
+        const wait_node = &task.awaitable.wait_node;
         if (is_yield) {
             // Yields → next_ready_queue (runs next iteration for fairness)
             self.next_ready_queue.push(wait_node);
@@ -1353,41 +1339,92 @@ pub const Executor = struct {
         }
     }
 
-    /// Schedule a task to run on this executor.
-    /// Sets the task state to ready and adds it to the appropriate queue.
-    /// Uses local queue if called from the same executor, otherwise uses remote queue.
-    ///
-    /// The `mode` parameter controls executor checking:
-    /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
-    /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
-    pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
-        // State is already set to .ready by resumeTask() or spawn()
+    /// Schedule a task to a remote executor (different executor or no current executor).
+    /// Uses the thread-safe remote queue and notifies the executor.
+    fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         const wait_node = &task.awaitable.wait_node;
 
-        if (mode == .maybe_remote) {
-            // Check if we're on the same executor thread
-            if (Runtime.current_executor == self) {
-                // Same executor - use local scheduling with LIFO slot
-                // is_yield = false: this is a wakeup, not a yield
-                self.scheduleLocal(wait_node, false);
-            } else {
-                // Different executor (or no current executor) - use remote path
-                // Push to remote ready queue (thread-safe)
-                self.next_ready_queue_remote.push(wait_node);
+        // Push to remote ready queue (thread-safe)
+        self.next_ready_queue_remote.push(wait_node);
 
-                // Notify the target executor's event loop (only if initialized)
-                const initialized = self.remote_initialized.load(.acquire);
-                if (initialized) {
-                    self.remote_wakeup.notify() catch |err| {
-                        std.debug.print("WARNING: remote_wakeup.notify() failed for executor {}: {}\n", .{ self.id, err });
-                    };
+        // Notify the target executor's event loop (only if initialized)
+        const initialized = self.remote_initialized.load(.acquire);
+        if (initialized) {
+            self.remote_wakeup.notify() catch |err| {
+                std.debug.print("WARNING: remote_wakeup.notify() failed for executor {}: {}\n", .{ self.id, err });
+            };
+        }
+    }
+
+    /// Schedule a task for execution. Called on the task's home executor (self).
+    /// Atomically transitions task state to .ready and schedules it for execution.
+    ///
+    /// Task migration for cache locality:
+    /// - Sync tasks (.waiting_sync) with .maybe_remote: May migrate to current executor if in same runtime
+    /// - I/O tasks (.waiting_io): Always stay on home executor (cannot migrate)
+    /// - Spawn tasks (.ready): Schedule on home executor
+    ///
+    /// The `mode` parameter:
+    /// - `.maybe_remote`: Enables migration for sync tasks, uses remote queue when needed
+    /// - `.local`: No migration, always uses home executor (for I/O callbacks)
+    pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
+        const old_state = task.coro.state.swap(.ready, .acq_rel);
+
+        // Task hasn't yielded yet - it will see .ready and skip the yield
+        if (old_state == .preparing_to_wait) return;
+
+        // I/O tasks cannot migrate (bound to home executor's event loop)
+        if (old_state == .waiting_io) {
+            if (mode == .maybe_remote) {
+                if (Runtime.current_executor == self) {
+                    self.scheduleTaskLocal(task, false);
+                } else {
+                    self.scheduleTaskRemote(task);
                 }
+            } else {
+                assert(Runtime.current_executor == self);
+                self.scheduleTaskLocal(task, false);
+            }
+            return;
+        }
+
+        // Handle .waiting_sync or .ready (spawn) states
+        if (old_state != .waiting_sync and old_state != .ready) {
+            std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
+        }
+
+        // Sync tasks can migrate for cache locality (waiting_sync state only)
+        if (old_state == .waiting_sync and mode == .maybe_remote) {
+            const current_exec = Runtime.current_executor orelse {
+                self.scheduleTaskRemote(task);
+                return;
+            };
+
+            // Check if we can migrate (same runtime, different executor)
+            if (current_exec.runtime_ptr == self.runtime_ptr) {
+                // Same runtime - migrate to current executor for cache locality
+                if (current_exec != self) {
+                    task.coro.parent_context_ptr = &current_exec.main_context;
+                }
+                current_exec.scheduleTaskLocal(task, false);
+                return;
+            }
+
+            // Different runtime - use remote scheduling on home executor
+            self.scheduleTaskRemote(task);
+            return;
+        }
+
+        // Default path: .ready state (spawn) or .local mode
+        if (mode == .maybe_remote) {
+            if (Runtime.current_executor == self) {
+                self.scheduleTaskLocal(task, false);
+            } else {
+                self.scheduleTaskRemote(task);
             }
         } else {
-            // Fast path: we know we're on the same executor
             assert(Runtime.current_executor == self);
-            // is_yield = false: this is a wakeup, not a yield
-            self.scheduleLocal(wait_node, false);
+            self.scheduleTaskLocal(task, false);
         }
     }
 
