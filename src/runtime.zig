@@ -408,6 +408,65 @@ pub const AnyTask = struct {
     }
 };
 
+/// Registry of all tasks in the runtime.
+/// Used for lifecycle management and preventing spawns during shutdown.
+///
+/// State encoding:
+/// - sentinel0 (empty_open): No tasks, accepting new spawns
+/// - sentinel1 (empty_closed): No tasks, runtime shutting down, reject spawns
+/// - pointer: Has tasks, accepting new spawns
+pub const AnyTaskList = struct {
+    queue: ConcurrentQueue(AnyTask) = .empty,
+
+    const State = ConcurrentQueue(AnyTask).State;
+    const empty_open: State = .sentinel0;
+    const empty_closed: State = .sentinel1;
+
+    /// Add a task to the registry.
+    /// Returns error.Closed if the runtime is shutting down.
+    pub fn add(self: *AnyTaskList, task: *AnyTask) error{Closed}!void {
+        if (!self.queue.pushUnless(empty_closed, task)) {
+            return error.Closed;
+        }
+    }
+
+    /// Remove a task from the registry.
+    /// Returns true if the task was found and removed.
+    pub fn remove(self: *AnyTaskList, task: *AnyTask) bool {
+        return self.queue.remove(task);
+    }
+
+    /// Close the registry to prevent new task additions.
+    /// Returns error.NotEmpty if the registry still has tasks.
+    /// Idempotent: succeeds if already closed.
+    pub fn close(self: *AnyTaskList) error{NotEmpty}!void {
+        // Try atomic transition: empty_open → empty_closed
+        if (!self.queue.tryTransition(empty_open, empty_closed)) {
+            const state = self.queue.getState();
+            if (state == empty_closed) return; // Already closed, OK
+            return error.NotEmpty; // Has tasks
+        }
+    }
+
+    /// Returns true if the registry has no tasks.
+    /// Note: Does not distinguish between open/closed states.
+    pub fn isEmpty(self: *const AnyTaskList) bool {
+        const state = self.queue.getState();
+        return !state.isPointer();
+    }
+
+    /// Returns true if the registry is closed (rejecting new spawns).
+    pub fn isClosed(self: *const AnyTaskList) bool {
+        return self.queue.getState() == empty_closed;
+    }
+
+    /// Remove and return the first task from the registry.
+    /// When popping the last item, transitions to empty_open (not closed).
+    pub fn pop(self: *AnyTaskList) ?*AnyTask {
+        return self.queue.pop();
+    }
+};
+
 // Blocking task for runtime scheduling - thread pool based tasks
 pub const AnyBlockingTask = struct {
     awaitable: Awaitable,
@@ -793,8 +852,6 @@ pub const Executor = struct {
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
-    tasks: ConcurrentQueue(AnyTask) = .empty,
-
     ready_queue: SimpleStack(WaitNode) = .{},
     next_ready_queue: SimpleStack(WaitNode) = .{},
 
@@ -894,12 +951,7 @@ pub const Executor = struct {
     pub fn deinit(self: *Executor) void {
         // Note: ThreadPool and loop are owned by thread that runs them
         // Loop cleanup is handled in deinitLoop() called from run*()
-
-        const rt = self.runtime();
-        // Drain all remaining tasks from queue
-        while (self.tasks.pop()) |task| {
-            rt.releaseAwaitable(&task.awaitable);
-        }
+        // Task cleanup is handled by Runtime.deinit()
 
         // Clean up stack pool
         self.stack_pool.deinit();
@@ -942,8 +994,9 @@ pub const Executor = struct {
         // Increment ref count for JoinHandle
         task.impl.base.awaitable.ref_count.incr();
 
-        // Add to tasks queue (thread-safe)
-        self.tasks.push(&task.impl.base);
+        // Add to global task registry (can fail if runtime is shutting down)
+        try self.runtime().tasks.add(&task.impl.base);
+        errdefer _ = self.runtime().tasks.remove(&task.impl.base);
 
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(&task.impl.base, .maybe_remote);
@@ -1089,6 +1142,26 @@ pub const Executor = struct {
         return handle.join();
     }
 
+    /// Check if task list is empty and initiate shutdown if so.
+    /// Only one executor will succeed in closing the registry due to atomic transition.
+    /// Can be called by any executor.
+    fn maybeShutdown(self: *Executor) void {
+        if (self.runtime_ptr.tasks.isEmpty()) {
+            // Try to atomically close the registry (empty_open → empty_closed)
+            if (self.runtime_ptr.tasks.close()) {
+                // We won the race - initiate shutdown
+                self.runtime_ptr.shutting_down.store(true, .release);
+
+                // Wake all executors (including main if sleeping in event loop)
+                for (self.runtime_ptr.executors.items) |*executor| {
+                    executor.shutdown_async.notify() catch {};
+                }
+            } else |_| {
+                // Another executor is closing or tasks were added - do nothing
+            }
+        }
+    }
+
     /// Run the executor event loop.
     /// Main executor (id=0) orchestrates shutdown when all tasks complete.
     /// Worker executors (id>0) run until signaled to shut down by main executor.
@@ -1104,7 +1177,9 @@ pub const Executor = struct {
         Runtime.current_executor = self;
         defer Runtime.current_executor = null;
 
-        const is_main = self.id == 0;
+        // Check if we're starting with an empty task list
+        // If so, immediately initiate shutdown (no work to do)
+        self.maybeShutdown();
 
         while (true) {
             // Exit if loop was stopped (by shutdown callback)
@@ -1148,40 +1223,17 @@ pub const Executor = struct {
                         // Track task completion
                         self.metrics.tasks_completed += 1;
 
-                        // Decrement global task count
-                        _ = self.runtime_ptr.global_task_count.fetchSub(1, .release);
-
-                        // Remove from tasks queue and release runtime's reference
-                        _ = self.tasks.remove(current_task);
+                        // Remove from global task registry and release runtime's reference
+                        _ = self.runtime_ptr.tasks.remove(current_task);
                         self.runtime().releaseAwaitable(current_awaitable);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
+
+                        // Check if we just removed the last task and maybe initiate shutdown
+                        self.maybeShutdown();
                     }
                 }
 
                 // Other states (.ready, .waiting) are handled by yield() or markReady()
-            }
-
-            // Main executor: check if all tasks are complete (after processing)
-            if (is_main and self.runtime_ptr.global_task_count.load(.acquire) == 0) {
-                // Temporarily stop accepting new spawns
-                self.runtime_ptr.accepting_spawns.store(false, .release);
-
-                // Re-check task count after setting accepting_spawns flag
-                // This catches tasks that incremented between our check and setting the flag
-                if (self.runtime_ptr.global_task_count.load(.acquire) == 0) {
-                    // Confirmed: no tasks running, initiate shutdown
-                    self.runtime_ptr.shutting_down.store(true, .release);
-
-                    // Trigger shutdown for all executors (including self)
-                    for (self.runtime_ptr.executors.items) |*executor| {
-                        executor.shutdown_async.notify() catch {};
-                    }
-
-                    // Loop will be stopped by shutdown callback
-                } else {
-                    // New task(s) spawned during the check - resume accepting spawns
-                    self.runtime_ptr.accepting_spawns.store(true, .release);
-                }
             }
 
             // Move yielded coroutines back to ready queue
@@ -1527,8 +1579,7 @@ pub const Runtime = struct {
 
     // Multi-executor coordination
     next_executor: std.atomic.Value(usize),
-    global_task_count: std.atomic.Value(usize),
-    accepting_spawns: std.atomic.Value(bool), // Controls whether new tasks can be spawned
+    tasks: AnyTaskList = .{}, // Global task registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
 
     /// Thread-local storage for the current executor
@@ -1581,8 +1632,6 @@ pub const Runtime = struct {
             .allocator = allocator,
             .options = options,
             .next_executor = std.atomic.Value(usize).init(0),
-            .global_task_count = std.atomic.Value(usize).init(0),
-            .accepting_spawns = std.atomic.Value(bool).init(true),
             .shutting_down = std.atomic.Value(bool).init(false),
         };
     }
@@ -1591,6 +1640,11 @@ pub const Runtime = struct {
         // Shutdown ThreadPool before cleaning up executors
         if (self.thread_pool) |tp| {
             tp.shutdown();
+        }
+
+        // Drain any remaining tasks from global registry
+        while (self.tasks.pop()) |task| {
+            self.releaseAwaitable(&task.awaitable);
         }
 
         // Deinit all executors (they own their threads)
@@ -1610,14 +1664,8 @@ pub const Runtime = struct {
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        // Optimistically increment global task count before spawn check
-        // This prevents race condition where task count reaches 0, accepting_spawns
-        // is set to false, but spawn() sneaks in between the check and flag set.
-        _ = self.global_task_count.fetchAdd(1, .release);
-        errdefer _ = self.global_task_count.fetchSub(1, .release);
-
-        // Check if runtime is accepting new spawns
-        if (!self.accepting_spawns.load(.acquire)) {
+        // Check if runtime is shutting down
+        if (self.tasks.isClosed()) {
             return error.RuntimeShutdown;
         }
 
@@ -1646,8 +1694,8 @@ pub const Runtime = struct {
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
-        // Check if runtime is accepting new spawns
-        if (!self.accepting_spawns.load(.acquire)) {
+        // Check if runtime is shutting down
+        if (self.tasks.isClosed()) {
             return error.RuntimeShutdown;
         }
 
@@ -2093,60 +2141,6 @@ test "runtime: spawnBlocking smoke test" {
     };
 
     try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
-}
-
-test "runtime: spawn during shutdown returns error" {
-    const testing = std.testing;
-
-    var runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn task() void {}
-
-        fn mainTask(rt: *Runtime) !void {
-            // First task spawns successfully
-            var handle1 = try rt.spawn(task, .{}, .{});
-            defer handle1.deinit();
-
-            // Manually trigger shutdown by stopping accepting spawns
-            rt.accepting_spawns.store(false, .release);
-
-            // Attempting to spawn during shutdown should fail
-            const result = rt.spawn(task, .{}, .{});
-            try testing.expectError(error.RuntimeShutdown, result);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
-}
-
-test "runtime: spawnBlocking during shutdown returns error" {
-    const testing = std.testing;
-
-    var runtime = try Runtime.init(testing.allocator, .{
-        .thread_pool = .{ .enabled = true },
-    });
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn blockingWork() void {}
-
-        fn mainTask(rt: *Runtime) !void {
-            // First task spawns successfully
-            var handle1 = try rt.spawnBlocking(blockingWork, .{});
-            defer handle1.deinit();
-
-            // Manually trigger shutdown by stopping accepting spawns
-            rt.accepting_spawns.store(false, .release);
-
-            // Attempting to spawn during shutdown should fail
-            const result = rt.spawnBlocking(blockingWork, .{});
-            try testing.expectError(error.RuntimeShutdown, result);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
 }
 
 test "runtime: Future basic set and get" {
