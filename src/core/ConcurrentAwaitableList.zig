@@ -143,7 +143,7 @@ pub fn acquireMutationLock(self: *ConcurrentAwaitableList, executor: ?*Executor)
         spin_count +%= 1;
         if (spin_count == 0) {
             if (executor) |e| {
-                e.yield(.ready, .no_cancel);
+                e.yield(.ready, .ready, .no_cancel);
             } else {
                 std.Thread.yield() catch {};
             }

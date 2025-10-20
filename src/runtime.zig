@@ -178,16 +178,24 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
                 std.debug.panic("cannot wait on self (would deadlock)", .{});
             }
         }
+
+        // Transition to preparing_to_wait state before adding to queue
+        task.coro.state.store(.preparing_to_wait, .release);
+
         awaitable.waiting_list.push(&task.awaitable.wait_node);
 
         // Double-check state before suspending (avoid lost wakeup)
         if (awaitable.done.load(.acquire)) {
             // Completed while we were adding to queue, remove ourselves
             _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
+            // Reset state back to ready
+            task.coro.state.store(.ready, .release);
             return;
         }
 
-        executor.yield(.waiting, .allow_cancel) catch |err| {
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
             // If yield itself was canceled, remove from wait list
             _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
             return err;
@@ -195,7 +203,7 @@ pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void
 
         // Pair with markComplete()'s .release
         _ = awaitable.done.load(.acquire);
-        // Yield returned successfully, awaitable must be complete
+        // Yield returned successfully or we were woken early, awaitable must be complete
     } else {
         // Thread path: use ThreadWaiter for futex-based parking
         var thread_waiter = ThreadWaiter.init();
@@ -331,12 +339,23 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
         else => @compileError("resumeTask() requires *Awaitable, *AnyTask, or *Coroutine, got " ++ @typeName(T)),
     };
 
-    // Validate state before resuming
-    assert(coro.state == .waiting);
-
     const task = AnyTask.fromCoroutine(coro);
     const executor = Executor.fromCoroutine(coro);
-    executor.scheduleTask(task, mode);
+
+    // Atomically transition to ready state and get the old state
+    const old_state = coro.state.swap(.ready, .acq_rel);
+
+    // Only schedule if the task was actually suspended
+    // If it was in .preparing_to_wait, it will see the state change and skip yield
+    if (old_state == .waiting) {
+        executor.scheduleTask(task, mode);
+    } else if (old_state == .preparing_to_wait) {
+        // Task hasn't yielded yet - it will see .ready and skip the yield
+        // No need to schedule
+    } else {
+        // Shouldn't happen - task should be either .waiting or .preparing_to_wait
+        std.debug.panic("resumeTask: unexpected state {} for task {*}", .{ old_state, task });
+    }
 }
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -911,7 +930,7 @@ pub const Executor = struct {
                     .coro = .{
                         .stack = stack,
                         .parent_context_ptr = &self.main_context,
-                        .state = .ready,
+                        .state = .init(.ready),
                     },
                 },
                 .future_result = .{},
@@ -960,7 +979,7 @@ pub const Executor = struct {
     ///
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
-    pub fn yield(self: *Executor, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    pub fn yield(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
@@ -976,7 +995,17 @@ pub const Executor = struct {
             }
         }
 
-        current_coro.state = desired_state;
+        // Atomically transition state - if this fails, someone changed our state
+        if (current_coro.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
+            // CAS failed - someone changed our state
+            if (actual_state == .ready) {
+                // We were woken up before we could yield - don't suspend
+                return;
+            } else {
+                // Unexpected state - this is a bug
+                std.debug.panic("Yield CAS failed with unexpected state: task {*} expected {} but was {} (not .ready)", .{ current_task, expected_state, actual_state });
+            }
+        }
         if (desired_state == .ready) {
             self.next_ready_queue.push(&current_task.awaitable.wait_node);
         }
@@ -1043,7 +1072,7 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        self.timedWaitForReady(milliseconds * 1_000_000) catch |err| switch (err) {
+        self.timedWaitForReady(.ready, milliseconds * 1_000_000) catch |err| switch (err) {
             error.Timeout => return, // Expected for sleep - not an error
             error.Canceled => return error.Canceled, // Propagate cancellation
         };
@@ -1103,7 +1132,7 @@ pub const Executor = struct {
 
                 // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
                 if (self.current_coroutine) |current_coro| {
-                    if (current_coro.state == .dead) {
+                    if (current_coro.state.load(.acquire) == .dead) {
                         const current_task = AnyTask.fromCoroutine(current_coro);
                         const current_awaitable = &current_task.awaitable;
 
@@ -1171,9 +1200,7 @@ pub const Executor = struct {
     /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
     /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
     pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
-        // Mark task as ready (idempotent for spawn, necessary for resumeTask)
-        task.coro.state = .ready;
-
+        // State is already set to .ready by resumeTask() or spawn()
         const wait_node = &task.awaitable.wait_node;
 
         if (mode == .maybe_remote) {
@@ -1187,8 +1214,11 @@ pub const Executor = struct {
                 self.next_ready_queue_remote.push(wait_node);
 
                 // Notify the target executor's event loop (only if initialized)
-                if (self.remote_initialized.load(.acquire)) {
-                    self.remote_wakeup.notify() catch {};
+                const initialized = self.remote_initialized.load(.acquire);
+                if (initialized) {
+                    self.remote_wakeup.notify() catch |err| {
+                        std.debug.print("WARNING: remote_wakeup.notify() failed for executor {}: {}\n", .{ self.id, err });
+                    };
                 }
             }
         } else {
@@ -1239,6 +1269,7 @@ pub const Executor = struct {
     /// another source (in which case the timeout is ignored).
     pub fn timedWaitForReadyWithCallback(
         self: *Executor,
+        expected_state: CoroutineState,
         timeout_ns: u64,
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
@@ -1304,7 +1335,7 @@ pub const Executor = struct {
         );
 
         // Wait for either timeout or external markReady
-        self.yield(.waiting, .allow_cancel) catch |err| {
+        self.yield(expected_state, .waiting, .allow_cancel) catch |err| {
             // Invalidate pending callbacks before unwinding so they ignore this stack frame.
             task.timer_generation +%= 1;
             timer.cancel(
@@ -1340,10 +1371,11 @@ pub const Executor = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Executor, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, timeout_ns: u64) error{ Timeout, Canceled }!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(
+            expected_state,
             timeout_ns,
             DummyContext,
             &dummy,
@@ -1371,7 +1403,7 @@ pub const Executor = struct {
         var cancel_completion: xev.Completion = .{};
 
         while (completion.state() != .dead) {
-            self.yield(.waiting, .allow_cancel) catch |err| switch (err) {
+            self.yield(.ready, .waiting, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     // First cancellation - try to cancel the xev operation
                     if (!was_canceled) {
@@ -1674,7 +1706,7 @@ pub const Runtime = struct {
         _ = self;
         const executor = Runtime.current_executor orelse return;
         if (executor.current_coroutine == null) return;
-        return executor.yield(.ready, .allow_cancel);
+        return executor.yield(.ready, .ready, .allow_cancel);
     }
 
     /// Sleep for the specified number of milliseconds.
@@ -1831,7 +1863,7 @@ pub const Runtime = struct {
         }
 
         // Yield and wait for one to complete
-        try executor.yield(.waiting, .allow_cancel);
+        try executor.yield(.ready, .waiting, .allow_cancel);
 
         // We were woken up - find which one completed
         inline for (fields, 0..) |field, i| {

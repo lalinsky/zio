@@ -10,8 +10,9 @@ pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 e
 
 pub const CoroutineState = enum(u8) {
     ready = 0,
-    waiting = 1,
-    dead = 2,
+    preparing_to_wait = 1,
+    waiting = 2,
+    dead = 3,
 };
 
 pub const stack_alignment = 16;
@@ -398,7 +399,7 @@ pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
     stack: ?Stack,
-    state: CoroutineState,
+    state: std.atomic.Value(CoroutineState),
 
     pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.ReturnType(func))) void {
         const Result = meta.ReturnType(func);
@@ -417,7 +418,7 @@ pub const Coroutine = struct {
                 const result = @call(.always_inline, func, coro_data.args);
                 _ = coro_data.result_ptr.set(result);
 
-                coro.state = .dead;
+                coro.state.store(.dead, .release);
                 switchContext(&coro.context, coro.parent_context_ptr);
                 unreachable;
             }
