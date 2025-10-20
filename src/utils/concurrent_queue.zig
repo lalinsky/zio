@@ -397,17 +397,25 @@ pub fn ConcurrentQueue(comptime T: type) type {
                 item.in_list = false;
             }
 
-            // O(1) removal with doubly-linked list
-            if (item.prev) |prev| {
-                prev.next = item.next;
+            // Save pointers, then clear them immediately while holding lock
+            // This prevents data races with concurrent remove() calls and ensures
+            // second remove attempts fail the early exit checks above
+            const item_prev = item.prev;
+            const item_next = item.next;
+            item.prev = null;
+            item.next = null;
+
+            // O(1) removal with doubly-linked list (using saved values)
+            if (item_prev) |prev| {
+                prev.next = item_next;
             }
-            if (item.next) |next| {
-                next.prev = item.prev;
+            if (item_next) |next| {
+                next.prev = item_prev;
             }
 
             // Update head if removing head
             if (head == item) {
-                if (item.next) |next| {
+                if (item_next) |next| {
                     // Store new head pointer (implicitly releases mutation lock since
                     // fromPtr() creates a state without the mutation bit)
                     // .release: publishes doubly-linked list updates and new head
@@ -424,14 +432,10 @@ pub fn ConcurrentQueue(comptime T: type) type {
             } else {
                 // Not removing head, update tail if needed then explicitly release lock
                 if (self.tail == item) {
-                    self.tail = item.prev;
+                    self.tail = item_prev;
                 }
                 self.releaseMutationLock();
             }
-
-            // Clear pointers
-            item.next = null;
-            item.prev = null;
 
             return true;
         }
