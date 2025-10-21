@@ -1,19 +1,19 @@
-//! Concurrent FIFO queues for thread-safe synchronization primitives.
+//! Wait queues for thread-safe synchronization primitives.
 //!
 //! This is a low-level building block for implementing synchronization primitives
 //! (mutexes, condition variables, semaphores, etc.). Application code should use
 //! higher-level primitives from the sync module instead of using these queues directly.
 //!
 //! Provides two variants:
-//! - ConcurrentQueue: 16-byte queue with separate head and tail pointers
-//! - CompactConcurrentQueue: 8-byte queue with tail stored in head node
+//! - WaitQueue: 16-byte queue with separate head and tail pointers
+//! - CompactWaitQueue: 8-byte queue with tail stored in head node
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 
-/// Generic concurrent FIFO queue with two sentinel states.
+/// Generic wait queue with two sentinel states for synchronization primitives.
 ///
 /// **Low-level primitive**: This is intended for implementing synchronization primitives.
 /// Application code should use higher-level abstractions from the sync module instead.
@@ -46,11 +46,11 @@ const Executor = @import("../runtime.zig").Executor;
 ///     data: i32,
 /// };
 /// // Use .empty for initialization:
-/// var queue: ConcurrentQueue(MyNode) = .empty;
+/// var queue: WaitQueue(MyNode) = .empty;
 /// // Or for convenient field initialization:
-/// waiters: ConcurrentQueue(MyNode) = .empty,
+/// waiters: WaitQueue(MyNode) = .empty,
 /// ```
-pub fn ConcurrentQueue(comptime T: type) type {
+pub fn WaitQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
@@ -457,7 +457,7 @@ pub fn ConcurrentQueue(comptime T: type) type {
     };
 }
 
-test "ConcurrentQueue basic operations" {
+test "WaitQueue basic operations" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -470,7 +470,7 @@ test "ConcurrentQueue basic operations" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    const Queue = ConcurrentQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     // Initially in sentinel0 state
@@ -497,7 +497,7 @@ test "ConcurrentQueue basic operations" {
     try testing.expectEqual(false, queue.remove(&node1));
 }
 
-test "ConcurrentQueue state transitions" {
+test "WaitQueue state transitions" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -507,7 +507,7 @@ test "ConcurrentQueue state transitions" {
         value: i32,
     };
 
-    const Queue = ConcurrentQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue = Queue.initWithState(.sentinel1);
     try testing.expectEqual(Queue.State.sentinel1, queue.getState());
 
@@ -520,7 +520,7 @@ test "ConcurrentQueue state transitions" {
     try testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "ConcurrentQueue empty constant" {
+test "WaitQueue empty constant" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -531,8 +531,8 @@ test "ConcurrentQueue empty constant" {
     };
 
     // Test .empty initialization
-    var queue: ConcurrentQueue(TestNode) = .empty;
-    try testing.expectEqual(ConcurrentQueue(TestNode).State.sentinel0, queue.getState());
+    var queue: WaitQueue(TestNode) = .empty;
+    try testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
     try testing.expectEqual(@as(?*TestNode, null), queue.tail);
 
     // Verify it works like init()
@@ -542,10 +542,10 @@ test "ConcurrentQueue empty constant" {
 
     const popped = queue.pop();
     try testing.expectEqual(&node, popped);
-    try testing.expectEqual(ConcurrentQueue(TestNode).State.sentinel0, queue.getState());
+    try testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
 }
 
-test "ConcurrentQueue double remove" {
+test "WaitQueue double remove" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -558,7 +558,7 @@ test "ConcurrentQueue double remove" {
     var runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    const Queue = ConcurrentQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     // Create mock nodes
@@ -593,7 +593,7 @@ test "ConcurrentQueue double remove" {
     try testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "ConcurrentQueue concurrent push and pop" {
+test "WaitQueue concurrent push and pop" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -603,7 +603,7 @@ test "ConcurrentQueue concurrent push and pop" {
         value: usize,
     };
 
-    const Queue = ConcurrentQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     const num_threads = 4;
@@ -647,7 +647,7 @@ test "ConcurrentQueue concurrent push and pop" {
     try testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "ConcurrentQueue concurrent remove during modifications" {
+test "WaitQueue concurrent remove during modifications" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -657,7 +657,7 @@ test "ConcurrentQueue concurrent remove during modifications" {
         value: usize,
     };
 
-    const Queue = ConcurrentQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     const num_items = 200;
@@ -726,7 +726,7 @@ test "ConcurrentQueue concurrent remove during modifications" {
     try testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "ConcurrentQueue popOrTransition with concurrent removals" {
+test "WaitQueue popOrTransition with concurrent removals" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -736,7 +736,7 @@ test "ConcurrentQueue popOrTransition with concurrent removals" {
         value: usize,
     };
 
-    const Queue = ConcurrentQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue = Queue.initWithState(.sentinel0);
 
     const num_items = 500;
@@ -799,7 +799,7 @@ test "ConcurrentQueue popOrTransition with concurrent removals" {
     try testing.expectEqual(Queue.State.sentinel1, queue.getState());
 }
 
-test "ConcurrentQueue stress test with heavy contention" {
+test "WaitQueue stress test with heavy contention" {
     const testing = std.testing;
 
     const TestNode = struct {
@@ -809,7 +809,7 @@ test "ConcurrentQueue stress test with heavy contention" {
         value: usize,
     };
 
-    const Queue = ConcurrentQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     const num_threads = 8;

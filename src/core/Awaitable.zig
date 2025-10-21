@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("WaitNode.zig");
-const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 
 // Forward declaration - Runtime is defined in runtime.zig
 const Runtime = @import("../runtime.zig").Runtime;
@@ -30,7 +30,7 @@ pub const Awaitable = struct {
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // WaitNodes waiting for the completion of this awaitable
-    waiting_list: ConcurrentQueue(WaitNode) = .empty,
+    waiting_list: WaitQueue(WaitNode) = .empty,
 
     /// Request cancellation of this awaitable.
     /// The cancellation flag will be consumed by the next yield() call.
