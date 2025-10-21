@@ -102,13 +102,35 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
         // On cancellation, remove from queue and reacquire mutex
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
         // Must reacquire mutex before returning
-        mutex.lockNoCancel(runtime);
+        mutex.lockUncancelable(runtime);
         return err;
     };
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
-    mutex.lockNoCancel(runtime);
+    mutex.lockUncancelable(runtime);
     try runtime.checkCanceled();
+}
+
+/// Atomically releases the mutex and waits for a signal with cancellation shielding.
+///
+/// Like `wait()`, but guarantees the wait operation completes even if cancellation
+/// occurs. Cancellation requests are ignored during the wait operation.
+///
+/// This function must be called while holding the mutex. It will:
+/// 1. Add the current task to the wait queue
+/// 2. Release the mutex
+/// 3. Suspend until signaled by `signal()` or `broadcast()`
+/// 4. Reacquire the mutex before returning
+///
+/// This is useful in critical sections where you must wait for a condition regardless
+/// of cancellation (e.g., cleanup operations that need to wait for resources to be freed).
+///
+/// If you need to propagate cancellation after the wait completes, call
+/// `runtime.checkCanceled()` after this function returns.
+pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
+    runtime.beginShield();
+    defer runtime.endShield();
+    self.wait(runtime, mutex) catch unreachable;
 }
 
 /// Atomically releases the mutex and waits for a signal with a timeout.
@@ -166,14 +188,14 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
             _ = self.wait_queue.remove(&task.awaitable.wait_node);
         }
         // Must reacquire mutex before returning
-        mutex.lockNoCancel(runtime);
+        mutex.lockUncancelable(runtime);
         // Cancellation during lock has priority over timeout
         try runtime.checkCanceled();
         return err;
     };
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
-    mutex.lockNoCancel(runtime);
+    mutex.lockUncancelable(runtime);
     try runtime.checkCanceled();
 }
 

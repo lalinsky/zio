@@ -207,7 +207,7 @@ pub fn Channel(comptime T: type) type {
         ///
         /// This operation is shielded from cancellation to ensure the close completes.
         pub fn close(self: *Self, rt: *Runtime, immediate: bool) void {
-            self.mutex.lockNoCancel(rt);
+            self.mutex.lockUncancelable(rt);
             defer self.mutex.unlock(rt);
 
             self.closed = true;

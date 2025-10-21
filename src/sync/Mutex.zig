@@ -113,7 +113,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 ///
 /// If you need to propagate cancellation after acquiring the lock, call
 /// `runtime.checkCanceled()` after this function returns.
-pub fn lockNoCancel(self: *Mutex, runtime: *Runtime) void {
+pub fn lockUncancelable(self: *Mutex, runtime: *Runtime) void {
     runtime.beginShield();
     defer runtime.endShield();
     self.lock(runtime) catch unreachable;

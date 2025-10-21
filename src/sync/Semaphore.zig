@@ -78,6 +78,25 @@ pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
     }
 }
 
+/// Acquires a permit with cancellation shielding.
+///
+/// Like `wait()`, but guarantees the permit is acquired even if cancellation
+/// occurs. Cancellation requests are ignored during the wait operation.
+///
+/// Decrements the permit count by 1. If no permits are available (count is 0),
+/// suspends the current task until a permit is released via `post()`.
+///
+/// This is useful in critical sections where you must acquire a permit regardless
+/// of cancellation (e.g., cleanup operations that need resource access).
+///
+/// If you need to propagate cancellation after acquiring the permit, call
+/// `runtime.checkCanceled()` after this function returns.
+pub fn waitUncancelable(self: *Semaphore, rt: *Runtime) void {
+    rt.beginShield();
+    defer rt.endShield();
+    self.wait(rt) catch unreachable;
+}
+
 /// Acquires a permit with a timeout.
 ///
 /// Like `wait()`, but returns `error.Timeout` if no permit becomes available
@@ -126,7 +145,7 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout
 /// This operation is shielded from cancellation to ensure the permit is always
 /// released, even if the calling task is in the process of being cancelled.
 pub fn post(self: *Semaphore, rt: *Runtime) void {
-    self.mutex.lockNoCancel(rt);
+    self.mutex.lockUncancelable(rt);
     defer self.mutex.unlock(rt);
 
     self.permits += 1;
