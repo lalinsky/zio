@@ -1385,7 +1385,7 @@ pub const Executor = struct {
         const initialized = self.remote_initialized.load(.acquire);
         if (initialized) {
             self.remote_wakeup.notify() catch |err| {
-                std.debug.print("WARNING: remote_wakeup.notify() failed for executor {}: {}\n", .{ self.id, err });
+                std.log.warn("remote_wakeup.notify() failed for executor {}: {}", .{ self.id, err });
             };
         }
     }
