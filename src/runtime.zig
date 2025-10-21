@@ -259,7 +259,7 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
         }
 
         const TimeoutContext = struct {
-            wait_queue: *ConcurrentQueue(WaitNode),
+            wait_queue: *WaitQueue(WaitNode),
             wait_node: *WaitNode,
         };
 
@@ -367,7 +367,7 @@ pub const AnyTask = struct {
     shield_count: u32 = 0,
     pin_count: u32 = 0,
 
-    // Intrusive list node for Executor.tasks queue (ConcurrentQueue)
+    // Intrusive list node for Executor.tasks queue (WaitQueue)
     next: ?*AnyTask = null,
     prev: ?*AnyTask = null,
     in_list: bool = false,
@@ -416,9 +416,9 @@ pub const AnyTask = struct {
 /// - sentinel1 (empty_closed): No tasks, runtime shutting down, reject spawns
 /// - pointer: Has tasks, accepting new spawns
 pub const AnyTaskList = struct {
-    queue: ConcurrentQueue(AnyTask) = .empty,
+    queue: WaitQueue(AnyTask) = .empty,
 
-    const State = ConcurrentQueue(AnyTask).State;
+    const State = WaitQueue(AnyTask).State;
     const empty_open: State = .sentinel0;
     const empty_closed: State = .sentinel1;
 
@@ -828,7 +828,7 @@ pub fn SelectUnion(comptime S: type) type {
 // Generic data structures (private)
 const WaitNode = @import("core/WaitNode.zig");
 const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
-const ConcurrentQueue = @import("utils/concurrent_queue.zig").ConcurrentQueue;
+const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 

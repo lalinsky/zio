@@ -49,18 +49,18 @@ const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime.zig").resumeTask;
-const ConcurrentQueue = @import("../utils/concurrent_queue.zig").ConcurrentQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 
-wait_queue: ConcurrentQueue(WaitNode) = .empty,
+wait_queue: WaitQueue(WaitNode) = .empty,
 
 const ResetEvent = @This();
 
-// Use ConcurrentQueue sentinel states to encode event state:
+// Use WaitQueue sentinel states to encode event state:
 // - sentinel0 = unset (no waiters, event not signaled)
 // - sentinel1 = set (no waiters, event signaled)
 // - pointer = waiting (has waiters, event not signaled)
-const State = ConcurrentQueue(WaitNode).State;
+const State = WaitQueue(WaitNode).State;
 const unset = State.sentinel0;
 const is_set = State.sentinel1;
 
@@ -183,7 +183,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     }
 
     const TimeoutContext = struct {
-        wait_queue: *ConcurrentQueue(WaitNode),
+        wait_queue: *WaitQueue(WaitNode),
         wait_node: *WaitNode,
     };
 

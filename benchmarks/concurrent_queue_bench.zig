@@ -1,7 +1,7 @@
 const std = @import("std");
 const zio = @import("zio");
 const Runtime = zio.Runtime;
-const ConcurrentQueue = zio.util.ConcurrentQueue;
+const WaitQueue = zio.util.WaitQueue;
 
 const StandardNode = struct {
     next: ?*@This() = null,
@@ -11,7 +11,7 @@ const StandardNode = struct {
 };
 
 fn benchmarkStandardQueue(allocator: std.mem.Allocator, num_operations: usize) !u64 {
-    const Queue = ConcurrentQueue(StandardNode);
+    const Queue = WaitQueue(StandardNode);
     var queue: Queue = .empty;
 
     const nodes = try allocator.alloc(StandardNode, num_operations);
@@ -44,7 +44,7 @@ fn benchmarkStandardQueue(allocator: std.mem.Allocator, num_operations: usize) !
 }
 
 fn benchmarkStandardQueueConcurrent(allocator: std.mem.Allocator, num_threads: usize, ops_per_thread: usize) !u64 {
-    const Queue = ConcurrentQueue(StandardNode);
+    const Queue = WaitQueue(StandardNode);
     var queue: Queue = .empty;
 
     const total_ops = num_threads * ops_per_thread;
@@ -170,13 +170,13 @@ pub fn main() !void {
     const num_operations = 10_000;
     const iterations = 100;
 
-    std.debug.print("=== ConcurrentQueue Benchmark ===\n\n", .{});
-    std.debug.print("Queue size: {d} bytes\n", .{@sizeOf(ConcurrentQueue(StandardNode))});
+    std.debug.print("=== WaitQueue Benchmark ===\n\n", .{});
+    std.debug.print("Queue size: {d} bytes\n", .{@sizeOf(WaitQueue(StandardNode))});
     std.debug.print("Node size:  {d} bytes\n\n", .{@sizeOf(StandardNode)});
 
     std.debug.print("Single-threaded ({d} operations, {d} iterations):\n\n", .{ num_operations, iterations });
 
-    try runBenchmark("ConcurrentQueue", allocator, benchmarkStandardQueue, num_operations, iterations);
+    try runBenchmark("WaitQueue", allocator, benchmarkStandardQueue, num_operations, iterations);
 
     const num_threads = try std.Thread.getCpuCount();
     const ops_per_thread = 2_500;
@@ -184,5 +184,5 @@ pub fn main() !void {
 
     std.debug.print("Concurrent ({d} threads × {d} ops, {d} iterations):\n\n", .{ num_threads, ops_per_thread, concurrent_iterations });
 
-    try runConcurrentBenchmark("ConcurrentQueue (concurrent)", allocator, benchmarkStandardQueueConcurrent, num_threads, ops_per_thread, concurrent_iterations);
+    try runConcurrentBenchmark("WaitQueue (concurrent)", allocator, benchmarkStandardQueueConcurrent, num_threads, ops_per_thread, concurrent_iterations);
 }

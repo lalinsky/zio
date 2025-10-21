@@ -5,7 +5,7 @@ const coroutines = @import("coroutines.zig");
 const Stack = coroutines.Stack;
 const StackPtr = coroutines.StackPtr;
 const stack_alignment = coroutines.stack_alignment;
-const ConcurrentQueue = @import("utils/concurrent_queue.zig").ConcurrentQueue;
+const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 
 pub const MIN_STACK_SIZE = 64 * 1024; // 64KB
 const NUM_BUCKETS = 8; // 64KB, 128KB, 256KB, 512KB, 1MB, 2MB, 4MB, 8MB
@@ -44,7 +44,7 @@ const FreeListNode = struct {
 };
 
 const Bucket = struct {
-    queue: ConcurrentQueue(FreeListNode) = ConcurrentQueue(FreeListNode).empty,
+    queue: WaitQueue(FreeListNode) = WaitQueue(FreeListNode).empty,
 
     fn acquire(self: *Bucket, size: usize, allocator: Allocator) !Stack {
         // Pop from front (FIFO - gets oldest stack)
