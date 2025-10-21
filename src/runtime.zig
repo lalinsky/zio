@@ -41,6 +41,10 @@ pub const ExecutorId = enum(usize) {
 pub const SpawnOptions = struct {
     stack_size: ?usize = null,
     executor: ExecutorId = .any,
+    /// Pin task to its home executor (prevents cross-thread migration).
+    /// Pinned tasks always run on their original executor, even when woken from other threads.
+    /// Useful for tasks with executor-specific state or when thread affinity is desired.
+    pinned: bool = false,
 };
 
 // Runtime configuration options
@@ -356,6 +360,7 @@ pub const AnyTask = struct {
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
     shield_count: u32 = 0,
+    pin_count: u32 = 0,
 
     // Intrusive list node for Executor.tasks queue (ConcurrentQueue)
     next: ?*AnyTask = null,
@@ -996,6 +1001,11 @@ pub const Executor = struct {
 
         task.impl.base.coro.setup(func, args, &task.impl.future_result);
 
+        // Set pin count if task is pinned
+        if (options.pinned) {
+            task.impl.base.pin_count = 1;
+        }
+
         // Increment ref count for JoinHandle
         task.impl.base.awaitable.ref_count.incr();
 
@@ -1131,6 +1141,25 @@ pub const Executor = struct {
         if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
             return error.Canceled;
         }
+    }
+
+    /// Pin the current task to its home executor (prevents cross-thread migration).
+    /// While pinned, the task will always run on its original executor, even when
+    /// woken from other threads. Useful for tasks with executor-specific state.
+    /// Must be paired with endPin().
+    pub fn beginPin(self: *Executor) void {
+        const current_coro = self.current_coroutine orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        current_task.pin_count += 1;
+    }
+
+    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
+    /// Must be paired with beginPin().
+    pub fn endPin(self: *Executor) void {
+        const current_coro = self.current_coroutine orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        std.debug.assert(current_task.pin_count > 0);
+        current_task.pin_count -= 1;
     }
 
     pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
@@ -1394,7 +1423,7 @@ pub const Executor = struct {
         }
 
         // Sync tasks can migrate for cache locality (waiting_sync state only)
-        if (old_state == .waiting_sync and mode == .maybe_remote) {
+        if (old_state == .waiting_sync and mode == .maybe_remote and task.pin_count == 0) {
             const current_exec = Runtime.current_executor orelse {
                 self.scheduleTaskRemote(task);
                 return;
@@ -1937,6 +1966,28 @@ pub const Runtime = struct {
         const executor = Runtime.current_executor orelse return;
         if (executor.current_coroutine == null) return;
         executor.endShield();
+    }
+
+    /// Pin the current task to its home executor (prevents cross-thread migration).
+    /// While pinned, the task will always run on its original executor, even when
+    /// woken from other threads. Useful for tasks with executor-specific state.
+    /// Must be paired with endPin().
+    /// No-op if not called from within a coroutine.
+    pub fn beginPin(self: *Runtime) void {
+        _ = self;
+        const executor = Runtime.current_executor orelse return;
+        if (executor.current_coroutine == null) return;
+        executor.beginPin();
+    }
+
+    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
+    /// Must be paired with beginPin().
+    /// No-op if not called from within a coroutine.
+    pub fn endPin(self: *Runtime) void {
+        _ = self;
+        const executor = Runtime.current_executor orelse return;
+        if (executor.current_coroutine == null) return;
+        executor.endPin();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
