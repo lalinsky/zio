@@ -111,19 +111,19 @@ test "tcpConnectToAddress: basic connection" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const TcpListener = @import("tcp.zig").TcpListener;
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
+            var listener = try TcpListener.init(addr);
+            defer listener.close(rt);
 
             try listener.bind(addr);
             try listener.listen(1);
 
             ready_event.set(rt);
 
-            var stream = try listener.accept();
-            defer stream.close();
+            var stream = try listener.accept(rt);
+            defer stream.close(rt);
 
             var buffer: [256]u8 = undefined;
-            const n = try stream.read(&buffer);
+            const n = try stream.read(rt, &buffer);
             try testing.expectEqualStrings("hello", buffer[0..n]);
         }
     };
@@ -134,10 +134,10 @@ test "tcpConnectToAddress: basic connection" {
 
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try tcpConnectToAddress(rt, addr);
-            defer stream.close();
+            defer stream.close(rt);
 
-            try stream.writeAll("hello");
-            try stream.shutdown();
+            try stream.writeAll(rt, "hello");
+            try stream.shutdown(rt);
         }
     };
 
@@ -169,19 +169,19 @@ test "tcpConnectToHost: localhost connection" {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const TcpListener = @import("tcp.zig").TcpListener;
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
+            var listener = try TcpListener.init(addr);
+            defer listener.close(rt);
 
             try listener.bind(addr);
             try listener.listen(1);
 
             ready_event.set(rt);
 
-            var stream = try listener.accept();
-            defer stream.close();
+            var stream = try listener.accept(rt);
+            defer stream.close(rt);
 
             var buffer: [256]u8 = undefined;
-            const n = try stream.read(&buffer);
+            const n = try stream.read(rt, &buffer);
             try testing.expectEqualStrings("hello from host", buffer[0..n]);
         }
     };
@@ -191,10 +191,10 @@ test "tcpConnectToHost: localhost connection" {
             try ready_event.wait(rt);
 
             var stream = try tcpConnectToHost(rt, alloc, "localhost", TEST_PORT);
-            defer stream.close();
+            defer stream.close(rt);
 
-            try stream.writeAll("hello from host");
-            try stream.shutdown();
+            try stream.writeAll(rt, "hello from host");
+            try stream.shutdown(rt);
         }
     };
 

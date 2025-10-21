@@ -392,28 +392,27 @@ const ConnectionHandler = struct {
     allocator: std.mem.Allocator,
 
     fn run(rt: *zio.Runtime, stream: zio.TcpStream, store_ptr: *Store, alloc: std.mem.Allocator) !void {
-        _ = rt;
         var self = ConnectionHandler{
             .stream = stream,
             .store = store_ptr,
             .allocator = alloc,
         };
-        defer self.stream.close();
+        defer self.stream.close(rt);
 
-        self.handle() catch |err| {
+        self.handle(rt) catch |err| {
             std.log.debug("Connection handler error: {}", .{err});
         };
     }
 
-    fn handle(self: *ConnectionHandler) !void {
+    fn handle(self: *ConnectionHandler, rt: *zio.Runtime) !void {
         const read_buffer = try self.allocator.alloc(u8, READ_BUFFER_SIZE);
         defer self.allocator.free(read_buffer);
 
         const write_buffer = try self.allocator.alloc(u8, WRITE_BUFFER_SIZE);
         defer self.allocator.free(write_buffer);
 
-        var reader = self.stream.reader(read_buffer);
-        var writer = self.stream.writer(write_buffer);
+        var reader = self.stream.reader(rt, read_buffer);
+        var writer = self.stream.writer(rt, write_buffer);
 
         var parser = RespParser{
             .reader = &reader.interface,
@@ -462,8 +461,8 @@ const ConnectionHandler = struct {
 
 fn runServer(rt: *zio.Runtime, store_ptr: *Store, alloc: std.mem.Allocator) !void {
     const addr = try std.net.Address.parseIp4("127.0.0.1", 6379);
-    var listener = try zio.TcpListener.init(rt, addr);
-    defer listener.close();
+    var listener = try zio.TcpListener.init(addr);
+    defer listener.close(rt);
 
     try listener.bind(addr);
     try listener.listen(128);
@@ -472,8 +471,8 @@ fn runServer(rt: *zio.Runtime, store_ptr: *Store, alloc: std.mem.Allocator) !voi
     std.log.info("Test with: redis-cli -p 6379", .{});
 
     while (true) {
-        var stream = try listener.accept();
-        errdefer stream.close();
+        var stream = try listener.accept(rt);
+        errdefer stream.close(rt);
         var handle = try rt.spawn(ConnectionHandler.run, .{ rt, stream, store_ptr, alloc }, .{});
         handle.deinit();
     }

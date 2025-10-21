@@ -10,7 +10,7 @@ fn runTlsTask(rt: *zio.Runtime) !void {
     std.log.info("Attempting TCP connection to httpbin.org:443...", .{});
 
     var stream = try zio.TcpStream.connect(rt, addr);
-    defer stream.close();
+    defer stream.close(rt);
 
     std.log.info("TCP connected to httpbin.org:443 successfully!", .{});
     std.log.info("Starting TLS handshake...", .{});
@@ -24,8 +24,8 @@ fn runTlsTask(rt: *zio.Runtime) !void {
     var tls_write_buffer: [32 * 1024]u8 = undefined;
 
     // Initialize TLS client with stream reader/writer interfaces
-    var tcp_reader = stream.reader(&tcp_read_buffer);
-    var tcp_writer = stream.writer(&tcp_write_buffer);
+    var tcp_reader = stream.reader(rt, &tcp_read_buffer);
+    var tcp_writer = stream.writer(rt, &tcp_write_buffer);
 
     var tls_client = std.crypto.tls.Client.init(&tcp_reader.interface, &tcp_writer.interface, .{
         .host = .{ .explicit = "httpbin.org" },

@@ -16,24 +16,24 @@ const TEST_PORT = 45001;
 
 fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
     const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-    var listener = try TcpListener.init(rt, addr);
-    defer listener.close();
+    var listener = try TcpListener.init(addr);
+    defer listener.close(rt);
 
     try listener.bind(addr);
     try listener.listen(1);
 
     ready_event.set(rt);
 
-    var stream = try listener.accept();
+    var stream = try listener.accept(rt);
     defer {
-        stream.shutdown() catch {};
-        stream.close();
+        stream.shutdown(rt) catch {};
+        stream.close(rt);
     }
 
     var read_buffer: [1024]u8 = undefined;
     var write_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(&read_buffer);
-    var writer = stream.writer(&write_buffer);
+    var reader = stream.reader(rt, &read_buffer);
+    var writer = stream.writer(rt, &write_buffer);
 
     while (true) {
         _ = reader.interface.stream(&writer.interface, .unlimited) catch |err| switch (err) {
@@ -46,12 +46,10 @@ fn echoServer(rt: *Runtime, ready_event: *ResetEvent) !void {
 
 pub const TcpListener = struct {
     xev_tcp: xev.TCP,
-    runtime: *Runtime,
 
-    pub fn init(runtime: *Runtime, addr: std.net.Address) !TcpListener {
+    pub fn init(addr: std.net.Address) !TcpListener {
         return TcpListener{
             .xev_tcp = try xev.TCP.init(addr),
-            .runtime = runtime,
         };
     }
 
@@ -63,8 +61,8 @@ pub const TcpListener = struct {
         try self.xev_tcp.listen(backlog);
     }
 
-    pub fn accept(self: TcpListener) !TcpStream {
-        const task = self.runtime.getCurrentTask() orelse unreachable;
+    pub fn accept(self: TcpListener, rt: *Runtime) !TcpStream {
+        const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
@@ -107,16 +105,15 @@ pub const TcpListener = struct {
         };
         return TcpStream{
             .xev_tcp = accepted_tcp,
-            .runtime = self.runtime,
         };
     }
 
-    pub fn close(self: TcpListener) void {
+    pub fn close(self: TcpListener, rt: *Runtime) void {
         // Shield close operation from cancellation
-        self.runtime.beginShield();
-        defer self.runtime.endShield();
+        rt.beginShield();
+        defer rt.endShield();
 
-        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
@@ -163,14 +160,14 @@ pub const TcpListener = struct {
 
 pub const TcpStream = struct {
     xev_tcp: xev.TCP,
-    runtime: *Runtime,
 
     pub const ReadError = anyerror;
     pub const WriteError = anyerror;
 
     /// Establishes a TCP connection to the specified address.
     /// Returns a connected TcpStream on success.
-    pub fn connect(runtime: *Runtime, addr: std.net.Address) !TcpStream {
+    pub fn connect(rt: *Runtime, addr: std.net.Address) !TcpStream {
+        const runtime = rt;
         var tcp = try xev.TCP.init(addr);
         const task = runtime.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
@@ -219,16 +216,15 @@ pub const TcpStream = struct {
 
         return TcpStream{
             .xev_tcp = tcp,
-            .runtime = runtime,
         };
     }
 
     /// Reads data from the stream into the provided buffer.
     /// Returns the number of bytes read, which may be less than buffer.len.
     /// A return value of 0 indicates end-of-stream.
-    pub fn read(self: TcpStream, buffer: []u8) !usize {
+    pub fn read(self: TcpStream, rt: *Runtime, buffer: []u8) !usize {
         var buf: xev.ReadBuffer = .{ .slice = buffer };
-        return self.readBuf(&buf) catch |err| switch (err) {
+        return self.readBuf(rt, &buf) catch |err| switch (err) {
             error.EndOfStream => 0,
             else => err,
         };
@@ -237,10 +233,10 @@ pub const TcpStream = struct {
     /// Returns the number of bytes read. If the number read is smaller than
     /// `buffer.len`, it means the stream reached the end. Reaching the end of
     /// a stream is not an error condition.
-    pub fn readAll(self: TcpStream, buffer: []u8) !usize {
+    pub fn readAll(self: TcpStream, rt: *Runtime, buffer: []u8) !usize {
         var index: usize = 0;
         while (index < buffer.len) {
-            const n = try self.read(buffer[index..]);
+            const n = try self.read(rt, buffer[index..]);
             if (n == 0) break;
             index += n;
         }
@@ -249,41 +245,41 @@ pub const TcpStream = struct {
 
     /// Writes data to the stream. Returns the number of bytes written,
     /// which may be less than the length of data.
-    pub fn write(self: TcpStream, data: []const u8) !usize {
-        return self.writeBuf(.{ .slice = data });
+    pub fn write(self: TcpStream, rt: *Runtime, data: []const u8) !usize {
+        return self.writeBuf(rt, .{ .slice = data });
     }
 
     /// Writes all data to the stream, looping until the entire buffer is written.
     /// Returns when all bytes have been written successfully.
-    pub fn writeAll(self: TcpStream, data: []const u8) !void {
+    pub fn writeAll(self: TcpStream, rt: *Runtime, data: []const u8) !void {
         var offset: usize = 0;
 
         while (offset < data.len) {
-            const bytes_written = try self.write(data[offset..]);
+            const bytes_written = try self.write(rt, data[offset..]);
             offset += bytes_written;
         }
     }
 
     /// Reads into multiple buffers using vectored I/O.
     /// Returns total bytes read. xev supports max 2 buffers.
-    pub fn readVec(self: TcpStream, iovecs: [][]u8) std.io.Reader.Error!usize {
+    pub fn readVec(self: TcpStream, rt: *Runtime, iovecs: [][]u8) std.io.Reader.Error!usize {
         if (iovecs.len == 0) return 0;
 
-        return self.readBuf(xev.ReadBuffer.fromSlices(iovecs));
+        return self.readBuf(rt, xev.ReadBuffer.fromSlices(iovecs));
     }
 
     /// Writes from multiple buffers using vectored I/O.
     /// xev supports max 2 buffers.
-    pub fn writeVec(self: TcpStream, iovecs: []const []const u8) std.io.Writer.Error!usize {
+    pub fn writeVec(self: TcpStream, rt: *Runtime, iovecs: []const []const u8) std.io.Writer.Error!usize {
         if (iovecs.len == 0) return 0;
 
-        return self.writeBuf(xev.WriteBuffer.fromSlices(iovecs));
+        return self.writeBuf(rt, xev.WriteBuffer.fromSlices(iovecs));
     }
 
     /// Shuts down the write side of the TCP connection.
     /// This sends a FIN packet to signal that no more data will be sent.
-    pub fn shutdown(self: TcpStream) !void {
-        const task = self.runtime.getCurrentTask() orelse unreachable;
+    pub fn shutdown(self: TcpStream, rt: *Runtime) !void {
+        const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
@@ -330,8 +326,8 @@ pub const TcpStream = struct {
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: TcpStream, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
-        const task = self.runtime.getCurrentTask() orelse unreachable;
+    pub fn writeBuf(self: TcpStream, rt: *Runtime, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
+        const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
@@ -371,8 +367,8 @@ pub const TcpStream = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: TcpStream, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
-        const task = self.runtime.getCurrentTask() orelse unreachable;
+    pub fn readBuf(self: TcpStream, rt: *Runtime, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
+        const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
@@ -422,12 +418,12 @@ pub const TcpStream = struct {
 
     /// Closes the TCP stream and releases associated resources.
     /// This operation is asynchronous but returns immediately.
-    pub fn close(self: TcpStream) void {
+    pub fn close(self: TcpStream, rt: *Runtime) void {
         // Shield close operation from cancellation
-        self.runtime.beginShield();
-        defer self.runtime.endShield();
+        rt.beginShield();
+        defer rt.endShield();
 
-        const task = self.runtime.getCurrentTask() orelse unreachable;
+        const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
 
@@ -476,12 +472,12 @@ pub const TcpStream = struct {
     pub const Writer = StreamWriter(*const TcpStream);
 
     // Zig 0.15+ interface methods
-    pub fn reader(self: *const TcpStream, buffer: []u8) Reader {
-        return Reader.init(self, buffer);
+    pub fn reader(self: *const TcpStream, rt: *Runtime, buffer: []u8) Reader {
+        return Reader.init(self, rt, buffer);
     }
 
-    pub fn writer(self: *const TcpStream, buffer: []u8) Writer {
-        return Writer.init(self, buffer);
+    pub fn writer(self: *const TcpStream, rt: *Runtime, buffer: []u8) Writer {
+        return Writer.init(self, rt, buffer);
     }
 };
 
@@ -500,14 +496,14 @@ test "TCP: basic echo server and client" {
 
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
+            defer stream.close(rt);
 
             const test_data = "Hello, TCP!";
-            try stream.writeAll(test_data);
-            try stream.shutdown();
+            try stream.writeAll(rt, test_data);
+            try stream.shutdown(rt);
 
             var buffer: [1024]u8 = undefined;
-            const bytes_read = try stream.readAll(&buffer);
+            const bytes_read = try stream.readAll(rt, &buffer);
             try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
         }
     };
@@ -539,21 +535,21 @@ test "TCP: Writer splat handling" {
 
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
+            defer stream.close(rt);
 
             var write_buffer: [256]u8 = undefined;
-            var writer = stream.writer(&write_buffer);
+            var writer = stream.writer(rt, &write_buffer);
 
             // Test splat: "ba" + "na" repeated 3 times = "bananana"
             var data = [_][]const u8{ "ba", "na" };
             const splat: usize = 3;
             try writer.interface.writeSplatAll(&data, splat);
             try writer.interface.flush();
-            try stream.shutdown();
+            try stream.shutdown(rt);
 
             // Read back echoed data
             var read_buffer: [1024]u8 = undefined;
-            const bytes_read = try stream.readAll(&read_buffer);
+            const bytes_read = try stream.readAll(rt, &read_buffer);
 
             const expected = "bananana";
             try testing.expectEqualStrings(expected, read_buffer[0..bytes_read]);
@@ -587,21 +583,21 @@ test "TCP: Writer splat with single element" {
 
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
+            defer stream.close(rt);
 
             var write_buffer: [256]u8 = undefined;
-            var writer = stream.writer(&write_buffer);
+            var writer = stream.writer(rt, &write_buffer);
 
             // Test single element splat: "hello" repeated 3 times
             var data = [_][]const u8{"hello"};
             const splat: usize = 3;
             try writer.interface.writeSplatAll(&data, splat);
             try writer.interface.flush();
-            try stream.shutdown();
+            try stream.shutdown(rt);
 
             // Read back echoed data
             var read_buffer: [1024]u8 = undefined;
-            const bytes_read = try stream.readAll(&read_buffer);
+            const bytes_read = try stream.readAll(rt, &read_buffer);
 
             const expected = "hellohellohello";
             try testing.expectEqualStrings(expected, read_buffer[0..bytes_read]);
@@ -635,21 +631,21 @@ test "TCP: Writer splat with single character" {
 
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
+            defer stream.close(rt);
 
             var write_buffer: [256]u8 = undefined;
-            var writer = stream.writer(&write_buffer);
+            var writer = stream.writer(rt, &write_buffer);
 
             // Test single-character splat optimization: "x" repeated 50 times
             var data = [_][]const u8{"x"};
             const splat: usize = 50;
             try writer.interface.writeSplatAll(&data, splat);
             try writer.interface.flush();
-            try stream.shutdown();
+            try stream.shutdown(rt);
 
             // Read back echoed data
             var read_buffer: [1024]u8 = undefined;
-            const bytes_read = try stream.readAll(&read_buffer);
+            const bytes_read = try stream.readAll(rt, &read_buffer);
 
             const expected = "x" ** 50;
             try testing.expectEqualStrings(expected, read_buffer[0..bytes_read]);
@@ -680,24 +676,24 @@ test "TCP: Reader takeByte with RESP protocol" {
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
+            var listener = try TcpListener.init(addr);
+            defer listener.close(rt);
 
             try listener.bind(addr);
             try listener.listen(1);
 
             ready_event.set(rt);
 
-            var stream = try listener.accept();
+            var stream = try listener.accept(rt);
             defer {
-                stream.shutdown() catch {};
-                stream.close();
+                stream.shutdown(rt) catch {};
+                stream.close(rt);
             }
 
             var read_buffer: [1024]u8 = undefined;
             var write_buffer: [1024]u8 = undefined;
-            var reader = stream.reader(&read_buffer);
-            var writer = stream.writer(&write_buffer);
+            var reader = stream.reader(rt, &read_buffer);
+            var writer = stream.writer(rt, &write_buffer);
 
             // Read RESP protocol data using takeByte
             const first_byte = try reader.interface.takeByte();
@@ -733,16 +729,16 @@ test "TCP: Reader takeByte with RESP protocol" {
 
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
+            defer stream.close(rt);
 
             // Send RESP PING command
             const test_data = "*1\r\n$4\r\nPING\r\n";
-            try stream.writeAll(test_data);
-            try stream.shutdown();
+            try stream.writeAll(rt, test_data);
+            try stream.shutdown(rt);
 
             // Read back echoed data
             var buffer: [1024]u8 = undefined;
-            const bytes_read = try stream.readAll(&buffer);
+            const bytes_read = try stream.readAll(rt, &buffer);
             try testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
         }
     };
@@ -771,23 +767,23 @@ test "TCP: readBuf with different ReadBuffer variants" {
     const ServerTask = struct {
         fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(rt, addr);
-            defer listener.close();
+            var listener = try TcpListener.init(addr);
+            defer listener.close(rt);
 
             try listener.bind(addr);
             try listener.listen(1);
 
             ready_event.set(rt);
 
-            var stream = try listener.accept();
+            var stream = try listener.accept(rt);
             defer {
-                stream.shutdown() catch {};
-                stream.close();
+                stream.shutdown(rt) catch {};
+                stream.close(rt);
             }
 
             // Send test data: "Hello World!"
             const test_data = "Hello World!";
-            try stream.writeAll(test_data);
+            try stream.writeAll(rt, test_data);
         }
     };
 
@@ -797,13 +793,13 @@ test "TCP: readBuf with different ReadBuffer variants" {
 
             const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try TcpStream.connect(rt, addr);
-            defer stream.close();
+            defer stream.close(rt);
 
             // Test 1: ReadBuffer with .slice
             {
                 var buffer: [5]u8 = undefined;
                 var read_buf: xev.ReadBuffer = .{ .slice = &buffer };
-                const n = try stream.readBuf(&read_buf);
+                const n = try stream.readBuf(rt, &read_buf);
                 try testing.expectEqual(5, n);
                 try testing.expectEqualStrings("Hello", buffer[0..n]);
             }
@@ -824,7 +820,7 @@ test "TCP: readBuf with different ReadBuffer variants" {
                         .len = 1,
                     },
                 };
-                const n = try stream.readBuf(&read_buf);
+                const n = try stream.readBuf(rt, &read_buf);
                 try testing.expectEqual(3, n);
                 try testing.expectEqualStrings(" Wo", buffer[0..n]);
             }
@@ -840,7 +836,7 @@ test "TCP: readBuf with different ReadBuffer variants" {
                     .{ .base = &buffer1, .len = buffer1.len },
                     .{ .base = &buffer2, .len = buffer2.len },
                 }, .len = 2 } };
-                const n = try stream.readBuf(&read_buf);
+                const n = try stream.readBuf(rt, &read_buf);
                 try testing.expectEqual(4, n);
                 try testing.expectEqualStrings("rl", buffer1[0..]);
                 try testing.expectEqualStrings("d!", buffer2[0..]);

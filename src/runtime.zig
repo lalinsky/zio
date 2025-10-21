@@ -18,6 +18,8 @@ const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
 
+const Io = @import("io.zig").Io;
+
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
     return @hasField(xev.Loop, "thread_pool");
@@ -2134,6 +2136,14 @@ pub const Runtime = struct {
 
         // Should never reach here - we were woken up, so something must be complete
         unreachable;
+    }
+
+    pub fn io(self: *Runtime) Io {
+        return .{ .userdata = self };
+    }
+
+    pub fn fromIo(io_: Io) *Runtime {
+        return @ptrCast(io_.userdata);
     }
 };
 

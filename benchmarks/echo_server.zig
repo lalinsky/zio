@@ -7,30 +7,30 @@ const MESSAGE_SIZE = 64; // bytes
 
 const ResetEvent = zio.ResetEvent;
 
-fn handleClient(in_stream: zio.TcpStream) !void {
+fn handleClient(rt: *zio.Runtime, in_stream: zio.TcpStream) !void {
     var stream = in_stream;
-    defer stream.close();
-    defer stream.shutdown() catch {};
+    defer stream.close(rt);
+    defer stream.shutdown(rt) catch {};
 
     var buffer: [MESSAGE_SIZE]u8 = undefined;
 
     while (true) {
-        const n = stream.read(&buffer) catch |err| switch (err) {
+        const n = stream.read(rt, &buffer) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,
         };
 
         if (n == 0) break;
 
-        try stream.writeAll(buffer[0..n]);
+        try stream.writeAll(rt, buffer[0..n]);
     }
 }
 
 fn serverTask(rt: *zio.Runtime, ready: *ResetEvent, done: *ResetEvent) !void {
     const addr = try std.net.Address.parseIp4("127.0.0.1", 45678);
 
-    var listener = try zio.TcpListener.init(rt, addr);
-    defer listener.close();
+    var listener = try zio.TcpListener.init(addr);
+    defer listener.close(rt);
 
     try listener.bind(addr);
     try listener.listen(128);
@@ -39,10 +39,10 @@ fn serverTask(rt: *zio.Runtime, ready: *ResetEvent, done: *ResetEvent) !void {
 
     var clients_handled: usize = 0;
     while (clients_handled < NUM_CLIENTS) : (clients_handled += 1) {
-        var stream = try listener.accept();
-        errdefer stream.close();
+        var stream = try listener.accept(rt);
+        errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{stream}, .{});
+        var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
         task.deinit();
     }
 
@@ -60,8 +60,8 @@ fn clientTask(
 
     const addr = try std.net.Address.parseIp4("127.0.0.1", 45678);
     var stream = try zio.net.tcpConnectToAddress(rt, addr);
-    defer stream.close();
-    defer stream.shutdown() catch {};
+    defer stream.close(rt);
+    defer stream.shutdown(rt) catch {};
 
     var send_buffer: [MESSAGE_SIZE]u8 = undefined;
     var recv_buffer: [MESSAGE_SIZE]u8 = undefined;
@@ -76,11 +76,11 @@ fn clientTask(
     while (i < MESSAGES_PER_CLIENT) : (i += 1) {
         const msg_start = std.time.nanoTimestamp();
 
-        try stream.writeAll(&send_buffer);
+        try stream.writeAll(rt, &send_buffer);
 
         var bytes_received: usize = 0;
         while (bytes_received < MESSAGE_SIZE) {
-            const n = try stream.read(recv_buffer[bytes_received..]);
+            const n = try stream.read(rt, recv_buffer[bytes_received..]);
             if (n == 0) return error.UnexpectedEndOfStream;
             bytes_received += n;
         }

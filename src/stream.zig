@@ -2,17 +2,20 @@ const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
 
-/// Generic reader for any stream type that implements readBuf(xev.ReadBuffer) !usize
+/// Generic reader for any stream type that implements readBuf(rt, xev.ReadBuffer) !usize
 pub fn StreamReader(comptime T: type) type {
+    const Runtime = @import("runtime.zig").Runtime;
     return struct {
         const Self = @This();
 
         stream: T,
+        runtime: *Runtime,
         interface: std.io.Reader,
 
-        pub fn init(stream: T, buffer: []u8) Self {
+        pub fn init(stream: T, runtime: *Runtime, buffer: []u8) Self {
             return .{
                 .stream = stream,
+                .runtime = runtime,
                 .interface = .{
                     .vtable = &.{
                         .stream = streamFn,
@@ -31,7 +34,7 @@ pub fn StreamReader(comptime T: type) type {
             const dest = limit.slice(try w.writableSliceGreedy(1));
 
             var buf: xev.ReadBuffer = .{ .slice = dest };
-            const n = r.stream.readBuf(&buf) catch |err| {
+            const n = r.stream.readBuf(r.runtime, &buf) catch |err| {
                 // Convert Canceled to ReadFailed since std.io.Reader doesn't support cancellation
                 return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
@@ -49,7 +52,7 @@ pub fn StreamReader(comptime T: type) type {
             while (total_discarded < remaining) {
                 const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
                 var buf: xev.ReadBuffer = .{ .slice = io_reader.buffer[0..to_read] };
-                const n = r.stream.readBuf(&buf) catch |err| {
+                const n = r.stream.readBuf(r.runtime, &buf) catch |err| {
                     if (err == error.EndOfStream) break;
                     return error.ReadFailed;
                 };
@@ -70,7 +73,7 @@ pub fn StreamReader(comptime T: type) type {
             buf.vectors.len = dest_n;
             if (dest_n == 0) return 0;
 
-            const n = r.stream.readBuf(&buf) catch |err| {
+            const n = r.stream.readBuf(r.runtime, &buf) catch |err| {
                 // Convert Canceled to ReadFailed since std.io.Reader doesn't support cancellation
                 return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
@@ -85,17 +88,20 @@ pub fn StreamReader(comptime T: type) type {
     };
 }
 
-/// Generic writer for any stream type that implements writeBuf(xev.WriteBuffer) !usize
+/// Generic writer for any stream type that implements writeBuf(rt, xev.WriteBuffer) !usize
 pub fn StreamWriter(comptime T: type) type {
+    const Runtime = @import("runtime.zig").Runtime;
     return struct {
         const Self = @This();
 
         stream: T,
+        runtime: *Runtime,
         interface: std.io.Writer,
 
-        pub fn init(stream: T, buffer: []u8) Self {
+        pub fn init(stream: T, runtime: *Runtime, buffer: []u8) Self {
             return .{
                 .stream = stream,
+                .runtime = runtime,
                 .interface = .{
                     .vtable = &.{
                         .drain = drain,
@@ -167,7 +173,7 @@ pub fn StreamWriter(comptime T: type) type {
             if (len == 0) return 0;
 
             const write_buf = xev.WriteBuffer.fromSlices(vecs[0..len]);
-            const n = w.stream.writeBuf(write_buf) catch |err| {
+            const n = w.stream.writeBuf(w.runtime, write_buf) catch |err| {
                 if (err == error.Canceled) return error.WriteFailed;
                 return error.WriteFailed;
             };
@@ -179,7 +185,7 @@ pub fn StreamWriter(comptime T: type) type {
 
             while (io_writer.end > 0) {
                 const buffered = io_writer.buffered();
-                const n = w.stream.writeBuf(.{ .slice = buffered }) catch |err| {
+                const n = w.stream.writeBuf(w.runtime, .{ .slice = buffered }) catch |err| {
                     if (err == error.Canceled) return error.WriteFailed;
                     return error.WriteFailed;
                 };
@@ -224,7 +230,8 @@ const BufferStream = struct {
 
     /// Implements readBuf for StreamReader compatibility.
     /// Returns error.EndOfStream when no more data available (NOT 0).
-    fn readBuf(self: *BufferStream, buf: *xev.ReadBuffer) std.io.Reader.Error!usize {
+    fn readBuf(self: *BufferStream, rt: anytype, buf: *xev.ReadBuffer) std.io.Reader.Error!usize {
+        _ = rt; // Unused in mock
         const available = self.buffer.items[self.read_pos..];
         if (available.len == 0) return error.EndOfStream;
 
@@ -258,7 +265,8 @@ const BufferStream = struct {
     }
 
     /// Implements writeBuf for StreamWriter compatibility.
-    fn writeBuf(self: *BufferStream, buf: xev.WriteBuffer) std.io.Writer.Error!usize {
+    fn writeBuf(self: *BufferStream, rt: anytype, buf: xev.WriteBuffer) std.io.Writer.Error!usize {
+        _ = rt; // Unused in mock
         return switch (buf) {
             .slice => |src| blk: {
                 self.buffer.appendSlice(self.allocator, src) catch return error.WriteFailed;
@@ -292,7 +300,7 @@ test "StreamWriter/Reader: basic write and read" {
     // Write data
     {
         var write_buffer: [256]u8 = undefined;
-        var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+        var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
 
         try writer.interface.writeAll("Hello, ");
         try writer.interface.writeAll("World!");
@@ -302,7 +310,7 @@ test "StreamWriter/Reader: basic write and read" {
     // Read data back
     {
         var read_buffer: [256]u8 = undefined;
-        var reader = StreamReader(*BufferStream).init(&stream, &read_buffer);
+        var reader = StreamReader(*BufferStream).init(&stream, undefined, &read_buffer);
 
         var result: [20]u8 = undefined;
         const n = try reader.interface.readSliceShort(&result);
@@ -320,7 +328,7 @@ test "StreamWriter: writeSplat pattern" {
     defer stream.deinit();
 
     var write_buffer: [256]u8 = undefined;
-    var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+    var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
 
     // Test splat: "ba" + "na" repeated 3 times = "bananana"
     var data = [_][]const u8{ "ba", "na" };
@@ -338,7 +346,7 @@ test "StreamWriter: writeSplat single element" {
     defer stream.deinit();
 
     var write_buffer: [256]u8 = undefined;
-    var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+    var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
 
     // Test single element splat: "hello" repeated 3 times
     var data = [_][]const u8{"hello"};
@@ -356,7 +364,7 @@ test "StreamWriter: writeSplat single character optimization" {
     defer stream.deinit();
 
     var write_buffer: [256]u8 = undefined;
-    var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+    var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
 
     // Test single-character splat: "x" repeated 50 times
     // This should use the @memset optimization
@@ -378,7 +386,7 @@ test "StreamWriter: writeVec multiple slices" {
     defer stream.deinit();
 
     var write_buffer: [256]u8 = undefined;
-    var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+    var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
 
     // Write multiple slices at once
     const slices = &[_][]const u8{ "Hello", ", ", "World", "!" };
@@ -396,7 +404,7 @@ test "StreamWriter: flush drains buffer" {
     defer stream.deinit();
 
     var write_buffer: [16]u8 = undefined;
-    var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+    var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
 
     // Write less than buffer size
     try writer.interface.writeAll("Hello");
@@ -417,7 +425,7 @@ test "StreamReader: EndOfStream error on empty buffer" {
     defer stream.deinit();
 
     var read_buffer: [256]u8 = undefined;
-    var reader = StreamReader(*BufferStream).init(&stream, &read_buffer);
+    var reader = StreamReader(*BufferStream).init(&stream, undefined, &read_buffer);
 
     var result: [10]u8 = undefined;
 
@@ -436,7 +444,7 @@ test "StreamReader: partial read then EOF" {
     try stream.buffer.appendSlice(allocator, "Hello");
 
     var read_buffer: [256]u8 = undefined;
-    var reader = StreamReader(*BufferStream).init(&stream, &read_buffer);
+    var reader = StreamReader(*BufferStream).init(&stream, undefined, &read_buffer);
 
     // First read succeeds
     var result: [10]u8 = undefined;
@@ -459,7 +467,7 @@ test "StreamReader: discard bytes" {
     try stream.buffer.appendSlice(allocator, "Hello, World!");
 
     var read_buffer: [256]u8 = undefined;
-    var reader = StreamReader(*BufferStream).init(&stream, &read_buffer);
+    var reader = StreamReader(*BufferStream).init(&stream, undefined, &read_buffer);
 
     // Discard first 7 bytes
     const discarded = try reader.interface.discard(.limited(7));
@@ -483,7 +491,7 @@ test "StreamReader: takeByte reads first byte correctly" {
     try stream.buffer.appendSlice(allocator, "*1\r\n$4\r\nPING\r\n");
 
     var read_buffer: [256]u8 = undefined;
-    var reader = StreamReader(*BufferStream).init(&stream, &read_buffer);
+    var reader = StreamReader(*BufferStream).init(&stream, undefined, &read_buffer);
 
     // Read first byte - should be '*'
     const first_byte = try reader.interface.takeByte();
@@ -509,7 +517,7 @@ test "StreamWriter/Reader: interleaved operations" {
     // Write some data
     {
         var write_buffer: [256]u8 = undefined;
-        var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+        var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
         try writer.interface.writeAll("First ");
         try writer.interface.flush();
     }
@@ -517,7 +525,7 @@ test "StreamWriter/Reader: interleaved operations" {
     // Read it
     {
         var read_buffer: [256]u8 = undefined;
-        var reader = StreamReader(*BufferStream).init(&stream, &read_buffer);
+        var reader = StreamReader(*BufferStream).init(&stream, undefined, &read_buffer);
         var result: [10]u8 = undefined;
         const n = try reader.interface.readSliceShort(&result);
         try testing.expectEqualStrings("First ", result[0..n]);
@@ -526,7 +534,7 @@ test "StreamWriter/Reader: interleaved operations" {
     // Write more
     {
         var write_buffer: [256]u8 = undefined;
-        var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+        var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
         try writer.interface.writeAll("Second");
         try writer.interface.flush();
     }
@@ -534,7 +542,7 @@ test "StreamWriter/Reader: interleaved operations" {
     // Read it
     {
         var read_buffer: [256]u8 = undefined;
-        var reader = StreamReader(*BufferStream).init(&stream, &read_buffer);
+        var reader = StreamReader(*BufferStream).init(&stream, undefined, &read_buffer);
         var result: [10]u8 = undefined;
         const n = try reader.interface.readSliceShort(&result);
         try testing.expectEqualStrings("Second", result[0..n]);
@@ -549,7 +557,7 @@ test "StreamWriter: empty write" {
     defer stream.deinit();
 
     var write_buffer: [256]u8 = undefined;
-    var writer = StreamWriter(*BufferStream).init(&stream, &write_buffer);
+    var writer = StreamWriter(*BufferStream).init(&stream, undefined, &write_buffer);
 
     try writer.interface.writeAll("");
     try writer.interface.flush();

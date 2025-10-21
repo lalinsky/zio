@@ -265,7 +265,8 @@ pub const File = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *File, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
+    pub fn readBuf(self: *File, rt: *Runtime, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
+        _ = rt; // File uses self.runtime for now
         const task = self.runtime.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
@@ -318,7 +319,8 @@ pub const File = struct {
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *File, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
+    pub fn writeBuf(self: *File, rt: *Runtime, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
+        _ = rt; // File uses self.runtime for now
         const task = self.runtime.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
@@ -414,12 +416,12 @@ pub const File = struct {
     pub const Reader = StreamReader(*File);
     pub const Writer = StreamWriter(*File);
 
-    pub fn reader(self: *File, buffer: []u8) Reader {
-        return Reader.init(self, buffer);
+    pub fn reader(self: *File, rt: *Runtime, buffer: []u8) Reader {
+        return Reader.init(self, rt, buffer);
     }
 
-    pub fn writer(self: *File, buffer: []u8) Writer {
-        return Writer.init(self, buffer);
+    pub fn writer(self: *File, rt: *Runtime, buffer: []u8) Writer {
+        return Writer.init(self, rt, buffer);
     }
 
     pub fn deinit(self: *const File) void {
@@ -559,7 +561,7 @@ test "File: reader and writer interface" {
                 defer file.deinit();
 
                 var write_buffer: [256]u8 = undefined;
-                var writer = file.writer(&write_buffer);
+                var writer = file.writer(rt, &write_buffer);
 
                 // Test writeSplatAll with single-character pattern
                 var data = [_][]const u8{"x"};
@@ -575,7 +577,7 @@ test "File: reader and writer interface" {
                 defer file.deinit();
 
                 var read_buffer: [256]u8 = undefined;
-                var reader = file.reader(&read_buffer);
+                var reader = file.reader(rt, &read_buffer);
 
                 var result: [20]u8 = undefined;
                 const bytes_read = try reader.interface.readSliceShort(&result);

@@ -6,14 +6,14 @@ fn clientTask(rt: *zio.Runtime, allocator: std.mem.Allocator) !void {
     // Connect using hostname instead of IP address
     std.log.info("Connecting to localhost:8080...", .{});
     var stream = try zio.net.tcpConnectToHost(rt, allocator, "localhost", 8080);
-    defer stream.close();
+    defer stream.close(rt);
 
-    defer stream.shutdown() catch |err| std.log.err("Shutdown error: {}", .{err});
+    defer stream.shutdown(rt) catch |err| std.log.err("Shutdown error: {}", .{err});
 
     var read_buffer: [4096]u8 = undefined;
     var write_buffer: [4096]u8 = undefined;
-    var reader = stream.reader(&read_buffer);
-    var writer = stream.writer(&write_buffer);
+    var reader = stream.reader(rt, &read_buffer);
+    var writer = stream.writer(rt, &write_buffer);
 
     const message = "Hello, server!";
 

@@ -63,14 +63,14 @@ Basic TCP echo server:
 const std = @import("std");
 const zio = @import("zio");
 
-fn handleClient(stream: zio.net.Stream) !void {
-    defer stream.close();
+fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
+    defer stream.close(rt);
 
     var read_buffer: [256]u8 = undefined;
-    var reader = stream.reader(&read_buffer);
+    var reader = stream.reader(rt, &read_buffer);
 
     var write_buffer: [256]u8 = undefined;
-    var writer = stream.writer(&write_buffer);
+    var writer = stream.writer(rt, &write_buffer);
 
     while (true) {
         const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
@@ -84,8 +84,8 @@ fn handleClient(stream: zio.net.Stream) !void {
 
 fn serverTask(rt: *zio.Runtime) !void {
     const addr = try std.net.Address.parseIp4("127.0.0.1", 8080);
-    var listener = try zio.TcpListener.init(rt, addr);
-    defer listener.close();
+    var listener = try zio.TcpListener.init(addr);
+    defer listener.close(rt);
 
     try listener.bind(addr);
     try listener.listen(10);
@@ -93,10 +93,10 @@ fn serverTask(rt: *zio.Runtime) !void {
     std.log.info("Listening on 127.0.0.1:8080", .{});
 
     while (true) {
-        const stream = try listener.accept();
-        errdefer stream.close();
+        const stream = try listener.accept(rt);
+        errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{stream}, .{});
+        var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
         task.deinit();
     }
 }
