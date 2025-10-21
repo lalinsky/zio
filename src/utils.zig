@@ -6,5 +6,6 @@
 const concurrent_queue = @import("utils/concurrent_queue.zig");
 
 pub const ConcurrentQueue = concurrent_queue.ConcurrentQueue;
+pub const WorkStealingQueue = @import("utils/queue.zig").WorkStealingQueue;
 pub const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 pub const SharedPtr = @import("utils/shared_ptr.zig").SharedPtr;
