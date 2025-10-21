@@ -35,6 +35,11 @@ pub const ExecutorId = enum(usize) {
     pub fn id(n: usize) ExecutorId {
         return @enumFromInt(n);
     }
+
+    /// Check if this is a specific executor ID (not .any or .same)
+    pub fn isId(self: ExecutorId) bool {
+        return self != .any and self != .same;
+    }
 };
 
 /// Options for spawning a coroutine
@@ -1001,8 +1006,8 @@ pub const Executor = struct {
 
         task.impl.base.coro.setup(func, args, &task.impl.future_result);
 
-        // Set pin count if task is pinned
-        if (options.pinned) {
+        // Set pin count if task is pinned or assigned to a specific executor
+        if (options.pinned or options.executor.isId()) {
             task.impl.base.pin_count = 1;
         }
 
