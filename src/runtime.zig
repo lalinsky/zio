@@ -67,6 +67,10 @@ pub const RuntimeOptions = struct {
     /// Enabled by default as it also maintains backward-compatible timing
     /// (woken tasks run immediately instead of being deferred to next batch).
     lifo_slot_enabled: bool = true,
+    /// Idle timer interval in milliseconds.
+    /// Periodically wakes up idle threads to ensure they don't miss events.
+    /// Set to 0 to disable. Default: 10000ms (10 seconds).
+    idle_interval_ms: u64 = 10000,
 
     pub const ThreadPoolOptions = struct {
         enabled: bool = backendNeedsThreadPool(),
@@ -167,6 +171,38 @@ fn shutdownCallback(
 
     // Stop the event loop
     loop.stop();
+    return .disarm;
+}
+
+// Idle timer callback - periodically wakes up the event loop
+fn idleTimerCallback(
+    executor: ?*Executor,
+    loop: *xev.Loop,
+    c: *xev.Completion,
+    result: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = result catch {};
+
+    if (executor) |exec| {
+        std.log.debug("idle timer fired on executor {d}", .{exec.id});
+
+        // Add ±20% jitter to prevent thundering herd
+        const base_interval = exec.idle_interval_ms;
+        const jitter_range = base_interval / 5; // 20% of base interval
+        const jitter = exec.prng.random().intRangeAtMost(u64, 0, jitter_range * 2);
+        const next_interval = base_interval - jitter_range + jitter;
+
+        // Requeue the timer for the next interval with jitter
+        exec.idle_timer.run(
+            loop,
+            c,
+            next_interval,
+            Executor,
+            exec,
+            idleTimerCallback,
+        );
+    }
+
     return .disarm;
 }
 
@@ -879,6 +915,14 @@ pub const Executor = struct {
     shutdown_async: xev.Async = undefined,
     shutdown_completion: xev.Completion = undefined,
 
+    // Idle timer - periodically wakes up idle threads for safety
+    idle_timer: xev.Timer = undefined,
+    idle_completion: xev.Completion = undefined,
+    idle_interval_ms: u64,
+
+    // Random number generator for executor-local randomness
+    prng: std.Random.DefaultPrng = undefined,
+
     // Stack pool cleanup tracking
     cleanup_interval_ms: i64,
     last_cleanup_ms: i64 = 0,
@@ -914,6 +958,8 @@ pub const Executor = struct {
             .loop = undefined,
             .stack_pool = StackPool.init(allocator, options.stack_pool),
             .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
+            .idle_interval_ms = options.idle_interval_ms,
+            .prng = std.Random.DefaultPrng.init(id),
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .remote_wakeup = undefined,
@@ -954,10 +1000,28 @@ pub const Executor = struct {
             shutdownCallback,
         );
 
+        // Initialize idle timer if enabled
+        if (self.idle_interval_ms > 0) {
+            self.idle_timer = try xev.Timer.init();
+            errdefer self.idle_timer.deinit();
+
+            self.idle_timer.run(
+                &self.loop,
+                &self.idle_completion,
+                self.idle_interval_ms,
+                Executor,
+                self,
+                idleTimerCallback,
+            );
+        }
+
         self.remote_initialized.store(true, .release);
     }
 
     fn deinitLoop(self: *Executor) void {
+        if (self.idle_interval_ms > 0) {
+            self.idle_timer.deinit();
+        }
         self.shutdown_async.deinit();
         self.remote_wakeup.deinit();
         self.loop.deinit();
