@@ -35,12 +35,21 @@ pub const ExecutorId = enum(usize) {
     pub fn id(n: usize) ExecutorId {
         return @enumFromInt(n);
     }
+
+    /// Check if this is a specific executor ID (not .any or .same)
+    pub fn isId(self: ExecutorId) bool {
+        return self != .any and self != .same;
+    }
 };
 
 /// Options for spawning a coroutine
 pub const SpawnOptions = struct {
     stack_size: ?usize = null,
     executor: ExecutorId = .any,
+    /// Pin task to its home executor (prevents cross-thread migration).
+    /// Pinned tasks always run on their original executor, even when woken from other threads.
+    /// Useful for tasks with executor-specific state or when thread affinity is desired.
+    pinned: bool = false,
 };
 
 // Runtime configuration options
@@ -52,6 +61,12 @@ pub const RuntimeOptions = struct {
     /// - 1: single-threaded mode (default)
     /// - N > 1: use N executor threads (multi-threaded)
     num_executors: ?usize = 1,
+    /// Enable LIFO slot optimization for cache locality.
+    /// When enabled, tasks woken by other tasks are placed in a LIFO slot
+    /// for immediate execution, improving cache locality.
+    /// Enabled by default as it also maintains backward-compatible timing
+    /// (woken tasks run immediately instead of being deferred to next batch).
+    lifo_slot_enabled: bool = true,
 
     pub const ThreadPoolOptions = struct {
         enabled: bool = backendNeedsThreadPool(),
@@ -331,33 +346,15 @@ pub const ResumeMode = enum {
 /// - `.local`: Assumes we're on the same executor (use for IO callbacks)
 pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
     const T = @TypeOf(obj);
-    const coro: *Coroutine = switch (T) {
-        *Awaitable => blk: {
-            const task = AnyTask.fromAwaitable(obj);
-            break :blk &task.coro;
-        },
-        *AnyTask => &obj.coro,
-        *Coroutine => obj,
-        else => @compileError("resumeTask() requires *Awaitable, *AnyTask, or *Coroutine, got " ++ @typeName(T)),
+    const task: *AnyTask = switch (T) {
+        *AnyTask => obj,
+        *Awaitable => AnyTask.fromAwaitable(obj),
+        *Coroutine => AnyTask.fromCoroutine(obj),
+        else => @compileError("resumeTask() requires, *AnyTask, *Awaitable or *Coroutine, got " ++ @typeName(T)),
     };
 
-    const task = AnyTask.fromCoroutine(coro);
-    const executor = Executor.fromCoroutine(coro);
-
-    // Atomically transition to ready state and get the old state
-    const old_state = coro.state.swap(.ready, .acq_rel);
-
-    // Only schedule if the task was actually suspended
-    // If it was in .preparing_to_wait, it will see the state change and skip yield
-    if (old_state == .waiting_io or old_state == .waiting_sync) {
-        executor.scheduleTask(task, mode);
-    } else if (old_state == .preparing_to_wait) {
-        // Task hasn't yielded yet - it will see .ready and skip the yield
-        // No need to schedule
-    } else {
-        // Shouldn't happen - task should be either .waiting_io, .waiting_sync, or .preparing_to_wait
-        std.debug.panic("resumeTask: unexpected state {} for task {*}", .{ old_state, task });
-    }
+    const home_executor = Executor.fromCoroutine(&task.coro);
+    home_executor.scheduleTask(task, mode);
 }
 
 // Task for runtime scheduling - coroutine-based tasks
@@ -368,6 +365,7 @@ pub const AnyTask = struct {
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
     shield_count: u32 = 0,
+    pin_count: u32 = 0,
 
     // Intrusive list node for Executor.tasks queue (ConcurrentQueue)
     next: ?*AnyTask = null,
@@ -854,8 +852,22 @@ pub const Executor = struct {
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
-    ready_queue: SimpleStack(WaitNode) = .{},
-    next_ready_queue: SimpleStack(WaitNode) = .{},
+    ready_queue: SimpleQueue(WaitNode) = .{},
+    next_ready_queue: SimpleQueue(WaitNode) = .{},
+
+    // LIFO slot optimization: when a task wakes another task, the woken task
+    // is placed here for immediate execution, improving cache locality.
+    // This is checked before ready_queue when selecting the next task to run.
+    lifo_slot: ?*WaitNode = null,
+
+    // Controls whether LIFO slot optimization is enabled.
+    // When disabled, all wakeups go to next_ready_queue (deferred to next batch).
+    // Initialized from RuntimeOptions.lifo_slot_enabled (default: true).
+    lifo_slot_enabled: bool = true,
+
+    // Tracks consecutive polls from LIFO slot to prevent starvation.
+    // Reset when we poll from ready_queue instead.
+    lifo_slot_used: u8 = 0,
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
@@ -902,6 +914,7 @@ pub const Executor = struct {
             .loop = undefined,
             .stack_pool = StackPool.init(allocator, options.stack_pool),
             .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
+            .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .remote_wakeup = undefined,
             .remote_completion = undefined,
@@ -984,7 +997,7 @@ pub const Executor = struct {
                     .coro = .{
                         .stack = stack,
                         .parent_context_ptr = &self.main_context,
-                        .state = .init(.ready),
+                        .state = .init(.waiting_sync),
                     },
                 },
                 .future_result = .{},
@@ -992,6 +1005,11 @@ pub const Executor = struct {
         };
 
         task.impl.base.coro.setup(func, args, &task.impl.future_result);
+
+        // Set pin count if task is pinned or assigned to a specific executor
+        if (options.pinned or options.executor.isId()) {
+            task.impl.base.pin_count = 1;
+        }
 
         // Increment ref count for JoinHandle
         task.impl.base.awaitable.ref_count.incr();
@@ -1062,8 +1080,10 @@ pub const Executor = struct {
                 std.debug.panic("Yield CAS failed with unexpected state: task {*} expected {} but was {} (not .ready)", .{ current_task, expected_state, actual_state });
             }
         }
+        // If yielding with .ready state (cooperative yield), schedule for later execution
+        // This bypasses LIFO slot for fairness - yields always go to back of queue
         if (desired_state == .ready) {
-            self.next_ready_queue.push(&current_task.awaitable.wait_node);
+            self.scheduleTaskLocal(current_task, true); // is_yield = true
         }
 
         // If dead, always switch to scheduler for cleanup
@@ -1072,16 +1092,21 @@ pub const Executor = struct {
             unreachable;
         }
 
-        if (self.ready_queue.pop()) |next_wait_node| {
+        // Try to switch directly to the next ready task (checks LIFO slot first)
+        if (self.getNextTask()) |next_wait_node| {
             const next_task = AnyTask.fromWaitNode(next_wait_node);
 
             self.current_coroutine = &next_task.coro;
             coroutines.switchContext(&current_coro.context, &next_task.coro.context);
         } else {
+            // No ready tasks - return to scheduler
             coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
         }
 
-        std.debug.assert(self.current_coroutine == current_coro);
+        // After resuming, the task may have migrated to a different executor.
+        // Re-derive the current executor from TLS instead of using the captured `self`.
+        const resumed_executor = Runtime.current_executor orelse unreachable;
+        std.debug.assert(resumed_executor.current_coroutine == current_coro);
 
         // Check again after resuming in case we were canceled while suspended (unless shielded or no_cancel)
         if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
@@ -1121,6 +1146,25 @@ pub const Executor = struct {
         if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
             return error.Canceled;
         }
+    }
+
+    /// Pin the current task to its home executor (prevents cross-thread migration).
+    /// While pinned, the task will always run on its original executor, even when
+    /// woken from other threads. Useful for tasks with executor-specific state.
+    /// Must be paired with endPin().
+    pub fn beginPin(self: *Executor) void {
+        const current_coro = self.current_coroutine orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        current_task.pin_count += 1;
+    }
+
+    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
+    /// Must be paired with beginPin().
+    pub fn endPin(self: *Executor) void {
+        const current_coro = self.current_coroutine orelse unreachable;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        std.debug.assert(current_task.pin_count > 0);
+        current_task.pin_count -= 1;
     }
 
     pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
@@ -1184,6 +1228,7 @@ pub const Executor = struct {
         // If so, immediately initiate shutdown (no work to do)
         self.maybeShutdown();
 
+        var spin_count: u8 = 0;
         while (true) {
             // Exit if loop was stopped (by shutdown callback)
             if (self.loop.stopped()) break;
@@ -1196,12 +1241,15 @@ pub const Executor = struct {
             }
 
             // Drain remote ready queue (cross-thread tasks)
-            // Atomically drain all remote ready tasks and prepend to ready queue
+            // Atomically drain all remote ready tasks and append to ready queue
             var drained = self.next_ready_queue_remote.popAll();
-            self.ready_queue.prependByMoving(&drained);
+            while (drained.pop()) |task| {
+                self.ready_queue.push(task);
+            }
 
             // Process all ready coroutines (once)
-            while (self.ready_queue.pop()) |wait_node| {
+            // getNextTask() checks LIFO slot first for cache locality, then ready_queue
+            while (self.getNextTask()) |wait_node| {
                 const task = AnyTask.fromWaitNode(wait_node);
 
                 self.current_coroutine = &task.coro;
@@ -1240,69 +1288,180 @@ pub const Executor = struct {
             }
 
             // Move yielded coroutines back to ready queue
-            self.ready_queue.prependByMoving(&self.next_ready_queue);
+            self.ready_queue.concatByMoving(&self.next_ready_queue);
 
-            // If no ready work, run event loop
-            if (self.ready_queue.head == null) {
-                // Spin briefly with non-blocking I/O checks before blocking
-                // This reduces cross-thread wakeup latency for high-frequency remote scheduling
-                var spin_count: usize = 0;
-                while (spin_count < 100) : (spin_count += 1) {
-                    // Run event loop without blocking to check I/O and remote wakeups
-                    try self.loop.run(.no_wait);
+            // Determine event loop run mode based on work availability and spin count
+            // Spin briefly with non-blocking polls before blocking to reduce cross-thread wakeup latency
+            const has_work = self.ready_queue.head != null or self.lifo_slot != null;
+            const run_mode: xev.RunMode = if (has_work or spin_count < 16) .no_wait else .once;
 
-                    // Check if remote work arrived
-                    var remote_drained = self.next_ready_queue_remote.popAll();
-                    if (remote_drained.head != null) {
-                        self.ready_queue.prependByMoving(&remote_drained);
-                        break;
-                    }
-                }
+            // Run event loop
+            try self.loop.run(run_mode);
 
-                // If still no work, block waiting for I/O
-                if (self.ready_queue.head == null) {
-                    try self.loop.run(.once);
-                }
-            } else {
-                // Have ready work, run event loop without blocking
-                try self.loop.run(.no_wait);
+            // Update spin count: reset if work found, increment if spinning, don't change if blocked
+            if (has_work) {
+                spin_count = 0;
+            } else if (run_mode == .no_wait) {
+                spin_count +%= 1;
             }
         }
     }
 
-    /// Schedule a task to run on this executor.
-    /// Sets the task state to ready and adds it to the appropriate queue.
-    /// Uses local queue if called from the same executor, otherwise uses remote queue.
+    /// Get the next task to run, checking LIFO slot first for cache locality.
     ///
-    /// The `mode` parameter controls executor checking:
-    /// - `.maybe_remote`: Checks if we're on the same executor and uses remote path if needed
-    /// - `.local`: Skips the check and always uses local path (optimization for IO callbacks)
-    pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
-        // State is already set to .ready by resumeTask() or spawn()
-        const wait_node = &task.awaitable.wait_node;
+    /// The LIFO slot is checked first (when enabled) because recently woken tasks
+    /// are likely cache-hot. However, we limit consecutive LIFO polls to prevent
+    /// starvation of tasks in ready_queue.
+    ///
+    /// Returns null if no tasks are available.
+    fn getNextTask(self: *Executor) ?*WaitNode {
+        // LIFO slot optimization: check LIFO slot first for cache locality
+        // But limit consecutive LIFO polls to prevent starvation of ready_queue tasks
+        // Value matches Tokio's MAX_LIFO_POLLS_PER_TICK
+        const MAX_LIFO_POLLS_PER_TICK = 3;
 
-        if (mode == .maybe_remote) {
-            // Check if we're on the same executor thread
-            if (Runtime.current_executor == self) {
-                // Same executor - use fast local path
-                self.ready_queue.push(wait_node);
+        if (self.lifo_slot_enabled) {
+            if (self.lifo_slot_used < MAX_LIFO_POLLS_PER_TICK) {
+                // Under starvation limit - can use LIFO slot
+                if (self.lifo_slot) |task| {
+                    self.lifo_slot = null;
+                    self.lifo_slot_used += 1;
+                    return task;
+                }
             } else {
-                // Different executor (or no current executor) - use remote path
-                // Push to remote ready queue (thread-safe)
-                self.next_ready_queue_remote.push(wait_node);
-
-                // Notify the target executor's event loop (only if initialized)
-                const initialized = self.remote_initialized.load(.acquire);
-                if (initialized) {
-                    self.remote_wakeup.notify() catch |err| {
-                        std.debug.print("WARNING: remote_wakeup.notify() failed for executor {}: {}\n", .{ self.id, err });
-                    };
+                // Hit starvation limit - move LIFO slot task to ready_queue (back of FIFO)
+                // This gives other ready_queue tasks a chance to run first
+                if (self.lifo_slot) |task| {
+                    self.lifo_slot = null;
+                    self.ready_queue.push(task);
+                    // Don't reset counter - only reset when we actually poll from ready_queue
                 }
             }
-        } else {
-            // Fast path: we know we're on the same executor
-            assert(Runtime.current_executor == self);
+        }
+
+        // Take from ready_queue
+        if (self.ready_queue.pop()) |task| {
+            self.lifo_slot_used = 0; // Reset starvation counter
+            return task;
+        }
+
+        return null;
+    }
+
+    /// Schedule a task to the current executor's local queues.
+    /// This must only be called when we're on the correct executor thread.
+    ///
+    /// The `is_yield` parameter determines scheduling behavior:
+    /// - `true`: Task is yielding - goes to next_ready_queue (runs next iteration)
+    /// - `false`: Task is being woken - goes to LIFO slot (immediate) or ready_queue (FIFO)
+    fn scheduleTaskLocal(self: *Executor, task: *AnyTask, is_yield: bool) void {
+        const wait_node = &task.awaitable.wait_node;
+        if (is_yield) {
+            // Yields → next_ready_queue (runs next iteration for fairness)
+            self.next_ready_queue.push(wait_node);
+        } else if (!self.lifo_slot_enabled) {
+            // LIFO disabled - woken tasks go to ready_queue (FIFO, fair scheduling)
             self.ready_queue.push(wait_node);
+        } else {
+            // LIFO enabled - try LIFO slot for cache locality
+            if (self.lifo_slot) |old_task| {
+                // LIFO slot occupied - displaced task goes to ready_queue (FIFO)
+                self.ready_queue.push(old_task);
+            }
+            // New task takes the LIFO slot (runs immediately, cache-hot)
+            self.lifo_slot = wait_node;
+        }
+    }
+
+    /// Schedule a task to a remote executor (different executor or no current executor).
+    /// Uses the thread-safe remote queue and notifies the executor.
+    fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
+        const wait_node = &task.awaitable.wait_node;
+
+        // Push to remote ready queue (thread-safe)
+        self.next_ready_queue_remote.push(wait_node);
+
+        // Notify the target executor's event loop (only if initialized)
+        const initialized = self.remote_initialized.load(.acquire);
+        if (initialized) {
+            self.remote_wakeup.notify() catch |err| {
+                std.log.warn("remote_wakeup.notify() failed for executor {}: {}", .{ self.id, err });
+            };
+        }
+    }
+
+    /// Schedule a task for execution. Called on the task's home executor (self).
+    /// Atomically transitions task state to .ready and schedules it for execution.
+    ///
+    /// Task migration for cache locality:
+    /// - Sync tasks (.waiting_sync) with .maybe_remote: May migrate to current executor if in same runtime
+    /// - I/O tasks (.waiting_io): Always stay on home executor (cannot migrate)
+    /// - Spawn tasks (.ready): Schedule on home executor
+    ///
+    /// The `mode` parameter:
+    /// - `.maybe_remote`: Enables migration for sync tasks, uses remote queue when needed
+    /// - `.local`: No migration, always uses home executor (for I/O callbacks)
+    pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
+        const old_state = task.coro.state.swap(.ready, .acq_rel);
+
+        // Task hasn't yielded yet - it will see .ready and skip the yield
+        if (old_state == .preparing_to_wait) return;
+
+        // I/O tasks cannot migrate (bound to home executor's event loop)
+        if (old_state == .waiting_io) {
+            if (mode == .maybe_remote) {
+                if (Runtime.current_executor == self) {
+                    self.scheduleTaskLocal(task, false);
+                } else {
+                    self.scheduleTaskRemote(task);
+                }
+            } else {
+                assert(Runtime.current_executor == self);
+                self.scheduleTaskLocal(task, false);
+            }
+            return;
+        }
+
+        // Handle .waiting_sync or .ready (spawn) states
+        if (old_state != .waiting_sync and old_state != .ready) {
+            std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
+        }
+
+        // Sync tasks can migrate for cache locality (waiting_sync state only)
+        if (old_state == .waiting_sync and mode == .maybe_remote and task.pin_count == 0) {
+            const current_exec = Runtime.current_executor orelse {
+                self.scheduleTaskRemote(task);
+                return;
+            };
+
+            // Check if we can migrate (same runtime, different executor)
+            if (current_exec.runtime_ptr == self.runtime_ptr) {
+                // Same runtime - migrate to current executor for cache locality
+                if (current_exec != self) {
+                    task.coro.parent_context_ptr = &current_exec.main_context;
+                }
+                current_exec.scheduleTaskLocal(task, false);
+                return;
+            }
+
+            // Different runtime - use remote scheduling on home executor
+            self.scheduleTaskRemote(task);
+            return;
+        }
+
+        // Task already transitioned to .ready by another thread - avoid double-schedule
+        if (old_state == .ready) return;
+
+        // Default path: .ready state (spawn) or .local mode
+        if (mode == .maybe_remote) {
+            if (Runtime.current_executor == self) {
+                self.scheduleTaskLocal(task, false);
+            } else {
+                self.scheduleTaskRemote(task);
+            }
+        } else {
+            assert(Runtime.current_executor == self);
+            self.scheduleTaskLocal(task, false);
         }
     }
 
@@ -1815,6 +1974,28 @@ pub const Runtime = struct {
         const executor = Runtime.current_executor orelse return;
         if (executor.current_coroutine == null) return;
         executor.endShield();
+    }
+
+    /// Pin the current task to its home executor (prevents cross-thread migration).
+    /// While pinned, the task will always run on its original executor, even when
+    /// woken from other threads. Useful for tasks with executor-specific state.
+    /// Must be paired with endPin().
+    /// No-op if not called from within a coroutine.
+    pub fn beginPin(self: *Runtime) void {
+        _ = self;
+        const executor = Runtime.current_executor orelse return;
+        if (executor.current_coroutine == null) return;
+        executor.beginPin();
+    }
+
+    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
+    /// Must be paired with beginPin().
+    /// No-op if not called from within a coroutine.
+    pub fn endPin(self: *Runtime) void {
+        _ = self;
+        const executor = Runtime.current_executor orelse return;
+        if (executor.current_coroutine == null) return;
+        executor.endPin();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
