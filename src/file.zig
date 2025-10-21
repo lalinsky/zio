@@ -411,8 +411,8 @@ pub const File = struct {
     }
 
     // Zig 0.15+ streaming interface
-    pub const Reader = StreamReader(File);
-    pub const Writer = StreamWriter(File);
+    pub const Reader = StreamReader(*File);
+    pub const Writer = StreamWriter(*File);
 
     pub fn reader(self: *File, buffer: []u8) Reader {
         return Reader.init(self, buffer);

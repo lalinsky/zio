@@ -55,15 +55,15 @@ pub const TcpListener = struct {
         };
     }
 
-    pub fn bind(self: *TcpListener, addr: std.net.Address) !void {
+    pub fn bind(self: TcpListener, addr: std.net.Address) !void {
         try self.xev_tcp.bind(addr);
     }
 
-    pub fn listen(self: *TcpListener, backlog: u31) !void {
+    pub fn listen(self: TcpListener, backlog: u31) !void {
         try self.xev_tcp.listen(backlog);
     }
 
-    pub fn accept(self: *TcpListener) !TcpStream {
+    pub fn accept(self: TcpListener) !TcpStream {
         const task = self.runtime.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
@@ -111,7 +111,7 @@ pub const TcpListener = struct {
         };
     }
 
-    pub fn close(self: *TcpListener) void {
+    pub fn close(self: TcpListener) void {
         // Shield close operation from cancellation
         self.runtime.beginShield();
         defer self.runtime.endShield();
@@ -158,10 +158,6 @@ pub const TcpListener = struct {
 
         // Ignore close errors, following Zig std lib pattern
         _ = result_data.result catch {};
-    }
-
-    pub fn deinit(self: *TcpListener) void {
-        self.close();
     }
 };
 
@@ -230,7 +226,7 @@ pub const TcpStream = struct {
     /// Reads data from the stream into the provided buffer.
     /// Returns the number of bytes read, which may be less than buffer.len.
     /// A return value of 0 indicates end-of-stream.
-    pub fn read(self: *const TcpStream, buffer: []u8) !usize {
+    pub fn read(self: TcpStream, buffer: []u8) !usize {
         var buf: xev.ReadBuffer = .{ .slice = buffer };
         return self.readBuf(&buf) catch |err| switch (err) {
             error.EndOfStream => 0,
@@ -241,7 +237,7 @@ pub const TcpStream = struct {
     /// Returns the number of bytes read. If the number read is smaller than
     /// `buffer.len`, it means the stream reached the end. Reaching the end of
     /// a stream is not an error condition.
-    pub fn readAll(self: *const TcpStream, buffer: []u8) !usize {
+    pub fn readAll(self: TcpStream, buffer: []u8) !usize {
         var index: usize = 0;
         while (index < buffer.len) {
             const n = try self.read(buffer[index..]);
@@ -253,13 +249,13 @@ pub const TcpStream = struct {
 
     /// Writes data to the stream. Returns the number of bytes written,
     /// which may be less than the length of data.
-    pub fn write(self: *const TcpStream, data: []const u8) !usize {
+    pub fn write(self: TcpStream, data: []const u8) !usize {
         return self.writeBuf(.{ .slice = data });
     }
 
     /// Writes all data to the stream, looping until the entire buffer is written.
     /// Returns when all bytes have been written successfully.
-    pub fn writeAll(self: *const TcpStream, data: []const u8) !void {
+    pub fn writeAll(self: TcpStream, data: []const u8) !void {
         var offset: usize = 0;
 
         while (offset < data.len) {
@@ -270,7 +266,7 @@ pub const TcpStream = struct {
 
     /// Reads into multiple buffers using vectored I/O.
     /// Returns total bytes read. xev supports max 2 buffers.
-    pub fn readVec(self: *const TcpStream, iovecs: [][]u8) std.io.Reader.Error!usize {
+    pub fn readVec(self: TcpStream, iovecs: [][]u8) std.io.Reader.Error!usize {
         if (iovecs.len == 0) return 0;
 
         return self.readBuf(xev.ReadBuffer.fromSlices(iovecs));
@@ -278,7 +274,7 @@ pub const TcpStream = struct {
 
     /// Writes from multiple buffers using vectored I/O.
     /// xev supports max 2 buffers.
-    pub fn writeVec(self: *const TcpStream, iovecs: []const []const u8) std.io.Writer.Error!usize {
+    pub fn writeVec(self: TcpStream, iovecs: []const []const u8) std.io.Writer.Error!usize {
         if (iovecs.len == 0) return 0;
 
         return self.writeBuf(xev.WriteBuffer.fromSlices(iovecs));
@@ -286,7 +282,7 @@ pub const TcpStream = struct {
 
     /// Shuts down the write side of the TCP connection.
     /// This sends a FIN packet to signal that no more data will be sent.
-    pub fn shutdown(self: *TcpStream) !void {
+    pub fn shutdown(self: TcpStream) !void {
         const task = self.runtime.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
@@ -334,7 +330,7 @@ pub const TcpStream = struct {
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
     /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *const TcpStream, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
+    pub fn writeBuf(self: TcpStream, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
         const task = self.runtime.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
@@ -375,7 +371,7 @@ pub const TcpStream = struct {
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
     /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *const TcpStream, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
+    pub fn readBuf(self: TcpStream, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
         const task = self.runtime.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         var completion: xev.Completion = undefined;
@@ -426,7 +422,7 @@ pub const TcpStream = struct {
 
     /// Closes the TCP stream and releases associated resources.
     /// This operation is asynchronous but returns immediately.
-    pub fn close(self: *TcpStream) void {
+    pub fn close(self: TcpStream) void {
         // Shield close operation from cancellation
         self.runtime.beginShield();
         defer self.runtime.endShield();
@@ -476,16 +472,16 @@ pub const TcpStream = struct {
     }
 
     // Zig 0.15+ streaming interface
-    pub const Reader = StreamReader(TcpStream);
-    pub const Writer = StreamWriter(TcpStream);
+    pub const Reader = StreamReader(*const TcpStream);
+    pub const Writer = StreamWriter(*const TcpStream);
 
     // Zig 0.15+ interface methods
     pub fn reader(self: *const TcpStream, buffer: []u8) Reader {
-        return Reader.init(@constCast(self), buffer);
+        return Reader.init(self, buffer);
     }
 
     pub fn writer(self: *const TcpStream, buffer: []u8) Writer {
-        return Writer.init(@constCast(self), buffer);
+        return Writer.init(self, buffer);
     }
 };
 

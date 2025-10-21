@@ -5,6 +5,8 @@ const TcpStream = @import("tcp.zig").TcpStream;
 
 pub const AddressList = std.net.AddressList;
 
+pub const Stream = TcpStream;
+
 /// Async DNS resolution using the runtime's thread pool.
 /// Performs DNS lookup in a blocking task to avoid blocking the event loop.
 /// Call `AddressList.deinit()` on the result when done.

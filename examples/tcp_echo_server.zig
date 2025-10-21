@@ -1,30 +1,28 @@
 const std = @import("std");
 const zio = @import("zio");
 
-fn handleClient(in_stream: zio.TcpStream) !void {
-    var stream = in_stream;
+fn handleClient(stream: zio.net.Stream) !void {
     defer stream.close();
 
     defer stream.shutdown() catch |err| {
         std.log.err("Failed to shutdown client connection: {}", .{err});
     };
 
-    var read_buffer: [4096]u8 = undefined;
-    var write_buffer: [4096]u8 = undefined;
-
+    var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(&read_buffer);
+
+    var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(&write_buffer);
 
     while (true) {
         // Use new Reader delimiter method to read lines
-        const line = reader.interface.takeDelimiterExclusive('\n') catch |err| switch (err) {
+        const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
             error.EndOfStream => break,
-            else => |e| return e,
+            else => return err,
         };
 
         std.log.info("Received: {s}", .{line});
         try writer.interface.writeAll(line);
-        try writer.interface.writeAll("\n");
         try writer.interface.flush();
     }
 }
@@ -42,7 +40,7 @@ fn serverTask(rt: *zio.Runtime) !void {
     std.log.info("Press Ctrl+C to stop the server", .{});
 
     while (true) {
-        var stream = try listener.accept();
+        const stream = try listener.accept();
         errdefer stream.close();
 
         var task = try rt.spawn(handleClient, .{stream}, .{});
