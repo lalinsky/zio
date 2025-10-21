@@ -57,44 +57,58 @@ exe.root_module.addImport("zio", zio.module("zio"));
 
 ## Usage
 
-Basic TCP client:
+Basic TCP echo server:
 
 ```zig
 const std = @import("std");
 const zio = @import("zio");
 
-fn echoClient(rt: *zio.Runtime, allocator: std.mem.Allocator) !void {
-    // Connect to echo server using hostname
-    var stream = try zio.net.tcpConnectToHost(rt, allocator, "localhost", 8080);
+fn handleClient(stream: zio.net.Stream) !void {
     defer stream.close();
 
-    // Use buffered reader/writer
-    var read_buffer: [1024]u8 = undefined;
-    var write_buffer: [1024]u8 = undefined;
+    var read_buffer: [256]u8 = undefined;
     var reader = stream.reader(&read_buffer);
+
+    var write_buffer: [256]u8 = undefined;
     var writer = stream.writer(&write_buffer);
 
-    // Send a line
-    try writer.interface.writeAll("Hello, World!\n");
-    try writer.interface.flush();
+    while (true) {
+        const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        try writer.interface.writeAll(line);
+        try writer.interface.flush();
+    }
+}
 
-    // Read response line
-    const response = try reader.interface.takeDelimiterExclusive('\n');
-    std.debug.print("Echo: {s}\n", .{response});
+fn serverTask(rt: *zio.Runtime) !void {
+    const addr = try std.net.Address.parseIp4("127.0.0.1", 8080);
+    var listener = try zio.TcpListener.init(rt, addr);
+    defer listener.close();
+
+    try listener.bind(addr);
+    try listener.listen(10);
+
+    std.log.info("Listening on 127.0.0.1:8080", .{});
+
+    while (true) {
+        const stream = try listener.accept();
+        errdefer stream.close();
+
+        var task = try rt.spawn(handleClient, .{stream}, .{});
+        task.deinit();
+    }
 }
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    // Initialize runtime with thread pool for DNS resolution
-    var runtime = try zio.Runtime.init(gpa.allocator(), .{
-        .thread_pool = .{ .enabled = true },
-    });
+    var runtime = try zio.Runtime.init(gpa.allocator(), .{});
     defer runtime.deinit();
 
-    // Run the client and wait until it completes
-    try runtime.runUntilComplete(echoClient, .{ &runtime, gpa.allocator() }, .{});
+    try runtime.runUntilComplete(serverTask, .{&runtime}, .{});
 }
 ```
 
