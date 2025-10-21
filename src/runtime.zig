@@ -997,7 +997,7 @@ pub const Executor = struct {
                     .coro = .{
                         .stack = stack,
                         .parent_context_ptr = &self.main_context,
-                        .state = .init(.ready),
+                        .state = .init(.waiting_sync),
                     },
                 },
                 .future_result = .{},
@@ -1448,6 +1448,9 @@ pub const Executor = struct {
             self.scheduleTaskRemote(task);
             return;
         }
+
+        // Task already transitioned to .ready by another thread - avoid double-schedule
+        if (old_state == .ready) return;
 
         // Default path: .ready state (spawn) or .local mode
         if (mode == .maybe_remote) {
