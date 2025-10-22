@@ -47,11 +47,12 @@ pub const IpAddress = extern union {
 
 pub const UnixAddress = extern union {
     any: std.posix.sockaddr,
-    un: std.posix.sockaddr.un,
+    un: if (std.net.has_unix_sockets) std.posix.sockaddr.un else void,
 
     pub const max_len = 108;
 
     pub fn init(path: []const u8) !UnixAddress {
+        if (!std.net.has_unix_sockets) unreachable;
         var un = std.posix.sockaddr.un{ .family = std.posix.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
         @memcpy(un.path[0..path.len], path);
@@ -91,8 +92,7 @@ pub const Server = struct {
     address: Address,
 
     pub fn accept(self: Server, rt: *Runtime) !Stream {
-        const handle = try netAccept(rt, self.handle);
-        return .{ .handle = handle };
+        return netAccept(rt, self.handle);
     }
 
     pub fn shutdown(self: Server, rt: *Runtime, how: ShutdownHow) !void {
@@ -106,6 +106,7 @@ pub const Server = struct {
 
 pub const Stream = struct {
     handle: Handle,
+    address: Address,
 
     pub fn read(self: Stream, rt: *Runtime, bufs: [][]u8) !usize {
         return netRead(rt, self.handle, bufs);
@@ -237,7 +238,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     };
 
     if (options.reuse_address) {
-        try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+        try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
     }
 
     try std.posix.bind(sock, &addr.any, addr_len);
@@ -252,6 +253,8 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
+    if (!std.net.has_unix_sockets) unreachable;
+
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
@@ -278,15 +281,17 @@ pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .initPosix(@ptrCast(&addr)));
-    return .{ .handle = fd };
+    return .{ .handle = fd, .address = .{ .ip = addr } };
 }
 
 pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
+    if (!std.net.has_unix_sockets) unreachable;
+
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .{ .un = addr.un });
-    return .{ .handle = fd };
+    return .{ .handle = fd, .address = .{ .unix = addr } };
 }
 
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
@@ -303,8 +308,8 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
 fn addBuf(buf: *xev.WriteBuffer, data: []const u8) !void {
     if (buf.vectors.len < buf.vectors.data.len) {
         buf.vectors.data[buf.vectors.len] = if (xev.backend == .iocp) .{
-            .base = data.ptr,
-            .len = data.len,
+            .buf = @constCast(data.ptr),
+            .len = @intCast(data.len),
         } else .{
             .base = data.ptr,
             .len = data.len,
@@ -356,7 +361,7 @@ pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []co
     return runIo(rt, &completion, "send");
 }
 
-pub fn netAccept(rt: *Runtime, fd: Handle) !Handle {
+pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
     var completion: xev.Completion = .{ .op = .{
         .accept = .{
             .socket = fd,
@@ -367,7 +372,63 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Handle {
         completion.flags.dup = true;
     }
 
-    return runIo(rt, &completion, "accept");
+    const handle = try runIo(rt, &completion, "accept");
+
+    // Extract peer address from completion
+    const addr = switch (xev.backend) {
+        .epoll, .io_uring, .kqueue => blk: {
+            const sockaddr = completion.op.accept.addr;
+            break :blk switch (sockaddr.family) {
+                std.posix.AF.INET => Address{
+                    .ip = .{ .ip4 = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(&sockaddr))).* },
+                },
+                std.posix.AF.INET6 => Address{
+                    .ip = .{ .ip6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(&sockaddr))).* },
+                },
+                std.posix.AF.UNIX => {
+                    if (!std.net.has_unix_sockets) unreachable;
+                    break :blk Address{
+                        .unix = .{ .un = @as(*const std.posix.sockaddr.un, @ptrCast(@alignCast(&sockaddr))).* },
+                    };
+                },
+                else => unreachable,
+            };
+        },
+        .iocp => blk: {
+            // Windows IOCP: Extract peer address from storage buffer using GetAcceptExSockaddrs
+            var local_addr: *std.posix.sockaddr = undefined;
+            var local_addr_len: i32 = undefined;
+            var remote_addr: *std.posix.sockaddr = undefined;
+            var remote_addr_len: i32 = undefined;
+
+            std.os.windows.ws2_32.GetAcceptExSockaddrs(
+                @ptrCast(&completion.op.accept.storage),
+                0, // dwReceiveDataLength (same as AcceptEx)
+                0, // dwLocalAddressLength (same as AcceptEx)
+                @intCast(@sizeOf(std.posix.sockaddr.storage)), // dwRemoteAddressLength (same as AcceptEx)
+                &local_addr,
+                &local_addr_len,
+                &remote_addr,
+                &remote_addr_len,
+            );
+
+            break :blk switch (remote_addr.family) {
+                std.posix.AF.INET => Address{
+                    .ip = .{ .ip4 = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(remote_addr))).* },
+                },
+                std.posix.AF.INET6 => Address{
+                    .ip = .{ .ip6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(remote_addr))).* },
+                },
+                else => unreachable,
+            };
+        },
+        .wasi_poll => blk: {
+            // WASI doesn't provide peer address info
+            break :blk Address{ .ip = .{ .ip4 = std.net.Ip4Address.unspecified(0) } };
+        },
+    };
+
+    return .{ .handle = handle, .address = addr };
 }
 
 pub fn netConnect(rt: *Runtime, fd: Handle, addr: std.net.Address) !void {

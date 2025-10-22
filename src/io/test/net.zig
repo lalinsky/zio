@@ -26,6 +26,7 @@ test "IpAddress: parseIp6" {
 }
 
 test "UnixAddress: init" {
+    if (!std.net.has_unix_sockets) return error.SkipZigTest;
     const addr = try UnixAddress.init("/tmp/socket");
     try std.testing.expectEqual(std.posix.AF.UNIX, addr.any.family);
 }
@@ -82,6 +83,7 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
+    if (!std.net.has_unix_sockets) return error.SkipZigTest;
     const path = "/tmp/zio-test-socket";
     defer std.fs.deleteFileAbsolute(path) catch {};
 
