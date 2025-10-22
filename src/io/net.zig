@@ -111,6 +111,7 @@ pub const UnixAddress = extern union {
     };
 
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (!std.net.has_unix_sockets) unreachable;
         switch (self.any.family) {
             std.posix.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
             else => unreachable,
@@ -131,26 +132,36 @@ pub const Address = extern union {
     ip: IpAddress,
     unix: UnixAddress,
 
-    /// Convert sockaddr.storage to IpAddress.
-    /// This properly handles IPv4 and IPv6 addresses without buffer overflows.
-    fn fromStorageIp(storage: *const std.posix.sockaddr.storage) IpAddress {
-        const sockaddr: *const std.posix.sockaddr = @ptrCast(storage);
+    /// Convert sockaddr to IpAddress from raw bytes.
+    /// This properly handles IPv4 and IPv6 addresses without alignment issues.
+    fn fromStorageIp(data: []const u8) IpAddress {
+        const sockaddr: *align(1) const std.posix.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
-            std.posix.AF.INET => IpAddress{ .in = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(sockaddr))).* },
-            std.posix.AF.INET6 => IpAddress{ .in6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(sockaddr))).* },
+            std.posix.AF.INET => blk: {
+                var addr: IpAddress = .{ .in = undefined };
+                @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
+                break :blk addr;
+            },
+            std.posix.AF.INET6 => blk: {
+                var addr: IpAddress = .{ .in6 = undefined };
+                @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
+                break :blk addr;
+            },
             else => unreachable,
         };
     }
 
-    /// Convert sockaddr.storage to Address.
-    /// This properly handles IPv4, IPv6, and Unix socket addresses without buffer overflows.
-    fn fromStorage(storage: *const std.posix.sockaddr.storage) Address {
-        const sockaddr: *const std.posix.sockaddr = @ptrCast(storage);
+    /// Convert sockaddr to Address from raw bytes.
+    /// This properly handles IPv4, IPv6, and Unix socket addresses without alignment issues.
+    fn fromStorage(data: []const u8) Address {
+        const sockaddr: *align(1) const std.posix.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
-            std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(storage) },
+            std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(data) },
             std.posix.AF.UNIX => blk: {
                 if (!std.net.has_unix_sockets) unreachable;
-                break :blk Address{ .unix = .{ .un = @as(*const std.posix.sockaddr.un, @ptrCast(@alignCast(sockaddr))).* } };
+                var addr: Address = .{ .unix = .{ .un = undefined } };
+                @memcpy(std.mem.asBytes(&addr.unix.un), data[0..@sizeOf(std.posix.sockaddr.un)]);
+                break :blk addr;
             },
             else => unreachable,
         };
@@ -365,7 +376,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
     try std.posix.getsockname(sock, @ptrCast(&storage), &actual_len);
 
-    return .{ .handle = fd, .address = .{ .ip = Address.fromStorageIp(&storage) } };
+    return .{ .handle = fd, .address = .{ .ip = Address.fromStorageIp(std.mem.asBytes(&storage)) } };
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
@@ -490,7 +501,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
 
     // Extract peer address from completion
     const addr = switch (xev.backend) {
-        .epoll, .io_uring, .kqueue => Address.fromStorage(&completion.op.accept.addr),
+        .epoll, .io_uring, .kqueue => Address.fromStorage(std.mem.asBytes(&completion.op.accept.addr)),
         .iocp => blk: {
             // Windows IOCP: Extract peer address from storage buffer using GetAcceptExSockaddrs
             var local_addr: *std.posix.sockaddr = undefined;
@@ -509,8 +520,9 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
                 &remote_addr_len,
             );
 
-            // Cast remote_addr back to storage to use the helper function
-            break :blk Address.fromStorage(@ptrCast(remote_addr));
+            // Convert remote_addr to Address using raw bytes
+            const remote_bytes: [*]const u8 = @ptrCast(remote_addr);
+            break :blk Address.fromStorage(remote_bytes[0..@intCast(remote_addr_len)]);
         },
         .wasi_poll => blk: {
             // WASI doesn't provide peer address info
