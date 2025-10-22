@@ -14,12 +14,10 @@ pub const SelectUnion = runtime.SelectUnion;
 pub const Cancelable = runtime.Cancelable;
 
 // Re-export I/O functionality
-pub const File = @import("file.zig").File;
+pub const File = @import("io/file.zig").File;
 pub const fs = @import("fs.zig");
 
 // Re-export network functionality
-pub const TcpListener = @import("tcp.zig").TcpListener;
-pub const TcpStream = @import("tcp.zig").TcpStream;
 pub const UdpSocket = @import("udp.zig").UdpSocket;
 pub const UdpRecvResult = @import("udp.zig").UdpReadResult;
 pub const net = @import("net.zig");

@@ -259,7 +259,7 @@ pub const Loop = struct {
         }
     }
 
-    fn timer_next(self: *Loop, next_ms: u64) posix.timespec {
+    pub fn timer_next(self: *Loop, next_ms: u64) posix.timespec {
         // Get the timestamp of the absolute time that we'll execute this timer.
         // There are lots of failure scenarios here in math. If we see any
         // of them we just use the maximum value.
@@ -279,6 +279,28 @@ pub const Loop = struct {
             .sec = std.math.add(isize, self.cached_now.sec, next_s) catch
                 return max,
             .nsec = std.math.add(isize, self.cached_now.nsec, next_ns) catch
+                return max,
+        };
+    }
+
+    pub fn timer_next_ns(self: *Loop, next_ns: u64) posix.timespec {
+        // Get the timestamp of the absolute time that we'll execute this timer.
+        // There are lots of failure scenarios here in math. If we see any
+        // of them we just use the maximum value.
+        const max: posix.timespec = .{
+            .sec = std.math.maxInt(isize),
+            .nsec = std.math.maxInt(isize),
+        };
+
+        const next_s = std.math.cast(isize, next_ns / std.time.ns_per_s) orelse
+            return max;
+        const next_nsec = std.math.cast(isize, next_ns % std.time.ns_per_s) orelse
+            return max;
+
+        return .{
+            .sec = std.math.add(isize, self.cached_now.sec, next_s) catch
+                return max,
+            .nsec = std.math.add(isize, self.cached_now.nsec, next_nsec) catch
                 return max,
         };
     }
@@ -961,7 +983,7 @@ pub const Completion = struct {
             .accept => |*op| .{
                 .accept = if (posix.accept(
                     op.socket,
-                    &op.addr,
+                    @ptrCast(&op.addr),
                     &op.addr_size,
                     op.flags,
                 )) |v|
@@ -1180,8 +1202,8 @@ pub const Operation = union(OperationType) {
 
     accept: struct {
         socket: posix.socket_t,
-        addr: posix.sockaddr = undefined,
-        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr),
+        addr: posix.sockaddr.storage = undefined,
+        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr.storage),
         flags: u32 = posix.SOCK.CLOEXEC,
     },
 
@@ -1451,7 +1473,7 @@ test "Completion size" {
     const testing = std.testing;
 
     // Just so we are aware when we change the size
-    try testing.expectEqual(@as(usize, 208), @sizeOf(Completion));
+    try testing.expectEqual(@as(usize, 240), @sizeOf(Completion));
 }
 
 test "epoll: default completion" {

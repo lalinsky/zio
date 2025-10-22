@@ -4,9 +4,11 @@ const zio = @import("zio");
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     defer stream.close(rt);
 
-    defer stream.shutdown(rt) catch |err| {
+    defer stream.shutdown(rt, .both) catch |err| {
         std.log.err("Failed to shutdown client connection: {}", .{err});
     };
+
+    std.log.info("Client connected from {f}", .{stream.address});
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(rt, &read_buffer);
@@ -25,29 +27,26 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
         try writer.interface.writeAll(line);
         try writer.interface.flush();
     }
+
+    std.log.info("Client disconnected", .{});
 }
 
 fn serverTask(rt: *zio.Runtime) !void {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 8080);
+    const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
-    var listener = try zio.TcpListener.init(addr);
-    defer listener.close(rt);
+    const server = try addr.listen(rt, .{});
+    defer server.close(rt);
 
-    try listener.bind(addr);
-    try listener.listen(10);
-
-    std.log.info("TCP echo server listening on 127.0.0.1:8080", .{});
+    std.log.info("TCP echo server listening on {f}", .{server.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
 
     while (true) {
-        const stream = try listener.accept(rt);
+        const stream = try server.accept(rt);
         errdefer stream.close(rt);
 
         var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
         task.deinit();
     }
-
-    listener.close(rt);
 }
 
 pub fn main() !void {

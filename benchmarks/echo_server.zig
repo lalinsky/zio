@@ -5,41 +5,37 @@ const NUM_CLIENTS = 10;
 const MESSAGES_PER_CLIENT = 10_000;
 const MESSAGE_SIZE = 64; // bytes
 
-const ResetEvent = zio.ResetEvent;
-
-fn handleClient(rt: *zio.Runtime, in_stream: zio.TcpStream) !void {
+fn handleClient(rt: *zio.Runtime, in_stream: zio.net.Stream) !void {
     var stream = in_stream;
     defer stream.close(rt);
-    defer stream.shutdown(rt) catch {};
 
-    var buffer: [MESSAGE_SIZE]u8 = undefined;
+    var read_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(rt, &read_buffer);
+
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(rt, &write_buffer);
 
     while (true) {
-        const n = stream.read(rt, &buffer) catch |err| switch (err) {
+        const n = reader.interface.stream(&writer.interface, .unlimited) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,
         };
-
-        if (n == 0) break;
-
-        try stream.writeAll(rt, buffer[0..n]);
+        _ = n;
+        try writer.interface.flush();
     }
 }
 
-fn serverTask(rt: *zio.Runtime, ready: *ResetEvent, done: *ResetEvent) !void {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 45678);
+fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !void {
+    const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
 
-    var listener = try zio.TcpListener.init(addr);
-    defer listener.close(rt);
-
-    try listener.bind(addr);
-    try listener.listen(128);
+    var server = try addr.listen(rt, .{});
+    defer server.close(rt);
 
     ready.set(rt);
 
     var clients_handled: usize = 0;
     while (clients_handled < NUM_CLIENTS) : (clients_handled += 1) {
-        var stream = try listener.accept(rt);
+        var stream = try server.accept(rt);
         errdefer stream.close(rt);
 
         var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
@@ -52,16 +48,22 @@ fn serverTask(rt: *zio.Runtime, ready: *ResetEvent, done: *ResetEvent) !void {
 
 fn clientTask(
     rt: *zio.Runtime,
-    ready: *ResetEvent,
+    ready: *zio.ResetEvent,
     latencies: []u64,
     client_id: usize,
 ) !void {
     try ready.wait(rt);
 
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 45678);
-    var stream = try zio.net.tcpConnectToAddress(rt, addr);
+    const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
+    var stream = try addr.connect(rt);
     defer stream.close(rt);
-    defer stream.shutdown(rt) catch {};
+    defer stream.shutdown(rt, .both) catch {};
+
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(rt, &reader_buffer);
+
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(rt, &writer_buffer);
 
     var send_buffer: [MESSAGE_SIZE]u8 = undefined;
     var recv_buffer: [MESSAGE_SIZE]u8 = undefined;
@@ -76,13 +78,13 @@ fn clientTask(
     while (i < MESSAGES_PER_CLIENT) : (i += 1) {
         const msg_start = std.time.nanoTimestamp();
 
-        try stream.writeAll(rt, &send_buffer);
+        try writer.interface.writeAll(&send_buffer);
+        try writer.interface.flush();
 
-        var bytes_received: usize = 0;
-        while (bytes_received < MESSAGE_SIZE) {
-            const n = try stream.read(rt, recv_buffer[bytes_received..]);
-            if (n == 0) return error.UnexpectedEndOfStream;
-            bytes_received += n;
+        try reader.interface.readSliceAll(&recv_buffer);
+
+        if (!std.mem.eql(u8, &send_buffer, &recv_buffer)) {
+            return error.UnexpectedData;
         }
 
         const msg_end = std.time.nanoTimestamp();
@@ -99,8 +101,8 @@ fn benchmarkTask(
     rt: *zio.Runtime,
     allocator: std.mem.Allocator,
 ) !void {
-    var server_ready = ResetEvent.init;
-    var server_done = ResetEvent.init;
+    var server_ready = zio.ResetEvent.init;
+    var server_done = zio.ResetEvent.init;
 
     // Allocate latency tracking
     const total_messages = NUM_CLIENTS * MESSAGES_PER_CLIENT;

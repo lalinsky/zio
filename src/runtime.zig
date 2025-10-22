@@ -1169,6 +1169,11 @@ pub const Executor = struct {
         current_task.pin_count -= 1;
     }
 
+    pub fn getCurrentTask(self: *Executor) ?*AnyTask {
+        const coro = self.current_coroutine orelse return null;
+        return AnyTask.fromCoroutine(coro);
+    }
+
     pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
         return &task.awaitable;
     }
@@ -2014,16 +2019,14 @@ pub const Runtime = struct {
     /// Get the currently executing task, or null if not in a coroutine.
     /// Uses the threadlocal current_executor to support multiple executors.
     pub fn getCurrentTask(self: *Runtime) ?*AnyTask {
-        _ = self;
-        const executor = Runtime.current_executor orelse return null;
+        const executor = self.getCurrentExecutor() orelse return null;
         const current = executor.current_coroutine orelse return null;
         return AnyTask.fromCoroutine(current);
     }
 
-    pub fn getCurrent() ?*Runtime {
-        // This function has no way to access the runtime without threadlocal
-        // It should not be used - tests that use it need Runtime passed as parameter
-        @compileError("Runtime.getCurrent() is not supported - pass *Runtime as parameter instead");
+    pub fn getCurrentExecutor(self: *Runtime) ?*Executor {
+        _ = self;
+        return Runtime.current_executor;
     }
 
     /// Get a copy of the current executor metrics (from executor 0).
