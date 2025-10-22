@@ -19,10 +19,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     while (true) {
         // Use new Reader delimiter method to read lines
         const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
-            error.EndOfStream => {
-                std.log.info("Client disconnected", .{});
-                break;
-            },
+            error.EndOfStream => break,
             else => return err,
         };
 
