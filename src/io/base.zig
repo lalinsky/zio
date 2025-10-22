@@ -21,22 +21,18 @@ pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
 
 pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
     var canceled = false;
-    var submitted = false;
+
+    var executor = rt.getCurrentExecutor() orelse @panic("no active executor");
+    executor.loop.add(completion);
 
     while (completion.state() == .active) {
-        const executor = rt.getCurrentExecutor() orelse @panic("no active executor");
-
-        if (!submitted) {
-            executor.loop.add(completion);
-            submitted = true;
-        }
-
         executor.yield(.ready, .waiting_io, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {
                 if (!canceled) {
                     cancelIo(rt, completion);
                     canceled = true;
                 }
+                executor = rt.getCurrentExecutor() orelse @panic("no active executor");
                 continue;
             },
         };

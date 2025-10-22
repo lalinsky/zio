@@ -44,13 +44,19 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
 
             // TODO use TaskGroup
 
-            server_task.join() catch {};
-            client_task.join() catch {};
+            try server_task.join();
+            try client_task.join();
         }
 
         pub fn serverFn(rt: *Runtime, server: Server) !void {
             const client = try server.accept(rt);
             defer client.close(rt);
+
+            var buf: [32]u8 = undefined;
+            var reader = client.reader(rt, &buf);
+
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", line);
 
             client.shutdown(rt, .both) catch {};
         }
@@ -58,6 +64,12 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
         pub fn clientFn(rt: *Runtime, server: Server) !void {
             const client = try server.address.connect(rt);
             defer client.close(rt);
+
+            var buf: [32]u8 = undefined;
+            var writer = client.writer(rt, &buf);
+
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
 
             client.shutdown(rt, .both) catch {};
         }
@@ -69,7 +81,7 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
     try runtime.runUntilComplete(Test.mainFn, .{ &runtime, addr, options }, .{});
 }
 
-test "UnixAddress: listen/accept/connect" {
+test "UnixAddress: listen/accept/connect/read/write" {
     const path = "/tmp/zio-test-socket";
     defer std.fs.deleteFileAbsolute(path) catch {};
 
@@ -77,7 +89,7 @@ test "UnixAddress: listen/accept/connect" {
     try checkListen(addr, UnixAddress.ListenOptions{});
 }
 
-test "IpAddress: listen/accept/connect" {
+test "IpAddress: listen/accept/connect/read/write" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 0);
     try checkListen(addr, IpAddress.ListenOptions{});
 }

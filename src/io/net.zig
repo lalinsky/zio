@@ -107,12 +107,12 @@ pub const Server = struct {
 pub const Stream = struct {
     handle: Handle,
 
-    pub fn send(self: Stream, rt: *Runtime, buf: []const u8) !usize {
-        return netSend(rt, self.handle, buf);
+    pub fn read(self: Stream, rt: *Runtime, bufs: [][]u8) !usize {
+        return netRead(rt, self.handle, bufs);
     }
 
-    pub fn receive(self: Stream, rt: *Runtime, buf: []u8) !usize {
-        return netReceive(rt, self.handle, buf);
+    pub fn write(self: Stream, rt: *Runtime, bufs: [][]const u8) !usize {
+        return netWrite(rt, self.handle, bufs, 0);
     }
 
     pub fn shutdown(self: Stream, rt: *Runtime, how: ShutdownHow) !void {
@@ -121,6 +121,96 @@ pub const Stream = struct {
 
     pub fn close(self: Stream, rt: *Runtime) void {
         netClose(rt, self.handle);
+    }
+
+    pub const Reader = struct {
+        rt: *Runtime,
+        stream: Stream,
+        interface: std.Io.Reader,
+        err: ?xev.ReadError = null,
+
+        pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
+            return .{
+                .rt = rt,
+                .stream = stream,
+                .interface = .{
+                    .vtable = &.{
+                        .stream = streamImpl,
+                        .readVec = readVecImpl,
+                    },
+                    .buffer = buffer,
+                    .seek = 0,
+                    .end = 0,
+                },
+            };
+        }
+
+        fn streamImpl(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+            const dest = limit.slice(try io_w.writableSliceGreedy(1));
+            var data: [1][]u8 = .{dest};
+            const n = try readVecImpl(io_r, &data);
+            io_w.advance(n);
+            return n;
+        }
+
+        fn readVecImpl(io_r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+            const r: *Reader = @alignCast(@fieldParentPtr("interface", io_r));
+            var iovecs_buffer: [2][]u8 = undefined;
+            const dest_n, const data_size = try io_r.writableVector(&iovecs_buffer, data);
+            if (dest_n == 0) return 0;
+            const dest = iovecs_buffer[0..dest_n];
+            std.debug.assert(dest[0].len > 0);
+            const n = netRead(r.rt, r.stream.handle, dest) catch |err| {
+                r.err = err;
+                return error.ReadFailed;
+            };
+            if (n == 0) {
+                return error.EndOfStream;
+            }
+            if (n > data_size) {
+                io_r.end += n - data_size;
+                return data_size;
+            }
+            return n;
+        }
+    };
+
+    pub const Writer = struct {
+        rt: *Runtime,
+        stream: Stream,
+        interface: std.Io.Writer,
+        err: ?xev.WriteError = null,
+
+        pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
+            return .{
+                .rt = rt,
+                .stream = stream,
+                .interface = .{
+                    .vtable = &.{
+                        .drain = drainImpl,
+                    },
+                    .buffer = buffer,
+                },
+            };
+        }
+
+        fn drainImpl(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
+            const buffered = io_w.buffered();
+            const n = netWrite(w.rt, w.stream.handle, buffered, data, splat) catch |err| {
+                w.err = err;
+                return error.WriteFailed;
+            };
+            return io_w.consume(n);
+        }
+    };
+
+    pub fn reader(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
+        return .init(stream, rt, buffer);
+    }
+
+    pub fn writer(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
+        return .init(stream, rt, buffer);
     }
 };
 
@@ -199,22 +289,67 @@ pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
     return .{ .handle = fd };
 }
 
-pub fn netReceive(rt: *Runtime, fd: Handle, buf: []u8) !usize {
+pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
     var completion: xev.Completion = .{ .op = .{
         .recv = .{
             .fd = fd,
-            .buffer = .{ .slice = buf },
+            .buffer = .fromSlices(bufs),
         },
     } };
 
     return runIo(rt, &completion, "recv");
 }
 
-pub fn netSend(rt: *Runtime, fd: Handle, buf: []const u8) !usize {
+fn addBuf(buf: *xev.WriteBuffer, data: []const u8) !void {
+    if (buf.vectors.len < buf.vectors.data.len) {
+        buf.vectors.data[buf.vectors.len] = if (xev.backend == .iocp) .{
+            .base = data.ptr,
+            .len = data.len,
+        } else .{
+            .base = data.ptr,
+            .len = data.len,
+        };
+        buf.vectors.len += 1;
+    }
+    return error.BufferFull;
+}
+
+fn fillBuf(out: *xev.WriteBuffer, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) void {
+    addBuf(out, header) catch return;
+    for (data[0 .. data.len - 1]) |bytes| addBuf(out, bytes) catch return;
+    const pattern = data[data.len - 1];
+    switch (splat) {
+        0 => {},
+        1 => addBuf(out, pattern) catch return,
+        else => switch (pattern.len) {
+            0 => {},
+            1 => {
+                const memset_len = @min(splat_buffer.len, splat);
+                const buf = splat_buffer[0..memset_len];
+                @memset(buf, pattern[0]);
+                addBuf(out, buf) catch return;
+                var remaining_splat = splat - buf.len;
+                while (remaining_splat > splat_buffer.len) {
+                    std.debug.assert(buf.len == splat_buffer.len);
+                    addBuf(out, splat_buffer) catch return;
+                    remaining_splat -= splat_buffer.len;
+                }
+                addBuf(out, splat_buffer[0..remaining_splat]) catch return;
+            },
+            else => for (0..splat) |_| addBuf(out, pattern) catch return,
+        },
+    }
+}
+
+pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []const u8, splat: usize) !usize {
+    var splat_buf: [64]u8 = undefined;
+    var buf: xev.WriteBuffer = .{ .vectors = .{ .data = undefined, .len = 0 } };
+    fillBuf(&buf, header, data, splat, &splat_buf);
+
     var completion: xev.Completion = .{ .op = .{
         .send = .{
             .fd = fd,
-            .buffer = .{ .slice = buf },
+            .buffer = buf,
         },
     } };
 
