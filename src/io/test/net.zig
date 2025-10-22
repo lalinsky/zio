@@ -118,3 +118,11 @@ test "IpAddress: listen/accept/connect/read/write" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 0);
     try checkListen(addr, IpAddress.ListenOptions{});
 }
+
+test "IpAddress: listen/accept/connect/read/write IPv6" {
+    const addr = try IpAddress.parseIp6("::1", 0);
+    checkListen(addr, IpAddress.ListenOptions{}) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
+}

@@ -131,6 +131,31 @@ pub const Address = extern union {
     ip: IpAddress,
     unix: UnixAddress,
 
+    /// Convert sockaddr.storage to IpAddress.
+    /// This properly handles IPv4 and IPv6 addresses without buffer overflows.
+    fn fromStorageIp(storage: *const std.posix.sockaddr.storage) IpAddress {
+        const sockaddr: *const std.posix.sockaddr = @ptrCast(storage);
+        return switch (sockaddr.family) {
+            std.posix.AF.INET => IpAddress{ .in = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(sockaddr))).* },
+            std.posix.AF.INET6 => IpAddress{ .in6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(sockaddr))).* },
+            else => unreachable,
+        };
+    }
+
+    /// Convert sockaddr.storage to Address.
+    /// This properly handles IPv4, IPv6, and Unix socket addresses without buffer overflows.
+    fn fromStorage(storage: *const std.posix.sockaddr.storage) Address {
+        const sockaddr: *const std.posix.sockaddr = @ptrCast(storage);
+        return switch (sockaddr.family) {
+            std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(storage) },
+            std.posix.AF.UNIX => blk: {
+                if (!std.net.has_unix_sockets) unreachable;
+                break :blk Address{ .unix = .{ .un = @as(*const std.posix.sockaddr.un, @ptrCast(@alignCast(sockaddr))).* } };
+            },
+            else => unreachable,
+        };
+    }
+
     pub fn format(self: Address, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
             std.posix.AF.INET, std.posix.AF.INET6 => return self.ip.format(w),
@@ -336,11 +361,11 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     try std.posix.listen(sock, options.kernel_backlog);
 
     // Get the actual bound address (important for port 0)
-    var actual_addr: IpAddress = undefined;
-    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-    try std.posix.getsockname(sock, &actual_addr.any, &actual_len);
+    var storage: std.posix.sockaddr.storage = undefined;
+    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
+    try std.posix.getsockname(sock, @ptrCast(&storage), &actual_len);
 
-    return .{ .handle = fd, .address = .{ .ip = actual_addr } };
+    return .{ .handle = fd, .address = .{ .ip = Address.fromStorageIp(&storage) } };
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
@@ -465,24 +490,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
 
     // Extract peer address from completion
     const addr = switch (xev.backend) {
-        .epoll, .io_uring, .kqueue => blk: {
-            const sockaddr = completion.op.accept.addr;
-            break :blk switch (sockaddr.family) {
-                std.posix.AF.INET => Address{
-                    .ip = .{ .in = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(&sockaddr))).* },
-                },
-                std.posix.AF.INET6 => Address{
-                    .ip = .{ .in6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(&sockaddr))).* },
-                },
-                std.posix.AF.UNIX => {
-                    if (!std.net.has_unix_sockets) unreachable;
-                    break :blk Address{
-                        .unix = .{ .un = @as(*const std.posix.sockaddr.un, @ptrCast(@alignCast(&sockaddr))).* },
-                    };
-                },
-                else => unreachable,
-            };
-        },
+        .epoll, .io_uring, .kqueue => Address.fromStorage(&completion.op.accept.addr),
         .iocp => blk: {
             // Windows IOCP: Extract peer address from storage buffer using GetAcceptExSockaddrs
             var local_addr: *std.posix.sockaddr = undefined;
@@ -501,15 +509,8 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
                 &remote_addr_len,
             );
 
-            break :blk switch (remote_addr.family) {
-                std.posix.AF.INET => Address{
-                    .ip = .{ .in = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(remote_addr))).* },
-                },
-                std.posix.AF.INET6 => Address{
-                    .ip = .{ .in6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(remote_addr))).* },
-                },
-                else => unreachable,
-            };
+            // Cast remote_addr back to storage to use the helper function
+            break :blk Address.fromStorage(@ptrCast(remote_addr));
         },
         .wasi_poll => blk: {
             // WASI doesn't provide peer address info
