@@ -7,10 +7,6 @@ const AnyTask = @import("../runtime.zig").AnyTask;
 const meta = @import("../meta.zig");
 
 pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
-    if (xev.backend != .io_uring) {
-        return;
-    }
-
     var cancel_completion: xev.Completion = .{ .op = .{ .cancel = .{ .c = completion } } };
 
     rt.beginShield();
@@ -43,8 +39,6 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
     if (canceled) {
         return error.Canceled;
     }
-
-    return;
 }
 
 pub fn runIo(rt: *Runtime, completion: *xev.Completion, comptime op: []const u8) !meta.Payload(@FieldType(xev.Result, op)) {
