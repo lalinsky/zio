@@ -12,23 +12,49 @@ pub const ShutdownHow = std.posix.ShutdownHow;
 
 pub const IpAddress = extern union {
     any: std.posix.sockaddr,
-    ip4: std.net.Ip4Address,
-    ip6: std.net.Ip6Address,
+    in: std.net.Ip4Address,
+    in6: std.net.Ip6Address,
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
-        return .{ .ip4 = std.net.Ip4Address.init(addr, port) };
+        return .{ .in = std.net.Ip4Address.init(addr, port) };
     }
 
     pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
-        return .{ .ip6 = std.net.Ip6Address.init(addr, port, flowinfo, scope_id) };
+        return .{ .in6 = std.net.Ip6Address.init(addr, port, flowinfo, scope_id) };
+    }
+
+    fn fromStd(addr: std.net.Address) IpAddress {
+        switch (addr.any.family) {
+            std.posix.AF.INET => return .{ .in = addr.in },
+            std.posix.AF.INET6 => return .{ .in6 = addr.in6 },
+            else => unreachable,
+        }
+    }
+
+    pub fn parseIpAndPort(name: []const u8) !IpAddress {
+        const addr = try std.net.Address.parseIpAndPort(name);
+        return fromStd(addr);
+    }
+
+    pub fn parseIp(name: []const u8, port: u16) !IpAddress {
+        const addr = try std.net.Address.parseIp(name, port);
+        return fromStd(addr);
     }
 
     pub fn parseIp4(buf: []const u8, port: u16) !IpAddress {
-        return .{ .ip4 = try std.net.Ip4Address.parse(buf, port) };
+        return .{ .in = try std.net.Ip4Address.parse(buf, port) };
     }
 
     pub fn parseIp6(buf: []const u8, port: u16) !IpAddress {
-        return .{ .ip6 = try std.net.Ip6Address.parse(buf, port) };
+        return .{ .in6 = try std.net.Ip6Address.parse(buf, port) };
+    }
+
+    pub fn format(self: IpAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self.any.family) {
+            std.posix.AF.INET => try self.in.format(w),
+            std.posix.AF.INET6 => try self.in6.format(w),
+            else => unreachable,
+        }
     }
 
     pub const ListenOptions = struct {
@@ -64,6 +90,13 @@ pub const UnixAddress = extern union {
         kernel_backlog: u31 = default_kernel_backlog,
     };
 
+    pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self.any.family) {
+            std.posix.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
+            else => unreachable,
+        }
+    }
+
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
         return netListenUnix(rt, self, options);
     }
@@ -77,6 +110,14 @@ pub const Address = extern union {
     any: std.posix.sockaddr,
     ip: IpAddress,
     unix: UnixAddress,
+
+    pub fn format(self: Address, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self.any.family) {
+            std.posix.AF.INET, std.posix.AF.INET6 => return self.ip.format(w),
+            std.posix.AF.UNIX => return self.unix.format(w),
+            else => unreachable,
+        }
+    }
 
     pub fn connect(self: Address, rt: *Runtime) !Stream {
         switch (self.any.family) {
@@ -232,8 +273,8 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     const sock = if (xev.backend == .iocp) @as(std.os.windows.ws2_32.SOCKET, @ptrCast(fd)) else fd;
 
     const addr_len = switch (addr.any.family) {
-        std.posix.AF.INET => addr.ip4.getOsSockLen(),
-        std.posix.AF.INET6 => addr.ip6.getOsSockLen(),
+        std.posix.AF.INET => addr.in.getOsSockLen(),
+        std.posix.AF.INET6 => addr.in6.getOsSockLen(),
         else => unreachable,
     };
 
@@ -380,10 +421,10 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
             const sockaddr = completion.op.accept.addr;
             break :blk switch (sockaddr.family) {
                 std.posix.AF.INET => Address{
-                    .ip = .{ .ip4 = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(&sockaddr))).* },
+                    .ip = .{ .in = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(&sockaddr))).* },
                 },
                 std.posix.AF.INET6 => Address{
-                    .ip = .{ .ip6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(&sockaddr))).* },
+                    .ip = .{ .in6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(&sockaddr))).* },
                 },
                 std.posix.AF.UNIX => {
                     if (!std.net.has_unix_sockets) unreachable;
@@ -414,17 +455,17 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
 
             break :blk switch (remote_addr.family) {
                 std.posix.AF.INET => Address{
-                    .ip = .{ .ip4 = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(remote_addr))).* },
+                    .ip = .{ .in = @as(*const std.net.Ip4Address, @ptrCast(@alignCast(remote_addr))).* },
                 },
                 std.posix.AF.INET6 => Address{
-                    .ip = .{ .ip6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(remote_addr))).* },
+                    .ip = .{ .in6 = @as(*const std.net.Ip6Address, @ptrCast(@alignCast(remote_addr))).* },
                 },
                 else => unreachable,
             };
         },
         .wasi_poll => blk: {
             // WASI doesn't provide peer address info
-            break :blk Address{ .ip = .{ .ip4 = std.net.Ip4Address.unspecified(0) } };
+            break :blk Address{ .ip = .{ .in = std.net.Ip4Address.unspecified(0) } };
         },
     };
 

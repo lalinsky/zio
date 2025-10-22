@@ -2,13 +2,13 @@ const std = @import("std");
 const print = std.debug.print;
 const zio = @import("zio");
 
-fn clientTask(rt: *zio.Runtime, allocator: std.mem.Allocator) !void {
-    // Connect using hostname instead of IP address
-    std.log.info("Connecting to localhost:8080...", .{});
-    var stream = try zio.net.tcpConnectToHost(rt, allocator, "localhost", 8080);
+fn clientTask(rt: *zio.Runtime) !void {
+    std.log.info("Connecting to 127.0.0.1:8080...", .{});
+    const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
+    var stream = try addr.connect(rt);
     defer stream.close(rt);
 
-    defer stream.shutdown(rt) catch |err| std.log.err("Shutdown error: {}", .{err});
+    defer stream.shutdown(rt, .both) catch |err| std.log.err("Shutdown error: {}", .{err});
 
     var read_buffer: [4096]u8 = undefined;
     var write_buffer: [4096]u8 = undefined;
@@ -19,6 +19,7 @@ fn clientTask(rt: *zio.Runtime, allocator: std.mem.Allocator) !void {
 
     try writer.interface.writeAll(message);
     try writer.interface.writeAll("\n");
+    try writer.interface.flush();
 
     std.log.info("Sent: {s}", .{message});
 
@@ -39,7 +40,7 @@ pub fn main() !void {
     });
     defer runtime.deinit();
 
-    var task = try runtime.spawn(clientTask, .{ &runtime, allocator }, .{});
+    var task = try runtime.spawn(clientTask, .{&runtime}, .{});
     defer task.deinit();
 
     try runtime.run();

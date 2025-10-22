@@ -6,10 +6,11 @@ const TcpStream = @import("tcp.zig").TcpStream;
 const io_net = @import("io/net.zig");
 pub const IpAddress = io_net.IpAddress;
 pub const UnixAddress = io_net.UnixAddress;
+pub const Address = io_net.Address;
+pub const Server = io_net.Server;
+pub const Stream = io_net.Stream;
 
 pub const AddressList = std.net.AddressList;
-
-pub const Stream = TcpStream;
 
 /// Async DNS resolution using the runtime's thread pool.
 /// Performs DNS lookup in a blocking task to avoid blocking the event loop.
