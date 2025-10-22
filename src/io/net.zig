@@ -409,10 +409,6 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
         },
     } };
 
-    if (xev.backend == .epoll) {
-        completion.flags.dup = true;
-    }
-
     const handle = try runIo(rt, &completion, "accept");
 
     // Extract peer address from completion
@@ -491,11 +487,6 @@ pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
         },
     } };
 
-    switch (xev.backend) {
-        .epoll, .kqueue => completion.flags.threadpool = true,
-        else => {},
-    }
-
     return runIo(rt, &completion, "shutdown");
 }
 
@@ -505,11 +496,6 @@ pub fn netClose(rt: *Runtime, fd: Handle) void {
             .fd = fd,
         },
     } };
-
-    switch (xev.backend) {
-        .epoll, .kqueue => completion.flags.threadpool = true,
-        else => {},
-    }
 
     rt.beginShield();
     defer rt.endShield();
