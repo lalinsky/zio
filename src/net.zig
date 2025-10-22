@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
-const TcpStream = @import("tcp.zig").TcpStream;
+const Channel = @import("sync/channel.zig").Channel;
 
 const io_net = @import("io/net.zig");
 pub const IpAddress = io_net.IpAddress;
@@ -10,7 +10,19 @@ pub const Address = io_net.Address;
 pub const Server = io_net.Server;
 pub const Stream = io_net.Stream;
 
-pub const AddressList = std.net.AddressList;
+pub const IpAddressList = struct {
+    arena: std.heap.ArenaAllocator,
+    addrs: []IpAddress,
+    canon_name: ?[]u8,
+
+    pub fn deinit(self: *IpAddressList) void {
+        // Here we copy the arena allocator into stack memory, because
+        // otherwise it would destroy itself while it was still working.
+        var arena = self.arena;
+        arena.deinit();
+        // self is destroyed
+    }
+};
 
 /// Async DNS resolution using the runtime's thread pool.
 /// Performs DNS lookup in a blocking task to avoid blocking the event loop.
@@ -20,32 +32,29 @@ pub fn getAddressList(
     allocator: std.mem.Allocator,
     name: []const u8,
     port: u16,
-) !*AddressList {
-    var blocking_task = try runtime.spawnBlocking(
+) !*std.net.AddressList {
+    var task = try runtime.spawnBlocking(
         std.net.getAddressList,
         .{ allocator, name, port },
     );
-    defer blocking_task.deinit();
+    defer task.deinit();
 
-    return try blocking_task.join();
+    return try task.join();
 }
 
-/// Async TCP connection by hostname.
-/// Performs DNS resolution followed by connection attempt.
-/// All memory allocated with `allocator` will be freed before this function returns.
 pub fn tcpConnectToHost(
-    runtime: *Runtime,
+    rt: *Runtime,
     allocator: std.mem.Allocator,
     name: []const u8,
     port: u16,
-) !TcpStream {
-    const list = try getAddressList(runtime, allocator, name, port);
+) !Stream {
+    const list = try getAddressList(rt, allocator, name, port);
     defer list.deinit();
 
     if (list.addrs.len == 0) return error.UnknownHostName;
 
     for (list.addrs) |addr| {
-        return tcpConnectToAddress(runtime, addr) catch |err| switch (err) {
+        return IpAddress.fromStd(addr).connect(rt) catch |err| switch (err) {
             error.ConnectionRefused => {
                 continue;
             },
@@ -55,10 +64,8 @@ pub fn tcpConnectToHost(
     return error.ConnectionRefused;
 }
 
-/// Async TCP connection to a specific address.
-/// This is a convenience wrapper around TcpStream.connect.
-pub fn tcpConnectToAddress(runtime: *Runtime, address: std.net.Address) !TcpStream {
-    return TcpStream.connect(runtime, address);
+pub fn tcpConnectToAddress(rt: *Runtime, addr: IpAddress) !Stream {
+    return addr.connect(rt);
 }
 
 test {
@@ -104,56 +111,54 @@ test "getAddressList: numeric IP" {
     try runtime.runUntilComplete(GetAddressListTask.run, .{ &runtime, allocator }, .{});
 }
 
-test "tcpConnectToAddress: basic connection" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-    const ResetEvent = @import("sync.zig").ResetEvent;
-
-    const TEST_PORT = 45100;
-
-    var runtime = try Runtime.init(allocator, .{});
+test "tcpConnectToAddress: basic" {
+    var runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var server_ready = ResetEvent.init;
-
     const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const TcpListener = @import("tcp.zig").TcpListener;
-            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(addr);
-            defer listener.close(rt);
+        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(rt, .{});
+            defer server.close(rt);
 
-            try listener.bind(addr);
-            try listener.listen(1);
+            try server_port.send(rt, server.address.ip.getPort());
 
-            ready_event.set(rt);
-
-            var stream = try listener.accept(rt);
+            var stream = try server.accept(rt);
             defer stream.close(rt);
 
-            var buffer: [256]u8 = undefined;
-            const n = try stream.read(rt, &buffer);
-            try testing.expectEqualStrings("hello", buffer[0..n]);
+            var read_buffer: [256]u8 = undefined;
+            var reader = stream.reader(rt, &read_buffer);
+
+            const msg = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", msg);
         }
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            try ready_event.wait(rt);
+        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
+            const port = try server_port.receive(rt);
+            const addr = try IpAddress.parseIp4("127.0.0.1", port);
 
-            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
             var stream = try tcpConnectToAddress(rt, addr);
             defer stream.close(rt);
 
-            try stream.writeAll(rt, "hello");
-            try stream.shutdown(rt);
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(rt, &write_buffer);
+
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
+
+            try stream.shutdown(rt, .both);
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var server_port_buf: [1]u16 = undefined;
+    var server_port_ch = Channel(u16).init(&server_port_buf);
+
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_port_ch }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_port_ch }, .{});
     defer client_task.deinit();
 
     try runtime.run();
@@ -162,55 +167,56 @@ test "tcpConnectToAddress: basic connection" {
     try client_task.join();
 }
 
-test "tcpConnectToHost: localhost connection" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-    const ResetEvent = @import("sync.zig").ResetEvent;
-
-    const TEST_PORT = 45101;
-
-    var runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
-    defer runtime.deinit();
-
-    var server_ready = ResetEvent.init;
-
+test "tcpConnectToHost: basic" {
     const ServerTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent) !void {
-            const TcpListener = @import("tcp.zig").TcpListener;
-            const addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-            var listener = try TcpListener.init(addr);
-            defer listener.close(rt);
+        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(rt, .{});
+            defer server.close(rt);
 
-            try listener.bind(addr);
-            try listener.listen(1);
+            std.debug.print("Server listening on port {}\n", .{server.address.ip.getPort()});
 
-            ready_event.set(rt);
+            try server_port.send(rt, server.address.ip.getPort());
 
-            var stream = try listener.accept(rt);
+            var stream = try server.accept(rt);
             defer stream.close(rt);
 
-            var buffer: [256]u8 = undefined;
-            const n = try stream.read(rt, &buffer);
-            try testing.expectEqualStrings("hello from host", buffer[0..n]);
+            var read_buffer: [256]u8 = undefined;
+            var reader = stream.reader(rt, &read_buffer);
+
+            const msg = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", msg);
         }
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, ready_event: *ResetEvent, alloc: std.mem.Allocator) !void {
-            try ready_event.wait(rt);
+        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
+            const port = try server_port.receive(rt);
+            std.debug.print("Client connecting to port {}\n", .{port});
 
-            var stream = try tcpConnectToHost(rt, alloc, "localhost", TEST_PORT);
+            var stream = try tcpConnectToHost(rt, std.testing.allocator, "localhost", port);
             defer stream.close(rt);
 
-            try stream.writeAll(rt, "hello from host");
-            try stream.shutdown(rt);
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(rt, &write_buffer);
+
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
+
+            try stream.shutdown(rt, .both);
         }
     };
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_ready }, .{});
+    var runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer runtime.deinit();
+
+    var server_port_buf: [1]u16 = undefined;
+    var server_port_ch = Channel(u16).init(&server_port_buf);
+
+    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_port_ch }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_ready, allocator }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_port_ch }, .{});
     defer client_task.deinit();
 
     try runtime.run();

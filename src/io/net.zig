@@ -23,7 +23,7 @@ pub const IpAddress = extern union {
         return .{ .in6 = std.net.Ip6Address.init(addr, port, flowinfo, scope_id) };
     }
 
-    fn fromStd(addr: std.net.Address) IpAddress {
+    pub fn fromStd(addr: std.net.Address) IpAddress {
         switch (addr.any.family) {
             std.posix.AF.INET => return .{ .in = addr.in },
             std.posix.AF.INET6 => return .{ .in6 = addr.in6 },
@@ -47,6 +47,26 @@ pub const IpAddress = extern union {
 
     pub fn parseIp6(buf: []const u8, port: u16) !IpAddress {
         return .{ .in6 = try std.net.Ip6Address.parse(buf, port) };
+    }
+
+    /// Returns the port in native endian.
+    /// Asserts that the address is ip4 or ip6.
+    pub fn getPort(self: IpAddress) u16 {
+        return switch (self.any.family) {
+            std.posix.AF.INET => self.in.getPort(),
+            std.posix.AF.INET6 => self.in6.getPort(),
+            else => unreachable,
+        };
+    }
+
+    /// `port` is native-endian.
+    /// Asserts that the address is ip4 or ip6.
+    pub fn setPort(self: *IpAddress, port: u16) void {
+        switch (self.any.family) {
+            std.posix.AF.INET => self.in.setPort(port),
+            std.posix.AF.INET6 => self.in6.setPort(port),
+            else => unreachable,
+        }
     }
 
     pub fn format(self: IpAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -149,18 +169,46 @@ pub const Stream = struct {
     handle: Handle,
     address: Address,
 
-    pub fn read(self: Stream, rt: *Runtime, bufs: [][]u8) !usize {
-        return netRead(rt, self.handle, bufs);
+    /// Reads data from the stream into the provided buffer.
+    /// Returns the number of bytes read, which may be less than buf.len.
+    /// A return value of 0 indicates end-of-stream.
+    pub fn read(self: Stream, rt: *Runtime, buf: []u8) !usize {
+        return netRead(rt, self.handle, &.{buf});
     }
 
-    pub fn write(self: Stream, rt: *Runtime, bufs: [][]const u8) !usize {
-        return netWrite(rt, self.handle, bufs, 0);
+    /// Reads data from the stream into the provided buffer until it is full or EOF.
+    pub fn readAll(self: Stream, rt: *Runtime, buf: []u8) !void {
+        var offset: usize = 0;
+        while (offset < buf.len) {
+            const n = try self.read(rt, buf[offset..]);
+            if (n == 0) break;
+            offset += n;
+        }
     }
 
+    /// Writes data from the provided buffer to the stream.
+    /// Returns the number of bytes written, which may be less than buf.len.
+    pub fn write(self: Stream, rt: *Runtime, buf: []const u8) !usize {
+        const empty: []const u8 = "";
+        return netWrite(rt, self.handle, buf, &.{empty}, 0);
+    }
+
+    /// Writes data from the provided buffer to the stream until it is empty.
+    /// Returns an error if the stream is closed or if the write fails.
+    pub fn writeAll(self: Stream, rt: *Runtime, buf: []const u8) !void {
+        var offset: usize = 0;
+        while (offset < buf.len) {
+            const n = try self.write(rt, buf[offset..]);
+            offset += n;
+        }
+    }
+
+    /// Shuts down all or part of a full-duplex connection.
     pub fn shutdown(self: Stream, rt: *Runtime, how: ShutdownHow) !void {
         return netShutdown(rt, self.handle, how);
     }
 
+    /// Closes the stream.
     pub fn close(self: Stream, rt: *Runtime) void {
         netClose(rt, self.handle);
     }
@@ -247,10 +295,12 @@ pub const Stream = struct {
         }
     };
 
+    /// Creates a buffered reader for the given stream.
     pub fn reader(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
         return .init(stream, rt, buffer);
     }
 
+    /// Creates a buffered writer for the given stream.
     pub fn writer(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
         return .init(stream, rt, buffer);
     }
