@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
-const File = @import("file.zig").File;
+const File = @import("io/file.zig").File;
 const Runtime = @import("runtime.zig").Runtime;
 
 const windows = if (builtin.os.tag == .windows) std.os.windows else struct {};
@@ -25,10 +25,11 @@ const windows = if (builtin.os.tag == .windows) std.os.windows else struct {};
 /// - `AccessDenied`: Insufficient permissions to access the file
 /// - Platform-specific file system errors
 pub fn openFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlags) !File {
+    _ = runtime;
     if (builtin.os.tag == .windows) {
-        return openFileWindows(runtime, path, flags);
+        return openFileWindows(path, flags);
     } else {
-        return openFileUnix(runtime, path, flags);
+        return openFileUnix(path, flags);
     }
 }
 
@@ -48,14 +49,15 @@ pub fn openFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlag
 /// - `AccessDenied`: Insufficient permissions to create the file
 /// - Platform-specific file system errors
 pub fn createFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.CreateFlags) !File {
+    _ = runtime;
     if (builtin.os.tag == .windows) {
-        return createFileWindows(runtime, path, flags);
+        return createFileWindows(path, flags);
     } else {
-        return createFileUnix(runtime, path, flags);
+        return createFileUnix(path, flags);
     }
 }
 
-fn openFileWindows(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlags) !File {
+fn openFileWindows(path: []const u8, flags: std.fs.File.OpenFlags) !File {
     // File locking is not supported in async I/O context
     if (flags.lock != .none) {
         return error.Unsupported;
@@ -98,10 +100,10 @@ fn openFileWindows(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenF
     }
 
     // Create File instance using the handle
-    return File.initFd(runtime, handle);
+    return File.initFd(handle);
 }
 
-fn createFileWindows(runtime: *Runtime, path: []const u8, flags: std.fs.File.CreateFlags) !File {
+fn createFileWindows(path: []const u8, flags: std.fs.File.CreateFlags) !File {
     // File locking is not supported in async I/O context
     if (flags.lock != .none) {
         return error.Unsupported;
@@ -150,27 +152,27 @@ fn createFileWindows(runtime: *Runtime, path: []const u8, flags: std.fs.File.Cre
     }
 
     // Create File instance using the handle
-    return File.initFd(runtime, handle);
+    return File.initFd(handle);
 }
 
-fn openFileUnix(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlags) !File {
+fn openFileUnix(path: []const u8, flags: std.fs.File.OpenFlags) !File {
     // File locking is not supported in async I/O context
     if (flags.lock != .none) {
         return error.Unsupported;
     }
 
     const std_file = try std.fs.cwd().openFile(path, flags);
-    return File.init(runtime, std_file);
+    return File.init(std_file);
 }
 
-fn createFileUnix(runtime: *Runtime, path: []const u8, flags: std.fs.File.CreateFlags) !File {
+fn createFileUnix(path: []const u8, flags: std.fs.File.CreateFlags) !File {
     // File locking is not supported in async I/O context
     if (flags.lock != .none) {
         return error.Unsupported;
     }
 
     const std_file = try std.fs.cwd().createFile(path, flags);
-    return File.init(runtime, std_file);
+    return File.init(std_file);
 }
 
 test "fs: openFile and createFile with different modes" {
@@ -186,22 +188,20 @@ test "fs: openFile and createFile with different modes" {
             const file_path = "test_fs_demo.txt";
 
             var file = try createFile(rt, file_path, .{});
-            defer file.deinit();
 
             // Write some data
             const write_data = "Hello, zio fs!";
-            _ = try file.write(write_data);
-            file.close();
+            _ = try file.write(rt, write_data);
+            file.close(rt);
 
             // Test opening the file for reading
             var read_file = try openFile(rt, file_path, .{ .mode = .read_only });
-            defer read_file.deinit();
 
             // Read back the data
             var buffer: [100]u8 = undefined;
-            const bytes_read = try read_file.read(&buffer);
+            const bytes_read = try read_file.read(rt, &buffer);
             try testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
-            read_file.close();
+            read_file.close(rt);
 
             // Clean up the test file
             std.fs.cwd().deleteFile(file_path) catch {};
