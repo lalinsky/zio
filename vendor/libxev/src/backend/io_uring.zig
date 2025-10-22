@@ -423,7 +423,7 @@ pub const Loop = struct {
 
             .accept => |*v| sqe.prep_accept(
                 v.socket,
-                &v.addr,
+                @ptrCast(&v.addr),
                 &v.addr_size,
                 v.flags,
             ),
@@ -1001,8 +1001,8 @@ pub const Operation = union(OperationType) {
 
     accept: struct {
         socket: posix.socket_t,
-        addr: posix.sockaddr = undefined,
-        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr),
+        addr: posix.sockaddr.storage = undefined,
+        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr.storage),
         flags: u32 = posix.SOCK.CLOEXEC,
     },
 
@@ -1253,7 +1253,7 @@ test "Completion size" {
     const testing = std.testing;
 
     // Just so we are aware when we change the size
-    try testing.expectEqual(@as(usize, 152), @sizeOf(Completion));
+    try testing.expectEqual(@as(usize, 184), @sizeOf(Completion));
 }
 
 test "io_uring: available" {

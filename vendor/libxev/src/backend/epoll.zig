@@ -983,7 +983,7 @@ pub const Completion = struct {
             .accept => |*op| .{
                 .accept = if (posix.accept(
                     op.socket,
-                    &op.addr,
+                    @ptrCast(&op.addr),
                     &op.addr_size,
                     op.flags,
                 )) |v|
@@ -1202,8 +1202,8 @@ pub const Operation = union(OperationType) {
 
     accept: struct {
         socket: posix.socket_t,
-        addr: posix.sockaddr = undefined,
-        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr),
+        addr: posix.sockaddr.storage = undefined,
+        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr.storage),
         flags: u32 = posix.SOCK.CLOEXEC,
     },
 
@@ -1473,7 +1473,7 @@ test "Completion size" {
     const testing = std.testing;
 
     // Just so we are aware when we change the size
-    try testing.expectEqual(@as(usize, 208), @sizeOf(Completion));
+    try testing.expectEqual(@as(usize, 240), @sizeOf(Completion));
 }
 
 test "epoll: default completion" {
