@@ -99,7 +99,7 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
         }
     };
 
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    var runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
     try runtime.runUntilComplete(Test.mainFn, .{ &runtime, addr, options }, .{});
