@@ -412,8 +412,10 @@ fn addBuf(buf: *xev.WriteBuffer, data: []const u8) !void {
 
 fn fillBuf(out: *xev.WriteBuffer, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) void {
     addBuf(out, header) catch return;
-    for (data[0 .. data.len - 1]) |bytes| addBuf(out, bytes) catch return;
-    const pattern = data[data.len - 1];
+    if (data.len == 0) return;
+    const last_index = data.len - 1;
+    for (data[0..last_index]) |bytes| addBuf(out, bytes) catch return;
+    const pattern = data[last_index];
     switch (splat) {
         0 => {},
         1 => addBuf(out, pattern) catch return,
