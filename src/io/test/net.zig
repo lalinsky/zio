@@ -19,27 +19,33 @@ test "IpAddress: initIp6" {
 test "IpAddress: parseIp4" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET, addr.any.family);
+    try std.testing.expectEqual(8080, addr.getPort());
 }
 
 test "IpAddress: parseIp6" {
     const addr = try IpAddress.parseIp6("::1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET6, addr.any.family);
+    try std.testing.expectEqual(8080, addr.getPort());
 }
 
 test "IpAddress: parseIp" {
     const addr1 = try IpAddress.parseIp("127.0.0.1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(8080, addr1.getPort());
 
     const addr2 = try IpAddress.parseIp("::1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(8080, addr2.getPort());
 }
 
 test "IpAddress: parseIpAndPort" {
     const addr1 = try IpAddress.parseIpAndPort("127.0.0.1:8080");
     try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(8080, addr1.getPort());
 
-    const addr2 = try IpAddress.parseIp("::1", 8080);
+    const addr2 = try IpAddress.parseIpAndPort("[::1]:8080");
     try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(8080, addr2.getPort());
 }
 
 test "UnixAddress: init" {
