@@ -1,14 +1,42 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const AnyTask = @import("runtime.zig").AnyTask;
-const Executor = @import("runtime.zig").Executor;
 const resumeTask = @import("runtime.zig").resumeTask;
-const Cancelable = @import("runtime.zig").Cancelable;
-const coroutines = @import("coroutines.zig");
-const Coroutine = coroutines.Coroutine;
+const runIo = @import("io/base.zig").runIo;
+const meta = @import("meta.zig");
 
 const TEST_PORT = 45001;
+
+const Handle = if (xev.backend == .iocp) std.os.windows.HANDLE else std.posix.socket_t;
+
+fn createDatagramSocket(family: std.posix.sa_family_t) !Handle {
+    if (builtin.os.tag == .windows) {
+        return try std.os.windows.WSASocketW(family, std.posix.SOCK.DGRAM, 0, null, 0, std.os.windows.ws2_32.WSA_FLAG_OVERLAPPED);
+    } else {
+        var flags: u32 = std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC;
+        if (xev.backend != .io_uring) flags |= std.posix.SOCK.NONBLOCK;
+        return try std.posix.socket(family, flags, 0);
+    }
+}
+
+fn addressFromStorage(data: []const u8) std.net.Address {
+    const sockaddr: *align(1) const std.posix.sockaddr = @ptrCast(data.ptr);
+    return switch (sockaddr.family) {
+        std.posix.AF.INET => blk: {
+            var addr: std.net.Address = .{ .in = undefined };
+            @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
+            break :blk addr;
+        },
+        std.posix.AF.INET6 => blk: {
+            var addr: std.net.Address = .{ .in6 = undefined };
+            @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
+            break :blk addr;
+        },
+        else => unreachable,
+    };
+}
 
 pub const UdpReadResult = struct {
     bytes_read: usize,
@@ -16,181 +44,149 @@ pub const UdpReadResult = struct {
 };
 
 pub const UdpSocket = struct {
-    xev_udp: xev.UDP,
-    runtime: *Runtime,
+    handle: Handle,
 
-    pub fn init(runtime: *Runtime, addr: std.net.Address) !UdpSocket {
+    pub fn init(addr: std.net.Address) !UdpSocket {
+        const fd = try createDatagramSocket(addr.any.family);
         return UdpSocket{
-            .xev_udp = try xev.UDP.init(addr),
-            .runtime = runtime,
+            .handle = fd,
         };
     }
 
     pub fn bind(self: *UdpSocket, addr: std.net.Address) !void {
-        try self.xev_udp.bind(addr);
+        const sock = if (xev.backend == .iocp) @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle)) else self.handle;
+        try std.posix.bind(sock, &addr.any, addr.getOsSockLen());
     }
 
-    pub fn read(self: *UdpSocket, buffer: []u8) !UdpReadResult {
-        const task = self.runtime.getCurrentTask() orelse unreachable;
-        const executor = task.getExecutor();
-        var completion: xev.Completion = undefined;
-        var state: xev.UDP.State = undefined;
+    pub fn read(self: *UdpSocket, rt: *Runtime, buffer: []u8) !UdpReadResult {
+        return switch (xev.backend) {
+            .io_uring, .epoll => try self.readRecvmsg(rt, buffer),
+            .iocp, .kqueue => try self.readRecvfrom(rt, buffer),
+            .wasi_poll => error.Unsupported,
+        };
+    }
 
-        const Result = struct {
-            task: *AnyTask,
-            result: xev.ReadError!usize = undefined,
-            sender_addr: std.net.Address = undefined,
-
-            pub fn callback(
-                result_data_ptr: ?*@This(),
-                loop: *xev.Loop,
-                completion_inner: *xev.Completion,
-                state_inner: *xev.UDP.State,
-                addr: std.net.Address,
-                socket: xev.UDP,
-                buffer_inner: xev.ReadBuffer,
-                result: xev.ReadError!usize,
-            ) xev.CallbackAction {
-                _ = loop;
-                _ = completion_inner;
-                _ = state_inner;
-                _ = socket;
-                _ = buffer_inner;
-
-                const result_data = result_data_ptr.?;
-                result_data.result = result;
-                result_data.sender_addr = addr;
-                resumeTask(result_data.task, .local);
-
-                return .disarm;
-            }
+    fn readRecvfrom(self: *UdpSocket, rt: *Runtime, buffer: []u8) !UdpReadResult {
+        var completion: xev.Completion = .{
+            .op = .{
+                .recvfrom = .{
+                    .fd = self.handle,
+                    .buffer = .{ .slice = buffer },
+                },
+            },
         };
 
-        var result_data: Result = .{ .task = task };
+        const bytes_read = try runIo(rt, &completion, "recvfrom");
+        const addr = std.net.Address.initPosix(@alignCast(&completion.op.recvfrom.addr));
 
-        self.xev_udp.read(
-            &executor.loop,
-            &completion,
-            &state,
-            .{ .slice = buffer },
-            Result,
-            &result_data,
-            Result.callback,
-        );
-
-        try executor.waitForXevCompletion(&completion);
-
-        const bytes_read = result_data.result catch |err| {
-            if (err == error.Canceled) return error.Unexpected;
-            return err;
-        };
         return UdpReadResult{
             .bytes_read = bytes_read,
-            .sender_addr = result_data.sender_addr,
+            .sender_addr = addr,
         };
     }
 
-    pub fn write(self: *UdpSocket, addr: std.net.Address, data: []const u8) !usize {
-        const task = self.runtime.getCurrentTask() orelse unreachable;
-        const executor = task.getExecutor();
-        var completion: xev.Completion = undefined;
-        var state: xev.UDP.State = undefined;
+    fn readRecvmsg(self: *UdpSocket, rt: *Runtime, buffer: []u8) !UdpReadResult {
+        var iov = [_]std.posix.iovec{.{
+            .base = buffer.ptr,
+            .len = buffer.len,
+        }};
 
-        const Result = struct {
-            task: *AnyTask,
-            result: xev.WriteError!usize = undefined,
-
-            pub fn callback(
-                result_data_ptr: ?*@This(),
-                loop: *xev.Loop,
-                completion_inner: *xev.Completion,
-                state_inner: *xev.UDP.State,
-                socket: xev.UDP,
-                buffer_inner: xev.WriteBuffer,
-                result: xev.WriteError!usize,
-            ) xev.CallbackAction {
-                _ = loop;
-                _ = completion_inner;
-                _ = state_inner;
-                _ = socket;
-                _ = buffer_inner;
-
-                const result_data = result_data_ptr.?;
-                result_data.result = result;
-                resumeTask(result_data.task, .local);
-
-                return .disarm;
-            }
+        var addr_storage: std.posix.sockaddr.storage = undefined;
+        var msg: std.posix.msghdr = .{
+            .name = @ptrCast(&addr_storage),
+            .namelen = @sizeOf(std.posix.sockaddr.storage),
+            .iov = &iov,
+            .iovlen = 1,
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
         };
 
-        var result_data: Result = .{ .task = task };
+        var completion: xev.Completion = .{
+            .op = .{
+                .recvmsg = .{
+                    .fd = self.handle,
+                    .msghdr = &msg,
+                },
+            },
+        };
 
-        self.xev_udp.write(
-            &executor.loop,
-            &completion,
-            &state,
-            addr,
-            .{ .slice = data },
-            Result,
-            &result_data,
-            Result.callback,
-        );
+        const bytes_read = try runIo(rt, &completion, "recvmsg");
 
-        try executor.waitForXevCompletion(&completion);
+        // Extract address from msghdr
+        const addr_bytes: [*]const u8 = @ptrCast(msg.name);
+        const addr = addressFromStorage(addr_bytes[0..msg.namelen]);
 
-        return result_data.result catch |err| {
-            if (err == error.Canceled) return error.Unexpected;
-            return err;
+        return UdpReadResult{
+            .bytes_read = bytes_read,
+            .sender_addr = addr,
         };
     }
 
-    pub fn close(self: *UdpSocket) void {
-        // Shield close operation from cancellation
-        self.runtime.beginShield();
-        defer self.runtime.endShield();
+    pub fn write(self: *UdpSocket, rt: *Runtime, addr: std.net.Address, data: []const u8) !usize {
+        return switch (xev.backend) {
+            .io_uring, .epoll => try self.writeSendmsg(rt, addr, data),
+            .iocp, .kqueue => try self.writeSendto(rt, addr, data),
+            .wasi_poll => error.Unsupported,
+        };
+    }
 
-        const task = self.runtime.getCurrentTask() orelse unreachable;
-        const executor = task.getExecutor();
-        var completion: xev.Completion = undefined;
-
-        const Result = struct {
-            task: *AnyTask,
-            result: xev.CloseError!void = undefined,
-
-            pub fn callback(
-                result_data_ptr: ?*@This(),
-                loop: *xev.Loop,
-                completion_inner: *xev.Completion,
-                socket: xev.UDP,
-                result: xev.CloseError!void,
-            ) xev.CallbackAction {
-                _ = loop;
-                _ = completion_inner;
-                _ = socket;
-
-                const result_data = result_data_ptr.?;
-                result_data.result = result;
-                resumeTask(result_data.task, .local);
-
-                return .disarm;
-            }
+    fn writeSendto(self: *UdpSocket, rt: *Runtime, addr: std.net.Address, data: []const u8) !usize {
+        var completion: xev.Completion = .{
+            .op = .{
+                .sendto = .{
+                    .fd = self.handle,
+                    .buffer = .{ .slice = data },
+                    .addr = addr,
+                },
+            },
         };
 
-        var result_data: Result = .{ .task = task };
+        return try runIo(rt, &completion, "sendto");
+    }
 
-        self.xev_udp.close(
-            &executor.loop,
-            &completion,
-            Result,
-            &result_data,
-            Result.callback,
-        );
+    fn writeSendmsg(self: *UdpSocket, rt: *Runtime, addr: std.net.Address, data: []const u8) !usize {
+        var iov = [_]std.posix.iovec_const{.{
+            .base = data.ptr,
+            .len = data.len,
+        }};
+
+        var msg: std.posix.msghdr_const = .{
+            .name = @ptrCast(&addr.any),
+            .namelen = addr.getOsSockLen(),
+            .iov = &iov,
+            .iovlen = 1,
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
+        };
+
+        var completion: xev.Completion = .{
+            .op = .{
+                .sendmsg = .{
+                    .fd = self.handle,
+                    .msghdr = &msg,
+                },
+            },
+        };
+
+        return try runIo(rt, &completion, "sendmsg");
+    }
+
+    pub fn close(self: *UdpSocket, rt: *Runtime) void {
+        rt.beginShield();
+        defer rt.endShield();
+
+        var completion: xev.Completion = .{
+            .op = .{
+                .close = .{
+                    .fd = self.handle,
+                },
+            },
+        };
 
         // Shield ensures this never returns error.Canceled
-        executor.waitForXevCompletion(&completion) catch unreachable;
-
-        // Ignore close errors, following Zig std lib pattern
-        _ = result_data.result catch {};
+        runIo(rt, &completion, "close") catch {};
     }
 };
 
@@ -204,8 +200,8 @@ test "UDP: basic send and receive" {
     const ServerTask = struct {
         fn run(rt: *Runtime, server_port: *u16) !void {
             const bind_addr = try std.net.Address.parseIp4("127.0.0.1", TEST_PORT);
-            var socket = try UdpSocket.init(rt, bind_addr);
-            defer socket.close();
+            var socket = try UdpSocket.init(bind_addr);
+            defer socket.close(rt);
 
             try socket.bind(bind_addr);
 
@@ -214,10 +210,10 @@ test "UDP: basic send and receive" {
 
             // Wait for and echo one message
             var buffer: [1024]u8 = undefined;
-            const recv_result = try socket.read(&buffer);
+            const recv_result = try socket.read(rt, &buffer);
 
             // Echo back to sender
-            const bytes_sent = try socket.write(recv_result.sender_addr, buffer[0..recv_result.bytes_read]);
+            const bytes_sent = try socket.write(rt, recv_result.sender_addr, buffer[0..recv_result.bytes_read]);
             try testing.expectEqual(recv_result.bytes_read, bytes_sent);
         }
     };
@@ -227,20 +223,20 @@ test "UDP: basic send and receive" {
             try rt.sleep(10); // Give server time to bind
 
             const client_addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-            var socket = try UdpSocket.init(rt, client_addr);
-            defer socket.close();
+            var socket = try UdpSocket.init(client_addr);
+            defer socket.close(rt);
 
             try socket.bind(client_addr);
 
             // Send test data
             const test_data = "Hello, UDP!";
             const server_addr = try std.net.Address.parseIp4("127.0.0.1", server_port.*);
-            const bytes_sent = try socket.write(server_addr, test_data);
+            const bytes_sent = try socket.write(rt, server_addr, test_data);
             try testing.expectEqual(test_data.len, bytes_sent);
 
             // Receive echo
             var buffer: [1024]u8 = undefined;
-            const recv_result = try socket.read(&buffer);
+            const recv_result = try socket.read(rt, &buffer);
             try testing.expectEqualStrings(test_data, buffer[0..recv_result.bytes_read]);
         }
     };
