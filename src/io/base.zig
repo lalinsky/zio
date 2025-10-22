@@ -17,6 +17,8 @@ pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
 
 pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
     var canceled = false;
+    var shielded = false;
+    defer if (shielded) rt.endShield();
 
     var executor = rt.getCurrentExecutor() orelse @panic("no active executor");
     executor.loop.add(completion);
@@ -25,6 +27,8 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
         executor.yield(.ready, .waiting_io, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {
                 if (!canceled) {
+                    rt.beginShield();
+                    shielded = true;
                     cancelIo(rt, completion);
                     canceled = true;
                 }
