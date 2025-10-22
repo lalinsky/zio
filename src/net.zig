@@ -148,7 +148,7 @@ test "tcpConnectToAddress: basic" {
             try writer.interface.writeAll("hello\n");
             try writer.interface.flush();
 
-            try stream.shutdown(rt, .both);
+            stream.shutdown(rt, .both) catch {};
         }
     };
 

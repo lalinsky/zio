@@ -1477,6 +1477,7 @@ pub const Completion = struct {
                 .shutdown = switch (errno) {
                     .SUCCESS => {},
                     .CANCELED => error.Canceled,
+                    .PERM => error.Unexpected,
                     else => |err| posix.unexpectedErrno(err),
                 },
             },
