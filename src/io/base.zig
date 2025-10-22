@@ -52,7 +52,7 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
 }
 
 pub fn runIo(rt: *Runtime, completion: *xev.Completion, comptime op: []const u8) !meta.Payload(@FieldType(xev.Result, op)) {
-    try IoOperation(op).run(rt, completion);
+    return try IoOperation(op).run(rt, completion);
 }
 
 pub fn IoOperation(comptime op: []const u8) type {

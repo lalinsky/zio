@@ -1,6 +1,7 @@
 const std = @import("std");
 const meta = @import("../../meta.zig");
 const Runtime = @import("../../runtime.zig").Runtime;
+const Server = @import("../net.zig").Server;
 const IpAddress = @import("../net.zig").IpAddress;
 const UnixAddress = @import("../net.zig").UnixAddress;
 
@@ -30,20 +31,45 @@ test "UnixAddress: init" {
 }
 
 pub fn checkListen(addr: anytype, options: anytype) !void {
-    const testFn = struct {
-        pub fn run(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
+    const Test = struct {
+        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
+
+            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            defer server_task.deinit();
+
+            var client_task = try rt.spawn(clientFn, .{ rt, server }, .{});
+            defer client_task.deinit();
+
+            // TODO use TaskGroup
+
+            server_task.join() catch {};
+            client_task.join() catch {};
         }
-    }.run;
+
+        pub fn serverFn(rt: *Runtime, server: Server) !void {
+            const client = try server.accept(rt);
+            defer client.close(rt);
+
+            client.shutdown(rt, .both) catch {};
+        }
+
+        pub fn clientFn(rt: *Runtime, server: Server) !void {
+            const client = try server.address.connect(rt);
+            defer client.close(rt);
+
+            client.shutdown(rt, .both) catch {};
+        }
+    };
 
     var runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(testFn, .{ &runtime, addr, options }, .{});
+    try runtime.runUntilComplete(Test.mainFn, .{ &runtime, addr, options }, .{});
 }
 
-test "UnixAddress: listen" {
+test "UnixAddress: listen/accept/connect" {
     const path = "/tmp/zio-test-socket";
     defer std.fs.deleteFileAbsolute(path) catch {};
 
@@ -51,7 +77,7 @@ test "UnixAddress: listen" {
     try checkListen(addr, UnixAddress.ListenOptions{});
 }
 
-test "IpAddress: listen" {
+test "IpAddress: listen/accept/connect" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 0);
     try checkListen(addr, IpAddress.ListenOptions{});
 }

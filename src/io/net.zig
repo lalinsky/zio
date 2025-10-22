@@ -37,8 +37,7 @@ pub const IpAddress = extern union {
     };
 
     pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
-        const fd = try netListenIp(rt, self, options);
-        return .{ .handle = fd };
+        return netListenIp(rt, self, options);
     }
 
     pub fn connect(self: IpAddress, rt: *Runtime) !Stream {
@@ -65,17 +64,31 @@ pub const UnixAddress = extern union {
     };
 
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
-        const fd = try netListenUnix(rt, self, options);
-        return .{ .handle = fd };
+        return netListenUnix(rt, self, options);
     }
 
-    pub fn connect(self: IpAddress, rt: *Runtime) !Stream {
+    pub fn connect(self: UnixAddress, rt: *Runtime) !Stream {
         return netConnectUnix(rt, self);
+    }
+};
+
+pub const Address = extern union {
+    any: std.posix.sockaddr,
+    ip: IpAddress,
+    unix: UnixAddress,
+
+    pub fn connect(self: Address, rt: *Runtime) !Stream {
+        switch (self.any.family) {
+            std.posix.AF.INET, std.posix.AF.INET6 => return self.ip.connect(rt),
+            std.posix.AF.UNIX => return self.unix.connect(rt),
+            else => unreachable,
+        }
     }
 };
 
 pub const Server = struct {
     handle: Handle,
+    address: Address,
 
     pub fn accept(self: Server, rt: *Runtime) !Stream {
         const handle = try netAccept(rt, self.handle);
@@ -95,15 +108,15 @@ pub const Stream = struct {
     handle: Handle,
 
     pub fn send(self: Stream, rt: *Runtime, buf: []const u8) !usize {
-        netSend(rt, self.handle, buf);
+        return netSend(rt, self.handle, buf);
     }
 
     pub fn receive(self: Stream, rt: *Runtime, buf: []u8) !usize {
-        netReceive(rt, self.handle, buf);
+        return netReceive(rt, self.handle, buf);
     }
 
     pub fn shutdown(self: Stream, rt: *Runtime, how: ShutdownHow) !void {
-        netShutdown(rt, self.handle, how);
+        return netShutdown(rt, self.handle, how);
     }
 
     pub fn close(self: Stream, rt: *Runtime) void {
@@ -121,7 +134,7 @@ fn createStreamSocket(family: std.posix.sa_family_t) !Handle {
     }
 }
 
-pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptions) !Handle {
+pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptions) !Server {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
@@ -140,10 +153,15 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     try std.posix.bind(sock, &addr.any, addr_len);
     try std.posix.listen(sock, options.kernel_backlog);
 
-    return fd;
+    // Get the actual bound address (important for port 0)
+    var actual_addr: IpAddress = undefined;
+    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+    try std.posix.getsockname(sock, &actual_addr.any, &actual_len);
+
+    return .{ .handle = fd, .address = .{ .ip = actual_addr } };
 }
 
-pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Handle {
+pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
@@ -157,32 +175,39 @@ pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.Liste
     try std.posix.bind(sock, &addr.any, addr_len);
     try std.posix.listen(sock, options.kernel_backlog);
 
-    return fd;
+    // Get the actual bound address
+    var actual_addr: UnixAddress = undefined;
+    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.un);
+    try std.posix.getsockname(sock, &actual_addr.any, &actual_len);
+
+    return .{ .handle = fd, .address = .{ .unix = actual_addr } };
 }
 
-pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Handle {
+pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    return netConnect(rt, fd, .initPosix(&addr.any));
+    try netConnect(rt, fd, .initPosix(@ptrCast(&addr)));
+    return .{ .handle = fd };
 }
 
-pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Handle {
+pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    return netConnect(rt, fd, .initUnix(addr.path));
+    try netConnect(rt, fd, .{ .un = addr.un });
+    return .{ .handle = fd };
 }
 
 pub fn netReceive(rt: *Runtime, fd: Handle, buf: []u8) !usize {
     var completion: xev.Completion = .{ .op = .{
-        .send = .{
+        .recv = .{
             .fd = fd,
             .buffer = .{ .slice = buf },
         },
     } };
 
-    return runIo(rt, &completion, "send");
+    return runIo(rt, &completion, "recv");
 }
 
 pub fn netSend(rt: *Runtime, fd: Handle, buf: []const u8) !usize {
@@ -199,7 +224,7 @@ pub fn netSend(rt: *Runtime, fd: Handle, buf: []const u8) !usize {
 pub fn netAccept(rt: *Runtime, fd: Handle) !Handle {
     var completion: xev.Completion = .{ .op = .{
         .accept = .{
-            .fd = fd,
+            .socket = fd,
         },
     } };
 
@@ -210,10 +235,10 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Handle {
     return runIo(rt, &completion, "accept");
 }
 
-pub fn netConnect(rt: *Runtime, fd: Handle, addr: std.net.Address) !Handle {
+pub fn netConnect(rt: *Runtime, fd: Handle, addr: std.net.Address) !void {
     var completion: xev.Completion = .{ .op = .{
         .connect = .{
-            .fd = fd,
+            .socket = fd,
             .addr = addr,
         },
     } };
