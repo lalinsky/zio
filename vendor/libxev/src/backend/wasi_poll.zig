@@ -577,7 +577,7 @@ pub const Loop = struct {
         if (get_now()) |t| self.cached_now = t else |_| {}
     }
 
-    fn timer_next(next_ms: u64) wasi.timestamp_t {
+    pub fn timer_next(next_ms: u64) wasi.timestamp_t {
         // Get the absolute time we'll execute this timer next.
         var now_ts: wasi.timestamp_t = undefined;
         switch (wasi.clock_time_get(@as(u32, @bitCast(posix.CLOCK.MONOTONIC)), 1, &now_ts)) {
@@ -588,6 +588,20 @@ pub const Loop = struct {
 
         // TODO: overflow
         now_ts += next_ms * std.time.ns_per_ms;
+        return now_ts;
+    }
+
+    pub fn timer_next_ns(next_ns: u64) wasi.timestamp_t {
+        // Get the absolute time we'll execute this timer next.
+        var now_ts: wasi.timestamp_t = undefined;
+        switch (wasi.clock_time_get(@as(u32, @bitCast(posix.CLOCK.MONOTONIC)), 1, &now_ts)) {
+            .SUCCESS => {},
+            .INVAL => unreachable,
+            else => unreachable,
+        }
+
+        // TODO: overflow
+        now_ts += next_ns;
         return now_ts;
     }
 

@@ -318,7 +318,7 @@ pub const Loop = struct {
         self.add(c_cancel);
     }
 
-    fn timer_next(self: *Loop, next_ms: u64) linux.kernel_timespec {
+    pub fn timer_next(self: *Loop, next_ms: u64) linux.kernel_timespec {
         // Get the timestamp of the absolute time that we'll execute this timer.
         // There are lots of failure scenarios here in math. If we see any
         // of them we just use the maximum value.
@@ -340,6 +340,30 @@ pub const Loop = struct {
             .sec = std.math.add(isize, self.cached_now.sec, next_s) catch
                 return max,
             .nsec = std.math.add(isize, self.cached_now.nsec, next_ns) catch
+                return max,
+        };
+    }
+
+    pub fn timer_next_ns(self: *Loop, next_ns: u64) linux.kernel_timespec {
+        // Get the timestamp of the absolute time that we'll execute this timer.
+        // There are lots of failure scenarios here in math. If we see any
+        // of them we just use the maximum value.
+        const max: linux.kernel_timespec = .{
+            .sec = std.math.maxInt(isize),
+            .nsec = std.math.maxInt(isize),
+        };
+
+        const next_s = std.math.cast(isize, next_ns / std.time.ns_per_s) orelse
+            return max;
+        const next_nsec = std.math.cast(isize, next_ns % std.time.ns_per_s) orelse
+            return max;
+
+        if (self.flags.now_outdated) self.update_now();
+
+        return .{
+            .sec = std.math.add(isize, self.cached_now.sec, next_s) catch
+                return max,
+            .nsec = std.math.add(isize, self.cached_now.nsec, next_nsec) catch
                 return max,
         };
     }

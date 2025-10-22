@@ -3,6 +3,10 @@ const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
 const TcpStream = @import("tcp.zig").TcpStream;
 
+const io_net = @import("io/net.zig");
+pub const IpAddress = io_net.IpAddress;
+pub const UnixAddress = io_net.UnixAddress;
+
 pub const AddressList = std.net.AddressList;
 
 pub const Stream = TcpStream;
@@ -54,6 +58,10 @@ pub fn tcpConnectToHost(
 /// This is a convenience wrapper around TcpStream.connect.
 pub fn tcpConnectToAddress(runtime: *Runtime, address: std.net.Address) !TcpStream {
     return TcpStream.connect(runtime, address);
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }
 
 test "getAddressList: localhost" {

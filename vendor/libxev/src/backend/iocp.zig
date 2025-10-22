@@ -467,6 +467,11 @@ pub const Loop = struct {
         return self.cached_now + next_ms * std.time.ns_per_ms;
     }
 
+    // Get the absolute timestamp corresponding to the given "next_ns".
+    pub fn timer_next_ns(self: *Loop, next_ns: u64) u64 {
+        return self.cached_now + next_ns;
+    }
+
     pub fn done(self: *Loop) bool {
         return self.flags.stopped or (self.active == 0 and
             self.submissions.empty() and
