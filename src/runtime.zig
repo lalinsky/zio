@@ -79,7 +79,6 @@ pub const RuntimeOptions = struct {
 
 // Runtime-specific errors
 pub const ZioError = error{
-    XevError,
     NotInCoroutine,
     InvalidExecutorId,
     RuntimeShutdown,
@@ -89,23 +88,6 @@ pub const ZioError = error{
 pub const Cancelable = error{
     Canceled,
 };
-
-// Timer callback for libxev
-fn markReadyFromXevCallback(
-    userdata: ?*Coroutine,
-    loop: *xev.Loop,
-    completion: *xev.Completion,
-    result: anyerror!void,
-) xev.CallbackAction {
-    _ = loop;
-    _ = completion;
-    _ = result catch {};
-
-    if (userdata) |coro| {
-        resumeTask(coro, .local);
-    }
-    return .disarm;
-}
 
 // Noop callback for async timer cancellation
 fn noopTimerCancelCallback(
