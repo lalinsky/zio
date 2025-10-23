@@ -343,6 +343,12 @@ const WindowsImpl = struct {
                 }
                 i += 1;
             }
+
+            // Uninstall handler if no more Signal instances exist
+            if (handlers.items.len == 0 and ctrl_handler_installed) {
+                _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandler, 0);
+                ctrl_handler_installed = false;
+            }
         }
 
         fn consoleCtrlHandler(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
