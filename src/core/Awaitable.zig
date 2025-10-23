@@ -68,4 +68,18 @@ pub const Awaitable = struct {
         const mutable_self: *Awaitable = @constCast(self);
         _ = mutable_self.waiting_list.remove(wait_node);
     }
+
+    /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
+    /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
+    /// Can be called from any context.
+    pub fn markComplete(self: *Awaitable) void {
+        // Set done flag first (release semantics for memory ordering)
+        self.done.store(true, .release);
+
+        // Pop and wake all waiters, then transition to complete
+        // Loop continues until popOrTransition successfully transitions not_complete->complete
+        while (self.waiting_list.popOrTransition(not_complete, complete)) |wait_node| {
+            wait_node.wake();
+        }
+    }
 };

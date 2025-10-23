@@ -117,7 +117,7 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
 
     // Mark awaitable as complete and wake all waiters (thread-safe)
     // Even if canceled, we still mark as complete so waiters wake up
-    markComplete(&any_blocking_task.awaitable);
+    any_blocking_task.awaitable.markComplete();
 
     // Release the blocking task's reference
     const runtime = any_blocking_task.runtime;
@@ -298,21 +298,6 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
             }
             try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns - elapsed_ns);
         }
-    }
-}
-
-/// Mark an awaitable as complete and wake all waiters (both coroutines and threads).
-/// This is a standalone helper that can be called on any awaitable.
-/// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
-/// Can be called from any context.
-pub fn markComplete(awaitable: *Awaitable) void {
-    // Set done flag first (release semantics for memory ordering)
-    awaitable.done.store(true, .release);
-
-    // Pop and wake all waiters, then transition to complete
-    // Loop continues until popOrTransition successfully transitions not_complete->complete
-    while (awaitable.waiting_list.popOrTransition(Awaitable.not_complete, Awaitable.complete)) |wait_node| {
-        wait_node.wake();
     }
 }
 
@@ -1203,7 +1188,7 @@ pub const Executor = struct {
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        markComplete(current_awaitable);
+                        current_awaitable.markComplete();
 
                         // Track task completion
                         self.metrics.tasks_completed += 1;
