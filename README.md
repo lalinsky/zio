@@ -29,12 +29,6 @@ the interface, or deprecate this library.
 - Synchronization primitives matching `std.Thread` API (`Mutex`, `Condition`, `Semaphore`, `ResetEvent`, `Notify`, `Barrier`)
 - `Channel(T)` and `BroadcastChannel(T)` for producer-consumer patterns across coroutines
 
-## TODO
-
-- Support for async events (for coordinating multiple threads)
-- Support for sub-processes
-- Support for pipes
-
 ## Installation
 
 1) Add zio as a dependency in your `build.zig.zon`:
