@@ -6,13 +6,21 @@ const WaitNode = @import("core/WaitNode.zig");
 // Future protocol:
 //   * needs to have const Result = T
 //   * needs to have hasResult()/getResult() methods
-//   * needs to have asyncWait()/asyncCancel() method
+//   * needs to have asyncWait()/asyncCancelWait() methods
+
+/// Extract the Future type, handling both direct types and pointers
+fn FutureType(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .pointer => |ptr| ptr.child,
+        else => T,
+    };
+}
 
 pub fn SelectUnion(comptime S: type) type {
     const struct_fields = @typeInfo(S).@"struct".fields;
     var fields: [struct_fields.len]std.builtin.Type.UnionField = undefined;
     for (&fields, struct_fields) |*union_field, struct_field| {
-        const Future = struct_field.type;
+        const Future = FutureType(struct_field.type);
         const Result = Future.Result;
         union_field.* = .{
             .name = struct_field.name,
@@ -75,16 +83,18 @@ pub const SelectWaiter = struct {
 };
 
 pub fn asyncWait(future: anytype, wait_node: *WaitNode) void {
-    if (@hasDecl(@TypeOf(future), "asyncWait")) {
+    const Future = FutureType(@TypeOf(future));
+    if (@hasDecl(Future, "asyncWait")) {
         future.asyncWait(wait_node);
     } else {
         future.awaitable.waiting_list.push(wait_node);
     }
 }
 
-pub fn asyncCancel(future: anytype, wait_node: *WaitNode) void {
-    if (@hasDecl(@TypeOf(future), "asyncCancel")) {
-        future.asyncCancel(wait_node);
+pub fn asyncCancelWait(future: anytype, wait_node: *WaitNode) void {
+    const Future = FutureType(@TypeOf(future));
+    if (@hasDecl(Future, "asyncCancelWait")) {
+        future.asyncCancelWait(wait_node);
     } else {
         _ = future.awaitable.waiting_list.remove(wait_node);
     }
@@ -146,7 +156,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
     defer {
         inline for (fields, 0..) |field, i| {
             const future = @field(futures, field.name);
-            asyncCancel(future, &waiters[i].wait_node);
+            asyncCancelWait(future, &waiters[i].wait_node);
         }
     }
 

@@ -225,6 +225,36 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ T
     }
 }
 
+// Future protocol implementation for use with select()
+pub const Result = void;
+
+/// Returns true if the event is set (has a result).
+/// This is part of the Future protocol for select().
+pub fn hasResult(self: *const ResetEvent) bool {
+    return self.isSet();
+}
+
+/// Gets the result (void) of the event.
+/// This is part of the Future protocol for select().
+pub fn getResult(self: *const ResetEvent) void {
+    _ = self;
+    return;
+}
+
+/// Registers a wait node to be notified when the event is set.
+/// This is part of the Future protocol for select().
+pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) void {
+    // Try to push to queue - only succeeds if event is not set
+    // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
+    _ = self.wait_queue.pushUnless(is_set, wait_node);
+}
+
+/// Cancels a pending wait operation by removing the wait node.
+/// This is part of the Future protocol for select().
+pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) void {
+    _ = self.wait_queue.remove(wait_node);
+}
+
 test "ResetEvent basic set/reset/isSet" {
     const testing = std.testing;
 
@@ -377,4 +407,31 @@ test "ResetEvent size" {
     // but still reasonably sized
     _ = testing;
     _ = @sizeOf(ResetEvent);
+}
+
+test "ResetEvent: select" {
+    const select = @import("../select.zig").select;
+
+    const TestContext = struct {
+        fn setterTask(rt: *Runtime, event: *ResetEvent) !void {
+            try rt.sleep(5);
+            event.set(rt);
+            try rt.sleep(5);
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var reset_event = ResetEvent.init;
+
+            var task = try rt.spawn(setterTask, .{ rt, &reset_event }, .{});
+            defer task.deinit();
+
+            const result = try select(rt, .{ .event = &reset_event, .task = task });
+            try std.testing.expectEqual(.event, result);
+        }
+    };
+
+    var runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
 }
