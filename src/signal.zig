@@ -245,15 +245,15 @@ const KqueueImpl = struct {
     }
 };
 
-// Windows implementation using SetConsoleCtrlHandler + ResetEvent
+// Windows implementation using SetConsoleCtrlHandler + Notify
 const WindowsImpl = struct {
     signal_type: SignalType,
-    event: ResetEvent = ResetEvent.init,
+    notify: Notify = Notify.init,
     registry_id: ?usize = null,
     mutex: std.Thread.Mutex = .{},
     registered: bool = false,
 
-    const ResetEvent = @import("sync.zig").ResetEvent;
+    const Notify = @import("sync.zig").Notify;
 
     fn init(signal_type: SignalType) WindowsImpl {
         return .{ .signal_type = signal_type };
@@ -269,11 +269,8 @@ const WindowsImpl = struct {
             try self.initializeSignal();
         }
 
-        // Wait for signal - event will be set by console handler
-        try self.event.wait(rt);
-
-        // Reset for next wait
-        self.event.reset();
+        // Wait for signal - notify will be signaled by console handler
+        try self.notify.wait(rt);
     }
 
     fn initializeSignal(self: *WindowsImpl) !void {
@@ -284,7 +281,7 @@ const WindowsImpl = struct {
         if (self.registered) return;
 
         // Register with global handler
-        self.registry_id = try GlobalHandlerRegistry.register(self.signal_type, &self.event);
+        self.registry_id = try GlobalHandlerRegistry.register(self.signal_type, &self.notify);
         self.registered = true;
     }
 
@@ -309,10 +306,10 @@ const WindowsImpl = struct {
         const HandlerEntry = struct {
             id: usize,
             signal_type: SignalType,
-            event: *ResetEvent,
+            notify: *Notify,
         };
 
-        fn register(signal_type: SignalType, event: *ResetEvent) !usize {
+        fn register(signal_type: SignalType, notify: *Notify) !usize {
             mutex.lock();
             defer mutex.unlock();
 
@@ -322,7 +319,7 @@ const WindowsImpl = struct {
             try handlers.append(std.heap.page_allocator, .{
                 .id = id,
                 .signal_type = signal_type,
-                .event = event,
+                .notify = notify,
             });
 
             if (!ctrl_handler_installed) {
@@ -359,10 +356,10 @@ const WindowsImpl = struct {
             };
 
             if (signal_type) |sig_type| {
-                // Set all matching events - ResetEvent.set() can be called from any thread
+                // Signal all matching notify instances - can be called from any thread
                 for (handlers.items) |entry| {
                     if (entry.signal_type == sig_type) {
-                        entry.event.set();
+                        entry.notify.signal();
                     }
                 }
                 return 1; // Signal handled
