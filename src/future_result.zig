@@ -34,6 +34,11 @@ pub fn FutureResult(comptime T: type) type {
             return false;
         }
 
+        pub fn isSet(self: *const Self) bool {
+            const state = self.state.load(.acquire);
+            return state == .ok or state == .err;
+        }
+
         pub fn get(self: *const Self) ?T {
             const state = self.state.load(.acquire);
             const is_error_union = @typeInfo(T) == .error_union;

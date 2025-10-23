@@ -15,6 +15,14 @@ pub fn Future(comptime T: type) type {
         wait_queue: WaitQueue(WaitNode) = .empty,
         value: FutureResult(T) = .{},
 
+        // Use WaitQueue sentinel states to encode future state:
+        // - sentinel0 = not set (no waiters, value not available)
+        // - sentinel1 = done (no waiters, value is available)
+        // - pointer = waiting (has waiters, value not available)
+        const State = WaitQueue(WaitNode).State;
+        const not_set = State.sentinel0;
+        const done = State.sentinel1;
+
         /// Initialize a new Future. Use like: `var future = Future(i32).init;`
         pub const init: Self = .{};
 
@@ -27,8 +35,9 @@ pub fn Future(comptime T: type) type {
                 return;
             }
 
-            // Wake all waiters
-            while (self.wait_queue.pop()) |wait_node| {
+            // Pop and wake all waiters, then transition to done
+            // Loop continues until popOrTransition successfully transitions not_set->done
+            while (self.wait_queue.popOrTransition(not_set, done)) |wait_node| {
                 wait_node.wake();
             }
         }
@@ -54,11 +63,13 @@ pub fn Future(comptime T: type) type {
         /// This is part of the Future protocol for select().
         /// Returns false if the future is already set (no wait needed), true if added to queue.
         pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
-            if (self.value.get() != null) {
+            // Fast path: check if already set
+            if (self.value.isSet()) {
                 return false;
             }
-            self.wait_queue.push(wait_node);
-            return true;
+            // Try to push to queue - only succeeds if future is not done
+            // Returns false if future is done, preventing invalid transition: done -> has_waiters
+            return self.wait_queue.pushUnless(done, wait_node);
         }
 
         /// Cancels a pending wait operation by removing the wait node.
