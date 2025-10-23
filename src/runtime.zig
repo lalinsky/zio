@@ -18,7 +18,7 @@ const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
 
-pub const SelectUnion = @import("select.zig").SelectUnion;
+const select = @import("select.zig");
 
 const Io = @import("io.zig").Io;
 
@@ -160,69 +160,6 @@ fn shutdownCallback(
 const awaitable_module = @import("core/Awaitable.zig");
 pub const Awaitable = awaitable_module.Awaitable;
 pub const AwaitableKind = awaitable_module.AwaitableKind;
-
-/// Wait for an awaitable to complete. Works from both coroutines and threads.
-/// When called from a coroutine, suspends the coroutine.
-/// When called from a thread, parks the thread using futex.
-/// Returns error.Canceled if the coroutine was canceled during the wait.
-pub fn waitForComplete(awaitable: *Awaitable, runtime: *Runtime) Cancelable!void {
-    // Fast path: check if already complete
-    if (awaitable.done.load(.acquire)) return;
-
-    if (runtime.getCurrentTask()) |task| {
-        // Coroutine path: add to wait queue and suspend
-        const executor = task.getExecutor();
-
-        // Check for self-join (would deadlock)
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-            if (&task.awaitable == awaitable) {
-                std.debug.panic("cannot wait on self (would deadlock)", .{});
-            }
-        }
-
-        // Transition to preparing_to_wait state before adding to queue
-        task.coro.state.store(.preparing_to_wait, .release);
-
-        awaitable.waiting_list.push(&task.awaitable.wait_node);
-
-        // Double-check state before suspending (avoid lost wakeup)
-        if (awaitable.done.load(.acquire)) {
-            // Completed while we were adding to queue, remove ourselves
-            _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
-            // Reset state back to ready
-            task.coro.state.store(.ready, .release);
-            return;
-        }
-
-        // Yield with atomic state transition (.preparing_to_wait -> .waiting_completion)
-        // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-        executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel) catch |err| {
-            // If yield itself was canceled, remove from wait list
-            _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
-            return err;
-        };
-
-        // Pair with markComplete()'s .release
-        _ = awaitable.done.load(.acquire);
-        // Yield returned successfully or we were woken early, awaitable must be complete
-    } else {
-        // Thread path: use ThreadWaiter for futex-based parking
-        var thread_waiter = ThreadWaiter.init();
-        awaitable.waiting_list.push(&thread_waiter.wait_node);
-
-        // Double-check before parking (avoid lost wakeup)
-        if (awaitable.done.load(.acquire)) {
-            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
-            return;
-        }
-
-        // Wait loop - check done flag and park on thread_waiter futex
-        while (true) {
-            if (awaitable.done.load(.acquire)) break;
-            std.Thread.Futex.wait(&thread_waiter.futex_state, 0);
-        }
-    }
-}
 
 /// Wait for an awaitable to complete with a timeout. Works from both coroutines and threads.
 /// Returns error.Timeout if the timeout expires before completion.
@@ -480,17 +417,19 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
         base: Base,
         future_result: FutureResult(T),
 
+        // Future protocol - Result type
+        pub const Result = T;
+
         pub fn wait(parent: *Parent) !meta.Payload(T) {
             // Check if already completed
             if (parent.impl.future_result.get()) |res| {
                 return res;
             }
 
-            // Wait for completion
+            // Wait for completion using select.wait()
             const runtime = Parent.getRuntime(parent);
-            try waitForComplete(&parent.impl.base.awaitable, runtime);
-
-            return parent.impl.future_result.get().?;
+            const result = try select.wait(runtime, parent);
+            return result.value;
         }
 
         pub fn cancel(parent: *Parent) void {
@@ -530,6 +469,13 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
         pub fn toAwaitable(parent: *const Parent) *const Awaitable {
             return &parent.impl.base.awaitable;
         }
+
+        /// Gets the result value.
+        /// This is part of the Future protocol for select().
+        /// Asserts that the task has completed.
+        pub fn getResult(parent: *Parent) T {
+            return parent.impl.future_result.get().?;
+        }
     };
 }
 
@@ -541,6 +487,7 @@ pub fn Task(comptime T: type) type {
 
         impl: Impl,
 
+        pub const Result = Impl.Result;
         pub const deinit = Impl.deinit;
         pub const wait = Impl.wait;
         pub const cancel = Impl.cancel;
@@ -549,6 +496,7 @@ pub fn Task(comptime T: type) type {
         pub const asyncWait = Impl.asyncWait;
         pub const asyncCancelWait = Impl.asyncCancelWait;
         pub const toAwaitable = Impl.toAwaitable;
+        pub const getResult = Impl.getResult;
 
         pub fn getRuntime(self: *Self) *Runtime {
             const executor = Executor.fromCoroutine(&self.impl.base.coro);
@@ -573,6 +521,7 @@ pub fn BlockingTask(comptime T: type) type {
 
         impl: Impl,
 
+        pub const Result = Impl.Result;
         pub const deinit = Impl.deinit;
         pub const wait = Impl.wait;
         pub const cancel = Impl.cancel;
@@ -581,6 +530,7 @@ pub fn BlockingTask(comptime T: type) type {
         pub const asyncWait = Impl.asyncWait;
         pub const asyncCancelWait = Impl.asyncCancelWait;
         pub const toAwaitable = Impl.toAwaitable;
+        pub const getResult = Impl.getResult;
 
         pub fn getRuntime(self: *Self) *Runtime {
             return self.impl.base.runtime;
@@ -1892,8 +1842,6 @@ pub const Runtime = struct {
             awaitable.destroy_fn(self, awaitable);
         }
     }
-
-    pub const select = @import("select.zig").select;
 
     pub fn io(self: *Runtime) Io {
         return .{ .userdata = self };
