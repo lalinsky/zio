@@ -66,10 +66,10 @@ const zio = @import("zio");
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     defer stream.close(rt);
 
-    var read_buffer: [256]u8 = undefined;
+    var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(rt, &read_buffer);
 
-    var write_buffer: [256]u8 = undefined;
+    var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(rt, &write_buffer);
 
     while (true) {
@@ -83,17 +83,15 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
 }
 
 fn serverTask(rt: *zio.Runtime) !void {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 8080);
-    var listener = try zio.TcpListener.init(addr);
-    defer listener.close(rt);
+    const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
-    try listener.bind(addr);
-    try listener.listen(10);
+    const server = try addr.listen(rt, .{});
+    defer server.close(rt);
 
     std.log.info("Listening on 127.0.0.1:8080", .{});
 
     while (true) {
-        const stream = try listener.accept(rt);
+        const stream = try server.accept(rt);
         errdefer stream.close(rt);
 
         var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
@@ -112,7 +110,7 @@ pub fn main() !void {
 }
 ```
 
-See `examples/*.zig` for [mini-redis](https://github.com/lalinsky/zio-mini-redis) more examples.
+See `examples/*.zig` and [mini-redis](https://github.com/lalinsky/zio-mini-redis) for more examples.
 
 ## Building
 
