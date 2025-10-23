@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("runtime.zig").Cancelable;
+const AnyTask = @import("runtime.zig").AnyTask;
 const WaitNode = @import("core/WaitNode.zig");
 const meta = @import("meta.zig");
 
@@ -22,6 +24,18 @@ fn FutureType(comptime T: type) type {
 fn FutureResult(comptime future_type: type) type {
     const Future = FutureType(future_type);
     return Future.Result;
+}
+
+/// Check for self-wait deadlock if the future has a toAwaitable() method
+fn checkSelfWait(task: *AnyTask, future: anytype) void {
+    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (std.meta.hasMethod(@TypeOf(future), "toAwaitable")) {
+            const awaitable_ptr = future.toAwaitable();
+            if (awaitable_ptr == &task.awaitable) {
+                std.debug.panic("cannot wait on self (would deadlock)", .{});
+            }
+        }
+    }
 }
 
 /// Wrapper for wait() result to avoid nested error unions
@@ -127,6 +141,11 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     const task = rt.getCurrentTask() orelse @panic("no active task");
     const executor = task.getExecutor();
 
+    // Self-wait detection: check all futures for self-wait
+    inline for (fields) |field| {
+        checkSelfWait(task, @field(futures, field.name));
+    }
+
     task.coro.state.store(.preparing_to_wait, .release);
     defer {
         const prev = task.coro.state.swap(.ready, .release);
@@ -193,6 +212,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
     const task = rt.getCurrentTask() orelse @panic("no active task");
     const executor = task.getExecutor();
+
+    // Self-wait detection: check if waiting on own task (would deadlock)
+    checkSelfWait(task, future);
 
     task.coro.state.store(.preparing_to_wait, .release);
     defer {

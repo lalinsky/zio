@@ -524,6 +524,12 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
         pub fn asyncCancelWait(parent: *const Parent, wait_node: *WaitNode) void {
             parent.impl.base.awaitable.asyncCancelWait(wait_node);
         }
+
+        /// Returns pointer to the underlying awaitable for self-wait detection.
+        /// This is part of the Future protocol for select().
+        pub fn toAwaitable(parent: *const Parent) *const Awaitable {
+            return &parent.impl.base.awaitable;
+        }
     };
 }
 
@@ -542,6 +548,7 @@ pub fn Task(comptime T: type) type {
         pub const fromAwaitable = Impl.fromAwaitable;
         pub const asyncWait = Impl.asyncWait;
         pub const asyncCancelWait = Impl.asyncCancelWait;
+        pub const toAwaitable = Impl.toAwaitable;
 
         pub fn getRuntime(self: *Self) *Runtime {
             const executor = Executor.fromCoroutine(&self.impl.base.coro);
@@ -573,6 +580,7 @@ pub fn BlockingTask(comptime T: type) type {
         pub const fromAwaitable = Impl.fromAwaitable;
         pub const asyncWait = Impl.asyncWait;
         pub const asyncCancelWait = Impl.asyncCancelWait;
+        pub const toAwaitable = Impl.toAwaitable;
 
         pub fn getRuntime(self: *Self) *Runtime {
             return self.impl.base.runtime;
