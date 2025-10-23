@@ -130,14 +130,14 @@ fn benchmarkTask(
     // Wait for all clients to complete
     for (client_tasks) |*task| {
         defer task.deinit();
-        try task.join();
+        try task.join(rt);
     }
 
     const end = std.time.nanoTimestamp();
 
     // Signal server to shut down
     server_done.set(rt);
-    try server.join();
+    try server.join(rt);
 
     // Calculate statistics
     const elapsed_ns = @as(u64, @intCast(end - start));
