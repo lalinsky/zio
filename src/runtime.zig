@@ -309,8 +309,9 @@ pub fn markComplete(awaitable: *Awaitable) void {
     // Set done flag first (release semantics for memory ordering)
     awaitable.done.store(true, .release);
 
-    // Wake all waiters (both coroutines and threads via WaitNode)
-    while (awaitable.waiting_list.pop()) |wait_node| {
+    // Pop and wake all waiters, then transition to complete
+    // Loop continues until popOrTransition successfully transitions not_complete->complete
+    while (awaitable.waiting_list.popOrTransition(Awaitable.not_complete, Awaitable.complete)) |wait_node| {
         wait_node.wake();
     }
 }
