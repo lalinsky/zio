@@ -49,8 +49,12 @@ test "IpAddress: parseIpAndPort" {
 }
 
 test "UnixAddress: init" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    const addr = try UnixAddress.init("/tmp/socket");
+    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const addr = try UnixAddress.init(path);
     try std.testing.expectEqual(std.posix.AF.UNIX, addr.any.family);
 }
 
@@ -106,15 +110,16 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    const path = "/tmp/zio-test-socket";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
 
     const addr = try UnixAddress.init(path);
     try checkListen(addr, UnixAddress.ListenOptions{});
 }
 
-test "IpAddress: listen/accept/connect/read/write" {
+test "IpAddress: listen/accept/connect/read/write IPv4" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 0);
     try checkListen(addr, IpAddress.ListenOptions{});
 }
