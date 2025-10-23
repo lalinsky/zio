@@ -12,7 +12,6 @@ const Runtime = @import("../runtime.zig").Runtime;
 pub const AwaitableKind = enum {
     task,
     blocking_task,
-    future,
 };
 
 // Awaitable - base type for anything that can be waited on
