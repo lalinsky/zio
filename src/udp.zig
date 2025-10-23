@@ -251,6 +251,6 @@ test "UDP: basic send and receive" {
 
     try runtime.run();
 
-    try server_task.join();
-    try client_task.join();
+    try server_task.join(&runtime);
+    try client_task.join(&runtime);
 }

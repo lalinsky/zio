@@ -192,6 +192,30 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) error{ Timeo
     }
 }
 
+// Future protocol implementation for use with select()
+pub const Result = void;
+
+/// Gets the result (void) of the notification.
+/// This is part of the Future protocol for select().
+pub fn getResult(self: *const Notify) void {
+    _ = self;
+    return;
+}
+
+/// Registers a wait node to be notified when signal() or broadcast() is called.
+/// This is part of the Future protocol for select().
+/// Always returns true since Notify has no persistent state (never pre-completed).
+pub fn asyncWait(self: *Notify, wait_node: *WaitNode) bool {
+    self.wait_queue.push(wait_node);
+    return true;
+}
+
+/// Cancels a pending wait operation by removing the wait node.
+/// This is part of the Future protocol for select().
+pub fn asyncCancelWait(self: *Notify, wait_node: *WaitNode) void {
+    _ = self.wait_queue.remove(wait_node);
+}
+
 test "Notify basic signal/wait" {
     const testing = std.testing;
 
@@ -380,4 +404,30 @@ test "Notify size and alignment" {
     // Should be the same size as WaitQueue (one pointer for head, one for tail)
     try testing.expectEqual(@sizeOf(WaitQueue(WaitNode)), @sizeOf(Notify));
     _ = @alignOf(Notify);
+}
+
+test "Notify: select" {
+    const select = @import("../select.zig").select;
+
+    const TestContext = struct {
+        fn signalerTask(rt: *Runtime, notify: *Notify) !void {
+            try rt.sleep(5);
+            notify.signal(rt);
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            var notify = Notify.init;
+
+            var task = try rt.spawn(signalerTask, .{ rt, &notify }, .{});
+            defer task.deinit();
+
+            const result = try select(rt, .{ .notify = &notify, .task = task });
+            try std.testing.expectEqual(.notify, result);
+        }
+    };
+
+    var runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
 }

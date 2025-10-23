@@ -10,7 +10,6 @@ const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
-pub const SelectUnion = runtime.SelectUnion;
 pub const Cancelable = runtime.Cancelable;
 
 // Re-export I/O functionality
@@ -30,6 +29,11 @@ pub const Semaphore = @import("sync.zig").Semaphore;
 pub const Barrier = @import("sync.zig").Barrier;
 pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
+
+pub const select = @import("select.zig").select;
+pub const wait = @import("select.zig").wait;
+pub const SelectResult = @import("select.zig").SelectResult;
+pub const WaitResult = @import("select.zig").WaitResult;
 
 // Re-export low-level utilities
 pub const util = @import("utils.zig");
