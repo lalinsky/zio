@@ -26,7 +26,7 @@ the interface, or deprecate this library.
 - File I/O on all platforms, Linux and Windows are truly non-blocking, other platforms are simulated using a thread pool
 - Network I/O, supports TCP/UDP sockets, DNS resolution currently via thread pool
 - Full `std.Io.Reader` and `std.Io.Writer` support for TCP streams
-- Synchronization primitives matching `std.Thread` API (`Mutex`, `Condition`, `Semaphore`, `ResetEvent`, `Barrier`)
+- Synchronization primitives matching `std.Thread` API (`Mutex`, `Condition`, `Semaphore`, `ResetEvent`, `Notify`, `Barrier`)
 - `Channel(T)` and `BroadcastChannel(T)` for producer-consumer patterns across coroutines
 
 ## TODO

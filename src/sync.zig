@@ -2,6 +2,7 @@
 pub const Mutex = @import("sync/Mutex.zig");
 pub const Condition = @import("sync/Condition.zig");
 pub const ResetEvent = @import("sync/ResetEvent.zig");
+pub const Notify = @import("sync/Notify.zig");
 pub const Semaphore = @import("sync/Semaphore.zig");
 pub const Barrier = @import("sync/Barrier.zig");
 
@@ -14,6 +15,7 @@ test {
     _ = Mutex;
     _ = Condition;
     _ = ResetEvent;
+    _ = Notify;
     _ = Semaphore;
     _ = Barrier;
     _ = @import("sync/channel.zig");
