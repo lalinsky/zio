@@ -31,6 +31,10 @@ pub const Barrier = @import("sync.zig").Barrier;
 pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
 
+// Re-export signal handling
+pub const Signal = @import("signal.zig").Signal;
+pub const SignalType = @import("signal.zig").SignalType;
+
 // Re-export low-level utilities
 pub const util = @import("utils.zig");
 

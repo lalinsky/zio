@@ -825,6 +825,11 @@ pub const Loop = struct {
                 break :action .{ .kevent = {} };
             },
 
+            .signal => action: {
+                ev.* = c.kevent().?;
+                break :action .{ .kevent = {} };
+            },
+
             .shutdown => |v| action: {
                 const result = posix.system.shutdown(v.socket, switch (v.how) {
                     .recv => posix.SHUT.RD,
@@ -1130,6 +1135,15 @@ pub const Completion = struct {
                 .udata = @intFromPtr(self),
             }),
 
+            .signal => |v| kevent_init(.{
+                .ident = @intCast(v.signum),
+                .filter = std.c.EVFILT.SIGNAL,
+                .flags = std.c.EV.ADD | std.c.EV.ENABLE,
+                .fflags = 0,
+                .data = 0,
+                .udata = @intFromPtr(self),
+            }),
+
             inline .write, .pwrite, .send, .sendto => |v| kevent_init(.{
                 .ident = @intCast(v.fd),
                 .filter = std.c.EVFILT.WRITE,
@@ -1359,6 +1373,8 @@ pub const Completion = struct {
                 break :res .{ .proc = 0 };
             },
 
+            .signal => .{ .signal = {} },
+
             .close => |*op| res: {
                 posix.close(op.fd);
                 break :res .{ .close = {} };
@@ -1469,6 +1485,14 @@ pub const Completion = struct {
                     .SUCCESS => @intCast(r),
                     .CANCELED => error.Canceled,
                     .SRCH => ProcError.NoSuchProcess,
+                    else => |err| posix.unexpectedErrno(err),
+                },
+            },
+
+            .signal => .{
+                .signal = switch (errno) {
+                    .SUCCESS => {},
+                    .CANCELED => error.Canceled,
                     else => |err| posix.unexpectedErrno(err),
                 },
             },
@@ -1605,6 +1629,7 @@ pub const OperationType = enum {
     cancel,
     machport,
     proc,
+    signal,
 };
 
 /// All the supported operations of this event loop. These are always
@@ -1698,6 +1723,10 @@ pub const Operation = union(OperationType) {
         pid: posix.pid_t,
         flags: u32 = NOTE_EXIT_FLAGS,
     },
+
+    signal: struct {
+        signum: c_int,
+    },
 };
 
 pub const Result = union(OperationType) {
@@ -1718,6 +1747,7 @@ pub const Result = union(OperationType) {
     cancel: CancelError!void,
     machport: MachPortError!void,
     proc: ProcError!u32,
+    signal: SignalError!void,
 };
 
 const ThreadPoolError = error{
@@ -1774,6 +1804,11 @@ pub const ProcError = posix.KEventError || error{
     MissingKevent,
     Unexpected,
     NoSuchProcess,
+};
+
+pub const SignalError = posix.KEventError || error{
+    Canceled,
+    Unexpected,
 };
 
 pub const ShutdownError = posix.ShutdownError || error{
