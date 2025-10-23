@@ -6,6 +6,31 @@ const AnyTask = @import("runtime.zig").AnyTask;
 const WaitNode = @import("core/WaitNode.zig");
 const meta = @import("meta.zig");
 
+/// Thread waiter for non-coroutine contexts
+const ThreadWaiter = struct {
+    wait_node: WaitNode,
+    futex_state: std.atomic.Value(u32),
+
+    const wait_node_vtable = WaitNode.VTable{
+        .wake = waitNodeWake,
+    };
+
+    pub fn init() ThreadWaiter {
+        return .{
+            .wait_node = .{
+                .vtable = &wait_node_vtable,
+            },
+            .futex_state = std.atomic.Value(u32).init(0),
+        };
+    }
+
+    fn waitNodeWake(wait_node: *WaitNode) void {
+        const self: *ThreadWaiter = @fieldParentPtr("wait_node", wait_node);
+        self.futex_state.store(1, .release);
+        std.Thread.Futex.wake(&self.futex_state, 1);
+    }
+};
+
 // Future protocol:
 //   * needs to have const Result = T
 //   * needs to have asyncWait(*WaitNode) bool method (returns false if already complete)
@@ -201,7 +226,8 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 
 /// Wait for a single future to complete.
 /// Similar to select() but for a single future, returns the result.
-/// Returns Cancelable error if the task is canceled while waiting.
+/// Works from both coroutines and threads.
+/// Returns Cancelable error if the task is canceled while waiting (coroutine only).
 ///
 /// Example:
 /// ```
@@ -210,20 +236,25 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 /// const value = try result.value; // handle the inner error union
 /// ```
 pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
-    const executor = task.getExecutor();
+    var thread_waiter = ThreadWaiter.init();
+    const task = rt.getCurrentTask();
+    const wait_node = if (task) |t| &t.awaitable.wait_node else &thread_waiter.wait_node;
 
     // Self-wait detection: check if waiting on own task (would deadlock)
-    checkSelfWait(task, future);
+    if (task) |t| checkSelfWait(t, future);
 
-    task.coro.state.store(.preparing_to_wait, .release);
+    if (task) |t| {
+        t.coro.state.store(.preparing_to_wait, .release);
+    }
     defer {
-        const prev = task.coro.state.swap(.ready, .release);
-        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
+        if (task) |t| {
+            const prev = t.coro.state.swap(.ready, .release);
+            std.debug.assert(prev == .preparing_to_wait or prev == .ready);
+        }
     }
 
     var ready: std.atomic.Value(u32) = .init(0);
-    var waiter = SelectWaiter.init(&task.awaitable.wait_node, &ready);
+    var waiter = SelectWaiter.init(wait_node, &ready);
 
     // Fast path: check if already complete
     var fut = future;
@@ -239,8 +270,16 @@ pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@T
         }
     }
 
-    // Yield and wait for completion
-    try executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel);
+    if (task) |t| {
+        // Coroutine path: yield
+        const executor = t.getExecutor();
+        try executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel);
+    } else {
+        // Thread path: park on futex
+        while (thread_waiter.futex_state.load(.acquire) == 0) {
+            std.Thread.Futex.wait(&thread_waiter.futex_state, 0);
+        }
+    }
 
     // We should have been signaled
     std.debug.assert(ready.load(.acquire) > 0);
