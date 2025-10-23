@@ -56,6 +56,66 @@ pub const Signal = struct {
     }
 };
 
+// Unix signal mask registry for reference counting
+const UnixSignalMaskRegistry = if (builtin.os.tag == .linux or
+    builtin.os.tag == .macos or
+    builtin.os.tag == .freebsd or
+    builtin.os.tag == .netbsd or
+    builtin.os.tag == .openbsd)
+    struct {
+        var mutex: std.Thread.Mutex = .{};
+        var refcounts: [2]usize = .{ 0, 0 }; // Index 0 = SIGINT, 1 = SIGTERM
+
+        fn indexForSignal(signal_type: SignalType) usize {
+            return switch (signal_type) {
+                .int => 0,
+                .term => 1,
+            };
+        }
+
+        fn incrementAndMaskIfNeeded(signal_type: SignalType) !void {
+            mutex.lock();
+            defer mutex.unlock();
+
+            const idx = indexForSignal(signal_type);
+            if (refcounts[idx] == 0) {
+                // First instance for this signal type - mask it
+                const signum: c_int = switch (signal_type) {
+                    .int => std.posix.SIG.INT,
+                    .term => std.posix.SIG.TERM,
+                };
+
+                var mask = std.posix.sigemptyset();
+                std.posix.sigaddset(&mask, @intCast(signum));
+                std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, null);
+            }
+            refcounts[idx] += 1;
+        }
+
+        fn decrementAndUnmaskIfNeeded(signal_type: SignalType) void {
+            mutex.lock();
+            defer mutex.unlock();
+
+            const idx = indexForSignal(signal_type);
+            if (refcounts[idx] > 0) {
+                refcounts[idx] -= 1;
+                if (refcounts[idx] == 0) {
+                    // Last instance for this signal type - unmask it
+                    const signum: c_int = switch (signal_type) {
+                        .int => std.posix.SIG.INT,
+                        .term => std.posix.SIG.TERM,
+                    };
+
+                    var mask = std.posix.sigemptyset();
+                    std.posix.sigaddset(&mask, @intCast(signum));
+                    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &mask, null);
+                }
+            }
+        }
+    }
+else
+    void;
+
 // Linux implementation using signalfd
 const LinuxImpl = struct {
     signal_type: SignalType,
@@ -97,17 +157,17 @@ const LinuxImpl = struct {
         // Double-check after acquiring lock
         if (self.fd != -1) return;
 
+        // Increment refcount and mask signal if this is the first instance
+        try UnixSignalMaskRegistry.incrementAndMaskIfNeeded(self.signal_type);
+
         const signum: c_int = switch (self.signal_type) {
             .int => std.posix.SIG.INT,
             .term => std.posix.SIG.TERM,
         };
 
-        // Block the signal so it doesn't kill the process
+        // Create signalfd
         var mask = std.posix.sigemptyset();
         std.posix.sigaddset(&mask, @intCast(signum));
-        std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, null);
-
-        // Create signalfd
         self.fd = try std.posix.signalfd(-1, &mask, std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK);
     }
 
@@ -118,6 +178,9 @@ const LinuxImpl = struct {
         if (self.fd != -1) {
             std.posix.close(self.fd);
             self.fd = -1;
+
+            // Decrement refcount and unmask signal if this is the last instance
+            UnixSignalMaskRegistry.decrementAndUnmaskIfNeeded(self.signal_type);
         }
     }
 };
@@ -164,21 +227,21 @@ const KqueueImpl = struct {
         // Double-check after acquiring lock
         if (self.initialized) return;
 
-        const signum: c_int = switch (self.signal_type) {
-            .int => std.posix.SIG.INT,
-            .term => std.posix.SIG.TERM,
-        };
-
-        // Block the signal so it doesn't kill the process
-        var mask = std.posix.sigemptyset();
-        std.posix.sigaddset(&mask, @intCast(signum));
-        std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, null);
+        // Increment refcount and mask signal if this is the first instance
+        try UnixSignalMaskRegistry.incrementAndMaskIfNeeded(self.signal_type);
 
         self.initialized = true;
     }
 
     fn deinit(self: *KqueueImpl) void {
-        _ = self;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.initialized) {
+            // Decrement refcount and unmask signal if this is the last instance
+            UnixSignalMaskRegistry.decrementAndUnmaskIfNeeded(self.signal_type);
+            self.initialized = false;
+        }
     }
 };
 
