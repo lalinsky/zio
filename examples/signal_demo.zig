@@ -35,7 +35,7 @@ fn signalHandler(rt: *zio.Runtime, shutdown: *zio.ResetEvent) !void {
     try sig.wait(rt);
 
     std.log.info("Received signal, initiating shutdown...", .{});
-    shutdown.set(rt);
+    shutdown.set();
 }
 
 pub fn main() !void {

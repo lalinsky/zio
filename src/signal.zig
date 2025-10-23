@@ -362,9 +362,7 @@ const WindowsImpl = struct {
                 // Set all matching events - ResetEvent.set() can be called from any thread
                 for (handlers.items) |entry| {
                     if (entry.signal_type == sig_type) {
-                        // Note: set() takes a runtime parameter but doesn't use it
-                        const dummy_runtime: *Runtime = undefined;
-                        entry.event.set(dummy_runtime);
+                        entry.event.set();
                     }
                 }
                 return 1; // Signal handled
