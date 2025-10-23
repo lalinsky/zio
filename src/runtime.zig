@@ -399,18 +399,6 @@ pub const AnyBlockingTask = struct {
 };
 
 // Future for runtime - not backed by computation, can be set from callbacks
-pub const AnyFuture = struct {
-    awaitable: Awaitable,
-    runtime: *Runtime,
-
-    const wait_node_vtable = WaitNode.VTable{};
-
-    pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyFuture {
-        assert(awaitable.kind == .future);
-        return @fieldParentPtr("awaitable", awaitable);
-    }
-};
-
 // Shared implementation for all Future types (Task, BlockingTask, Future)
 fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type {
     return struct {
