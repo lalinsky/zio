@@ -40,7 +40,7 @@ pub fn SelectResult(comptime S: type) type {
         union_field.* = .{
             .name = struct_field.name,
             .type = Result,
-            .alignment = struct_field.alignment,
+            .alignment = @alignOf(Result),
         };
     }
     return @Type(.{ .@"union" = .{
