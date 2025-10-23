@@ -70,6 +70,19 @@ pub fn WaitResult(comptime T: type) type {
     };
 }
 
+/// Behavior when a wait operation is canceled
+pub const CancelBehavior = enum {
+    /// Propagate the cancellation error to the caller
+    propagate,
+    /// Cancel the child task and continue waiting until completion (with shield)
+    cancel_and_continue,
+};
+
+/// Flags for configuring wait behavior
+pub const WaitFlags = struct {
+    on_cancel: CancelBehavior = .propagate,
+};
+
 pub fn SelectResult(comptime S: type) type {
     const struct_fields = @typeInfo(S).@"struct".fields;
     var fields: [struct_fields.len]std.builtin.Type.UnionField = undefined;
@@ -224,18 +237,8 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     unreachable;
 }
 
-/// Wait for a single future to complete.
-/// Similar to select() but for a single future, returns the result.
-/// Works from both coroutines and threads.
-/// Returns Cancelable error if the task is canceled while waiting (coroutine only).
-///
-/// Example:
-/// ```
-/// // For Future(error{Foo}!i32)
-/// const result = try rt.wait(&future); // returns Cancelable!WaitResult(error{Foo}!i32)
-/// const value = try result.value; // handle the inner error union
-/// ```
-pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
+/// Internal wait implementation with configurable cancellation behavior.
+fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
     var thread_waiter = ThreadWaiter.init();
     const task = rt.getCurrentTask();
     const wait_node = if (task) |t| &t.awaitable.wait_node else &thread_waiter.wait_node;
@@ -271,9 +274,30 @@ pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@T
     }
 
     if (task) |t| {
-        // Coroutine path: yield
+        // Coroutine path: yield with cancellation handling
         const executor = t.getExecutor();
-        try executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel);
+
+        if (flags.on_cancel == .cancel_and_continue) {
+            // Stay subscribed to wait queue during cancel-and-retry
+            var shielded = false;
+            defer if (shielded) rt.endShield();
+
+            while (true) {
+                executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel) catch |err| switch (err) {
+                    error.Canceled => {
+                        if (shielded) unreachable;
+                        rt.beginShield();
+                        shielded = true;
+                        fut.cancel();
+                        continue;
+                    },
+                };
+                break;
+            }
+        } else {
+            // Propagate cancellation to caller
+            try executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel);
+        }
     } else {
         // Thread path: park on futex
         while (thread_waiter.futex_state.load(.acquire) == 0) {
@@ -286,6 +310,36 @@ pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@T
     std.debug.assert(waiter.signaled.load(.acquire));
 
     return .{ .value = fut.getResult() };
+}
+
+/// Wait for a single future to complete.
+/// Similar to select() but for a single future, returns the result.
+/// Works from both coroutines and threads.
+/// Returns Cancelable error if the task is canceled while waiting (coroutine only).
+///
+/// Example:
+/// ```
+/// // For Future(error{Foo}!i32)
+/// const result = try rt.wait(&future); // returns Cancelable!WaitResult(error{Foo}!i32)
+/// const value = try result.value; // handle the inner error union
+/// ```
+pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
+    return waitInternal(rt, future, .{ .on_cancel = .propagate });
+}
+
+/// Wait for a single future to complete, never propagating cancellation.
+/// When canceled, cancels the child task and continues waiting with shield enabled.
+/// This ensures the function always returns a result and never returns error.Canceled.
+/// Works from both coroutines and threads.
+///
+/// Example:
+/// ```
+/// const value = rt.waitUntilComplete(&future); // never returns error.Canceled
+/// // value is directly FutureResult (e.g., error{Foo}!i32)
+/// ```
+pub fn waitUntilComplete(rt: *Runtime, future: anytype) FutureResult(@TypeOf(future)) {
+    const result = waitInternal(rt, future, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
+    return result.value;
 }
 
 test "select: basic - first completes" {
@@ -461,7 +515,7 @@ test "select: with cancellation" {
             select_handle.cancel();
 
             // Should return error.Canceled
-            const result = select_handle.join();
+            const result = select_handle.join(rt);
             try testing.expectError(error.Canceled, result);
         }
     };

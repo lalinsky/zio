@@ -72,8 +72,8 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
 
             // TODO use TaskGroup
 
-            try server_task.join();
-            try client_task.join();
+            try server_task.join(rt);
+            try client_task.join(rt);
         }
 
         pub fn serverFn(rt: *Runtime, server: Server) !void {

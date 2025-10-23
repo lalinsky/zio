@@ -39,7 +39,7 @@ pub fn getAddressList(
     );
     defer task.deinit();
 
-    return try task.join();
+    return try task.join(runtime);
 }
 
 pub fn tcpConnectToHost(
@@ -163,8 +163,8 @@ test "tcpConnectToAddress: basic" {
 
     try runtime.run();
 
-    try server_task.join();
-    try client_task.join();
+    try server_task.join(&runtime);
+    try client_task.join(&runtime);
 }
 
 test "tcpConnectToHost: basic" {
@@ -221,6 +221,6 @@ test "tcpConnectToHost: basic" {
 
     try runtime.run();
 
-    try server_task.join();
-    try client_task.join();
+    try server_task.join(&runtime);
+    try client_task.join(&runtime);
 }

@@ -420,16 +420,15 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
         // Future protocol - Result type
         pub const Result = T;
 
-        pub fn wait(parent: *Parent) !meta.Payload(T) {
+        pub fn wait(parent: *Parent) Cancelable!select.WaitResult(T) {
             // Check if already completed
             if (parent.impl.future_result.get()) |res| {
-                return res;
+                return .{ .value = res };
             }
 
             // Wait for completion using select.wait()
             const runtime = Parent.getRuntime(parent);
-            const result = try select.wait(runtime, parent);
-            return result.value;
+            return try select.wait(runtime, parent);
         }
 
         pub fn cancel(parent: *Parent) void {
@@ -618,10 +617,10 @@ pub fn JoinHandle(comptime T: type) type {
             runtime.releaseAwaitable(self.awaitable);
         }
 
-        pub fn join(self: *Self) !meta.Payload(T) {
+        pub fn join(self: *Self, rt: *Runtime) T {
             return switch (self.awaitable.kind) {
-                .task => Task(T).fromAwaitable(self.awaitable).wait(),
-                .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).wait(),
+                .task => select.waitUntilComplete(rt, Task(T).fromAwaitable(self.awaitable)),
+                .blocking_task => select.waitUntilComplete(rt, BlockingTask(T).fromAwaitable(self.awaitable)),
             };
         }
 
@@ -1054,16 +1053,6 @@ pub const Executor = struct {
             error.Canceled => return error.Canceled, // Propagate cancellation
         };
         unreachable; // Should always timeout or be canceled
-    }
-
-    /// Convenience function that spawns a task, runs the event loop until completion, and returns the result.
-    /// This is equivalent to: `spawn()` + `run()` + `result()`, but in a single call.
-    /// Returns an error union that includes errors from `spawn()`, `run()`, and the task itself.
-    pub fn runUntilComplete(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
-        var handle = try self.spawn(func, args, options);
-        defer handle.deinit();
-        try self.run();
-        return handle.join();
     }
 
     /// Check if task list is empty and initiate shutdown if so.
@@ -1722,7 +1711,7 @@ pub const Runtime = struct {
         // Run all executors
         try self.run();
 
-        return handle.join();
+        return handle.join(self);
     }
 
     // Convenience methods that operate on the current coroutine context
@@ -1897,7 +1886,7 @@ test "runtime: multi-threaded with auto-detect executors" {
 
             // Wait for all tasks
             for (&handles, 0..) |*handle, i| {
-                const result = try handle.join();
+                const result = try handle.join(rt);
                 try testing.expectEqual(i * 2, result);
             }
         }
@@ -1939,7 +1928,7 @@ test "runtime: multi-threaded with explicit executor count" {
 
             // Wait for all tasks
             for (&handles, 0..) |*handle, i| {
-                const result = try handle.join();
+                const result = try handle.join(rt);
                 try testing.expectEqual(i * 2, result);
             }
         }
@@ -1971,7 +1960,7 @@ test "runtime: multi-threaded with executor pinning" {
 
             // Verify results
             for (&handles, 0..) |*handle, i| {
-                const result = try handle.join();
+                const result = handle.join(rt);
                 try testing.expectEqual(i, result);
             }
         }
@@ -2009,8 +1998,8 @@ test "runtime: task colocation with getExecutorId" {
             defer handle2.deinit();
 
             // Verify both tasks ran on the same executor
-            const result1 = try handle1.join();
-            const result2 = try handle2.join();
+            const result1 = handle1.join(rt);
+            const result2 = handle2.join(rt);
             try testing.expectEqual(result1, result2);
             try testing.expectEqual(@as(usize, 2), result1);
         }
@@ -2036,7 +2025,7 @@ test "runtime: spawnBlocking smoke test" {
             var handle = try rt.spawnBlocking(blockingWork, .{21});
             defer handle.deinit();
 
-            const result = try handle.join();
+            const result = handle.join(rt);
             try testing.expectEqual(@as(i32, 42), result);
         }
     };
@@ -2068,7 +2057,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
                 var casted = handle.cast(anyerror!i32);
                 defer casted.deinit();
 
-                const result = try casted.join();
+                const result = try casted.join(rt);
                 try testing.expectEqual(@as(i32, 42), result);
             }
 
@@ -2078,7 +2067,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
                 var casted = handle.cast(anyerror!i32);
                 defer casted.deinit();
 
-                const result = casted.join();
+                const result = casted.join(rt);
                 try testing.expectError(error.Foo, result);
             }
         }
@@ -2136,7 +2125,7 @@ test "runtime: sleep is cancelable" {
             handle.cancel();
 
             // Should return error.Canceled
-            const result = handle.join();
+            const result = handle.join(rt);
             try testing.expectError(error.Canceled, result);
         }
     };
