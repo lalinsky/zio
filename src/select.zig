@@ -114,6 +114,10 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
     const executor = task.getExecutor();
 
     task.coro.state.store(.preparing_to_wait, .release);
+    defer {
+        const prev = task.coro.state.swap(.ready, .release);
+        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
+    }
 
     // Keep track of the number of wakeups (== number of futures that became ready)
     var ready: std.atomic.Value(u32) = .init(0);
@@ -124,25 +128,22 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
         waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &ready);
     }
 
-    // Add waiters to all waiting lists - fast path: return immediately if already complete
-    inline for (fields, 0..) |field, i| {
-        const added = @field(futures, field.name).asyncWait(&waiters[i].wait_node);
-        if (!added) {
-            // Already complete! Clean up any waiters we already added
-            inline for (fields, 0..) |prev_field, j| {
-                if (j < i) {
-                    @field(futures, prev_field.name).asyncCancelWait(&waiters[j].wait_node);
-                }
-            }
-            var future = @field(futures, field.name);
-            return @unionInit(U, field.name, future.getResult());
-        }
-    }
-
     // Clean up waiters on all exit paths
     defer {
         inline for (fields, 0..) |field, i| {
-            @field(futures, field.name).asyncCancelWait(&waiters[i].wait_node);
+            if (!waiters[i].signaled.load(.acquire)) {
+                var future = @field(futures, field.name);
+                future.asyncCancelWait(&waiters[i].wait_node);
+            }
+        }
+    }
+
+    // Add waiters to all waiting lists - fast path: return immediately if already complete
+    inline for (fields, 0..) |field, i| {
+        var future = @field(futures, field.name);
+        const waiting = future.asyncWait(&waiters[i].wait_node);
+        if (!waiting) {
+            return @unionInit(U, field.name, future.getResult());
         }
     }
 
