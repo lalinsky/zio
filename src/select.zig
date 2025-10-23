@@ -2,6 +2,7 @@ const std = @import("std");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("runtime.zig").Cancelable;
 const WaitNode = @import("core/WaitNode.zig");
+const meta = @import("meta.zig");
 
 // Future protocol:
 //   * needs to have const Result = T
@@ -17,7 +18,20 @@ fn FutureType(comptime T: type) type {
     };
 }
 
-pub fn SelectUnion(comptime S: type) type {
+/// Extract the Result type from a future (handles both direct futures and pointers)
+fn FutureResult(comptime future_type: type) type {
+    const Future = FutureType(future_type);
+    return Future.Result;
+}
+
+/// Wrapper for wait() result to avoid nested error unions
+pub fn WaitResult(comptime T: type) type {
+    return struct {
+        value: T,
+    };
+}
+
+pub fn SelectResult(comptime S: type) type {
     const struct_fields = @typeInfo(S).@"struct".fields;
     var fields: [struct_fields.len]std.builtin.Type.UnionField = undefined;
     for (&fields, struct_fields) |*union_field, struct_field| {
@@ -37,7 +51,7 @@ pub fn SelectUnion(comptime S: type) type {
     } });
 }
 
-test "SelectUnion: result types" {
+test "SelectResult: result types" {
     const Future1 = struct {
         const Result = void;
     };
@@ -45,7 +59,7 @@ test "SelectUnion: result types" {
         const Result = u32;
     };
 
-    const Select = SelectUnion(struct {
+    const Select = SelectResult(struct {
         future1: Future1,
         future2: Future2,
     });
@@ -103,9 +117,9 @@ pub const SelectWaiter = struct {
 ///     .second => |val| ...,
 /// }
 /// ```
-pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
+pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     const S = @TypeOf(futures);
-    const U = SelectUnion(S);
+    const U = SelectResult(S);
     const fields = @typeInfo(S).@"struct".fields;
 
     // Multi-wait path: Create separate waiter awaitables for each handle
@@ -164,6 +178,53 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
 
     // Should never reach here - we were woken up, so something must be signaled
     unreachable;
+}
+
+/// Wait for a single future to complete.
+/// Similar to select() but for a single future, returns the result.
+/// Returns Cancelable error if the task is canceled while waiting.
+///
+/// Example:
+/// ```
+/// // For Future(error{Foo}!i32)
+/// const result = try rt.wait(&future); // returns Cancelable!WaitResult(error{Foo}!i32)
+/// const value = try result.value; // handle the inner error union
+/// ```
+pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
+    task.coro.state.store(.preparing_to_wait, .release);
+    defer {
+        const prev = task.coro.state.swap(.ready, .release);
+        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
+    }
+
+    var ready: std.atomic.Value(u32) = .init(0);
+    var waiter = SelectWaiter.init(&task.awaitable.wait_node, &ready);
+
+    // Fast path: check if already complete
+    var fut = future;
+    const added = fut.asyncWait(&waiter.wait_node);
+    if (!added) {
+        return .{ .value = fut.getResult() };
+    }
+
+    // Clean up waiter on exit
+    defer {
+        if (!waiter.signaled.load(.acquire)) {
+            fut.asyncCancelWait(&waiter.wait_node);
+        }
+    }
+
+    // Yield and wait for completion
+    try executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel);
+
+    // We should have been signaled
+    std.debug.assert(ready.load(.acquire) > 0);
+    std.debug.assert(waiter.signaled.load(.acquire));
+
+    return .{ .value = fut.getResult() };
 }
 
 test "select: basic - first completes" {
@@ -509,6 +570,116 @@ test "select: with mixed error types" {
                     return error.TestUnexpectedResult;
                 },
             }
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "wait: plain type" {
+    const testing = std.testing;
+    const Future = @import("sync/future.zig").Future;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn asyncTask(rt: *Runtime) !void {
+            var future = Future(i32).init;
+
+            // Spawn task to set the future
+            var task = try rt.spawn(struct {
+                fn run(f: *Future(i32)) !void {
+                    f.set(42);
+                }
+            }.run, .{&future}, .{});
+            defer task.deinit();
+
+            // Wait for the future
+            const result = try wait(rt, &future);
+            try testing.expectEqual(@as(i32, 42), result.value);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "wait: error union" {
+    const testing = std.testing;
+    const Future = @import("sync/future.zig").Future;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        const MyError = error{Foo};
+
+        fn asyncTask(rt: *Runtime) !void {
+            var future = Future(MyError!i32).init;
+
+            // Spawn task to set the future with success
+            var task = try rt.spawn(struct {
+                fn run(f: *Future(MyError!i32)) !void {
+                    f.set(123);
+                }
+            }.run, .{&future}, .{});
+            defer task.deinit();
+
+            // Wait for the future
+            const result = try wait(rt, &future);
+            const value = try result.value;
+            try testing.expectEqual(@as(i32, 123), value);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "wait: error union with error" {
+    const testing = std.testing;
+    const Future = @import("sync/future.zig").Future;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        const MyError = error{Foo};
+
+        fn asyncTask(rt: *Runtime) !void {
+            var future = Future(MyError!i32).init;
+
+            // Spawn task to set the future with error
+            var task = try rt.spawn(struct {
+                fn run(f: *Future(MyError!i32)) !void {
+                    f.set(MyError.Foo);
+                }
+            }.run, .{&future}, .{});
+            defer task.deinit();
+
+            // Wait for the future
+            const result = try wait(rt, &future);
+            try testing.expectError(MyError.Foo, result.value);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+}
+
+test "wait: already complete (fast path)" {
+    const testing = std.testing;
+    const Future = @import("sync/future.zig").Future;
+
+    var runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn asyncTask(rt: *Runtime) !void {
+            var future = Future(i32).init;
+            future.set(99);
+
+            // Wait should return immediately since already set
+            const result = try wait(rt, &future);
+            try testing.expectEqual(@as(i32, 99), result.value);
         }
     };
 

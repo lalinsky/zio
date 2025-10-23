@@ -31,7 +31,9 @@ pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
 
 pub const select = @import("select.zig").select;
-pub const SelectUnion = @import("select.zig").SelectUnion;
+pub const wait = @import("select.zig").wait;
+pub const SelectResult = @import("select.zig").SelectResult;
+pub const WaitResult = @import("select.zig").WaitResult;
 
 // Re-export low-level utilities
 pub const util = @import("utils.zig");

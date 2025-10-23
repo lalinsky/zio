@@ -6,21 +6,22 @@ const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 const FutureResult = @import("../future_result.zig").FutureResult;
 const meta = @import("../meta.zig");
+const select = @import("../select.zig");
 
 pub fn Future(comptime T: type) type {
     return struct {
         const Self = @This();
 
         wait_queue: WaitQueue(WaitNode) = .empty,
-        future_result: FutureResult(T) = .{},
+        value: FutureResult(T) = .{},
 
         /// Initialize a new Future. Use like: `var future = Future(i32).init;`
         pub const init: Self = .{};
 
         /// Set the future's value and wake all waiters.
         /// Returns silently if the value was already set.
-        pub fn set(self: *Self, value: T) void {
-            const was_set = self.future_result.set(value);
+        pub fn set(self: *Self, val: T) void {
+            const was_set = self.value.set(val);
             if (!was_set) {
                 // Value was already set, ignore
                 return;
@@ -35,40 +36,8 @@ pub fn Future(comptime T: type) type {
         /// Wait for the future's value to be set.
         /// Returns immediately if the value is already available.
         /// Returns error.Canceled if the task is canceled while waiting.
-        pub fn wait(self: *Self, runtime: *Runtime) Cancelable!meta.Payload(T) {
-            // Fast path: check if already set
-            if (self.future_result.get()) |res| {
-                return res;
-            }
-
-            // Must be called from a coroutine context
-            const task = runtime.getCurrentTask() orelse {
-                @panic("Future.wait() must be called from a coroutine");
-            };
-            const executor = task.getExecutor();
-
-            // Transition to preparing_to_wait state before adding to queue
-            task.coro.state.store(.preparing_to_wait, .release);
-
-            // Add to wait queue
-            self.wait_queue.push(&task.awaitable.wait_node);
-
-            // Double-check before suspending (avoid lost wakeup)
-            if (self.future_result.get()) |res| {
-                // Value was set between our check and adding to queue
-                _ = self.wait_queue.remove(&task.awaitable.wait_node);
-                return res;
-            }
-
-            // Yield and wait for signal
-            executor.yield(.preparing_to_wait, .waiting_sync, .allow_cancel) catch |err| {
-                // On cancellation, remove from queue
-                _ = self.wait_queue.remove(&task.awaitable.wait_node);
-                return err;
-            };
-
-            // We were woken up, result must be available
-            return self.future_result.get().?;
+        pub fn wait(self: *Self, runtime: *Runtime) Cancelable!select.WaitResult(T) {
+            return select.wait(runtime, self);
         }
 
         // Future protocol implementation for use with select()
@@ -78,14 +47,14 @@ pub fn Future(comptime T: type) type {
         /// This is part of the Future protocol for select().
         /// Asserts that the future has been set.
         pub fn getResult(self: *Self) T {
-            return self.future_result.get().?;
+            return self.value.get().?;
         }
 
         /// Registers a wait node to be notified when the future is set.
         /// This is part of the Future protocol for select().
         /// Returns false if the future is already set (no wait needed), true if added to queue.
         pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
-            if (self.future_result.get() != null) {
+            if (self.value.get() != null) {
                 return false;
             }
             self.wait_queue.push(wait_node);
@@ -115,7 +84,7 @@ test "Future: basic set and get" {
 
             // Get value (should return immediately since already set)
             const result = try future.wait(rt);
-            try testing.expectEqual(@as(i32, 42), result);
+            try testing.expectEqual(@as(i32, 42), result.value);
         }
     };
 
@@ -138,7 +107,8 @@ test "Future: await from coroutine" {
 
         fn getterTask(rt: *Runtime, future: *Future(i32)) !i32 {
             // This will block until setter sets the value
-            return future.wait(rt);
+            const result = try future.wait(rt);
+            return result.value;
         }
 
         fn asyncTask(rt: *Runtime) !void {
@@ -169,7 +139,7 @@ test "Future: multiple waiters" {
     const TestContext = struct {
         fn waiterTask(rt: *Runtime, future: *Future(i32), expected: i32) !void {
             const result = try future.wait(rt);
-            try testing.expectEqual(expected, result);
+            try testing.expectEqual(expected, result.value);
         }
 
         fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
