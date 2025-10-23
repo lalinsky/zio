@@ -243,10 +243,11 @@ pub fn getResult(self: *const ResetEvent) void {
 
 /// Registers a wait node to be notified when the event is set.
 /// This is part of the Future protocol for select().
-pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) void {
+/// Returns false if the event is already set (no wait needed), true if added to queue.
+pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) bool {
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
-    _ = self.wait_queue.pushUnless(is_set, wait_node);
+    return self.wait_queue.pushUnless(is_set, wait_node);
 }
 
 /// Cancels a pending wait operation by removing the wait node.

@@ -37,4 +37,26 @@ pub const Awaitable = struct {
     pub fn requestCancellation(self: *Awaitable) void {
         self.canceled.store(true, .release);
     }
+
+    /// Registers a wait node to be notified when the awaitable completes.
+    /// This is part of the Future protocol for select().
+    /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
+    pub fn asyncWait(self: *const Awaitable, wait_node: *WaitNode) bool {
+        if (self.done.load(.acquire)) {
+            return false;
+        }
+        // Cast away const to mutate the waiting list
+        // This is safe because waiting_list is designed to be mutated even from const contexts
+        const mutable_self: *Awaitable = @constCast(self);
+        mutable_self.waiting_list.push(wait_node);
+        return true;
+    }
+
+    /// Cancels a pending wait operation by removing the wait node.
+    /// This is part of the Future protocol for select().
+    pub fn asyncCancelWait(self: *const Awaitable, wait_node: *WaitNode) void {
+        // Cast away const to mutate the waiting list
+        const mutable_self: *Awaitable = @constCast(self);
+        _ = mutable_self.waiting_list.remove(wait_node);
+    }
 };

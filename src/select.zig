@@ -5,8 +5,9 @@ const WaitNode = @import("core/WaitNode.zig");
 
 // Future protocol:
 //   * needs to have const Result = T
-//   * needs to have hasResult()/getResult() methods
-//   * needs to have asyncWait()/asyncCancelWait() methods
+//   * needs to have asyncWait(*WaitNode) bool method (returns false if already complete)
+//   * needs to have asyncCancelWait(*WaitNode) void method
+//   * needs to have getResult() Result method
 
 /// Extract the Future type, handling both direct types and pointers
 fn FutureType(comptime T: type) type {
@@ -58,6 +59,7 @@ pub const SelectWaiter = struct {
     wait_node: WaitNode,
     parent: *WaitNode,
     wake_counter: *std.atomic.Value(u32),
+    signaled: std.atomic.Value(bool) = .init(false),
 
     const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
@@ -70,35 +72,19 @@ pub const SelectWaiter = struct {
             },
             .parent = parent,
             .wake_counter = wake_counter,
+            .signaled = .init(false),
         };
     }
 
     fn waitNodeWake(wait_node: *WaitNode) void {
         const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
+        self.signaled.store(true, .release);
         const prev_val = self.wake_counter.fetchAdd(1, .acq_rel);
         if (prev_val == 0) {
             self.parent.wake();
         }
     }
 };
-
-pub fn asyncWait(future: anytype, wait_node: *WaitNode) void {
-    const Future = FutureType(@TypeOf(future));
-    if (@hasDecl(Future, "asyncWait")) {
-        future.asyncWait(wait_node);
-    } else {
-        future.awaitable.waiting_list.push(wait_node);
-    }
-}
-
-pub fn asyncCancelWait(future: anytype, wait_node: *WaitNode) void {
-    const Future = FutureType(@TypeOf(future));
-    if (@hasDecl(Future, "asyncCancelWait")) {
-        future.asyncCancelWait(wait_node);
-    } else {
-        _ = future.awaitable.waiting_list.remove(wait_node);
-    }
-}
 
 /// Wait for multiple futures simultaneously and return whichever completes first.
 /// `handles` is a struct with each field a `JoinHandle(T)`, where `T` can be different for each field.
@@ -122,14 +108,6 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
     const U = SelectUnion(S);
     const fields = @typeInfo(S).@"struct".fields;
 
-    // Fast path: check if any handle is already complete
-    inline for (fields) |field| {
-        var future = @field(futures, field.name);
-        if (future.hasResult()) {
-            return @unionInit(U, field.name, future.getResult());
-        }
-    }
-
     // Multi-wait path: Create separate waiter awaitables for each handle
     // We can't add the same awaitable to multiple lists (next/prev pointers conflict)
     const task = rt.getCurrentTask() orelse @panic("no active task");
@@ -146,17 +124,25 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
         waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &ready);
     }
 
-    // Add waiters to all waiting lists
+    // Add waiters to all waiting lists - fast path: return immediately if already complete
     inline for (fields, 0..) |field, i| {
-        const future = @field(futures, field.name);
-        asyncWait(future, &waiters[i].wait_node);
+        const added = @field(futures, field.name).asyncWait(&waiters[i].wait_node);
+        if (!added) {
+            // Already complete! Clean up any waiters we already added
+            inline for (fields, 0..) |prev_field, j| {
+                if (j < i) {
+                    @field(futures, prev_field.name).asyncCancelWait(&waiters[j].wait_node);
+                }
+            }
+            var future = @field(futures, field.name);
+            return @unionInit(U, field.name, future.getResult());
+        }
     }
 
-    // Clean up waiters on all exit paths (skip waiters marked ready by markComplete)
+    // Clean up waiters on all exit paths
     defer {
         inline for (fields, 0..) |field, i| {
-            const future = @field(futures, field.name);
-            asyncCancelWait(future, &waiters[i].wait_node);
+            @field(futures, field.name).asyncCancelWait(&waiters[i].wait_node);
         }
     }
 
@@ -167,15 +153,15 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectUnion(@TypeOf(futures)) {
     // TODO What to do if we have multiple?
     std.debug.assert(ready.load(.acquire) > 0);
 
-    // Find which one completed
-    inline for (fields) |field| {
-        var future = @field(futures, field.name);
-        if (future.hasResult()) {
+    // Find which one completed by checking signaled flags
+    inline for (fields, 0..) |field, i| {
+        if (waiters[i].signaled.load(.acquire)) {
+            var future = @field(futures, field.name);
             return @unionInit(U, field.name, future.getResult());
         }
     }
 
-    // Should never reach here - we were woken up, so something must be complete
+    // Should never reach here - we were woken up, so something must be signaled
     unreachable;
 }
 

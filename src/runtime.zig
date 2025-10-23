@@ -525,6 +525,19 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
             const runtime = Parent.getRuntime(parent);
             runtime.releaseAwaitable(&parent.impl.base.awaitable);
         }
+
+        /// Registers a wait node to be notified when the task completes.
+        /// This is part of the Future protocol for select().
+        /// Returns false if the task is already complete (no wait needed), true if added to queue.
+        pub fn asyncWait(parent: *const Parent, wait_node: *WaitNode) bool {
+            return parent.impl.base.awaitable.asyncWait(wait_node);
+        }
+
+        /// Cancels a pending wait operation by removing the wait node.
+        /// This is part of the Future protocol for select().
+        pub fn asyncCancelWait(parent: *const Parent, wait_node: *WaitNode) void {
+            parent.impl.base.awaitable.asyncCancelWait(wait_node);
+        }
     };
 }
 
@@ -541,6 +554,8 @@ pub fn Task(comptime T: type) type {
         pub const cancel = Impl.cancel;
         pub const fromAny = Impl.fromAny;
         pub const fromAwaitable = Impl.fromAwaitable;
+        pub const asyncWait = Impl.asyncWait;
+        pub const asyncCancelWait = Impl.asyncCancelWait;
 
         pub fn getRuntime(self: *Self) *Runtime {
             const executor = Executor.fromCoroutine(&self.impl.base.coro);
@@ -570,6 +585,8 @@ pub fn Future(comptime T: type) type {
         pub const cancel = Impl.cancel;
         pub const fromAny = Impl.fromAny;
         pub const fromAwaitable = Impl.fromAwaitable;
+        pub const asyncWait = Impl.asyncWait;
+        pub const asyncCancelWait = Impl.asyncCancelWait;
 
         pub fn getRuntime(self: *Self) *Runtime {
             return self.impl.base.runtime;
@@ -630,6 +647,8 @@ pub fn BlockingTask(comptime T: type) type {
         pub const cancel = Impl.cancel;
         pub const fromAny = Impl.fromAny;
         pub const fromAwaitable = Impl.fromAwaitable;
+        pub const asyncWait = Impl.asyncWait;
+        pub const asyncCancelWait = Impl.asyncCancelWait;
 
         pub fn getRuntime(self: *Self) *Runtime {
             return self.impl.base.runtime;
@@ -743,6 +762,19 @@ pub fn JoinHandle(comptime T: type) type {
                 .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
                 .future => Future(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
             };
+        }
+
+        /// Registers a wait node to be notified when the task completes.
+        /// This is part of the Future protocol for select().
+        /// Returns false if the task is already complete (no wait needed), true if added to queue.
+        pub fn asyncWait(self: Self, wait_node: *WaitNode) bool {
+            return self.awaitable.asyncWait(wait_node);
+        }
+
+        /// Cancels a pending wait operation by removing the wait node.
+        /// This is part of the Future protocol for select().
+        pub fn asyncCancelWait(self: Self, wait_node: *WaitNode) void {
+            self.awaitable.asyncCancelWait(wait_node);
         }
 
         /// Request cancellation of this task.
