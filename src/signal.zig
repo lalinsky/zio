@@ -15,12 +15,11 @@ pub const SignalKind = switch (builtin.os.tag) {
         hangup = std.posix.SIG.HUP,
         alarm = std.posix.SIG.ALRM,
         child = std.posix.SIG.CHLD,
-        io = std.posix.SIG.IO,
         pipe = std.posix.SIG.PIPE,
         quit = std.posix.SIG.QUIT,
         user1 = std.posix.SIG.USR1,
         user2 = std.posix.SIG.USR2,
-        window_change = std.posix.SIG.WINCH,
+        _,
     },
 };
 
