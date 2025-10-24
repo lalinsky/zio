@@ -82,6 +82,10 @@ pub const IpAddress = extern union {
         reuse_address: bool = false,
     };
 
+    pub fn bind(self: IpAddress, rt: *Runtime) !Socket {
+        return netBindIp(rt, self);
+    }
+
     pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
         return netListenIp(rt, self, options);
     }
@@ -116,6 +120,10 @@ pub const UnixAddress = extern union {
             std.posix.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
             else => unreachable,
         }
+    }
+
+    pub fn bind(self: UnixAddress, rt: *Runtime) !Socket {
+        return netBindUnix(rt, self);
     }
 
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
@@ -179,7 +187,8 @@ pub const Address = extern union {
             std.posix.AF.UNIX => blk: {
                 if (!std.net.has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
-                @memcpy(std.mem.asBytes(&addr.unix.un), data[0..@sizeOf(std.posix.sockaddr.un)]);
+                const copy_len = @min(data.len, @sizeOf(std.posix.sockaddr.un));
+                @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
                 break :blk addr;
             },
             else => unreachable,
@@ -224,7 +233,7 @@ pub const Socket = struct {
     }
 
     /// Bind the socket to an address
-    pub fn bind(self: Socket, rt: *Runtime, addr: Address) !void {
+    pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
         _ = rt;
         const sock = if (xev.backend == .iocp)
             @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
@@ -239,6 +248,10 @@ pub const Socket = struct {
         };
 
         try std.posix.bind(sock, &addr.any, addr_len);
+
+        // Update address with actual bound address (important for port 0)
+        var actual_len: std.posix.socklen_t = @sizeOf(Address);
+        try std.posix.getsockname(sock, &self.address.any, &actual_len);
     }
 
     /// Mark the socket as a listening socket
@@ -250,10 +263,6 @@ pub const Socket = struct {
             self.handle;
 
         try std.posix.listen(sock, backlog);
-
-        // Update address with actual bound address (important for port 0)
-        var actual_len: std.posix.socklen_t = @sizeOf(Address);
-        try std.posix.getsockname(sock, &self.address.any, &actual_len);
     }
 
     /// Connect the socket to a remote address
@@ -570,6 +579,16 @@ fn createStreamSocket(family: std.posix.sa_family_t) !Handle {
     }
 }
 
+fn createDatagramSocket(family: std.posix.sa_family_t) !Handle {
+    if (builtin.os.tag == .windows) {
+        return try std.os.windows.WSASocketW(family, std.posix.SOCK.DGRAM, 0, null, 0, std.os.windows.ws2_32.WSA_FLAG_OVERLAPPED);
+    } else {
+        var flags: u32 = std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC;
+        if (xev.backend != .io_uring) flags |= std.posix.SOCK.NONBLOCK;
+        return try std.posix.socket(family, flags, 0);
+    }
+}
+
 pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptions) !Server {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
@@ -622,6 +641,36 @@ pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
 
     try netConnect(rt, fd, .{ .un = addr.un });
     return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
+}
+
+pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
+    const fd = try createDatagramSocket(addr.any.family);
+    errdefer netClose(rt, fd);
+
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .ip = addr },
+    };
+
+    try socket.bind(rt, .{ .ip = addr });
+
+    return socket;
+}
+
+pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
+    if (!std.net.has_unix_sockets) unreachable;
+
+    const fd = try createDatagramSocket(addr.any.family);
+    errdefer netClose(rt, fd);
+
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .unix = addr },
+    };
+
+    try socket.bind(rt, .{ .unix = addr });
+
+    return socket;
 }
 
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
