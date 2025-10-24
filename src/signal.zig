@@ -29,6 +29,7 @@ const MAX_HANDLERS = 32;
 
 const HandlerEntry = struct {
     kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
+    enabled: std.atomic.Value(bool) = .init(false),
     event: xev.Async = undefined,
 };
 
@@ -73,6 +74,7 @@ const HandlerRegistryUnix = struct {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
 
                 entry.event = try xev.Async.init();
+                entry.enabled.store(true, .release);
 
                 return &entry.event;
             }
@@ -87,6 +89,7 @@ const HandlerRegistryUnix = struct {
         const entry: *HandlerEntry = @fieldParentPtr("event", event);
         const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
         std.debug.assert(prev_value == signum);
+        entry.enabled.store(false, .release);
 
         // Restore previous handler if this was the last handler for this signal type
         const new_count = self.installed_handlers[signum].fetchSub(1, .acq_rel) - 1;
@@ -133,6 +136,7 @@ const HandlerRegistryWindows = struct {
             if (prev == null) {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
                 entry.event = try xev.Async.init();
+                entry.enabled.store(true, .release);
                 return &entry.event;
             }
         }
@@ -146,6 +150,7 @@ const HandlerRegistryWindows = struct {
         const entry: *HandlerEntry = @fieldParentPtr("event", event);
         const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
         std.debug.assert(prev_value == signum);
+        entry.enabled.store(false, .release);
 
         // Restore previous handler if this was the last handler
         const new_total = self.total_handlers.fetchSub(1, .acq_rel) - 1;
@@ -167,7 +172,9 @@ fn signalHandlerUnix(signum: c_int) callconv(.c) void {
     for (&registry.handlers) |*entry| {
         const kind = entry.kind.load(.acquire);
         if (kind != NO_SIGNAL and kind == signum) {
-            entry.event.notify() catch {};
+            if (entry.enabled.load(.acquire)) {
+                entry.event.notify() catch {};
+            }
         }
     }
 }
@@ -185,8 +192,10 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
     for (&registry.handlers) |*entry| {
         const kind = entry.kind.load(.acquire);
         if (kind != NO_SIGNAL and kind == signal_value) {
-            entry.event.notify() catch {};
-            found_handler = true;
+            if (entry.enabled.load(.acquire)) {
+                entry.event.notify() catch {};
+                found_handler = true;
+            }
         }
     }
 
