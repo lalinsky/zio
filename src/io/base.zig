@@ -41,26 +41,24 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
 }
 
 pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+
     var canceled = false;
     var timed_out = false;
-    defer {
-        if (canceled) rt.endShield();
-        if (timed_out) rt.endShield();
-    }
-
-    const task = rt.getCurrentTask() orelse @panic("no active task");
-    const executor = task.getExecutor();
+    defer if (canceled or timed_out) rt.endShield();
 
     const TimeoutContext = struct {
         completion: *xev.Completion,
+        canceled: *bool,
     };
 
     var timeout_ctx = TimeoutContext{
         .completion = completion,
+        .canceled = &canceled,
     };
 
     while (completion.state() == .active) {
-        executor.timedWaitForReadyWithCallback(
+        task.getExecutor().timedWaitForReadyWithCallback(
             .ready,
             .waiting_io,
             timeout_ns,
@@ -68,23 +66,29 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64
             &timeout_ctx,
             struct {
                 fn onTimeout(ctx: *TimeoutContext) bool {
-                    // Only timeout if I/O hasn't completed yet
-                    return ctx.completion.state() == .active;
+                    // Only timeout if I/O hasn't completed and hasn't been canceled
+                    return ctx.completion.state() == .active and ctx.canceled.* == false;
                 }
             }.onTimeout,
         ) catch |err| switch (err) {
             error.Timeout => {
                 // Cancel the I/O operation on timeout
-                timed_out = true;
-                rt.beginShield();
-                cancelIo(rt, completion);
+                if (!timed_out) {
+                    timed_out = true;
+                    if (!canceled) {
+                        rt.beginShield();
+                        cancelIo(rt, completion);
+                    }
+                }
                 continue;
             },
             error.Canceled => {
                 if (!canceled) {
                     canceled = true;
-                    rt.beginShield();
-                    cancelIo(rt, completion);
+                    if (!timed_out) {
+                        rt.beginShield();
+                        cancelIo(rt, completion);
+                    }
                 }
                 continue;
             },
