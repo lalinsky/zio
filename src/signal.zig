@@ -59,6 +59,13 @@ const HandlerRegistryUnix = struct {
             std.posix.sigaction(@intFromEnum(kind), &sa, &self.prev_handlers[signum]);
         }
 
+        errdefer {
+            // Restore previous handler if this was the last handler
+            if (prev_count == 0) {
+                std.posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
+            }
+        }
+
         // Now find a slot for this signal handler
         for (&self.handlers) |*entry| {
             const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, signum, .acq_rel, .monotonic);
@@ -78,16 +85,18 @@ const HandlerRegistryUnix = struct {
         const signum: u8 = @intFromEnum(kind);
 
         const entry: *HandlerEntry = @fieldParentPtr("event", event);
-        const prev_kind = entry.kind.swap(NO_SIGNAL, .acq_rel);
-        std.debug.assert(prev_kind == signum);
-        entry.event.deinit();
-        entry.event = undefined;
+        const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
+        std.debug.assert(prev_value == signum);
 
+        // Restore previous handler if this was the last handler for this signal type
         const new_count = self.installed_handlers[signum].fetchSub(1, .acq_rel) - 1;
         if (new_count == 0) {
-            // Last handler for this signal type - restore previous OS signal handler
             std.posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
         }
+
+        // Now we can safely deinit the event
+        entry.event.deinit();
+        entry.event = undefined;
     }
 };
 
@@ -111,6 +120,13 @@ const HandlerRegistryWindows = struct {
             }
         }
 
+        errdefer {
+            // Restore previous handler if this was the last handler
+            if (prev_total == 0) {
+                _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 0);
+            }
+        }
+
         // Now find a slot for this signal handler
         for (&self.handlers) |*entry| {
             const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, signum, .acq_rel, .monotonic);
@@ -128,16 +144,18 @@ const HandlerRegistryWindows = struct {
         const signum: u8 = @intFromEnum(kind);
 
         const entry: *HandlerEntry = @fieldParentPtr("event", event);
-        const prev_kind = entry.kind.swap(NO_SIGNAL, .acq_rel);
-        std.debug.assert(prev_kind == signum);
-        entry.event.deinit();
-        entry.event = undefined;
+        const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
+        std.debug.assert(prev_value == signum);
 
+        // Restore previous handler if this was the last handler
         const new_total = self.total_handlers.fetchSub(1, .acq_rel) - 1;
         if (new_total == 0) {
-            // Last handler removed - uninstall the global console control handler
             _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 0);
         }
+
+        // Now we can safely deinit the event
+        entry.event.deinit();
+        entry.event = undefined;
     }
 };
 
