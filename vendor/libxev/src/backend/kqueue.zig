@@ -1324,8 +1324,8 @@ pub const Completion = struct {
                         const ev = ev_ orelse
                             break :res .{ .read = error.MissingKevent };
                         break :empty @intCast(ev.data);
-                    } else posix.recvfrom(op.fd, v, 0, &op.addr, &op.addr_size),
-                    .array => |*v| posix.recvfrom(op.fd, v, 0, &op.addr, &op.addr_size),
+                    } else posix.recvfrom(op.fd, v, 0, @ptrCast(&op.addr), &op.addr_size),
+                    .array => |*v| posix.recvfrom(op.fd, v, 0, @ptrCast(&op.addr), &op.addr_size),
                     .vectors => |v| blk: {
                         // Use recvmsg for vectored I/O instead of readv
                         var msg: posix.msghdr = .{
@@ -1695,8 +1695,8 @@ pub const Operation = union(OperationType) {
     recvfrom: struct {
         fd: posix.fd_t,
         buffer: ReadBuffer,
-        addr: posix.sockaddr = undefined,
-        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr),
+        addr: posix.sockaddr.storage = undefined,
+        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr.storage),
     },
 
     close: struct {
@@ -2031,7 +2031,7 @@ inline fn kevent_init(ev: posix.Kevent) Kevent {
 }
 
 comptime {
-    if (@sizeOf(Completion) != 256) {
+    if (@sizeOf(Completion) != 280) {
         @compileLog(@sizeOf(Completion));
         unreachable;
     }

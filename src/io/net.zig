@@ -82,6 +82,10 @@ pub const IpAddress = extern union {
         reuse_address: bool = false,
     };
 
+    pub fn bind(self: IpAddress, rt: *Runtime) !Socket {
+        return netBindIp(rt, self);
+    }
+
     pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
         return netListenIp(rt, self, options);
     }
@@ -118,6 +122,10 @@ pub const UnixAddress = extern union {
         }
     }
 
+    pub fn bind(self: UnixAddress, rt: *Runtime) !Socket {
+        return netBindUnix(rt, self);
+    }
+
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
         return netListenUnix(rt, self, options);
     }
@@ -131,6 +139,25 @@ pub const Address = extern union {
     any: std.posix.sockaddr,
     ip: IpAddress,
     unix: UnixAddress,
+
+    /// Convert to std.net.Address
+    pub fn toStd(self: *const Address) std.net.Address {
+        return switch (self.any.family) {
+            std.posix.AF.INET, std.posix.AF.INET6 => std.net.Address.initPosix(@ptrCast(self)),
+            std.posix.AF.UNIX => if (std.net.has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            else => unreachable,
+        };
+    }
+
+    /// Convert from std.net.Address
+    pub fn fromStd(addr: std.net.Address) Address {
+        return switch (addr.any.family) {
+            std.posix.AF.INET => Address{ .ip = .{ .in = addr.in } },
+            std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6 } },
+            std.posix.AF.UNIX => if (std.net.has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            else => unreachable,
+        };
+    }
 
     /// Convert sockaddr to IpAddress from raw bytes.
     /// This properly handles IPv4 and IPv6 addresses without alignment issues.
@@ -160,7 +187,8 @@ pub const Address = extern union {
             std.posix.AF.UNIX => blk: {
                 if (!std.net.has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
-                @memcpy(std.mem.asBytes(&addr.unix.un), data[0..@sizeOf(std.posix.sockaddr.un)]);
+                const copy_len = @min(data.len, @sizeOf(std.posix.sockaddr.un));
+                @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
                 break :blk addr;
             },
             else => unreachable,
@@ -184,32 +212,232 @@ pub const Address = extern union {
     }
 };
 
-pub const Server = struct {
+pub const ReceiveFromResult = struct {
+    from: Address,
+    len: usize,
+};
+
+pub const Socket = struct {
     handle: Handle,
     address: Address,
 
-    pub fn accept(self: Server, rt: *Runtime) !Stream {
-        return netAccept(rt, self.handle);
+    /// Set a socket option
+    pub fn setOption(self: Socket, level: i32, optname: u32, value: anytype) !void {
+        const sock = if (xev.backend == .iocp)
+            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
+        else
+            self.handle;
+
+        const bytes = std.mem.asBytes(&value);
+        try std.posix.setsockopt(sock, level, optname, bytes);
     }
 
-    pub fn shutdown(self: Server, rt: *Runtime, how: ShutdownHow) !void {
+    /// Bind the socket to an address
+    pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
+        _ = rt;
+        const sock = if (xev.backend == .iocp)
+            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
+        else
+            self.handle;
+
+        const addr_len = switch (addr.any.family) {
+            std.posix.AF.INET => addr.ip.in.getOsSockLen(),
+            std.posix.AF.INET6 => addr.ip.in6.getOsSockLen(),
+            std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
+            else => unreachable,
+        };
+
+        try std.posix.bind(sock, &addr.any, addr_len);
+
+        // Update address with actual bound address (important for port 0)
+        var actual_len: std.posix.socklen_t = @sizeOf(Address);
+        try std.posix.getsockname(sock, &self.address.any, &actual_len);
+    }
+
+    /// Mark the socket as a listening socket
+    pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
+        _ = rt;
+        const sock = if (xev.backend == .iocp)
+            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
+        else
+            self.handle;
+
+        try std.posix.listen(sock, backlog);
+    }
+
+    /// Connect the socket to a remote address
+    pub fn connect(self: Socket, rt: *Runtime, addr: Address) !void {
+        try netConnect(rt, self.handle, addr.toStd());
+    }
+
+    /// Receives data from the socket into the provided buffer.
+    /// Returns the number of bytes received, which may be less than buf.len.
+    /// A return value of 0 indicates the socket has been shut down.
+    pub fn receive(self: Socket, rt: *Runtime, buf: []u8) !usize {
+        return netRead(rt, self.handle, &.{buf});
+    }
+
+    /// Sends data from the provided buffer to the socket.
+    /// Returns the number of bytes sent, which may be less than buf.len.
+    pub fn send(self: Socket, rt: *Runtime, buf: []const u8) !usize {
+        const empty: []const u8 = "";
+        return netWrite(rt, self.handle, buf, &.{empty}, 0);
+    }
+
+    /// Receives a datagram from the socket, returning the sender's address and bytes read.
+    /// Used for UDP and other datagram-based protocols.
+    pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+        return switch (xev.backend) {
+            .io_uring, .epoll => try self.receiveFromRecvmsg(rt, buf),
+            .iocp, .kqueue => try self.receiveFromRecvfrom(rt, buf),
+            .wasi_poll => error.Unsupported,
+        };
+    }
+
+    fn receiveFromRecvfrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+        var completion: xev.Completion = .{
+            .op = .{
+                .recvfrom = .{
+                    .fd = self.handle,
+                    .buffer = .{ .slice = buf },
+                },
+            },
+        };
+
+        const bytes_read = try runIo(rt, &completion, "recvfrom");
+        const addr_bytes = std.mem.asBytes(&completion.op.recvfrom.addr)[0..completion.op.recvfrom.addr_size];
+        const addr = Address.fromStorage(addr_bytes);
+
+        return ReceiveFromResult{
+            .from = addr,
+            .len = bytes_read,
+        };
+    }
+
+    fn receiveFromRecvmsg(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+        var iov = [_]std.posix.iovec{.{
+            .base = buf.ptr,
+            .len = buf.len,
+        }};
+
+        var addr_storage: std.posix.sockaddr.storage = undefined;
+        var msg: std.posix.msghdr = .{
+            .name = @ptrCast(&addr_storage),
+            .namelen = @sizeOf(std.posix.sockaddr.storage),
+            .iov = &iov,
+            .iovlen = 1,
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
+        };
+
+        var completion: xev.Completion = .{
+            .op = .{
+                .recvmsg = .{
+                    .fd = self.handle,
+                    .msghdr = &msg,
+                },
+            },
+        };
+
+        const bytes_read = try runIo(rt, &completion, "recvmsg");
+
+        // Extract address from msghdr
+        const addr_bytes: [*]const u8 = @ptrCast(msg.name);
+        const addr = Address.fromStorage(addr_bytes[0..msg.namelen]);
+
+        return ReceiveFromResult{
+            .from = addr,
+            .len = bytes_read,
+        };
+    }
+
+    /// Sends a datagram to the specified address.
+    /// Used for UDP and other datagram-based protocols.
+    pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+        return switch (xev.backend) {
+            .io_uring, .epoll => try self.sendToSendmsg(rt, addr, data),
+            .iocp, .kqueue => try self.sendToSendto(rt, addr, data),
+            .wasi_poll => error.Unsupported,
+        };
+    }
+
+    fn sendToSendto(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+        var completion: xev.Completion = .{
+            .op = .{
+                .sendto = .{
+                    .fd = self.handle,
+                    .buffer = .{ .slice = data },
+                    .addr = addr.toStd(),
+                },
+            },
+        };
+
+        return try runIo(rt, &completion, "sendto");
+    }
+
+    fn sendToSendmsg(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+        var iov = [_]std.posix.iovec_const{.{
+            .base = data.ptr,
+            .len = data.len,
+        }};
+
+        const std_addr = addr.toStd();
+        var msg: std.posix.msghdr_const = .{
+            .name = @ptrCast(&std_addr.any),
+            .namelen = std_addr.getOsSockLen(),
+            .iov = &iov,
+            .iovlen = 1,
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
+        };
+
+        var completion: xev.Completion = .{
+            .op = .{
+                .sendmsg = .{
+                    .fd = self.handle,
+                    .msghdr = &msg,
+                },
+            },
+        };
+
+        return try runIo(rt, &completion, "sendmsg");
+    }
+
+    pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
         return netShutdown(rt, self.handle, how);
     }
 
-    pub fn close(self: Server, rt: *Runtime) void {
+    pub fn close(self: Socket, rt: *Runtime) void {
         return netClose(rt, self.handle);
     }
 };
 
+pub const Server = struct {
+    socket: Socket,
+
+    pub fn accept(self: Server, rt: *Runtime) !Stream {
+        return netAccept(rt, self.socket.handle);
+    }
+
+    pub fn shutdown(self: Server, rt: *Runtime, how: ShutdownHow) !void {
+        return self.socket.shutdown(rt, how);
+    }
+
+    pub fn close(self: Server, rt: *Runtime) void {
+        return self.socket.close(rt);
+    }
+};
+
 pub const Stream = struct {
-    handle: Handle,
-    address: Address,
+    socket: Socket,
 
     /// Reads data from the stream into the provided buffer.
     /// Returns the number of bytes read, which may be less than buf.len.
     /// A return value of 0 indicates end-of-stream.
     pub fn read(self: Stream, rt: *Runtime, buf: []u8) !usize {
-        return netRead(rt, self.handle, &.{buf});
+        return netRead(rt, self.socket.handle, &.{buf});
     }
 
     /// Reads data from the stream into the provided buffer until it is full or EOF.
@@ -226,7 +454,7 @@ pub const Stream = struct {
     /// Returns the number of bytes written, which may be less than buf.len.
     pub fn write(self: Stream, rt: *Runtime, buf: []const u8) !usize {
         const empty: []const u8 = "";
-        return netWrite(rt, self.handle, buf, &.{empty}, 0);
+        return netWrite(rt, self.socket.handle, buf, &.{empty}, 0);
     }
 
     /// Writes data from the provided buffer to the stream until it is empty.
@@ -241,12 +469,12 @@ pub const Stream = struct {
 
     /// Shuts down all or part of a full-duplex connection.
     pub fn shutdown(self: Stream, rt: *Runtime, how: ShutdownHow) !void {
-        return netShutdown(rt, self.handle, how);
+        return self.socket.shutdown(rt, how);
     }
 
     /// Closes the stream.
     pub fn close(self: Stream, rt: *Runtime) void {
-        netClose(rt, self.handle);
+        self.socket.close(rt);
     }
 
     pub const Reader = struct {
@@ -286,7 +514,7 @@ pub const Stream = struct {
             if (dest_n == 0) return 0;
             const dest = iovecs_buffer[0..dest_n];
             std.debug.assert(dest[0].len > 0);
-            const n = netRead(r.rt, r.stream.handle, dest) catch |err| {
+            const n = netRead(r.rt, r.stream.socket.handle, dest) catch |err| {
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -323,7 +551,7 @@ pub const Stream = struct {
         fn drainImpl(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
             const buffered = io_w.buffered();
-            const n = netWrite(w.rt, w.stream.handle, buffered, data, splat) catch |err| {
+            const n = netWrite(w.rt, w.stream.socket.handle, buffered, data, splat) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
@@ -352,31 +580,33 @@ fn createStreamSocket(family: std.posix.sa_family_t) !Handle {
     }
 }
 
+fn createDatagramSocket(family: std.posix.sa_family_t) !Handle {
+    if (builtin.os.tag == .windows) {
+        return try std.os.windows.WSASocketW(family, std.posix.SOCK.DGRAM, 0, null, 0, std.os.windows.ws2_32.WSA_FLAG_OVERLAPPED);
+    } else {
+        var flags: u32 = std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC;
+        if (xev.backend != .io_uring) flags |= std.posix.SOCK.NONBLOCK;
+        return try std.posix.socket(family, flags, 0);
+    }
+}
+
 pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptions) !Server {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    const sock = if (xev.backend == .iocp) @as(std.os.windows.ws2_32.SOCKET, @ptrCast(fd)) else fd;
-
-    const addr_len = switch (addr.any.family) {
-        std.posix.AF.INET => addr.in.getOsSockLen(),
-        std.posix.AF.INET6 => addr.in6.getOsSockLen(),
-        else => unreachable,
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .ip = addr },
     };
 
     if (options.reuse_address) {
-        try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+        try socket.setOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, @as(c_int, 1));
     }
 
-    try std.posix.bind(sock, &addr.any, addr_len);
-    try std.posix.listen(sock, options.kernel_backlog);
+    try socket.bind(rt, .{ .ip = addr });
+    try socket.listen(rt, options.kernel_backlog);
 
-    // Get the actual bound address (important for port 0)
-    var storage: std.posix.sockaddr.storage = undefined;
-    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
-    try std.posix.getsockname(sock, @ptrCast(&storage), &actual_len);
-
-    return .{ .handle = fd, .address = .{ .ip = Address.fromStorageIp(std.mem.asBytes(&storage)) } };
+    return .{ .socket = socket };
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
@@ -385,22 +615,15 @@ pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.Liste
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    const sock = if (xev.backend == .iocp) @as(std.os.windows.ws2_32.SOCKET, @ptrCast(fd)) else fd;
-
-    const addr_len = switch (addr.any.family) {
-        std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
-        else => unreachable,
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .unix = addr },
     };
 
-    try std.posix.bind(sock, &addr.any, addr_len);
-    try std.posix.listen(sock, options.kernel_backlog);
+    try socket.bind(rt, .{ .unix = addr });
+    try socket.listen(rt, options.kernel_backlog);
 
-    // Get the actual bound address
-    var actual_addr: UnixAddress = undefined;
-    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.un);
-    try std.posix.getsockname(sock, &actual_addr.any, &actual_len);
-
-    return .{ .handle = fd, .address = .{ .unix = actual_addr } };
+    return .{ .socket = socket };
 }
 
 pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
@@ -408,7 +631,7 @@ pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .initPosix(@ptrCast(&addr)));
-    return .{ .handle = fd, .address = .{ .ip = addr } };
+    return .{ .socket = .{ .handle = fd, .address = .{ .ip = addr } } };
 }
 
 pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
@@ -418,7 +641,37 @@ pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .{ .un = addr.un });
-    return .{ .handle = fd, .address = .{ .unix = addr } };
+    return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
+}
+
+pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
+    const fd = try createDatagramSocket(addr.any.family);
+    errdefer netClose(rt, fd);
+
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .ip = addr },
+    };
+
+    try socket.bind(rt, .{ .ip = addr });
+
+    return socket;
+}
+
+pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
+    if (!std.net.has_unix_sockets) unreachable;
+
+    const fd = try createDatagramSocket(addr.any.family);
+    errdefer netClose(rt, fd);
+
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .unix = addr },
+    };
+
+    try socket.bind(rt, .{ .unix = addr });
+
+    return socket;
 }
 
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
@@ -530,7 +783,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
         },
     };
 
-    return .{ .handle = handle, .address = addr };
+    return .{ .socket = .{ .handle = handle, .address = addr } };
 }
 
 pub fn netConnect(rt: *Runtime, fd: Handle, addr: std.net.Address) !void {
