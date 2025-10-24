@@ -12,7 +12,7 @@ extern "C" {
  * byte sizes here. We choose some overly large values for now so that
  * we can retain ABI compatibility. */
 const size_t XEV_SIZEOF_LOOP = 512;
-const size_t XEV_SIZEOF_COMPLETION = 320;
+const size_t XEV_SIZEOF_COMPLETION = 448;
 const size_t XEV_SIZEOF_WATCHER = 256;
 const size_t XEV_SIZEOF_THREADPOOL = 64;
 const size_t XEV_SIZEOF_THREADPOOL_BATCH = 24;
