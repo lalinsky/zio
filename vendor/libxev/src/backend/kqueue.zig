@@ -2031,7 +2031,7 @@ inline fn kevent_init(ev: posix.Kevent) Kevent {
 }
 
 comptime {
-    if (@sizeOf(Completion) != 256) {
+    if (@sizeOf(Completion) != 280) {
         @compileLog(@sizeOf(Completion));
         unreachable;
     }
