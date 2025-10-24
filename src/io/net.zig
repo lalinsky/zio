@@ -246,6 +246,20 @@ pub const Socket = struct {
         try netConnect(rt, self.handle, addr.toStd());
     }
 
+    /// Receives data from the socket into the provided buffer.
+    /// Returns the number of bytes received, which may be less than buf.len.
+    /// A return value of 0 indicates the socket has been shut down.
+    pub fn receive(self: Socket, rt: *Runtime, buf: []u8) !usize {
+        return netRead(rt, self.handle, &.{buf});
+    }
+
+    /// Sends data from the provided buffer to the socket.
+    /// Returns the number of bytes sent, which may be less than buf.len.
+    pub fn send(self: Socket, rt: *Runtime, buf: []const u8) !usize {
+        const empty: []const u8 = "";
+        return netWrite(rt, self.handle, buf, &.{empty}, 0);
+    }
+
     pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
         return netShutdown(rt, self.handle, how);
     }
