@@ -24,11 +24,11 @@ pub const SignalKind = switch (builtin.os.tag) {
 };
 
 const NO_SIGNAL = 255;
+const INSTALLING = 254;
 const MAX_HANDLERS = 32;
 
 const HandlerEntry = struct {
     kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
-    enabled: std.atomic.Value(bool) = .init(false),
     counter: std.atomic.Value(usize) = .init(0),
     event: xev.Async = undefined,
 };
@@ -69,12 +69,12 @@ const HandlerRegistryUnix = struct {
 
         // Now find a slot for this signal handler
         for (&self.handlers) |*entry| {
-            const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, signum, .acq_rel, .monotonic);
+            const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, INSTALLING, .acq_rel, .monotonic);
             if (prev == null) {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
 
                 entry.event = try xev.Async.init();
-                entry.enabled.store(true, .release);
+                entry.kind.store(signum, .release);
 
                 return entry;
             }
@@ -86,9 +86,9 @@ const HandlerRegistryUnix = struct {
     fn uninstall(self: *HandlerRegistryUnix, kind: SignalKind, entry: *HandlerEntry) void {
         const signum: u8 = @intFromEnum(kind);
 
-        const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
+        // First swap to INSTALLING to prevent signal handler from accessing this entry
+        const prev_value = entry.kind.swap(INSTALLING, .acq_rel);
         std.debug.assert(prev_value == signum);
-        entry.enabled.store(false, .release);
 
         // Restore previous handler if this was the last handler for this signal type
         const new_count = self.installed_handlers[signum].fetchSub(1, .acq_rel) - 1;
@@ -99,6 +99,9 @@ const HandlerRegistryUnix = struct {
         // Now we can safely deinit the event
         entry.event.deinit();
         entry.event = undefined;
+
+        // Finally mark as available
+        entry.kind.store(NO_SIGNAL, .release);
     }
 };
 
@@ -131,11 +134,11 @@ const HandlerRegistryWindows = struct {
 
         // Now find a slot for this signal handler
         for (&self.handlers) |*entry| {
-            const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, signum, .acq_rel, .monotonic);
+            const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, INSTALLING, .acq_rel, .monotonic);
             if (prev == null) {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
                 entry.event = try xev.Async.init();
-                entry.enabled.store(true, .release);
+                entry.kind.store(signum, .release);
                 return entry;
             }
         }
@@ -146,9 +149,9 @@ const HandlerRegistryWindows = struct {
     fn uninstall(self: *HandlerRegistryWindows, kind: SignalKind, entry: *HandlerEntry) void {
         const signum: u8 = @intFromEnum(kind);
 
-        const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
+        // First swap to INSTALLING to prevent signal handler from accessing this entry
+        const prev_value = entry.kind.swap(INSTALLING, .acq_rel);
         std.debug.assert(prev_value == signum);
-        entry.enabled.store(false, .release);
 
         // Restore previous handler if this was the last handler
         const new_total = self.total_handlers.fetchSub(1, .acq_rel) - 1;
@@ -159,6 +162,9 @@ const HandlerRegistryWindows = struct {
         // Now we can safely deinit the event
         entry.event.deinit();
         entry.event = undefined;
+
+        // Finally mark as available
+        entry.kind.store(NO_SIGNAL, .release);
     }
 };
 
@@ -169,11 +175,9 @@ var registry: HandlerRegistry = .{};
 fn signalHandlerUnix(signum: c_int) callconv(.c) void {
     for (&registry.handlers) |*entry| {
         const kind = entry.kind.load(.acquire);
-        if (kind != NO_SIGNAL and kind == signum) {
-            if (entry.enabled.load(.acquire)) {
-                _ = entry.counter.fetchAdd(1, .release);
-                entry.event.notify() catch {};
-            }
+        if (kind == signum) {
+            _ = entry.counter.fetchAdd(1, .release);
+            entry.event.notify() catch {};
         }
     }
 }
@@ -190,12 +194,10 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
     var found_handler = false;
     for (&registry.handlers) |*entry| {
         const kind = entry.kind.load(.acquire);
-        if (kind != NO_SIGNAL and kind == signal_value) {
-            if (entry.enabled.load(.acquire)) {
-                _ = entry.counter.fetchAdd(1, .release);
-                entry.event.notify() catch {};
-                found_handler = true;
-            }
+        if (kind == signal_value) {
+            _ = entry.counter.fetchAdd(1, .release);
+            entry.event.notify() catch {};
+            found_handler = true;
         }
     }
 
