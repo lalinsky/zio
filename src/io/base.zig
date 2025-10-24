@@ -17,22 +17,17 @@ pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
 
 pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
     var canceled = false;
-    var shielded = false;
-    defer if (shielded) rt.endShield();
-
-    var executor = rt.getCurrentExecutor() orelse @panic("no active executor");
-    executor.loop.add(completion);
+    defer if (canceled) rt.endShield();
 
     while (completion.state() == .active) {
+        var executor = rt.getCurrentExecutor() orelse @panic("no active executor");
         executor.yield(.ready, .waiting_io, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {
                 if (!canceled) {
-                    rt.beginShield();
-                    shielded = true;
-                    cancelIo(rt, completion);
                     canceled = true;
+                    rt.beginShield();
+                    cancelIo(rt, completion);
                 }
-                executor = rt.getCurrentExecutor() orelse @panic("no active executor");
                 continue;
             },
         };
@@ -66,12 +61,14 @@ pub fn IoOperation(comptime op: []const u8) type {
 
         pub fn run(rt: *Runtime, completion: *xev.Completion) !meta.Payload(ResultType) {
             const task = rt.getCurrentTask() orelse @panic("no active task");
+            const executor = task.getExecutor();
 
             var self = Self{ .task = task };
 
             completion.userdata = &self;
             completion.callback = callback;
 
+            executor.loop.add(completion);
             try waitForIo(rt, completion);
 
             return self.result;

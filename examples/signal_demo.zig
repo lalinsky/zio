@@ -28,7 +28,7 @@ fn serverTask(rt: *zio.Runtime, shutdown: *zio.ResetEvent) !void {
 
 fn signalHandler(rt: *zio.Runtime, shutdown: *zio.ResetEvent) !void {
     // Create signal handler for SIGINT (Ctrl+C)
-    var sig = zio.Signal.init(.int);
+    var sig = try zio.Signal.init(.interrupt);
     defer sig.deinit();
 
     // Wait for SIGINT (Ctrl+C)

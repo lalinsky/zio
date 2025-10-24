@@ -32,7 +32,7 @@ pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
 
 // Re-export signal handling
 pub const Signal = @import("signal.zig").Signal;
-pub const SignalType = @import("signal.zig").SignalType;
+pub const SignalKind = @import("signal.zig").SignalKind;
 
 // Re-export select functionality
 pub const select = @import("select.zig").select;

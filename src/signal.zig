@@ -2,384 +2,235 @@ const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
-const runIo = @import("io/base.zig").runIo;
+const Cancelable = @import("runtime.zig").Cancelable;
 
-/// Signal types that can be waited on across all platforms.
-pub const SignalType = enum {
-    /// SIGINT on Unix (Ctrl+C), CTRL_C_EVENT on Windows
-    int,
-    /// SIGTERM on Unix, CTRL_CLOSE_EVENT on Windows
-    term,
+pub const SignalKind = switch (builtin.os.tag) {
+    .windows => enum(u8) {
+        interrupt = std.os.windows.CTRL_C_EVENT,
+        terminate = std.os.windows.CTRL_CLOSE_EVENT,
+    },
+    else => enum(u8) {
+        interrupt = std.posix.SIG.INT,
+        terminate = std.posix.SIG.TERM,
+        hangup = std.posix.SIG.HUP,
+        alarm = std.posix.SIG.ALRM,
+        child = std.posix.SIG.CHLD,
+        io = std.posix.SIG.IO,
+        pipe = std.posix.SIG.PIPE,
+        quit = std.posix.SIG.QUIT,
+        user1 = std.posix.SIG.USR1,
+        user2 = std.posix.SIG.USR2,
+        window_change = std.posix.SIG.WINCH,
+    },
 };
 
-/// Cross-platform signal handler.
-///
-/// Allows waiting for OS signals in a coroutine-friendly way using the
-/// async runtime. Multiple coroutines can wait on the same signal.
-///
-/// ## Example
-/// ```zig
-/// const sig = zio.Signal.init(.int);
-/// while (true) {
-///     try sig.wait(rt);
-///     std.log.info("Received SIGINT, shutting down...", .{});
-///     break;
-/// }
-/// ```
-pub const Signal = struct {
-    impl: Impl,
+const NO_SIGNAL = 255;
+const MAX_HANDLERS = 32;
 
-    const Impl = if (builtin.os.tag == .windows)
-        WindowsImpl
-    else if (builtin.os.tag == .linux)
-        LinuxImpl
-    else if (builtin.os.tag == .macos or builtin.os.tag == .freebsd or builtin.os.tag == .netbsd or builtin.os.tag == .openbsd)
-        KqueueImpl
-    else
-        @compileError("Unsupported platform for signal handling");
-
-    pub fn init(signal_type: SignalType) Signal {
-        return .{
-            .impl = Impl.init(signal_type),
-        };
-    }
-
-    /// Wait for the signal to be received.
-    /// Blocks the current coroutine until the signal arrives.
-    pub fn wait(self: *Signal, rt: *Runtime) !void {
-        return self.impl.wait(rt);
-    }
-
-    /// Cleanup resources. Must be called when done with the signal.
-    pub fn deinit(self: *Signal) void {
-        self.impl.deinit();
-    }
+const HandlerEntry = struct {
+    kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
+    event: xev.Async = undefined,
 };
 
-// Unix signal mask registry for reference counting
-const UnixSignalMaskRegistry = if (builtin.os.tag == .linux or
-    builtin.os.tag == .macos or
-    builtin.os.tag == .freebsd or
-    builtin.os.tag == .netbsd or
-    builtin.os.tag == .openbsd)
-    struct {
-        var mutex: std.Thread.Mutex = .{};
-        var refcounts: [2]usize = .{ 0, 0 }; // Index 0 = SIGINT, 1 = SIGTERM
+const HandlerRegistryUnix = struct {
+    handlers: [MAX_HANDLERS]HandlerEntry = [_]HandlerEntry{.{}} ** MAX_HANDLERS,
+    // Reference count for each signal value (0-255)
+    // Each signal type has its own OS-level handler that needs tracking
+    installed_handlers: [256]std.atomic.Value(u8) = [_]std.atomic.Value(u8){.init(0)} ** 256,
+    // Store previous signal handlers to restore when refcount reaches 0
+    prev_handlers: [256]std.posix.Sigaction = undefined,
 
-        fn indexForSignal(signal_type: SignalType) usize {
-            return switch (signal_type) {
-                .int => 0,
-                .term => 1,
-            };
-        }
+    fn install(self: *HandlerRegistryUnix, kind: SignalKind) !*xev.Async {
+        const signum: u8 = @intFromEnum(kind);
 
-        fn incrementAndMaskIfNeeded(signal_type: SignalType) !void {
-            mutex.lock();
-            defer mutex.unlock();
+        // Atomically increment refcount for this signal type
+        const prev_count = self.installed_handlers[signum].fetchAdd(1, .acq_rel);
+        errdefer _ = self.installed_handlers[signum].fetchSub(1, .acq_rel);
 
-            const idx = indexForSignal(signal_type);
-            if (refcounts[idx] == 0) {
-                // First instance for this signal type - mask it
-                const signum: c_int = switch (signal_type) {
-                    .int => std.posix.SIG.INT,
-                    .term => std.posix.SIG.TERM,
-                };
-
-                var mask = std.posix.sigemptyset();
-                std.posix.sigaddset(&mask, @intCast(signum));
-                std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, null);
-            }
-            refcounts[idx] += 1;
-        }
-
-        fn decrementAndUnmaskIfNeeded(signal_type: SignalType) void {
-            mutex.lock();
-            defer mutex.unlock();
-
-            const idx = indexForSignal(signal_type);
-            if (refcounts[idx] > 0) {
-                refcounts[idx] -= 1;
-                if (refcounts[idx] == 0) {
-                    // Last instance for this signal type - unmask it
-                    const signum: c_int = switch (signal_type) {
-                        .int => std.posix.SIG.INT,
-                        .term => std.posix.SIG.TERM,
-                    };
-
-                    var mask = std.posix.sigemptyset();
-                    std.posix.sigaddset(&mask, @intCast(signum));
-                    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &mask, null);
-                }
-            }
-        }
-    }
-else
-    void;
-
-// Linux implementation using signalfd
-const LinuxImpl = struct {
-    signal_type: SignalType,
-    fd: std.posix.fd_t = -1,
-    mutex: std.Thread.Mutex = .{},
-
-    fn init(signal_type: SignalType) LinuxImpl {
-        return .{ .signal_type = signal_type };
-    }
-
-    fn wait(self: *LinuxImpl, rt: *Runtime) !void {
-        // Lazy initialization on first wait
-        self.mutex.lock();
-        const needs_init = self.fd == -1;
-        self.mutex.unlock();
-
-        if (needs_init) {
-            try self.initializeSignal();
-        }
-
-        // Read from signalfd - this blocks in xev's event loop
-        var info: std.os.linux.signalfd_siginfo = undefined;
-        var completion: xev.Completion = .{
-            .op = .{
-                .read = .{
-                    .fd = self.fd,
-                    .buffer = .{ .slice = std.mem.asBytes(&info) },
-                },
-            },
-        };
-
-        _ = try runIo(rt, &completion, "read");
-    }
-
-    fn initializeSignal(self: *LinuxImpl) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Double-check after acquiring lock
-        if (self.fd != -1) return;
-
-        // Increment refcount and mask signal if this is the first instance
-        try UnixSignalMaskRegistry.incrementAndMaskIfNeeded(self.signal_type);
-
-        const signum: c_int = switch (self.signal_type) {
-            .int => std.posix.SIG.INT,
-            .term => std.posix.SIG.TERM,
-        };
-
-        // Create signalfd
-        var mask = std.posix.sigemptyset();
-        std.posix.sigaddset(&mask, @intCast(signum));
-        self.fd = try std.posix.signalfd(-1, &mask, std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK);
-    }
-
-    fn deinit(self: *LinuxImpl) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.fd != -1) {
-            std.posix.close(self.fd);
-            self.fd = -1;
-
-            // Decrement refcount and unmask signal if this is the last instance
-            UnixSignalMaskRegistry.decrementAndUnmaskIfNeeded(self.signal_type);
-        }
-    }
-};
-
-// macOS/BSD implementation using kqueue EVFILT_SIGNAL
-const KqueueImpl = struct {
-    signal_type: SignalType,
-    initialized: bool = false,
-    mutex: std.Thread.Mutex = .{},
-
-    fn init(signal_type: SignalType) KqueueImpl {
-        return .{ .signal_type = signal_type };
-    }
-
-    fn wait(self: *KqueueImpl, rt: *Runtime) !void {
-        // Lazy initialization on first wait
-        self.mutex.lock();
-        const needs_init = !self.initialized;
-        self.mutex.unlock();
-
-        if (needs_init) {
-            try self.initializeSignal();
-        }
-
-        // Wait for signal using xev's signal operation
-        var completion: xev.Completion = .{
-            .op = .{
-                .signal = .{
-                    .signum = switch (self.signal_type) {
-                        .int => std.posix.SIG.INT,
-                        .term => std.posix.SIG.TERM,
-                    },
-                },
-            },
-        };
-
-        _ = try runIo(rt, &completion, "signal");
-    }
-
-    fn initializeSignal(self: *KqueueImpl) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Double-check after acquiring lock
-        if (self.initialized) return;
-
-        // Increment refcount and mask signal if this is the first instance
-        try UnixSignalMaskRegistry.incrementAndMaskIfNeeded(self.signal_type);
-
-        self.initialized = true;
-    }
-
-    fn deinit(self: *KqueueImpl) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.initialized) {
-            // Decrement refcount and unmask signal if this is the last instance
-            UnixSignalMaskRegistry.decrementAndUnmaskIfNeeded(self.signal_type);
-            self.initialized = false;
-        }
-    }
-};
-
-// Windows implementation using SetConsoleCtrlHandler + Notify
-const WindowsImpl = struct {
-    signal_type: SignalType,
-    notify: Notify = Notify.init,
-    registry_id: ?usize = null,
-    mutex: std.Thread.Mutex = .{},
-    registered: bool = false,
-
-    const Notify = @import("sync.zig").Notify;
-
-    fn init(signal_type: SignalType) WindowsImpl {
-        return .{ .signal_type = signal_type };
-    }
-
-    fn wait(self: *WindowsImpl, rt: *Runtime) !void {
-        // Lazy initialization on first wait
-        self.mutex.lock();
-        const needs_init = !self.registered;
-        self.mutex.unlock();
-
-        if (needs_init) {
-            try self.initializeSignal();
-        }
-
-        // Wait for signal - notify will be signaled by console handler
-        try self.notify.wait(rt);
-    }
-
-    fn initializeSignal(self: *WindowsImpl) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Double-check after acquiring lock
-        if (self.registered) return;
-
-        // Register with global handler
-        self.registry_id = try GlobalHandlerRegistry.register(self.signal_type, &self.notify);
-        self.registered = true;
-    }
-
-    fn deinit(self: *WindowsImpl) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.registry_id) |id| {
-            GlobalHandlerRegistry.unregister(id);
-            self.registry_id = null;
-            self.registered = false;
-        }
-    }
-
-    // Global registry for Windows console control handlers
-    const GlobalHandlerRegistry = struct {
-        var mutex: std.Thread.Mutex = .{};
-        var handlers: std.ArrayListUnmanaged(HandlerEntry) = .{};
-        var ctrl_handler_installed: bool = false;
-        var next_id: usize = 0;
-
-        const HandlerEntry = struct {
-            id: usize,
-            signal_type: SignalType,
-            notify: *Notify,
-        };
-
-        fn register(signal_type: SignalType, notify: *Notify) !usize {
-            mutex.lock();
-            defer mutex.unlock();
-
-            const id = next_id;
-            next_id += 1;
-
-            try handlers.append(std.heap.page_allocator, .{
-                .id = id,
-                .signal_type = signal_type,
-                .notify = notify,
-            });
-
-            if (!ctrl_handler_installed) {
-                const result = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandler, 1);
-                if (result == 0) return error.SetConsoleCtrlHandlerFailed;
-                ctrl_handler_installed = true;
-            }
-
-            return id;
-        }
-
-        fn unregister(id: usize) void {
-            mutex.lock();
-            defer mutex.unlock();
-
-            var i: usize = 0;
-            while (i < handlers.items.len) {
-                if (handlers.items[i].id == id) {
-                    _ = handlers.swapRemove(i);
-                    break;
-                }
-                i += 1;
-            }
-
-            // Uninstall handler if no more Signal instances exist
-            if (handlers.items.len == 0 and ctrl_handler_installed) {
-                _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandler, 0);
-                ctrl_handler_installed = false;
-            }
-        }
-
-        fn consoleCtrlHandler(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
-            mutex.lock();
-            defer mutex.unlock();
-
-            const signal_type: ?SignalType = switch (ctrl_type) {
-                std.os.windows.CTRL_C_EVENT, std.os.windows.CTRL_BREAK_EVENT => .int,
-                std.os.windows.CTRL_CLOSE_EVENT, std.os.windows.CTRL_LOGOFF_EVENT, std.os.windows.CTRL_SHUTDOWN_EVENT => .term,
-                else => null,
+        if (prev_count == 0) {
+            // First handler for this signal type - install OS signal handler
+            var sa = std.posix.Sigaction{
+                .handler = .{ .handler = signalHandlerUnix },
+                .mask = std.posix.sigemptyset(),
+                .flags = std.posix.SA.RESTART,
             };
 
-            if (signal_type) |sig_type| {
-                // Signal all matching notify instances - can be called from any thread
-                for (handlers.items) |entry| {
-                    if (entry.signal_type == sig_type) {
-                        entry.notify.signal();
-                    }
-                }
-                return 1; // Signal handled
-            }
-
-            return 0; // Not handled
+            // Save the previous handler so we can restore it later
+            std.posix.sigaction(@intFromEnum(kind), &sa, &self.prev_handlers[signum]);
         }
-    };
+
+        // Now find a slot for this signal handler
+        for (&self.handlers) |*entry| {
+            const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, signum, .acq_rel, .monotonic);
+            if (prev == null) {
+                errdefer entry.kind.store(NO_SIGNAL, .release);
+
+                entry.event = try xev.Async.init();
+
+                return &entry.event;
+            }
+        }
+
+        return error.TooManySignalHandlers;
+    }
+
+    fn uninstall(self: *HandlerRegistryUnix, kind: SignalKind, event: *xev.Async) void {
+        const signum: u8 = @intFromEnum(kind);
+
+        const entry: *HandlerEntry = @fieldParentPtr("event", event);
+        const prev_kind = entry.kind.swap(NO_SIGNAL, .acq_rel);
+        std.debug.assert(prev_kind == signum);
+        entry.event.deinit();
+        entry.event = undefined;
+
+        const new_count = self.installed_handlers[signum].fetchSub(1, .acq_rel) - 1;
+        if (new_count == 0) {
+            // Last handler for this signal type - restore previous OS signal handler
+            std.posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
+        }
+    }
 };
 
-// Note: Real signal handling tests would need to actually send signals to the process,
-// which is difficult to test in unit tests. Signal handling should be tested via
-// integration tests or manual testing.
+const HandlerRegistryWindows = struct {
+    handlers: [MAX_HANDLERS]HandlerEntry = [_]HandlerEntry{.{}} ** MAX_HANDLERS,
+    // Total number of handlers across all signal types
+    // Only one global console control handler for all signals
+    total_handlers: std.atomic.Value(usize) = .init(0),
 
-test {
-    std.testing.refAllDecls(@This());
+    fn install(self: *HandlerRegistryWindows, kind: SignalKind) !*xev.Async {
+        const signum: u8 = @intFromEnum(kind);
+
+        const prev_total = self.total_handlers.fetchAdd(1, .acq_rel);
+        errdefer _ = self.total_handlers.fetchSub(1, .acq_rel);
+
+        if (prev_total == 0) {
+            // First handler of any type - install the global console control handler
+            const result = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 1);
+            if (result == 0) {
+                return error.SetConsoleCtrlHandlerFailed;
+            }
+        }
+
+        // Now find a slot for this signal handler
+        for (&self.handlers) |*entry| {
+            const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, signum, .acq_rel, .monotonic);
+            if (prev == null) {
+                errdefer entry.kind.store(NO_SIGNAL, .release);
+                entry.event = try xev.Async.init();
+                return &entry.event;
+            }
+        }
+
+        return error.TooManySignalHandlers;
+    }
+
+    fn uninstall(self: *HandlerRegistryWindows, kind: SignalKind, event: *xev.Async) void {
+        const signum: u8 = @intFromEnum(kind);
+
+        const entry: *HandlerEntry = @fieldParentPtr("event", event);
+        const prev_kind = entry.kind.swap(NO_SIGNAL, .acq_rel);
+        std.debug.assert(prev_kind == signum);
+        entry.event.deinit();
+        entry.event = undefined;
+
+        const new_total = self.total_handlers.fetchSub(1, .acq_rel) - 1;
+        if (new_total == 0) {
+            // Last handler removed - uninstall the global console control handler
+            _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 0);
+        }
+    }
+};
+
+const HandlerRegistry = if (builtin.os.tag == .windows) HandlerRegistryWindows else HandlerRegistryUnix;
+
+var registry: HandlerRegistry = .{};
+
+fn signalHandlerUnix(signum: c_int) callconv(.c) void {
+    for (&registry.handlers) |*entry| {
+        const kind = entry.kind.load(.acquire);
+        if (kind != NO_SIGNAL and kind == signum) {
+            entry.event.notify() catch {};
+        }
+    }
 }
+
+fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
+    // Map Windows control events to SignalKind values
+    const signal_value: u8 = switch (ctrl_type) {
+        std.os.windows.CTRL_C_EVENT => @intFromEnum(SignalKind.interrupt),
+        std.os.windows.CTRL_CLOSE_EVENT => @intFromEnum(SignalKind.terminate),
+        else => return 0, // Not handled
+    };
+
+    // Notify all matching handlers
+    var found_handler = false;
+    for (&registry.handlers) |*entry| {
+        const kind = entry.kind.load(.acquire);
+        if (kind != NO_SIGNAL and kind == signal_value) {
+            entry.event.notify() catch {};
+            found_handler = true;
+        }
+    }
+
+    // Return 1 if we handled it, 0 to pass to default handler
+    return if (found_handler) 1 else 0;
+}
+
+pub const Signal = struct {
+    kind: SignalKind,
+    event: *xev.Async,
+    completion: xev.Completion = undefined,
+
+    pub fn init(kind: SignalKind) !Signal {
+        const event = try registry.install(kind);
+        return .{ .kind = kind, .event = event };
+    }
+
+    pub fn deinit(self: *Signal) void {
+        registry.uninstall(self.kind, self.event);
+        self.event = undefined;
+    }
+
+    pub fn wait(self: *Signal, rt: *Runtime) Cancelable!void {
+        const AnyTask = @import("runtime.zig").AnyTask;
+        const resumeTask = @import("runtime.zig").resumeTask;
+        const waitForIo = @import("io/base.zig").waitForIo;
+
+        const WaitContext = struct {
+            task: *AnyTask,
+            result: xev.Async.WaitError!void = undefined,
+        };
+
+        const task = rt.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
+
+        var ctx = WaitContext{ .task = task };
+
+        // Register async wait callback (this also adds to the loop)
+        self.event.wait(
+            &executor.loop,
+            &self.completion,
+            WaitContext,
+            &ctx,
+            struct {
+                fn callback(
+                    userdata: ?*WaitContext,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    result: xev.Async.WaitError!void,
+                ) xev.CallbackAction {
+                    const context = userdata.?;
+                    context.result = result;
+                    resumeTask(context.task, .local);
+                    return .disarm;
+                }
+            }.callback,
+        );
+
+        // Wait for signal (handles cancellation)
+        try waitForIo(rt, &self.completion);
+
+        // Check result - ignore any xev errors, just ensure signal was received
+        ctx.result catch {};
+    }
+};
