@@ -141,6 +141,16 @@ pub const Address = extern union {
         };
     }
 
+    /// Convert from std.net.Address
+    pub fn fromStd(addr: std.net.Address) Address {
+        return switch (addr.any.family) {
+            std.posix.AF.INET => Address{ .ip = .{ .in = addr.in } },
+            std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6 } },
+            std.posix.AF.UNIX => if (std.net.has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            else => unreachable,
+        };
+    }
+
     /// Convert sockaddr to IpAddress from raw bytes.
     /// This properly handles IPv4 and IPv6 addresses without alignment issues.
     fn fromStorageIp(data: []const u8) IpAddress {
@@ -191,6 +201,11 @@ pub const Address = extern union {
             else => unreachable,
         }
     }
+};
+
+pub const ReceiveFromResult = struct {
+    from: Address,
+    len: usize,
 };
 
 pub const Socket = struct {
@@ -258,6 +273,126 @@ pub const Socket = struct {
     pub fn send(self: Socket, rt: *Runtime, buf: []const u8) !usize {
         const empty: []const u8 = "";
         return netWrite(rt, self.handle, buf, &.{empty}, 0);
+    }
+
+    /// Receives a datagram from the socket, returning the sender's address and bytes read.
+    /// Used for UDP and other datagram-based protocols.
+    pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+        return switch (xev.backend) {
+            .io_uring, .epoll => try self.receiveFromRecvmsg(rt, buf),
+            .iocp, .kqueue => try self.receiveFromRecvfrom(rt, buf),
+            .wasi_poll => error.Unsupported,
+        };
+    }
+
+    fn receiveFromRecvfrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+        var completion: xev.Completion = .{
+            .op = .{
+                .recvfrom = .{
+                    .fd = self.handle,
+                    .buffer = .{ .slice = buf },
+                },
+            },
+        };
+
+        const bytes_read = try runIo(rt, &completion, "recvfrom");
+        const addr = std.net.Address.initPosix(@alignCast(&completion.op.recvfrom.addr));
+
+        return ReceiveFromResult{
+            .from = Address.fromStd(addr),
+            .len = bytes_read,
+        };
+    }
+
+    fn receiveFromRecvmsg(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+        var iov = [_]std.posix.iovec{.{
+            .base = buf.ptr,
+            .len = buf.len,
+        }};
+
+        var addr_storage: std.posix.sockaddr.storage = undefined;
+        var msg: std.posix.msghdr = .{
+            .name = @ptrCast(&addr_storage),
+            .namelen = @sizeOf(std.posix.sockaddr.storage),
+            .iov = &iov,
+            .iovlen = 1,
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
+        };
+
+        var completion: xev.Completion = .{
+            .op = .{
+                .recvmsg = .{
+                    .fd = self.handle,
+                    .msghdr = &msg,
+                },
+            },
+        };
+
+        const bytes_read = try runIo(rt, &completion, "recvmsg");
+
+        // Extract address from msghdr
+        const addr_bytes: [*]const u8 = @ptrCast(msg.name);
+        const addr = Address.fromStorage(addr_bytes[0..msg.namelen]);
+
+        return ReceiveFromResult{
+            .from = addr,
+            .len = bytes_read,
+        };
+    }
+
+    /// Sends a datagram to the specified address.
+    /// Used for UDP and other datagram-based protocols.
+    pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+        return switch (xev.backend) {
+            .io_uring, .epoll => try self.sendToSendmsg(rt, addr, data),
+            .iocp, .kqueue => try self.sendToSendto(rt, addr, data),
+            .wasi_poll => error.Unsupported,
+        };
+    }
+
+    fn sendToSendto(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+        var completion: xev.Completion = .{
+            .op = .{
+                .sendto = .{
+                    .fd = self.handle,
+                    .buffer = .{ .slice = data },
+                    .addr = addr.toStd(),
+                },
+            },
+        };
+
+        return try runIo(rt, &completion, "sendto");
+    }
+
+    fn sendToSendmsg(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+        var iov = [_]std.posix.iovec_const{.{
+            .base = data.ptr,
+            .len = data.len,
+        }};
+
+        const std_addr = addr.toStd();
+        var msg: std.posix.msghdr_const = .{
+            .name = @ptrCast(&std_addr.any),
+            .namelen = std_addr.getOsSockLen(),
+            .iov = &iov,
+            .iovlen = 1,
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
+        };
+
+        var completion: xev.Completion = .{
+            .op = .{
+                .sendmsg = .{
+                    .fd = self.handle,
+                    .msghdr = &msg,
+                },
+            },
+        };
+
+        return try runIo(rt, &completion, "sendmsg");
     }
 
     pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
