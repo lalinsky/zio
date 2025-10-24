@@ -1,6 +1,6 @@
 # ZIO - Async I/O and concurrency framework for Zig
 
-There are two ways of doing asynchronous I/O, either you use callbacks and have the I/O operation call you when it's done, or you have some sort of continuation system and suspend your code while waiting for I/O. Callback-based APIs are easier to implement, they don't need any special runtime or language support, but are much harder to use, you need to manage the state yourself and most likely you need a lot more allocations to manage the state.
+There are two ways of doing asynchronous I/O, either you use callbacks and have the I/O operation call you when it's done, or you have some sort of continuation system and suspend your code while waiting for I/O. Callback-based APIs are easier to implement, they don't need any special runtime or language support, but are much harder to use, you need to manage the state yourself and most likely you need a lot more allocations to do so.
 
 This project started out of my frustration with the state of networking in Zig. I've tried to write a nice wrapper for libuv in Zig, but it just doesn't work, you have to allocate memory all the time, you need to depend on reference counted pointers. Then it occured to me I could do Go-style stackful coroutines and use the stack for storing the state. The resulting code feels much more idiomatic.
 
