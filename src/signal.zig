@@ -234,3 +234,87 @@ pub const Signal = struct {
         ctx.result catch {};
     }
 };
+
+test "Signal: basic signal handling" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        signal_received: bool = false,
+
+        fn mainTask(self: *@This(), r: *Runtime) !void {
+            var h1 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            defer h1.deinit();
+            var h2 = try r.spawn(sendSignal, .{r}, .{});
+            defer h2.deinit();
+
+            try h1.join(r);
+            try h2.join(r);
+        }
+
+        fn waitForSignal(self: *@This(), r: *Runtime) !void {
+            var sig = try Signal.init(.interrupt);
+            defer sig.deinit();
+
+            try sig.wait(r);
+            self.signal_received = true;
+        }
+
+        fn sendSignal(r: *Runtime) !void {
+            try r.sleep(10);
+            try std.posix.raise(@intFromEnum(SignalKind.interrupt));
+        }
+    };
+
+    var ctx = TestContext{};
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+
+    try std.testing.expect(ctx.signal_received);
+}
+
+test "Signal: multiple handlers for same signal" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        count: std.atomic.Value(usize) = .init(0),
+
+        fn mainTask(self: *@This(), r: *Runtime) !void {
+            var h1 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            defer h1.deinit();
+            var h2 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            defer h2.deinit();
+            var h3 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            defer h3.deinit();
+            var h4 = try r.spawn(sendSignal, .{r}, .{});
+            defer h4.deinit();
+
+            try h1.join(r);
+            try h2.join(r);
+            try h3.join(r);
+            try h4.join(r);
+        }
+
+        fn waitForSignal(self: *@This(), r: *Runtime) !void {
+            var sig = try Signal.init(.interrupt);
+            defer sig.deinit();
+
+            try sig.wait(r);
+            _ = self.count.fetchAdd(1, .monotonic);
+        }
+
+        fn sendSignal(r: *Runtime) !void {
+            try r.sleep(10);
+            try std.posix.raise(@intFromEnum(SignalKind.interrupt));
+        }
+    };
+
+    var ctx = TestContext{};
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+
+    try std.testing.expectEqual(@as(usize, 3), ctx.count.load(.monotonic));
+}
