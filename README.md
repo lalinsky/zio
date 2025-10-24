@@ -17,7 +17,7 @@ You can see this as an alternative to the Go runtime, the Tokio project for Rust
 - Spawning coroutines, one small allocation per spawn, stack memory is reused
 - Spawning blocking tasks in an auxiliary thread pool
 - Fully asynchronous network I/O, supports TCP/UDP sockets, Unix sockets, DNS resolution currently via thread pool
-- Asynchronous file I/O on all platforms, Linux and Windows are truly asynchronous, other platforms are simulated using a thread pool
+- Asynchronous file I/O, Linux and Windows are truly asynchronous, other platforms are simulated using a thread pool
 - Cancelation support for all I/O operations on Linux and Windows, on other platforms we just stop polling, but can't cancel active operation
 - Full `std.Io.Reader` and `std.Io.Writer` support for files and streaming sockets (TCP, Unix)
 - Synchronization primitives matching `std.Thread` API (`Mutex`, `Condition`, `Semaphore`, `ResetEvent`, `Notify`, `Barrier`)
