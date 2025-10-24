@@ -771,6 +771,7 @@ pub const Completion = struct {
 
             .poll => .{
                 .poll = if (res >= 0) {} else switch (@as(posix.E, @enumFromInt(-res))) {
+                    .CANCELED => error.Canceled,
                     else => |errno| posix.unexpectedErrno(errno),
                 },
             },

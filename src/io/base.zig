@@ -40,6 +40,68 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
     }
 }
 
+pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    var canceled = false;
+    var timed_out = false;
+    defer {
+        if (canceled) rt.endShield();
+        if (timed_out) rt.endShield();
+    }
+
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
+    const TimeoutContext = struct {
+        completion: *xev.Completion,
+    };
+
+    var timeout_ctx = TimeoutContext{
+        .completion = completion,
+    };
+
+    while (completion.state() == .active) {
+        executor.timedWaitForReadyWithCallback(
+            .ready,
+            .waiting_io,
+            timeout_ns,
+            TimeoutContext,
+            &timeout_ctx,
+            struct {
+                fn onTimeout(ctx: *TimeoutContext) bool {
+                    // Only timeout if I/O hasn't completed yet
+                    return ctx.completion.state() == .active;
+                }
+            }.onTimeout,
+        ) catch |err| switch (err) {
+            error.Timeout => {
+                // Cancel the I/O operation on timeout
+                timed_out = true;
+                rt.beginShield();
+                cancelIo(rt, completion);
+                continue;
+            },
+            error.Canceled => {
+                if (!canceled) {
+                    canceled = true;
+                    rt.beginShield();
+                    cancelIo(rt, completion);
+                }
+                continue;
+            },
+        };
+        std.debug.assert(completion.state() == .dead);
+        break;
+    }
+
+    if (timed_out) {
+        return error.Timeout;
+    }
+
+    if (canceled) {
+        return error.Canceled;
+    }
+}
+
 pub fn runIo(rt: *Runtime, completion: *xev.Completion, comptime op: []const u8) !meta.Payload(@FieldType(xev.Result, op)) {
     return try IoOperation(op).run(rt, completion);
 }
