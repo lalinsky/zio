@@ -29,6 +29,7 @@ const MAX_HANDLERS = 32;
 const HandlerEntry = struct {
     kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
     enabled: std.atomic.Value(bool) = .init(false),
+    counter: std.atomic.Value(usize) = .init(0),
     event: xev.Async = undefined,
 };
 
@@ -40,7 +41,7 @@ const HandlerRegistryUnix = struct {
     // Store previous signal handlers to restore when refcount reaches 0
     prev_handlers: [256]std.posix.Sigaction = undefined,
 
-    fn install(self: *HandlerRegistryUnix, kind: SignalKind) !*xev.Async {
+    fn install(self: *HandlerRegistryUnix, kind: SignalKind) !*HandlerEntry {
         const signum: u8 = @intFromEnum(kind);
 
         // Atomically increment refcount for this signal type
@@ -75,17 +76,16 @@ const HandlerRegistryUnix = struct {
                 entry.event = try xev.Async.init();
                 entry.enabled.store(true, .release);
 
-                return &entry.event;
+                return entry;
             }
         }
 
         return error.TooManySignalHandlers;
     }
 
-    fn uninstall(self: *HandlerRegistryUnix, kind: SignalKind, event: *xev.Async) void {
+    fn uninstall(self: *HandlerRegistryUnix, kind: SignalKind, entry: *HandlerEntry) void {
         const signum: u8 = @intFromEnum(kind);
 
-        const entry: *HandlerEntry = @fieldParentPtr("event", event);
         const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
         std.debug.assert(prev_value == signum);
         entry.enabled.store(false, .release);
@@ -108,7 +108,7 @@ const HandlerRegistryWindows = struct {
     // Only one global console control handler for all signals
     total_handlers: std.atomic.Value(usize) = .init(0),
 
-    fn install(self: *HandlerRegistryWindows, kind: SignalKind) !*xev.Async {
+    fn install(self: *HandlerRegistryWindows, kind: SignalKind) !*HandlerEntry {
         const signum: u8 = @intFromEnum(kind);
 
         const prev_total = self.total_handlers.fetchAdd(1, .acq_rel);
@@ -136,17 +136,16 @@ const HandlerRegistryWindows = struct {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
                 entry.event = try xev.Async.init();
                 entry.enabled.store(true, .release);
-                return &entry.event;
+                return entry;
             }
         }
 
         return error.TooManySignalHandlers;
     }
 
-    fn uninstall(self: *HandlerRegistryWindows, kind: SignalKind, event: *xev.Async) void {
+    fn uninstall(self: *HandlerRegistryWindows, kind: SignalKind, entry: *HandlerEntry) void {
         const signum: u8 = @intFromEnum(kind);
 
-        const entry: *HandlerEntry = @fieldParentPtr("event", event);
         const prev_value = entry.kind.swap(NO_SIGNAL, .acq_rel);
         std.debug.assert(prev_value == signum);
         entry.enabled.store(false, .release);
@@ -172,6 +171,7 @@ fn signalHandlerUnix(signum: c_int) callconv(.c) void {
         const kind = entry.kind.load(.acquire);
         if (kind != NO_SIGNAL and kind == signum) {
             if (entry.enabled.load(.acquire)) {
+                _ = entry.counter.fetchAdd(1, .release);
                 entry.event.notify() catch {};
             }
         }
@@ -192,6 +192,7 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
         const kind = entry.kind.load(.acquire);
         if (kind != NO_SIGNAL and kind == signal_value) {
             if (entry.enabled.load(.acquire)) {
+                _ = entry.counter.fetchAdd(1, .release);
                 entry.event.notify() catch {};
                 found_handler = true;
             }
@@ -204,20 +205,25 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
 
 pub const Signal = struct {
     kind: SignalKind,
-    event: *xev.Async,
+    entry: *HandlerEntry,
     completion: xev.Completion = undefined,
 
     pub fn init(kind: SignalKind) !Signal {
-        const event = try registry.install(kind);
-        return .{ .kind = kind, .event = event };
+        const entry = try registry.install(kind);
+        return .{ .kind = kind, .entry = entry };
     }
 
     pub fn deinit(self: *Signal) void {
-        registry.uninstall(self.kind, self.event);
-        self.event = undefined;
+        registry.uninstall(self.kind, self.entry);
+        self.entry = undefined;
     }
 
     pub fn wait(self: *Signal, rt: *Runtime) Cancelable!void {
+        // Check if we already have pending signals
+        if (self.entry.counter.swap(0, .acquire) > 0) {
+            return;
+        }
+
         const AnyTask = @import("runtime.zig").AnyTask;
         const resumeTask = @import("runtime.zig").resumeTask;
         const waitForIo = @import("io/base.zig").waitForIo;
@@ -233,7 +239,7 @@ pub const Signal = struct {
         var ctx = WaitContext{ .task = task };
 
         // Register async wait callback (this also adds to the loop)
-        self.event.wait(
+        self.entry.event.wait(
             &executor.loop,
             &self.completion,
             WaitContext,
@@ -258,6 +264,9 @@ pub const Signal = struct {
 
         // Check result - ignore any xev errors, just ensure signal was received
         ctx.result catch {};
+
+        // Consume the counter
+        _ = self.entry.counter.swap(0, .acquire);
     }
 };
 
