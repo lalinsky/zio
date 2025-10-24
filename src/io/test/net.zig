@@ -194,6 +194,8 @@ test "IpAddress: bind/sendTo/receiveFrom IPv6" {
 
 test "UnixAddress: bind/sendTo/receiveFrom" {
     if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    // Windows doesn't support UDP Unix sockets
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const server_path = "zio-test-udp-server.sock";
     defer std.fs.cwd().deleteFile(server_path) catch {};
