@@ -30,10 +30,10 @@
 //!     // ...
 //!
 //!     // Wake one waiting worker
-//!     notify.signal(rt);
+//!     notify.signal();
 //!
 //!     // Or wake all waiting workers
-//!     // notify.broadcast(rt);
+//!     // notify.broadcast();
 //! }
 //!
 //! var notify = zio.Notify.init;
@@ -73,8 +73,7 @@ pub const init: Notify = .{};
 ///
 /// This is useful for work-stealing scenarios or when you want to wake tasks one
 /// at a time as resources become available.
-pub fn signal(self: *Notify, runtime: *Runtime) void {
-    _ = runtime;
+pub fn signal(self: *Notify) void {
     // Pop one waiter if available
     if (self.wait_queue.pop()) |wait_node| {
         wait_node.wake();
@@ -87,8 +86,7 @@ pub fn signal(self: *Notify, runtime: *Runtime) void {
 /// are waiting, this is a no-op and the broadcast is lost.
 ///
 /// This is useful for notifying multiple tasks about an event that affects them all.
-pub fn broadcast(self: *Notify, runtime: *Runtime) void {
-    _ = runtime;
+pub fn broadcast(self: *Notify) void {
     // Pop and wake all waiters
     while (self.wait_queue.pop()) |wait_node| {
         wait_node.wake();
@@ -233,7 +231,7 @@ test "Notify basic signal/wait" {
 
         fn signaler(rt: *Runtime, n: *Notify) !void {
             try rt.yield(); // Give waiter time to start waiting
-            n.signal(rt);
+            n.signal();
         }
     };
 
@@ -256,8 +254,8 @@ test "Notify signal with no waiters" {
     var notify = Notify.init;
 
     // Signal with no waiters - should be no-op
-    notify.signal(&runtime);
-    notify.broadcast(&runtime);
+    notify.signal();
+    notify.broadcast();
 
     // Verify state is still empty
     try testing.expectEqual(empty, notify.wait_queue.getState());
@@ -283,7 +281,7 @@ test "Notify broadcast to multiple waiters" {
             try rt.yield();
             try rt.yield();
             try rt.yield();
-            n.broadcast(rt);
+            n.broadcast();
         }
     };
 
@@ -322,9 +320,9 @@ test "Notify multiple signals to multiple waiters" {
             try rt.yield();
             try rt.yield();
             // Signal three times to wake all three waiters one by one (FIFO)
-            n.signal(rt);
-            n.signal(rt);
-            n.signal(rt);
+            n.signal();
+            n.signal();
+            n.signal();
         }
     };
 
@@ -385,7 +383,7 @@ test "Notify timedWait success" {
 
         fn signaler(rt: *Runtime, n: *Notify) !void {
             try rt.yield(); // Give waiter time to start waiting
-            n.signal(rt);
+            n.signal();
         }
     };
 
@@ -412,7 +410,7 @@ test "Notify: select" {
     const TestContext = struct {
         fn signalerTask(rt: *Runtime, notify: *Notify) !void {
             try rt.sleep(5);
-            notify.signal(rt);
+            notify.signal();
         }
 
         fn asyncTask(rt: *Runtime) !void {

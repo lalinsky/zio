@@ -31,7 +31,7 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
     var server = try addr.listen(rt, .{});
     defer server.close(rt);
 
-    ready.set(rt);
+    ready.set();
 
     var clients_handled: usize = 0;
     while (clients_handled < NUM_CLIENTS) : (clients_handled += 1) {
@@ -136,7 +136,7 @@ fn benchmarkTask(
     const end = std.time.nanoTimestamp();
 
     // Signal server to shut down
-    server_done.set(rt);
+    server_done.set();
     try server.join(rt);
 
     // Calculate statistics

@@ -30,7 +30,7 @@
 //!     // ...
 //!
 //!     // Signal all waiting workers
-//!     event.set(rt);
+//!     event.set();
 //! }
 //!
 //! var event = zio.ResetEvent.init;
@@ -80,8 +80,7 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// Marks the event as set and unblocks all tasks waiting in `wait()` or `timedWait()`.
 /// The event remains set until `reset()` is called. Multiple calls to `set()` while
 /// already set have no effect.
-pub fn set(self: *ResetEvent, runtime: *Runtime) void {
-    _ = runtime;
+pub fn set(self: *ResetEvent) void {
     // Pop and wake all waiters, then transition to is_set
     // Loop continues until popOrTransition successfully transitions unset->is_set
     // This handles: already set (is_set->is_set fails, pop returns null),
@@ -268,11 +267,11 @@ test "ResetEvent basic set/reset/isSet" {
     try testing.expect(!reset_event.isSet());
 
     // Set the event
-    reset_event.set(&runtime);
+    reset_event.set();
     try testing.expect(reset_event.isSet());
 
     // Setting again should be no-op
-    reset_event.set(&runtime);
+    reset_event.set();
     try testing.expect(reset_event.isSet());
 
     // Reset the event
@@ -297,7 +296,7 @@ test "ResetEvent wait/set signaling" {
 
         fn setter(rt: *Runtime, event: *ResetEvent) !void {
             try rt.yield(); // Give waiter time to start waiting
-            event.set(rt);
+            event.set();
         }
     };
 
@@ -358,7 +357,7 @@ test "ResetEvent multiple waiters broadcast" {
             try rt.yield();
             try rt.yield();
             try rt.yield();
-            event.set(rt);
+            event.set();
         }
     };
 
@@ -387,7 +386,7 @@ test "ResetEvent wait on already set event" {
     var wait_completed = false;
 
     // Set event before waiting
-    reset_event.set(&runtime);
+    reset_event.set();
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, event: *ResetEvent, completed: *bool) !void {
@@ -416,7 +415,7 @@ test "ResetEvent: select" {
     const TestContext = struct {
         fn setterTask(rt: *Runtime, event: *ResetEvent) !void {
             try rt.sleep(5);
-            event.set(rt);
+            event.set();
             try rt.sleep(5);
         }
 
