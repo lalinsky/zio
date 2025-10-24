@@ -270,6 +270,57 @@ pub const Signal = struct {
         // Consume the counter
         _ = self.entry.counter.swap(0, .acquire);
     }
+
+    pub fn timedWait(self: *Signal, rt: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+        // Check if we already have pending signals
+        if (self.entry.counter.swap(0, .acquire) > 0) {
+            return;
+        }
+
+        const AnyTask = @import("runtime.zig").AnyTask;
+        const resumeTask = @import("runtime.zig").resumeTask;
+        const timedWaitForIo = @import("io/base.zig").timedWaitForIo;
+
+        const WaitContext = struct {
+            task: *AnyTask,
+            result: xev.Async.WaitError!void = undefined,
+        };
+
+        const task = rt.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
+
+        var ctx = WaitContext{ .task = task };
+
+        // Register async wait callback (this also adds to the loop)
+        self.entry.event.wait(
+            &executor.loop,
+            &self.completion,
+            WaitContext,
+            &ctx,
+            struct {
+                fn callback(
+                    userdata: ?*WaitContext,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    result: xev.Async.WaitError!void,
+                ) xev.CallbackAction {
+                    const context = userdata.?;
+                    context.result = result;
+                    resumeTask(context.task, .local);
+                    return .disarm;
+                }
+            }.callback,
+        );
+
+        // Wait for signal with timeout (handles cancellation)
+        try timedWaitForIo(rt, &self.completion, timeout_ns);
+
+        // Check result - ignore any xev errors, just ensure signal was received
+        ctx.result catch {};
+
+        // Consume the counter
+        _ = self.entry.counter.swap(0, .acquire);
+    }
 };
 
 test "Signal: basic signal handling" {
@@ -354,4 +405,72 @@ test "Signal: multiple handlers for same signal" {
     try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
 
     try std.testing.expectEqual(@as(usize, 3), ctx.count.load(.monotonic));
+}
+
+test "Signal: timedWait timeout" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        timed_out: bool = false,
+
+        fn mainTask(self: *@This(), r: *Runtime) !void {
+            var sig = try Signal.init(.interrupt);
+            defer sig.deinit();
+
+            sig.timedWait(r, 50 * std.time.ns_per_ms) catch |err| {
+                if (err == error.Timeout) {
+                    self.timed_out = true;
+                    return;
+                }
+                return err;
+            };
+        }
+    };
+
+    var ctx = TestContext{};
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+
+    try std.testing.expect(ctx.timed_out);
+}
+
+test "Signal: timedWait receives signal before timeout" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        signal_received: bool = false,
+
+        fn mainTask(self: *@This(), r: *Runtime) !void {
+            var h1 = try r.spawn(waitForSignalTimed, .{ self, r }, .{});
+            defer h1.deinit();
+            var h2 = try r.spawn(sendSignal, .{r}, .{});
+            defer h2.deinit();
+
+            try h1.join(r);
+            try h2.join(r);
+        }
+
+        fn waitForSignalTimed(self: *@This(), r: *Runtime) !void {
+            var sig = try Signal.init(.interrupt);
+            defer sig.deinit();
+
+            try sig.timedWait(r, 1000 * std.time.ns_per_ms);
+            self.signal_received = true;
+        }
+
+        fn sendSignal(r: *Runtime) !void {
+            try r.sleep(10);
+            try std.posix.raise(@intFromEnum(SignalKind.interrupt));
+        }
+    };
+
+    var ctx = TestContext{};
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+
+    try std.testing.expect(ctx.signal_received);
 }
