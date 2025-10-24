@@ -305,10 +305,11 @@ pub const Socket = struct {
         };
 
         const bytes_read = try runIo(rt, &completion, "recvfrom");
-        const addr = std.net.Address.initPosix(@ptrCast(@alignCast(&completion.op.recvfrom.addr)));
+        const addr_bytes = std.mem.asBytes(&completion.op.recvfrom.addr)[0..completion.op.recvfrom.addr_size];
+        const addr = Address.fromStorage(addr_bytes);
 
         return ReceiveFromResult{
-            .from = Address.fromStd(addr),
+            .from = addr,
             .len = bytes_read,
         };
     }
