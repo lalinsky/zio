@@ -137,8 +137,6 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
         }
 
         pub fn clientFn(rt: *Runtime, server_socket: Socket, client_addr_inner: @TypeOf(client_addr)) !void {
-            try rt.sleep(10);
-
             const client_socket = try client_addr_inner.bind(rt);
             defer client_socket.close(rt);
 

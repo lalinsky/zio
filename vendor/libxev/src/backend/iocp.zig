@@ -798,7 +798,7 @@ pub const Loop = struct {
                     buffer_count,
                     null,
                     &flags,
-                    &v.addr,
+                    @ptrCast(&v.addr),
                     @as(*i32, @ptrCast(&v.addr_size)),
                     &completion.overlapped,
                     null,
