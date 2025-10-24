@@ -1,33 +1,28 @@
-# ZIO - Zig I/O Library
+# ZIO - Async I/O and concurrency framework for Zig
 
-An async I/O library for Zig, built on top of stackful coroutines and libxev.
+There are two ways of doing asynchronous I/O, either you use callbacks and have the I/O operation call you when it's done, or you have some sort of continuation system and suspend your code while waiting for I/O. Callback-based APIs are easier to implement, they don't need any special runtime or language support, but are much harder to use, you need to manage the state yourself and most likely you need a lot more allocations to manage the state.
 
-It uses non-blocking I/O in the background, but you can write your application code
-in a blocking fashion, without callbacks or state machines. That results in much
-more readable code. Additionally, you can use external libraries, if they support
-the reader/writer interfaces, they don't even need to be aware they are running
-in a coroutine and using non-blocking I/O.
+This project started out of my frustration with the state of networking in Zig. I've tried to write a nice wrapper for libuv in Zig, but it just doesn't work, you have to allocate memory all the time, you need to depend on reference counted pointers. Then it occured to me I could do Go-style stackful coroutines and use the stack for storing the state. The resulting code feels much more idiomatic.
 
-Coroutines still allocate a fairly large stack, so they are not as cheap as
-async functions in Rust or earlier versions of Zig (where were stackless state machines),
-but they are still much cheaper than threads, you don't need to be afraid of
-spawning many of them.
+It consists of a runtime for executing many stackful coroutines (fibers, green threads) on one or more CPU threads, synchronization primitives that work with this runtime and an asynchronous I/O layer and makes it look like I/O calls are blocking, allowing surrouding state to be stored directly on stack. This makes it possible for you to handle thousands of network connections on a single CPU thread. And if you use multiple executors, you can spread the load across multiple CPU threads. When using the multi-threaded runtime, coroutines are migrating from one thread to another, both for reduced latency in message passing applications, but also for load balancing.
 
-NOTE: This library is very similar to the future `std.Io` interface. Depending on
-how the Zig standard library progresses in the future, we will either implement
-the interface, or deprecate this library.
+We implement the standard `std.Io.Reader` and `std.Io.Writer` interfaces, so you can use external libraries, that were never written with asynchronous I/O in mind and their will just work. Additional, when Zig 0.16 is released with the `std.Io` interface, we will implement that as well, allowing you to use the entire standard library with this runtime.
+
+You can see this as an alternative to the Go runtime, the Tokio project for Rust, or Python's asyncio. In a single-threaded mode, Zio outperforms any of these. In multi-threaded mode, it had comparable performance to Go and Tokio, but those are mroe mature projects and they invested a lot of effort to ensuring fairness and load balancing of their schedulers.
 
 ## Features
 
-- Supports Linux, Windows and macOS
+- Supports Linux, Windows and macOS (BSDs should work, but not tested)
 - Single-threaded or multi-threaded runtime with one I/O event loop per executor thread
-- Spawn stackful coroutines, and wait for the results
-- Spawn blocking tasks in a thread pool, and wait for the results
-- File I/O on all platforms, Linux and Windows are truly non-blocking, other platforms are simulated using a thread pool
-- Network I/O, supports TCP/UDP sockets, DNS resolution currently via thread pool
-- Full `std.Io.Reader` and `std.Io.Writer` support for TCP streams
+- Spawning coroutines, one small allocation per spawn, stack memory is reused
+- Spawning blocking tasks in an auxiliary thread pool
+- Fully asynchronous network I/O, supports TCP/UDP sockets, Unix sockets, DNS resolution currently via thread pool
+- Asynchronous file I/O, Linux and Windows are truly asynchronous, other platforms are simulated using a thread pool
+- Cancelation support for all I/O operations on Linux and Windows, on other platforms we just stop polling, but can't cancel active operation
+- Full `std.Io.Reader` and `std.Io.Writer` support for files and streaming sockets (TCP, Unix)
 - Synchronization primitives matching `std.Thread` API (`Mutex`, `Condition`, `Semaphore`, `ResetEvent`, `Notify`, `Barrier`)
 - `Channel(T)` and `BroadcastChannel(T)` for producer-consumer patterns across coroutines
+- Signal handling
 
 ## Installation
 
@@ -115,3 +110,13 @@ zig build
 # Run tests
 zig build test
 ```
+
+## FAQ
+
+### How is this different from other Zig async I/O projects?
+
+There are many projects implementing stackful coroutines for Zig, unfortunatelly they are all missing something. The closest one to complete is [Tardy](https://github.com/tardy-org/tardy). Infortunately, I didn't know about it when I started this project. However, even Tardy is missing many things that I wanted, like spawning non-cooperative tasks in a separate thread pool and being able to wait on their results from corouties, more advanced synchronization primitives and Windows support. I wanted to start from an existing cross-platform event loop, originally [libuv](https://libuv.org/), later switched to [libxev](https://github.com/mitchellh/libxev), and just add coroutine runtime on top of that.
+
+### How is this different from the future `std.Io` interface in Zig?
+
+When I realized that the Zig team is working on the `std.Io` interface, I was questioning whether to continue working on this project, because there is a huge overlap. I still wanted something I can use now, instead of waiting and there are still things I'd be missing from `std.Io`, most specifically the ability to run tasks from a separate thread pool and wait on them from coroutine, but also more control over task cancelation, and some more advanced synchronization primitives that are hard to implement without access to the event loop internals. I've decide to continue with this project and when the interface is released, Zio will become one implementation of it.
