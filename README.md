@@ -115,7 +115,7 @@ zig build test
 
 ### How is this different from other Zig async I/O projects?
 
-There are many projects implementing stackful coroutines for Zig, unfortunatelly they are all missing something. The closest one to complete is [Tardy](https://github.com/tardy-org/tardy). Infortunately, I didn't know about it when I started this project. However, even Tardy is missing many things that I wanted, like spawning non-cooperative tasks in a separate thread pool and being able to wait on their results from corouties, more advanced synchronization primitives and Windows support. I wanted to start from an existing cross-platform event loop, originally libuv, later switched to libxev, and just add coroutine runtime on top of that.
+There are many projects implementing stackful coroutines for Zig, unfortunatelly they are all missing something. The closest one to complete is [Tardy](https://github.com/tardy-org/tardy). Infortunately, I didn't know about it when I started this project. However, even Tardy is missing many things that I wanted, like spawning non-cooperative tasks in a separate thread pool and being able to wait on their results from corouties, more advanced synchronization primitives and Windows support. I wanted to start from an existing cross-platform event loop, originally [libuv](https://libuv.org/), later switched to [libxev](https://github.com/mitchellh/libxev), and just add coroutine runtime on top of that.
 
 ### How is this different from the future `std.Io` interface in Zig?
 
