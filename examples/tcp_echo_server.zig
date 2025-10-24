@@ -8,7 +8,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
         std.log.err("Failed to shutdown client connection: {}", .{err});
     };
 
-    std.log.info("Client connected from {f}", .{stream.address});
+    std.log.info("Client connected from {f}", .{stream.socket.address});
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(rt, &read_buffer);
@@ -37,7 +37,7 @@ fn serverTask(rt: *zio.Runtime) !void {
     const server = try addr.listen(rt, .{});
     defer server.close(rt);
 
-    std.log.info("TCP echo server listening on {f}", .{server.address});
+    std.log.info("TCP echo server listening on {f}", .{server.socket.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
 
     while (true) {

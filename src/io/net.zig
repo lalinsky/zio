@@ -184,32 +184,43 @@ pub const Address = extern union {
     }
 };
 
-pub const Server = struct {
+pub const Socket = struct {
     handle: Handle,
     address: Address,
 
-    pub fn accept(self: Server, rt: *Runtime) !Stream {
-        return netAccept(rt, self.handle);
-    }
-
-    pub fn shutdown(self: Server, rt: *Runtime, how: ShutdownHow) !void {
+    pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
         return netShutdown(rt, self.handle, how);
     }
 
-    pub fn close(self: Server, rt: *Runtime) void {
+    pub fn close(self: Socket, rt: *Runtime) void {
         return netClose(rt, self.handle);
     }
 };
 
+pub const Server = struct {
+    socket: Socket,
+
+    pub fn accept(self: Server, rt: *Runtime) !Stream {
+        return netAccept(rt, self.socket.handle);
+    }
+
+    pub fn shutdown(self: Server, rt: *Runtime, how: ShutdownHow) !void {
+        return self.socket.shutdown(rt, how);
+    }
+
+    pub fn close(self: Server, rt: *Runtime) void {
+        return self.socket.close(rt);
+    }
+};
+
 pub const Stream = struct {
-    handle: Handle,
-    address: Address,
+    socket: Socket,
 
     /// Reads data from the stream into the provided buffer.
     /// Returns the number of bytes read, which may be less than buf.len.
     /// A return value of 0 indicates end-of-stream.
     pub fn read(self: Stream, rt: *Runtime, buf: []u8) !usize {
-        return netRead(rt, self.handle, &.{buf});
+        return netRead(rt, self.socket.handle, &.{buf});
     }
 
     /// Reads data from the stream into the provided buffer until it is full or EOF.
@@ -226,7 +237,7 @@ pub const Stream = struct {
     /// Returns the number of bytes written, which may be less than buf.len.
     pub fn write(self: Stream, rt: *Runtime, buf: []const u8) !usize {
         const empty: []const u8 = "";
-        return netWrite(rt, self.handle, buf, &.{empty}, 0);
+        return netWrite(rt, self.socket.handle, buf, &.{empty}, 0);
     }
 
     /// Writes data from the provided buffer to the stream until it is empty.
@@ -241,12 +252,12 @@ pub const Stream = struct {
 
     /// Shuts down all or part of a full-duplex connection.
     pub fn shutdown(self: Stream, rt: *Runtime, how: ShutdownHow) !void {
-        return netShutdown(rt, self.handle, how);
+        return self.socket.shutdown(rt, how);
     }
 
     /// Closes the stream.
     pub fn close(self: Stream, rt: *Runtime) void {
-        netClose(rt, self.handle);
+        self.socket.close(rt);
     }
 
     pub const Reader = struct {
@@ -286,7 +297,7 @@ pub const Stream = struct {
             if (dest_n == 0) return 0;
             const dest = iovecs_buffer[0..dest_n];
             std.debug.assert(dest[0].len > 0);
-            const n = netRead(r.rt, r.stream.handle, dest) catch |err| {
+            const n = netRead(r.rt, r.stream.socket.handle, dest) catch |err| {
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -323,7 +334,7 @@ pub const Stream = struct {
         fn drainImpl(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
             const buffered = io_w.buffered();
-            const n = netWrite(w.rt, w.stream.handle, buffered, data, splat) catch |err| {
+            const n = netWrite(w.rt, w.stream.socket.handle, buffered, data, splat) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
@@ -376,7 +387,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
     try std.posix.getsockname(sock, @ptrCast(&storage), &actual_len);
 
-    return .{ .handle = fd, .address = .{ .ip = Address.fromStorageIp(std.mem.asBytes(&storage)) } };
+    return .{ .socket = .{ .handle = fd, .address = .{ .ip = Address.fromStorageIp(std.mem.asBytes(&storage)) } } };
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
@@ -400,7 +411,7 @@ pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.Liste
     var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.un);
     try std.posix.getsockname(sock, &actual_addr.any, &actual_len);
 
-    return .{ .handle = fd, .address = .{ .unix = actual_addr } };
+    return .{ .socket = .{ .handle = fd, .address = .{ .unix = actual_addr } } };
 }
 
 pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
@@ -408,7 +419,7 @@ pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .initPosix(@ptrCast(&addr)));
-    return .{ .handle = fd, .address = .{ .ip = addr } };
+    return .{ .socket = .{ .handle = fd, .address = .{ .ip = addr } } };
 }
 
 pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
@@ -418,7 +429,7 @@ pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .{ .un = addr.un });
-    return .{ .handle = fd, .address = .{ .unix = addr } };
+    return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
 }
 
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
@@ -530,7 +541,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
         },
     };
 
-    return .{ .handle = handle, .address = addr };
+    return .{ .socket = .{ .handle = handle, .address = addr } };
 }
 
 pub fn netConnect(rt: *Runtime, fd: Handle, addr: std.net.Address) !void {

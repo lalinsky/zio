@@ -90,7 +90,7 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
         }
 
         pub fn clientFn(rt: *Runtime, server: Server) !void {
-            const client = try server.address.connect(rt);
+            const client = try server.socket.address.connect(rt);
             defer client.close(rt);
 
             var buf: [32]u8 = undefined;

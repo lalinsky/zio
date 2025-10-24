@@ -7,6 +7,7 @@ const io_net = @import("io/net.zig");
 pub const IpAddress = io_net.IpAddress;
 pub const UnixAddress = io_net.UnixAddress;
 pub const Address = io_net.Address;
+pub const Socket = io_net.Socket;
 pub const Server = io_net.Server;
 pub const Stream = io_net.Stream;
 
@@ -121,7 +122,7 @@ test "tcpConnectToAddress: basic" {
             const server = try addr.listen(rt, .{});
             defer server.close(rt);
 
-            try server_port.send(rt, server.address.ip.getPort());
+            try server_port.send(rt, server.socket.address.ip.getPort());
 
             var stream = try server.accept(rt);
             defer stream.close(rt);
@@ -174,9 +175,9 @@ test "tcpConnectToHost: basic" {
             const server = try addr.listen(rt, .{});
             defer server.close(rt);
 
-            std.debug.print("Server listening on port {}\n", .{server.address.ip.getPort()});
+            std.debug.print("Server listening on port {}\n", .{server.socket.address.ip.getPort()});
 
-            try server_port.send(rt, server.address.ip.getPort());
+            try server_port.send(rt, server.socket.address.ip.getPort());
 
             var stream = try server.accept(rt);
             defer stream.close(rt);
