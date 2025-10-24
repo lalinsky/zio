@@ -53,14 +53,14 @@ pub fn tcpConnectToHost(
 
     if (list.addrs.len == 0) return error.UnknownHostName;
 
+    var last_err: ?anyerror = null;
     for (list.addrs) |addr| {
-        return IpAddress.fromStd(addr).connect(rt) catch |err| switch (err) {
-            error.ConnectionRefused => {
-                continue;
-            },
-            else => return err,
+        return IpAddress.fromStd(addr).connect(rt) catch |err| {
+            last_err = err;
+            continue;
         };
     }
+    if (last_err) |err| return err;
     return error.ConnectionRefused;
 }
 
