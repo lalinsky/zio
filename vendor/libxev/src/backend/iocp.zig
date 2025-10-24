@@ -1374,8 +1374,8 @@ pub const Operation = union(OperationType) {
     recvfrom: struct {
         fd: windows.HANDLE,
         buffer: ReadBuffer,
-        addr: posix.sockaddr = undefined,
-        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr),
+        addr: posix.sockaddr.storage = undefined,
+        addr_size: posix.socklen_t = @sizeOf(posix.sockaddr.storage),
         wsa_buffer: windows.ws2_32.WSABUF = undefined,
     },
 
