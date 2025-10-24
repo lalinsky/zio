@@ -132,6 +132,15 @@ pub const Address = extern union {
     ip: IpAddress,
     unix: UnixAddress,
 
+    /// Convert to std.net.Address
+    pub fn toStd(self: *const Address) std.net.Address {
+        return switch (self.any.family) {
+            std.posix.AF.INET, std.posix.AF.INET6 => std.net.Address.initPosix(@ptrCast(self)),
+            std.posix.AF.UNIX => if (std.net.has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            else => unreachable,
+        };
+    }
+
     /// Convert sockaddr to IpAddress from raw bytes.
     /// This properly handles IPv4 and IPv6 addresses without alignment issues.
     fn fromStorageIp(data: []const u8) IpAddress {
@@ -187,6 +196,55 @@ pub const Address = extern union {
 pub const Socket = struct {
     handle: Handle,
     address: Address,
+
+    /// Set a socket option
+    pub fn setOption(self: Socket, level: i32, optname: u32, value: anytype) !void {
+        const sock = if (xev.backend == .iocp)
+            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
+        else
+            self.handle;
+
+        const bytes = std.mem.asBytes(&value);
+        try std.posix.setsockopt(sock, level, optname, bytes);
+    }
+
+    /// Bind the socket to an address
+    pub fn bind(self: Socket, rt: *Runtime, addr: Address) !void {
+        _ = rt;
+        const sock = if (xev.backend == .iocp)
+            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
+        else
+            self.handle;
+
+        const addr_len = switch (addr.any.family) {
+            std.posix.AF.INET => addr.ip.in.getOsSockLen(),
+            std.posix.AF.INET6 => addr.ip.in6.getOsSockLen(),
+            std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
+            else => unreachable,
+        };
+
+        try std.posix.bind(sock, &addr.any, addr_len);
+    }
+
+    /// Mark the socket as a listening socket
+    pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
+        _ = rt;
+        const sock = if (xev.backend == .iocp)
+            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
+        else
+            self.handle;
+
+        try std.posix.listen(sock, backlog);
+
+        // Update address with actual bound address (important for port 0)
+        var actual_len: std.posix.socklen_t = @sizeOf(Address);
+        try std.posix.getsockname(sock, &self.address.any, &actual_len);
+    }
+
+    /// Connect the socket to a remote address
+    pub fn connect(self: Socket, rt: *Runtime, addr: Address) !void {
+        try netConnect(rt, self.handle, addr.toStd());
+    }
 
     pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
         return netShutdown(rt, self.handle, how);
@@ -367,27 +425,19 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    const sock = if (xev.backend == .iocp) @as(std.os.windows.ws2_32.SOCKET, @ptrCast(fd)) else fd;
-
-    const addr_len = switch (addr.any.family) {
-        std.posix.AF.INET => addr.in.getOsSockLen(),
-        std.posix.AF.INET6 => addr.in6.getOsSockLen(),
-        else => unreachable,
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .ip = addr },
     };
 
     if (options.reuse_address) {
-        try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+        try socket.setOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, @as(c_int, 1));
     }
 
-    try std.posix.bind(sock, &addr.any, addr_len);
-    try std.posix.listen(sock, options.kernel_backlog);
+    try socket.bind(rt, .{ .ip = addr });
+    try socket.listen(rt, options.kernel_backlog);
 
-    // Get the actual bound address (important for port 0)
-    var storage: std.posix.sockaddr.storage = undefined;
-    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
-    try std.posix.getsockname(sock, @ptrCast(&storage), &actual_len);
-
-    return .{ .socket = .{ .handle = fd, .address = .{ .ip = Address.fromStorageIp(std.mem.asBytes(&storage)) } } };
+    return .{ .socket = socket };
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
@@ -396,22 +446,15 @@ pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.Liste
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    const sock = if (xev.backend == .iocp) @as(std.os.windows.ws2_32.SOCKET, @ptrCast(fd)) else fd;
-
-    const addr_len = switch (addr.any.family) {
-        std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
-        else => unreachable,
+    var socket: Socket = .{
+        .handle = fd,
+        .address = .{ .unix = addr },
     };
 
-    try std.posix.bind(sock, &addr.any, addr_len);
-    try std.posix.listen(sock, options.kernel_backlog);
+    try socket.bind(rt, .{ .unix = addr });
+    try socket.listen(rt, options.kernel_backlog);
 
-    // Get the actual bound address
-    var actual_addr: UnixAddress = undefined;
-    var actual_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.un);
-    try std.posix.getsockname(sock, &actual_addr.any, &actual_len);
-
-    return .{ .socket = .{ .handle = fd, .address = .{ .unix = actual_addr } } };
+    return .{ .socket = socket };
 }
 
 pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
