@@ -5,7 +5,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     defer stream.close(rt);
 
     defer stream.shutdown(rt, .both) catch |err| {
-        std.log.err("Failed to shutdown client connection: {}", .{err});
+        std.log.debug("Failed to shutdown client connection: {}", .{err});
     };
 
     std.log.info("HTTP client connected from {f}", .{stream.socket.address});
