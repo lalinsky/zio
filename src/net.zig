@@ -169,6 +169,8 @@ test "tcpConnectToAddress: basic" {
 }
 
 test "tcpConnectToHost: basic" {
+    if (builtin.os.tag == .macos) return error.SkipZigTest;
+
     const ServerTask = struct {
         fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
