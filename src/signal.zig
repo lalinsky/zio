@@ -225,7 +225,6 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
 pub const Signal = struct {
     kind: SignalKind,
     entry: *HandlerEntry,
-    completion: xev.Completion = undefined,
 
     /// Initializes a new signal watcher for the specified signal kind.
     /// Multiple watchers can be registered for the same signal type.
@@ -275,11 +274,12 @@ pub const Signal = struct {
         const executor = task.getExecutor();
 
         var ctx = WaitContext{ .task = task };
+        var completion: xev.Completion = undefined;
 
         // Register async wait callback (this also adds to the loop)
         self.entry.event.wait(
             &executor.loop,
-            &self.completion,
+            &completion,
             WaitContext,
             &ctx,
             struct {
@@ -298,7 +298,7 @@ pub const Signal = struct {
         );
 
         // Wait for signal (handles cancellation)
-        try waitForIo(rt, &self.completion);
+        try waitForIo(rt, &completion);
 
         // Check result - ignore any xev errors, just ensure signal was received
         ctx.result catch {};
@@ -339,11 +339,12 @@ pub const Signal = struct {
         const executor = task.getExecutor();
 
         var ctx = WaitContext{ .task = task };
+        var completion: xev.Completion = undefined;
 
         // Register async wait callback (this also adds to the loop)
         self.entry.event.wait(
             &executor.loop,
-            &self.completion,
+            &completion,
             WaitContext,
             &ctx,
             struct {
@@ -362,7 +363,7 @@ pub const Signal = struct {
         );
 
         // Wait for signal with timeout (handles cancellation)
-        try timedWaitForIo(rt, &self.completion, timeout_ns);
+        try timedWaitForIo(rt, &completion, timeout_ns);
 
         // Check result - ignore any xev errors, just ensure signal was received
         ctx.result catch {};
