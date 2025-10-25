@@ -63,7 +63,7 @@ fn serverTask(rt: *zio.Runtime) !void {
     defer server.close(rt);
 
     std.log.info("HTTP server listening on {f}", .{server.socket.address});
-    std.log.info("Visit http://127.0.0.1:8080 in your browser", .{});
+    std.log.info("Visit http://{f} in your browser", .{server.socket.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
 
     while (true) {
