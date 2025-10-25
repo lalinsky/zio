@@ -1,4 +1,4 @@
-# ZIO - Async I/O and concurrency framework for Zig
+# ZIO - Async I/O framework for Zig
 
 There are two ways of doing asynchronous I/O, either you use callbacks and have the I/O operation call you when it's done, or you have some sort of continuation system and suspend your code while waiting for I/O. Callback-based APIs are easier to implement, they don't need any special runtime or language support. However, they are much harder to use, you need to manage state yourself and most likely need many more allocations to do so.
 
