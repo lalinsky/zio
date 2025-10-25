@@ -5,6 +5,8 @@ const Executor = @import("../runtime.zig").Executor;
 const resumeTask = @import("../runtime.zig").resumeTask;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const meta = @import("../meta.zig");
+const Cancelable = @import("../common.zig").Cancelable;
+const Timeoutable = @import("../common.zig").Timeoutable;
 
 pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
     var cancel_completion: xev.Completion = .{ .op = .{ .cancel = .{ .c = completion } } };
@@ -40,7 +42,7 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
     }
 }
 
-pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64) error{ Timeout, Canceled }!void {
+pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     const task = rt.getCurrentTask() orelse @panic("no active task");
 
     var canceled = false;

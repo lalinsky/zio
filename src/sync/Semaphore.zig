@@ -39,7 +39,8 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Cancelable = @import("../runtime.zig").Cancelable;
+const Cancelable = @import("../common.zig").Cancelable;
+const Timeoutable = @import("../common.zig").Timeoutable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 mutex: Mutex = Mutex.init,
@@ -107,7 +108,7 @@ pub fn waitUncancelable(self: *Semaphore, rt: *Runtime) void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a permit becomes available.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     var timeout_timer = std.time.Timer.start() catch unreachable;
 
     try self.mutex.lock(rt);

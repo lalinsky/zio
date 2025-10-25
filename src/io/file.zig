@@ -4,7 +4,7 @@ const xev = @import("xev");
 const StreamReader = @import("../stream.zig").StreamReader;
 const StreamWriter = @import("../stream.zig").StreamWriter;
 const Runtime = @import("../runtime.zig").Runtime;
-const Cancelable = @import("../runtime.zig").Cancelable;
+const Cancelable = @import("../common.zig").Cancelable;
 const runIo = @import("base.zig").runIo;
 
 const Handle = std.fs.File.Handle;

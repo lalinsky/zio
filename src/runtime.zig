@@ -6,6 +6,8 @@ const assert = std.debug.assert;
 const xev = @import("xev");
 
 const meta = @import("meta.zig");
+const Cancelable = @import("common.zig").Cancelable;
+const Timeoutable = @import("common.zig").Timeoutable;
 
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
@@ -86,11 +88,6 @@ pub const ZioError = error{
     RuntimeShutdown,
 };
 
-// Cancelable error set
-pub const Cancelable = error{
-    Canceled,
-};
-
 // Noop callback for async timer cancellation
 fn noopTimerCancelCallback(
     ud: ?*void,
@@ -166,7 +163,7 @@ pub const AwaitableKind = awaitable_module.AwaitableKind;
 /// Returns error.Canceled if the coroutine was canceled during the wait.
 /// For coroutines, uses runtime timer infrastructure.
 /// For threads, uses futex timedWait directly.
-pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     // Fast path: check if already complete
     if (awaitable.done.load(.acquire)) return;
 
@@ -1366,7 +1363,7 @@ pub const Executor = struct {
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
         comptime onTimeout: fn (ctx: *TimeoutContext) bool,
-    ) error{ Timeout, Canceled }!void {
+    ) (Timeoutable || Cancelable)!void {
         const current = self.current_coroutine orelse unreachable;
         const task = AnyTask.fromCoroutine(current);
 
@@ -1463,7 +1460,7 @@ pub const Executor = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, timeout_ns: u64) (Timeoutable || Cancelable)!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(

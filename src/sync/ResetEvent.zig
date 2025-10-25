@@ -44,7 +44,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
-const Cancelable = @import("../runtime.zig").Cancelable;
+const Cancelable = @import("../common.zig").Cancelable;
+const Timeoutable = @import("../common.zig").Timeoutable;
 const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
@@ -158,7 +159,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     const state = self.wait_queue.getState();
 
     // Fast path: already set

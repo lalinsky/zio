@@ -2,7 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
-const Cancelable = @import("runtime.zig").Cancelable;
+const Cancelable = @import("common.zig").Cancelable;
+const Timeoutable = @import("common.zig").Timeoutable;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -271,7 +272,7 @@ pub const Signal = struct {
         _ = self.entry.counter.swap(0, .acquire);
     }
 
-    pub fn timedWait(self: *Signal, rt: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+    pub fn timedWait(self: *Signal, rt: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;

@@ -45,7 +45,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Cancelable = @import("../runtime.zig").Cancelable;
+const Cancelable = @import("../common.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 mutex: Mutex = Mutex.init,

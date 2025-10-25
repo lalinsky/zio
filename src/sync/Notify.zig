@@ -47,7 +47,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
-const Cancelable = @import("../runtime.zig").Cancelable;
+const Cancelable = @import("../common.zig").Cancelable;
+const Timeoutable = @import("../common.zig").Timeoutable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 
@@ -136,7 +137,7 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a signal is received.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) error{ Timeout, Canceled }!void {
+pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     // Add to wait queue and wait with timeout
     const task = runtime.getCurrentTask() orelse unreachable;
     const executor = task.getExecutor();

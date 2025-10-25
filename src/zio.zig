@@ -10,7 +10,11 @@ const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
-pub const Cancelable = runtime.Cancelable;
+
+// Re-export common error sets
+const common = @import("common.zig");
+pub const Cancelable = common.Cancelable;
+pub const Timeoutable = common.Timeoutable;
 
 // Re-export I/O functionality
 pub const File = @import("io/file.zig").File;
