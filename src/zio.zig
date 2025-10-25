@@ -53,4 +53,6 @@ pub const util = @import("utils.zig");
 
 test {
     std.testing.refAllDecls(@This());
+
+    _ = @import("event/loop.zig");
 }
