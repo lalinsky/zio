@@ -1,6 +1,9 @@
 const std = @import("std");
 const zio = @import("zio");
 
+// Maximum size of the request headers
+const MAX_REQUEST_HEADER_SIZE = 64 * 1024;
+
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     defer stream.close(rt);
 
@@ -10,7 +13,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
 
     std.log.info("HTTP client connected from {f}", .{stream.socket.address});
 
-    var read_buffer: [4096]u8 = undefined;
+    var read_buffer: [MAX_REQUEST_HEADER_SIZE]u8 = undefined;
     var reader = stream.reader(rt, &read_buffer);
 
     var write_buffer: [4096]u8 = undefined;
@@ -22,10 +25,9 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     // Handle multiple requests on the same connection (keep-alive)
     while (true) {
         // Receive HTTP request headers
-        var request = server.receiveHead() catch |err| switch (err) {
-            error.HttpConnectionClosing => break,
-            error.HttpRequestTruncated => break,
-            else => return err,
+        var request = server.receiveHead() catch |err| {
+            std.log.debug("Failed to receive request: {}", .{err});
+            return err;
         };
 
         std.log.info("{s} {s}", .{ @tagName(request.head.method), request.head.target });
