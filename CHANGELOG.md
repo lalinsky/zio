@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2025-10-25
+
+### Added
+
+- Extended runtime to support multiple threads/executors (not full work-stealing yet)
+- Added `Signal` for listening to OS signals
+- Added `Notify` and `Future(T)` synchronization primitives
+- Added `select()` for waiting on multiple tasks
+
+### Changed
+
+- Added `zio.net.IpAddress` and `zio.net.UnixAddress`, matching the future `std.net` API
+- Renamed `zio.TcpListener` to `zio.net.Server`
+- Renamed `zio.TcpStream` to `zio.net.Stream`
+- Renamed `zio.UdpSocket` to `zio.net.Socket` (`Socket` can be also as a low-level primitive)
+- `join()` is now uncancelable, it will cancel the task if the parent task is cancelled
+- `sleep()` now correctly propagates `error.Canceled`
+- Internal refactoring to allow more objects (e.g. `ResetEvent`) to participate in `select()`
+
+### Fixed
+
+- IPv6 address truncatation in network operations
+
 ## [0.3.0] - 2025-10-16
 
 ### Added
@@ -52,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
+[0.4.0]: https://github.com/lalinsky/zio/releases/tag/v0.4.0
 [0.3.0]: https://github.com/lalinsky/zio/releases/tag/v0.3.0
 [0.2.0]: https://github.com/lalinsky/zio/releases/tag/v0.2.0
 [0.1.0]: https://github.com/lalinsky/zio/releases/tag/v0.1.0

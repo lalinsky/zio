@@ -1,6 +1,6 @@
 .{
     .name = .zio,
-    .version = "0.3.0",
+    .version = "0.4.0",
     .fingerprint = 0xcf1598b354d576c4,
     .paths = .{
         "build.zig",
