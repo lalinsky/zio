@@ -206,21 +206,56 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
     return if (found_handler) 1 else 0;
 }
 
+/// OS signal watcher.
+///
+/// Signal allows tasks to wait for OS signals (Unix) or console control events (Windows).
+/// Multiple watchers can be registered for the same signal type, and all watchers will
+/// be notified when the signal is received.
+///
+/// Signal watchers use an internal counter to track received signals, preventing signal
+/// loss between wait operations. If a signal is received while no task is waiting, the
+/// next wait operation will return immediately.
+///
+/// Example:
+/// ```zig
+/// var sig = try Signal.init(.interrupt);
+/// defer sig.deinit();
+/// try sig.wait(rt);  // Blocks until SIGINT is received
+/// ```
 pub const Signal = struct {
     kind: SignalKind,
     entry: *HandlerEntry,
     completion: xev.Completion = undefined,
 
+    /// Initializes a new signal watcher for the specified signal kind.
+    /// Multiple watchers can be registered for the same signal type.
+    ///
+    /// When the first watcher for a signal type is initialized, the OS signal handler
+    /// is installed and the previous handler is saved.
+    ///
+    /// Returns error.TooManySignalHandlers if MAX_HANDLERS (32) concurrent watchers are already registered.
     pub fn init(kind: SignalKind) !Signal {
         const entry = try registry.install(kind);
         return .{ .kind = kind, .entry = entry };
     }
 
+    /// Deinitializes the signal watcher and releases its resources.
+    ///
+    /// When the last watcher for a signal type is deinitialized, the previous OS signal
+    /// handler is restored.
     pub fn deinit(self: *Signal) void {
         registry.uninstall(self.kind, self.entry);
         self.entry = undefined;
     }
 
+    /// Waits for the signal to be received.
+    /// If the signal was already received (counter > 0), returns immediately.
+    /// Otherwise, suspends the current task until the signal is received.
+    ///
+    /// This function can be called multiple times - each call will wait for a new signal.
+    /// The internal counter is reset after each wait, ensuring signals are not lost.
+    ///
+    /// Returns error.Canceled if the task is cancelled while waiting.
     pub fn wait(self: *Signal, rt: *Runtime) Cancelable!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
@@ -272,6 +307,19 @@ pub const Signal = struct {
         _ = self.entry.counter.swap(0, .acquire);
     }
 
+    /// Waits for the signal to be received with a timeout.
+    /// If the signal was already received (counter > 0), returns immediately.
+    /// Otherwise, suspends the current task until either:
+    /// - The signal is received (returns successfully)
+    /// - The timeout expires (returns error.Timeout)
+    /// - The task is cancelled (returns error.Canceled)
+    ///
+    /// This function can be called multiple times - each call will wait for a new signal.
+    /// The internal counter is reset after each wait, ensuring signals are not lost.
+    ///
+    /// Arguments:
+    /// - rt: Runtime context
+    /// - timeout_ns: Timeout duration in nanoseconds
     pub fn timedWait(self: *Signal, rt: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
