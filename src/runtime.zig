@@ -2086,6 +2086,8 @@ test "runtime: sleep is cancelable" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
+            var timer = try std.time.Timer.start();
+
             var handle = try rt.spawn(sleepingTask, .{rt}, .{});
             defer handle.deinit();
 
@@ -2099,6 +2101,10 @@ test "runtime: sleep is cancelable" {
             // Should return error.Canceled
             const result = handle.join(rt);
             try testing.expectError(error.Canceled, result);
+
+            // Ensure the sleep was canceled before completion
+            const elapsed = timer.read();
+            try testing.expect(elapsed <= 500 * std.time.ns_per_ms);
         }
     };
 
