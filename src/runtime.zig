@@ -797,9 +797,6 @@ pub const Executor = struct {
             task.impl.base.pin_count = 1;
         }
 
-        // Increment ref count for JoinHandle
-        task.impl.base.awaitable.ref_count.incr();
-
         // Add to global awaitable registry (can fail if runtime is shutting down)
         try self.runtime().tasks.add(&task.impl.base.awaitable);
         errdefer _ = self.runtime().tasks.remove(&task.impl.base.awaitable);
@@ -809,6 +806,9 @@ pub const Executor = struct {
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
+
+        // Increment ref count for JoinHandle
+        task.impl.base.awaitable.ref_count.incr();
 
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
