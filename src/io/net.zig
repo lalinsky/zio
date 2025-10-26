@@ -515,6 +515,7 @@ pub const Stream = struct {
             const dest = iovecs_buffer[0..dest_n];
             std.debug.assert(dest[0].len > 0);
             const n = netRead(r.rt, r.stream.socket.handle, dest) catch |err| {
+                if (err == error.EOF) return error.EndOfStream;
                 r.err = err;
                 return error.ReadFailed;
             };
