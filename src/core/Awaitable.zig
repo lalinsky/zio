@@ -40,9 +40,13 @@ pub const Awaitable = struct {
     pub const complete = State.sentinel1;
 
     /// Request cancellation of this awaitable.
-    /// The cancellation flag will be consumed by the next yield() call.
-    pub fn requestCancellation(self: *Awaitable) void {
+    /// This will set a flag that will be read at the next yield point.
+    /// If the task is currently suspended, we will wake it up,
+    /// so that it can handle the cancelation (e.g. cancel the underlaying I/O operation).
+    /// If the task is already running/dead, the wake is a noop.
+    pub fn cancel(self: *Awaitable) void {
         self.canceled.store(true, .release);
+        self.wait_node.wake();
     }
 
     /// Registers a wait node to be notified when the awaitable completes.
