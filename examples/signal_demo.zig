@@ -51,11 +51,11 @@ pub fn main() !void {
     std.log.info("Starting demo (press Ctrl+C to stop gracefully)...", .{});
 
     // Spawn server task
-    var server_task = try runtime.spawn(serverTask, .{ &runtime, &shutdown }, .{});
+    var server_task = try runtime.spawn(serverTask, .{ runtime, &shutdown }, .{});
     defer server_task.deinit();
 
     // Spawn signal handler task
-    var signal_task = try runtime.spawn(signalHandler, .{ &runtime, &shutdown }, .{});
+    var signal_task = try runtime.spawn(signalHandler, .{ runtime, &shutdown }, .{});
     defer signal_task.deinit();
 
     // Run until all tasks complete

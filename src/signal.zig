@@ -407,7 +407,7 @@ test "Signal: basic signal handling" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -452,7 +452,7 @@ test "Signal: multiple handlers for same signal" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
 
     try std.testing.expectEqual(@as(usize, 3), ctx.count.load(.monotonic));
 }
@@ -481,7 +481,7 @@ test "Signal: timedWait timeout" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
 
     try std.testing.expect(ctx.timed_out);
 }
@@ -520,7 +520,7 @@ test "Signal: timedWait receives signal before timeout" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, &rt }, .{});
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
 
     try std.testing.expect(ctx.signal_received);
 }

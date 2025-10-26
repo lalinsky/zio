@@ -85,5 +85,5 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(serverTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(serverTask, .{runtime}, .{});
 }

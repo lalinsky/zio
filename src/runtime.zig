@@ -409,7 +409,7 @@ pub fn Task(comptime T: type) type {
 
         pub fn getRuntime(self: *Self) *Runtime {
             const executor = Executor.fromCoroutine(&self.impl.base.coro);
-            return executor.runtime();
+            return executor.runtime;
         }
 
         fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
@@ -673,7 +673,7 @@ pub const Executor = struct {
     metrics: ExecutorMetrics = .{},
 
     // Back-reference to runtime for global coordination
-    runtime_ptr: *Runtime = undefined,
+    runtime: *Runtime,
 
     // Worker thread (null for main executor that runs on calling thread)
     thread: ?std.Thread = null,
@@ -686,12 +686,7 @@ pub const Executor = struct {
         return @fieldParentPtr("main_context", coro.parent_context_ptr);
     }
 
-    /// Get the Runtime instance from this Executor
-    pub inline fn runtime(self: *Executor) *Runtime {
-        return self.runtime_ptr;
-    }
-
-    pub fn init(self: *Executor, id: usize, allocator: Allocator, options: RuntimeOptions) !void {
+    pub fn init(self: *Executor, id: usize, allocator: Allocator, options: RuntimeOptions, runtime: *Runtime) !void {
         // Establish stable memory location with defaults
         // Loop will be initialized later from the thread that runs it
         self.* = .{
@@ -704,13 +699,14 @@ pub const Executor = struct {
             .main_context = undefined,
             .remote_wakeup = undefined,
             .remote_completion = undefined,
+            .runtime = runtime,
         };
     }
 
     fn initLoop(self: *Executor) !void {
         // Initialize loop from the thread that will run it
         self.loop = try xev.Loop.init(.{
-            .thread_pool = self.runtime_ptr.thread_pool,
+            .thread_pool = self.runtime.thread_pool,
         });
         errdefer self.loop.deinit();
 
@@ -798,8 +794,8 @@ pub const Executor = struct {
         }
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.runtime().tasks.add(&task.impl.base.awaitable);
-        errdefer _ = self.runtime().tasks.remove(&task.impl.base.awaitable);
+        try self.runtime.tasks.add(&task.impl.base.awaitable);
+        errdefer _ = self.runtime.tasks.remove(&task.impl.base.awaitable);
 
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(&task.impl.base, .maybe_remote);
@@ -987,7 +983,7 @@ pub const Executor = struct {
 
         // Check if we're starting with an empty task list
         // If so, immediately initiate shutdown (no work to do)
-        self.runtime_ptr.maybeShutdown();
+        self.runtime.maybeShutdown();
 
         var spin_count: u8 = 0;
         while (true) {
@@ -1036,7 +1032,7 @@ pub const Executor = struct {
                         self.metrics.tasks_completed += 1;
 
                         // Release runtime's reference and check for shutdown
-                        self.runtime().releaseAwaitable(current_awaitable, true);
+                        self.runtime.releaseAwaitable(current_awaitable, true);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
                     }
                 }
@@ -1195,7 +1191,7 @@ pub const Executor = struct {
             };
 
             // Check if we can migrate (same runtime, different executor)
-            if (current_exec.runtime_ptr == self.runtime_ptr) {
+            if (current_exec.runtime == self.runtime) {
                 // Same runtime - migrate to current executor for cache locality
                 if (current_exec != self) {
                     task.coro.parent_context_ptr = &current_exec.main_context;
@@ -1424,7 +1420,11 @@ pub const Runtime = struct {
     /// Thread-local storage for the current executor
     pub threadlocal var current_executor: ?*Executor = null;
 
-    pub fn init(allocator: Allocator, options: RuntimeOptions) !Runtime {
+    pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
+        // Allocate Runtime on heap for stable pointer
+        const runtime = try allocator.create(Runtime);
+        errdefer allocator.destroy(runtime);
+
         // Determine number of executors
         const num_executors = if (options.num_executors) |n|
             n
@@ -1461,11 +1461,11 @@ pub const Runtime = struct {
 
         for (0..num_executors) |i| {
             var executor: Executor = undefined;
-            try executor.init(i, allocator, options);
+            try executor.init(i, allocator, options, runtime);
             executors.appendAssumeCapacity(executor);
         }
 
-        return Runtime{
+        runtime.* = Runtime{
             .executors = executors,
             .thread_pool = thread_pool,
             .allocator = allocator,
@@ -1473,9 +1473,13 @@ pub const Runtime = struct {
             .next_executor = std.atomic.Value(usize).init(0),
             .shutting_down = std.atomic.Value(bool).init(false),
         };
+
+        return runtime;
     }
 
     pub fn deinit(self: *Runtime) void {
+        const allocator = self.allocator;
+
         // Shutdown ThreadPool before cleaning up executors
         if (self.thread_pool) |tp| {
             tp.shutdown();
@@ -1492,13 +1496,16 @@ pub const Runtime = struct {
         }
 
         // Free executors ArrayList
-        self.executors.deinit(self.allocator);
+        self.executors.deinit(allocator);
 
         // Clean up ThreadPool after executors
         if (self.thread_pool) |tp| {
             tp.deinit();
-            self.allocator.destroy(tp);
+            allocator.destroy(tp);
         }
+
+        // Free the Runtime allocation
+        allocator.destroy(self);
     }
 
     // High-level public API - delegates to appropriate Executor
@@ -1525,9 +1532,6 @@ pub const Runtime = struct {
         };
 
         const executor = &self.executors.items[executor_id];
-
-        // Set runtime back-references (in case runtime was moved after init)
-        executor.runtime_ptr = self;
 
         return executor.spawn(func, args, options);
     }
@@ -1559,11 +1563,6 @@ pub const Runtime = struct {
     }
 
     pub fn run(self: *Runtime) !void {
-        // Set runtime back-references (in case runtime was moved after init)
-        for (self.executors.items) |*exec| {
-            exec.runtime_ptr = self;
-        }
-
         // If single-threaded, just run the main executor
         if (self.executors.items.len == 1) {
             return self.executors.items[0].run();
@@ -1761,7 +1760,7 @@ pub const Runtime = struct {
 test "runtime with thread pool smoke test" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{
+    const runtime = try Runtime.init(testing.allocator, .{
         .thread_pool = .{ .enabled = true },
     });
     defer runtime.deinit();
@@ -1779,7 +1778,7 @@ test "runtime with thread pool smoke test" {
 test "runtime: multi-threaded with auto-detect executors" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{
+    const runtime = try Runtime.init(testing.allocator, .{
         .num_executors = null, // Auto-detect CPU count
     });
     defer runtime.deinit();
@@ -1809,13 +1808,13 @@ test "runtime: multi-threaded with auto-detect executors" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
 }
 
 test "runtime: multi-threaded with explicit executor count" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{
+    const runtime = try Runtime.init(testing.allocator, .{
         .num_executors = 4,
     });
     defer runtime.deinit();
@@ -1851,13 +1850,13 @@ test "runtime: multi-threaded with explicit executor count" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
 }
 
 test "runtime: multi-threaded with executor pinning" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{
+    const runtime = try Runtime.init(testing.allocator, .{
         .num_executors = 4,
     });
     defer runtime.deinit();
@@ -1883,13 +1882,13 @@ test "runtime: multi-threaded with executor pinning" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
 }
 
 test "runtime: task colocation with getExecutorId" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{
+    const runtime = try Runtime.init(testing.allocator, .{
         .num_executors = 4,
     });
     defer runtime.deinit();
@@ -1922,13 +1921,13 @@ test "runtime: task colocation with getExecutorId" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.mainTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
 }
 
 test "runtime: spawnBlocking smoke test" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{
+    const runtime = try Runtime.init(testing.allocator, .{
         .thread_pool = .{ .enabled = true },
     });
     defer runtime.deinit();
@@ -1947,13 +1946,13 @@ test "runtime: spawnBlocking smoke test" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "runtime: JoinHandle.cast() error set conversion" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -1990,13 +1989,13 @@ test "runtime: JoinHandle.cast() error set conversion" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "runtime: now() returns monotonic time" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -2013,13 +2012,13 @@ test "runtime: now() returns monotonic time" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "runtime: sleep is cancelable" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -2053,5 +2052,5 @@ test "runtime: sleep is cancelable" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }

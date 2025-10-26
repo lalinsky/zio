@@ -54,13 +54,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{});
+    const runtime = try zio.Runtime.init(allocator, .{});
     defer runtime.deinit();
 
-    var server = try runtime.spawn(serverTask, .{&runtime}, .{});
+    var server = try runtime.spawn(serverTask, .{runtime}, .{});
     defer server.deinit();
 
     try runtime.run();
 
-    try server.join(&runtime);
+    try server.join(runtime);
 }

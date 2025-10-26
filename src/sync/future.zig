@@ -83,7 +83,7 @@ pub fn Future(comptime T: type) type {
 test "Future: basic set and get" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -99,13 +99,13 @@ test "Future: basic set and get" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "Future: await from coroutine" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -138,13 +138,13 @@ test "Future: await from coroutine" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "Future: multiple waiters" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -183,5 +183,5 @@ test "Future: multiple waiters" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }

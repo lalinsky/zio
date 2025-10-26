@@ -179,7 +179,7 @@ test "fs: openFile and createFile with different modes" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator, .{});
+    const runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -208,5 +208,5 @@ test "fs: openFile and createFile with different modes" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime}, .{});
 }

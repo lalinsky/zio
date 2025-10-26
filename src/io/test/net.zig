@@ -104,10 +104,10 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
         }
     };
 
-    var runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(Test.mainFn, .{ &runtime, addr, options }, .{});
+    try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options }, .{});
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
@@ -150,10 +150,10 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
         }
     };
 
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(Test.mainFn, .{ &runtime, server_addr, client_addr }, .{});
+    try runtime.runUntilComplete(Test.mainFn, .{ runtime, server_addr, client_addr }, .{});
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {

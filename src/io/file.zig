@@ -175,7 +175,7 @@ pub const File = struct {
 test "File: basic read and write" {
     const fs = @import("../fs.zig");
 
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -212,13 +212,13 @@ test "File: basic read and write" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime}, .{});
 }
 
 test "File: positional read and write" {
     const fs = @import("../fs.zig");
 
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -246,13 +246,13 @@ test "File: positional read and write" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime}, .{});
 }
 
 test "File: close operation" {
     const fs = @import("../fs.zig");
 
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -272,13 +272,13 @@ test "File: close operation" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime}, .{});
 }
 
 test "File: reader and writer interface" {
     const fs = @import("../fs.zig");
 
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestTask = struct {
@@ -319,5 +319,5 @@ test "File: reader and writer interface" {
         }
     };
 
-    try runtime.runUntilComplete(TestTask.run, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestTask.run, .{runtime}, .{});
 }

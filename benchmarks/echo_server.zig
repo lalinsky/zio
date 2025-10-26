@@ -190,5 +190,5 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator, .{ .num_executors = null });
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(benchmarkTask, .{ &runtime, allocator }, .{});
+    try runtime.runUntilComplete(benchmarkTask, .{ runtime, allocator }, .{});
 }

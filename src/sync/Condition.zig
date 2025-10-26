@@ -247,7 +247,7 @@ pub fn broadcast(self: *Condition, runtime: *Runtime) void {
 test "Condition basic wait/signal" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -275,9 +275,9 @@ test "Condition basic wait/signal" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ &runtime, &mutex, &condition, &ready }, .{});
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready }, .{});
     defer waiter_task.deinit();
-    var signaler_task = try runtime.spawn(TestFn.signaler, .{ &runtime, &mutex, &condition, &ready }, .{});
+    var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &mutex, &condition, &ready }, .{});
     defer signaler_task.deinit();
 
     try runtime.run();
@@ -288,7 +288,7 @@ test "Condition basic wait/signal" {
 test "Condition timedWait timeout" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -309,7 +309,7 @@ test "Condition timedWait timeout" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.waiter, .{ &runtime, &mutex, &condition, &timed_out }, .{});
+    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &mutex, &condition, &timed_out }, .{});
 
     try testing.expect(timed_out);
 }
@@ -317,7 +317,7 @@ test "Condition timedWait timeout" {
 test "Condition broadcast" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -350,13 +350,13 @@ test "Condition broadcast" {
         }
     };
 
-    var waiter1 = try runtime.spawn(TestFn.waiter, .{ &runtime, &mutex, &condition, &ready, &waiter_count }, .{});
+    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count }, .{});
     defer waiter1.deinit();
-    var waiter2 = try runtime.spawn(TestFn.waiter, .{ &runtime, &mutex, &condition, &ready, &waiter_count }, .{});
+    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count }, .{});
     defer waiter2.deinit();
-    var waiter3 = try runtime.spawn(TestFn.waiter, .{ &runtime, &mutex, &condition, &ready, &waiter_count }, .{});
+    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count }, .{});
     defer waiter3.deinit();
-    var broadcaster_task = try runtime.spawn(TestFn.broadcaster, .{ &runtime, &mutex, &condition, &ready }, .{});
+    var broadcaster_task = try runtime.spawn(TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready }, .{});
     defer broadcaster_task.deinit();
 
     try runtime.run();
