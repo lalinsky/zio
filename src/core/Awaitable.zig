@@ -41,8 +41,9 @@ pub const Awaitable = struct {
 
     /// Request cancellation of this awaitable.
     /// This will set a flag that will be read at the next yield point.
-    /// If the task is currrently suspended, we will wake it up,
+    /// If the task is currently suspended, we will wake it up,
     /// so that it can handle the cancelation (e.g. cancel the underlaying I/O operation).
+    /// If the task is already running/dead, the wake is a noop.
     pub fn cancel(self: *Awaitable) void {
         self.canceled.store(true, .release);
         self.wait_node.wake();
