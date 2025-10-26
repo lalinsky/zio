@@ -92,10 +92,10 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var runtime = try zio.Runtime.init(gpa.allocator(), .{});
-    defer runtime.deinit();
+    const rt = try zio.Runtime.init(gpa.allocator(), .{});
+    defer rt.deinit();
 
-    try runtime.runUntilComplete(serverTask, .{&runtime}, .{});
+    try rt.runUntilComplete(serverTask, .{rt}, .{});
 }
 ```
 

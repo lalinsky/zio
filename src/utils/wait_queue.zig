@@ -467,9 +467,6 @@ test "WaitQueue basic operations" {
         value: i32,
     };
 
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
     const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
@@ -554,9 +551,6 @@ test "WaitQueue double remove" {
         in_list: bool = false,
         value: i32,
     };
-
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
 
     const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
