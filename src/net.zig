@@ -77,7 +77,7 @@ test "getAddressList: localhost" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
     const GetAddressListTask = struct {
@@ -89,14 +89,14 @@ test "getAddressList: localhost" {
         }
     };
 
-    try runtime.runUntilComplete(GetAddressListTask.run, .{ &runtime, allocator }, .{});
+    try runtime.runUntilComplete(GetAddressListTask.run, .{ runtime, allocator }, .{});
 }
 
 test "getAddressList: numeric IP" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
     const GetAddressListTask = struct {
@@ -109,11 +109,11 @@ test "getAddressList: numeric IP" {
         }
     };
 
-    try runtime.runUntilComplete(GetAddressListTask.run, .{ &runtime, allocator }, .{});
+    try runtime.runUntilComplete(GetAddressListTask.run, .{ runtime, allocator }, .{});
 }
 
 test "tcpConnectToAddress: basic" {
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const ServerTask = struct {
@@ -156,16 +156,16 @@ test "tcpConnectToAddress: basic" {
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_port_ch }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_port_ch }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
     defer client_task.deinit();
 
     try runtime.run();
 
-    try server_task.join(&runtime);
-    try client_task.join(&runtime);
+    try server_task.join(runtime);
+    try client_task.join(runtime);
 }
 
 test "tcpConnectToHost: basic" {
@@ -210,20 +210,20 @@ test "tcpConnectToHost: basic" {
         }
     };
 
-    var runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ &runtime, &server_port_ch }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
     defer server_task.deinit();
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ &runtime, &server_port_ch }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
     defer client_task.deinit();
 
     try runtime.run();
 
-    try server_task.join(&runtime);
-    try client_task.join(&runtime);
+    try server_task.join(runtime);
+    try client_task.join(runtime);
 }

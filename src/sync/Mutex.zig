@@ -139,7 +139,7 @@ pub fn unlock(self: *Mutex, runtime: *Runtime) void {
 test "Mutex basic lock/unlock" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var shared_counter: u32 = 0;
@@ -155,9 +155,9 @@ test "Mutex basic lock/unlock" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ &runtime, &shared_counter, &mutex }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex }, .{});
     defer task1.deinit();
-    var task2 = try runtime.spawn(TestFn.worker, .{ &runtime, &shared_counter, &mutex }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex }, .{});
     defer task2.deinit();
 
     try runtime.run();
@@ -168,7 +168,7 @@ test "Mutex basic lock/unlock" {
 test "Mutex tryLock" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -184,7 +184,7 @@ test "Mutex tryLock" {
     };
 
     var results: [3]bool = undefined;
-    try runtime.runUntilComplete(TestFn.testTryLock, .{ &runtime, &mutex, &results }, .{});
+    try runtime.runUntilComplete(TestFn.testTryLock, .{ runtime, &mutex, &results }, .{});
 
     try testing.expect(results[0]); // First tryLock should succeed
     try testing.expect(!results[1]); // Second tryLock should fail

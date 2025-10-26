@@ -38,9 +38,9 @@
 //!
 //! var barrier = zio.Barrier.init(3);
 //!
-//! var task1 = try runtime.spawn(worker, .{ &runtime, &barrier, 1 }, .{});
-//! var task2 = try runtime.spawn(worker, .{ &runtime, &barrier, 2 }, .{});
-//! var task3 = try runtime.spawn(worker, .{ &runtime, &barrier, 3 }, .{});
+//! var task1 = try runtime.spawn(worker, .{runtime, &barrier, 1 }, .{});
+//! var task2 = try runtime.spawn(worker, .{runtime, &barrier, 2 }, .{});
+//! var task3 = try runtime.spawn(worker, .{runtime, &barrier, 3 }, .{});
 //! ```
 
 const std = @import("std");
@@ -126,7 +126,7 @@ pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrie
 test "Barrier: basic synchronization" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -146,11 +146,11 @@ test "Barrier: basic synchronization" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &results[0] }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[0] }, .{});
     defer task1.deinit();
-    var task2 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &results[1] }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[1] }, .{});
     defer task2.deinit();
-    var task3 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &results[2] }, .{});
+    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[2] }, .{});
     defer task3.deinit();
 
     try runtime.run();
@@ -164,7 +164,7 @@ test "Barrier: basic synchronization" {
 test "Barrier: leader detection" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -179,11 +179,11 @@ test "Barrier: leader detection" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &leader_count }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count }, .{});
     defer task1.deinit();
-    var task2 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &leader_count }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count }, .{});
     defer task2.deinit();
-    var task3 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &leader_count }, .{});
+    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count }, .{});
     defer task3.deinit();
 
     try runtime.run();
@@ -195,7 +195,7 @@ test "Barrier: leader detection" {
 test "Barrier: reusable for multiple cycles" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(2);
@@ -219,9 +219,9 @@ test "Barrier: reusable for multiple cycles" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &phase1_done, &phase2_done, &phase3_done }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done }, .{});
     defer task1.deinit();
-    var task2 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &phase1_done, &phase2_done, &phase3_done }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done }, .{});
     defer task2.deinit();
 
     try runtime.run();
@@ -234,7 +234,7 @@ test "Barrier: reusable for multiple cycles" {
 test "Barrier: single coroutine barrier" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(1);
@@ -247,7 +247,7 @@ test "Barrier: single coroutine barrier" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.worker, .{ &runtime, &barrier, &is_leader_result }, .{});
+    try runtime.runUntilComplete(TestFn.worker, .{ runtime, &barrier, &is_leader_result }, .{});
 
     try testing.expect(is_leader_result);
 }
@@ -255,7 +255,7 @@ test "Barrier: single coroutine barrier" {
 test "Barrier: ordering test" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -277,11 +277,11 @@ test "Barrier: ordering test" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &arrival_order, &arrivals[0], &final_order }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[0], &final_order }, .{});
     defer task1.deinit();
-    var task2 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &arrival_order, &arrivals[1], &final_order }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[1], &final_order }, .{});
     defer task2.deinit();
-    var task3 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &arrival_order, &arrivals[2], &final_order }, .{});
+    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[2], &final_order }, .{});
     defer task3.deinit();
 
     try runtime.run();
@@ -301,7 +301,7 @@ test "Barrier: ordering test" {
 test "Barrier: many coroutines" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(5);
@@ -316,15 +316,15 @@ test "Barrier: many coroutines" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &final_counts[0] }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[0] }, .{});
     defer task1.deinit();
-    var task2 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &final_counts[1] }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[1] }, .{});
     defer task2.deinit();
-    var task3 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &final_counts[2] }, .{});
+    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[2] }, .{});
     defer task3.deinit();
-    var task4 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &final_counts[3] }, .{});
+    var task4 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[3] }, .{});
     defer task4.deinit();
-    var task5 = try runtime.spawn(TestFn.worker, .{ &runtime, &barrier, &counter, &final_counts[4] }, .{});
+    var task5 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[4] }, .{});
     defer task5.deinit();
 
     try runtime.run();

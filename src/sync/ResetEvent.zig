@@ -35,9 +35,9 @@
 //!
 //! var event = zio.ResetEvent.init;
 //!
-//! var task1 = try runtime.spawn(worker, .{ &runtime, &event, 1 }, .{});
-//! var task2 = try runtime.spawn(worker, .{ &runtime, &event, 2 }, .{});
-//! var task3 = try runtime.spawn(coordinator, .{ &runtime, &event }, .{});
+//! var task1 = try runtime.spawn(worker, .{runtime, &event, 1 }, .{});
+//! var task2 = try runtime.spawn(worker, .{runtime, &event, 2 }, .{});
+//! var task3 = try runtime.spawn(coordinator, .{runtime, &event }, .{});
 //! ```
 
 const std = @import("std");
@@ -259,7 +259,7 @@ pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) void {
 test "ResetEvent basic set/reset/isSet" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -283,7 +283,7 @@ test "ResetEvent basic set/reset/isSet" {
 test "ResetEvent wait/set signaling" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -301,9 +301,9 @@ test "ResetEvent wait/set signaling" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ &runtime, &reset_event, &waiter_finished }, .{});
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_finished }, .{});
     defer waiter_task.deinit();
-    var setter_task = try runtime.spawn(TestFn.setter, .{ &runtime, &reset_event }, .{});
+    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
     defer setter_task.deinit();
 
     try runtime.run();
@@ -315,7 +315,7 @@ test "ResetEvent wait/set signaling" {
 test "ResetEvent timedWait timeout" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -332,7 +332,7 @@ test "ResetEvent timedWait timeout" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.waiter, .{ &runtime, &reset_event, &timed_out }, .{});
+    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &reset_event, &timed_out }, .{});
 
     try testing.expect(timed_out);
     try testing.expect(!reset_event.isSet());
@@ -341,7 +341,7 @@ test "ResetEvent timedWait timeout" {
 test "ResetEvent multiple waiters broadcast" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -362,13 +362,13 @@ test "ResetEvent multiple waiters broadcast" {
         }
     };
 
-    var waiter1 = try runtime.spawn(TestFn.waiter, .{ &runtime, &reset_event, &waiter_count }, .{});
+    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
     defer waiter1.deinit();
-    var waiter2 = try runtime.spawn(TestFn.waiter, .{ &runtime, &reset_event, &waiter_count }, .{});
+    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
     defer waiter2.deinit();
-    var waiter3 = try runtime.spawn(TestFn.waiter, .{ &runtime, &reset_event, &waiter_count }, .{});
+    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
     defer waiter3.deinit();
-    var setter_task = try runtime.spawn(TestFn.setter, .{ &runtime, &reset_event }, .{});
+    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
     defer setter_task.deinit();
 
     try runtime.run();
@@ -380,7 +380,7 @@ test "ResetEvent multiple waiters broadcast" {
 test "ResetEvent wait on already set event" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -396,7 +396,7 @@ test "ResetEvent wait on already set event" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.waiter, .{ &runtime, &reset_event, &wait_completed }, .{});
+    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &reset_event, &wait_completed }, .{});
 
     try testing.expect(wait_completed);
     try testing.expect(reset_event.isSet());
@@ -431,8 +431,8 @@ test "ResetEvent: select" {
         }
     };
 
-    var runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }

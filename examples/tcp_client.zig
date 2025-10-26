@@ -40,7 +40,7 @@ pub fn main() !void {
     });
     defer runtime.deinit();
 
-    var task = try runtime.spawn(clientTask, .{&runtime}, .{});
+    var task = try runtime.spawn(clientTask, .{runtime}, .{});
     defer task.deinit();
 
     try runtime.run();

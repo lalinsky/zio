@@ -38,10 +38,10 @@ pub fn main() !void {
     const start = std.time.nanoTimestamp();
 
     // Spawn pinger and ponger tasks
-    var pinger_task = try runtime.spawn(pinger, .{ &runtime, &ping_channel, &pong_channel, NUM_ROUNDS }, .{});
+    var pinger_task = try runtime.spawn(pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS }, .{});
     defer pinger_task.deinit();
 
-    var ponger_task = try runtime.spawn(ponger, .{ &runtime, &ping_channel, &pong_channel, NUM_ROUNDS }, .{});
+    var ponger_task = try runtime.spawn(ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS }, .{});
     defer ponger_task.deinit();
 
     // Run until both tasks complete

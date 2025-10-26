@@ -164,7 +164,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try Runtime.init(allocator, .{});
+    const runtime = try Runtime.init(allocator, .{});
     defer runtime.deinit();
 
     const num_operations = 10_000;

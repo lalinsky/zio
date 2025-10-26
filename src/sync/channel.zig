@@ -40,8 +40,8 @@ const Condition = @import("Condition.zig");
 /// var buffer: [5]u32 = undefined;
 /// var channel = Channel(u32).init(&buffer);
 ///
-/// var task1 = try runtime.spawn(producer, .{ &runtime, &channel }, .{});
-/// var task2 = try runtime.spawn(consumer, .{ &runtime, &channel }, .{});
+/// var task1 = try runtime.spawn(producer, .{runtime, &channel }, .{});
+/// var task2 = try runtime.spawn(consumer, .{runtime, &channel }, .{});
 /// ```
 pub fn Channel(comptime T: type) type {
     return struct {
@@ -229,7 +229,7 @@ pub fn Channel(comptime T: type) type {
 test "Channel: basic send and receive" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -250,9 +250,9 @@ test "Channel: basic send and receive" {
     };
 
     var results: [3]u32 = undefined;
-    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &channel }, .{});
+    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
     defer producer_task.deinit();
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &channel, &results }, .{});
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &results }, .{});
     defer consumer_task.deinit();
 
     try runtime.run();
@@ -265,7 +265,7 @@ test "Channel: basic send and receive" {
 test "Channel: trySend and tryReceive" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [2]u32 = undefined;
@@ -298,13 +298,13 @@ test "Channel: trySend and tryReceive" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.testTry, .{ &runtime, &channel }, .{});
+    try runtime.runUntilComplete(TestFn.testTry, .{ runtime, &channel }, .{});
 }
 
 test "Channel: blocking behavior when empty" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -322,9 +322,9 @@ test "Channel: blocking behavior when empty" {
     };
 
     var result: u32 = 0;
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &channel, &result }, .{});
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &result }, .{});
     defer consumer_task.deinit();
-    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &channel }, .{});
+    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
     defer producer_task.deinit();
 
     try runtime.run();
@@ -335,7 +335,7 @@ test "Channel: blocking behavior when empty" {
 test "Channel: blocking behavior when full" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [2]u32 = undefined;
@@ -357,9 +357,9 @@ test "Channel: blocking behavior when full" {
     };
 
     var count: u32 = 0;
-    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &channel, &count }, .{});
+    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel, &count }, .{});
     defer producer_task.deinit();
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &channel }, .{});
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel }, .{});
     defer consumer_task.deinit();
 
     try runtime.run();
@@ -370,7 +370,7 @@ test "Channel: blocking behavior when full" {
 test "Channel: multiple producers and consumers" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -392,13 +392,13 @@ test "Channel: multiple producers and consumers" {
     };
 
     var sum: u32 = 0;
-    var producer1 = try runtime.spawn(TestFn.producer, .{ &runtime, &channel, @as(u32, 0) }, .{});
+    var producer1 = try runtime.spawn(TestFn.producer, .{ runtime, &channel, @as(u32, 0) }, .{});
     defer producer1.deinit();
-    var producer2 = try runtime.spawn(TestFn.producer, .{ &runtime, &channel, @as(u32, 100) }, .{});
+    var producer2 = try runtime.spawn(TestFn.producer, .{ runtime, &channel, @as(u32, 100) }, .{});
     defer producer2.deinit();
-    var consumer1 = try runtime.spawn(TestFn.consumer, .{ &runtime, &channel, &sum }, .{});
+    var consumer1 = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &sum }, .{});
     defer consumer1.deinit();
-    var consumer2 = try runtime.spawn(TestFn.consumer, .{ &runtime, &channel, &sum }, .{});
+    var consumer2 = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &sum }, .{});
     defer consumer2.deinit();
 
     try runtime.run();
@@ -410,7 +410,7 @@ test "Channel: multiple producers and consumers" {
 test "Channel: close graceful" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -432,9 +432,9 @@ test "Channel: close graceful" {
     };
 
     var results: [3]?u32 = .{ null, null, null };
-    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &channel }, .{});
+    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
     defer producer_task.deinit();
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &channel, &results }, .{});
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &results }, .{});
     defer consumer_task.deinit();
 
     try runtime.run();
@@ -447,7 +447,7 @@ test "Channel: close graceful" {
 test "Channel: close immediate" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -468,9 +468,9 @@ test "Channel: close immediate" {
     };
 
     var result: ?u32 = null;
-    var producer_task = try runtime.spawn(TestFn.producer, .{ &runtime, &channel }, .{});
+    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
     defer producer_task.deinit();
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ &runtime, &channel, &result }, .{});
+    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &result }, .{});
     defer consumer_task.deinit();
 
     try runtime.run();
@@ -481,7 +481,7 @@ test "Channel: close immediate" {
 test "Channel: send on closed channel" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -499,13 +499,13 @@ test "Channel: send on closed channel" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.testClosed, .{ &runtime, &channel }, .{});
+    try runtime.runUntilComplete(TestFn.testClosed, .{ runtime, &channel }, .{});
 }
 
 test "Channel: ring buffer wrapping" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [3]u32 = undefined;
@@ -539,5 +539,5 @@ test "Channel: ring buffer wrapping" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.testWrap, .{ &runtime, &channel }, .{});
+    try runtime.runUntilComplete(TestFn.testWrap, .{ runtime, &channel }, .{});
 }

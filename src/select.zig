@@ -345,7 +345,7 @@ pub fn waitUntilComplete(rt: *Runtime, future: anytype) FutureResult(@TypeOf(fut
 test "select: basic - first completes" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -375,13 +375,13 @@ test "select: basic - first completes" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "select: already complete - fast path" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -414,13 +414,13 @@ test "select: already complete - fast path" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "select: heterogeneous types" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -470,13 +470,13 @@ test "select: heterogeneous types" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "select: with cancellation" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -520,13 +520,13 @@ test "select: with cancellation" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "select: with error unions - success case" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -578,13 +578,13 @@ test "select: with error unions - success case" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "select: with error unions - error case" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -626,13 +626,13 @@ test "select: with error unions - error case" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "select: with mixed error types" {
     const testing = std.testing;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -688,14 +688,14 @@ test "select: with mixed error types" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "wait: plain type" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -716,14 +716,14 @@ test "wait: plain type" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "wait: error union" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -747,14 +747,14 @@ test "wait: error union" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "wait: error union with error" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -777,14 +777,14 @@ test "wait: error union with error" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
 
 test "wait: already complete (fast path)" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    var runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -798,5 +798,5 @@ test "wait: already complete (fast path)" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{&runtime}, .{});
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }

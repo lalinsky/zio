@@ -60,9 +60,9 @@ pub fn main() !void {
     }
 
     for (0..2) |i| {
-        producers[i] = try runtime.spawn(producer, .{ &runtime, &channel, @as(u32, @intCast(i)) }, .{});
+        producers[i] = try runtime.spawn(producer, .{ runtime, &channel, @as(u32, @intCast(i)) }, .{});
         producer_count += 1;
-        consumers[i] = try runtime.spawn(consumer, .{ &runtime, &channel, @as(u32, @intCast(i)) }, .{});
+        consumers[i] = try runtime.spawn(consumer, .{ runtime, &channel, @as(u32, @intCast(i)) }, .{});
         consumer_count += 1;
     }
 
