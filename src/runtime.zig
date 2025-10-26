@@ -306,12 +306,6 @@ pub const AnyTask = struct {
     pub inline fn getExecutor(self: *AnyTask) *Executor {
         return Executor.fromCoroutine(&self.coro);
     }
-
-    /// Request cancellation of this task.
-    /// The cancellation flag will be checked at the next yield point.
-    pub fn cancel(self: *AnyTask) void {
-        self.awaitable.requestCancellation();
-    }
 };
 
 /// Registry of all tasks in the runtime.
@@ -386,13 +380,6 @@ pub const AnyBlockingTask = struct {
         assert(awaitable.kind == .blocking_task);
         return @fieldParentPtr("awaitable", awaitable);
     }
-
-    /// Request cancellation of this blocking task.
-    /// If the task hasn't started executing yet, it will skip execution.
-    /// If already executing, this has no effect (cannot stop blocking work).
-    pub fn cancel(self: *AnyBlockingTask) void {
-        self.awaitable.requestCancellation();
-    }
 };
 
 // Future for runtime - not backed by computation, can be set from callbacks
@@ -417,7 +404,7 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
         }
 
         pub fn cancel(parent: *Parent) void {
-            parent.impl.base.awaitable.requestCancellation();
+            parent.impl.base.awaitable.cancel();
         }
 
         pub fn fromAny(base: *Base) *Parent {
@@ -645,7 +632,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
         /// For futures: Has no effect (futures are not cancelable).
         pub fn cancel(self: *Self) void {
-            self.awaitable.requestCancellation();
+            self.awaitable.cancel();
         }
 
         /// Get the executor ID for this task.
