@@ -512,7 +512,7 @@ test "select: with cancellation" {
             try rt.yield();
 
             // Cancel the select operation
-            select_handle.cancel();
+            select_handle.cancel(rt);
 
             // Should return error.Canceled
             const result = select_handle.join(rt);

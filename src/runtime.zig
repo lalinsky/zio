@@ -81,13 +81,6 @@ pub const RuntimeOptions = struct {
     };
 };
 
-// Runtime-specific errors
-pub const ZioError = error{
-    NotInCoroutine,
-    InvalidExecutorId,
-    RuntimeShutdown,
-};
-
 // Noop callback for async timer cancellation
 fn noopTimerCancelCallback(
     ud: ?*void,
@@ -574,7 +567,8 @@ pub fn JoinHandle(comptime T: type) type {
         /// For coroutine tasks: Sets the cancellation flag, which will be checked at the next yield point.
         /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
         /// For futures: Has no effect (futures are not cancelable).
-        pub fn cancel(self: *Self) void {
+        pub fn cancel(self: *Self, rt: *Runtime) void {
+            _ = rt;
             self.awaitable.cancel();
         }
 
@@ -1753,7 +1747,7 @@ pub const Runtime = struct {
     }
 
     pub fn fromIo(io_: Io) *Runtime {
-        return @ptrCast(io_.userdata);
+        return @ptrCast(@alignCast(io_.userdata));
     }
 };
 
@@ -2040,7 +2034,7 @@ test "runtime: sleep is cancelable" {
             try rt.yield();
 
             // Cancel the sleeping task
-            handle.cancel();
+            handle.cancel(rt);
 
             // Should return error.Canceled
             const result = handle.join(rt);
