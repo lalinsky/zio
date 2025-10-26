@@ -499,16 +499,17 @@ pub fn BlockingTask(comptime T: type) type {
                 .args = args,
             };
 
-            // Increment ref count for the JoinHandle
-            task_data.blocking_task.impl.base.awaitable.ref_count.incr();
-
             // Add to global awaitable registry (can fail if runtime is shutting down)
             try runtime.tasks.add(&task_data.blocking_task.impl.base.awaitable);
             errdefer _ = runtime.tasks.remove(&task_data.blocking_task.impl.base.awaitable);
 
+            // Schedule the task to run on the thread pool
             thread_pool.schedule(
                 xev.ThreadPool.Batch.from(&task_data.blocking_task.impl.base.thread_pool_task),
             );
+
+            // Increment ref count for the JoinHandle
+            task_data.blocking_task.impl.base.awaitable.ref_count.incr();
 
             return &task_data.blocking_task;
         }
