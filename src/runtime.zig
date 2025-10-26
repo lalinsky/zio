@@ -116,9 +116,9 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     // Even if canceled, we still mark as complete so waiters wake up
     any_blocking_task.awaitable.markComplete();
 
-    // Release the blocking task's reference
+    // Release the blocking task's reference and check for shutdown
     const runtime = any_blocking_task.runtime;
-    runtime.releaseAwaitable(&any_blocking_task.awaitable);
+    runtime.releaseAwaitable(&any_blocking_task.awaitable, true);
 }
 
 // Async callback for remote ready tasks wakeup (cross-thread resumption)
@@ -157,6 +157,8 @@ fn shutdownCallback(
 const awaitable_module = @import("core/Awaitable.zig");
 pub const Awaitable = awaitable_module.Awaitable;
 pub const AwaitableKind = awaitable_module.AwaitableKind;
+
+const AwaitableList = @import("core/AwaitableList.zig");
 
 /// Wait for an awaitable to complete with a timeout. Works from both coroutines and threads.
 /// Returns error.Timeout if the timeout expires before completion.
@@ -273,11 +275,6 @@ pub const AnyTask = struct {
     shield_count: u32 = 0,
     pin_count: u32 = 0,
 
-    // Intrusive list node for Executor.tasks queue (WaitQueue)
-    next: ?*AnyTask = null,
-    prev: ?*AnyTask = null,
-    in_list: bool = false,
-
     const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
     };
@@ -305,65 +302,6 @@ pub const AnyTask = struct {
     /// Get the executor that owns this task.
     pub inline fn getExecutor(self: *AnyTask) *Executor {
         return Executor.fromCoroutine(&self.coro);
-    }
-};
-
-/// Registry of all tasks in the runtime.
-/// Used for lifecycle management and preventing spawns during shutdown.
-///
-/// State encoding:
-/// - sentinel0 (empty_open): No tasks, accepting new spawns
-/// - sentinel1 (empty_closed): No tasks, runtime shutting down, reject spawns
-/// - pointer: Has tasks, accepting new spawns
-pub const AnyTaskList = struct {
-    queue: WaitQueue(AnyTask) = .empty,
-
-    const State = WaitQueue(AnyTask).State;
-    const empty_open: State = .sentinel0;
-    const empty_closed: State = .sentinel1;
-
-    /// Add a task to the registry.
-    /// Returns error.Closed if the runtime is shutting down.
-    pub fn add(self: *AnyTaskList, task: *AnyTask) error{Closed}!void {
-        if (!self.queue.pushUnless(empty_closed, task)) {
-            return error.Closed;
-        }
-    }
-
-    /// Remove a task from the registry.
-    /// Returns true if the task was found and removed.
-    pub fn remove(self: *AnyTaskList, task: *AnyTask) bool {
-        return self.queue.remove(task);
-    }
-
-    /// Close the registry to prevent new task additions.
-    /// Returns error.NotEmpty if the registry still has tasks.
-    /// Idempotent: succeeds if already closed.
-    pub fn close(self: *AnyTaskList) error{NotEmpty}!void {
-        // Try atomic transition: empty_open → empty_closed
-        if (!self.queue.tryTransition(empty_open, empty_closed)) {
-            const state = self.queue.getState();
-            if (state == empty_closed) return; // Already closed, OK
-            return error.NotEmpty; // Has tasks
-        }
-    }
-
-    /// Returns true if the registry has no tasks.
-    /// Note: Does not distinguish between open/closed states.
-    pub fn isEmpty(self: *const AnyTaskList) bool {
-        const state = self.queue.getState();
-        return !state.isPointer();
-    }
-
-    /// Returns true if the registry is closed (rejecting new spawns).
-    pub fn isClosed(self: *const AnyTaskList) bool {
-        return self.queue.getState() == empty_closed;
-    }
-
-    /// Remove and return the first task from the registry.
-    /// When popping the last item, transitions to empty_open (not closed).
-    pub fn pop(self: *AnyTaskList) ?*AnyTask {
-        return self.queue.pop();
     }
 };
 
@@ -419,7 +357,7 @@ fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type
 
         pub fn deinit(parent: *Parent) void {
             const runtime = Parent.getRuntime(parent);
-            runtime.releaseAwaitable(&parent.impl.base.awaitable);
+            runtime.releaseAwaitable(&parent.impl.base.awaitable, false);
         }
 
         /// Registers a wait node to be notified when the task completes.
@@ -564,6 +502,10 @@ pub fn BlockingTask(comptime T: type) type {
             // Increment ref count for the JoinHandle
             task_data.blocking_task.impl.base.awaitable.ref_count.incr();
 
+            // Add to global awaitable registry (can fail if runtime is shutting down)
+            try runtime.tasks.add(&task_data.blocking_task.impl.base.awaitable);
+            errdefer _ = runtime.tasks.remove(&task_data.blocking_task.impl.base.awaitable);
+
             thread_pool.schedule(
                 xev.ThreadPool.Batch.from(&task_data.blocking_task.impl.base.thread_pool_task),
             );
@@ -586,7 +528,7 @@ pub fn JoinHandle(comptime T: type) type {
                 .task => Task(T).fromAwaitable(self.awaitable).getRuntime(),
                 .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).getRuntime(),
             };
-            runtime.releaseAwaitable(self.awaitable);
+            runtime.releaseAwaitable(self.awaitable, false);
         }
 
         pub fn join(self: *Self, rt: *Runtime) T {
@@ -857,9 +799,9 @@ pub const Executor = struct {
         // Increment ref count for JoinHandle
         task.impl.base.awaitable.ref_count.incr();
 
-        // Add to global task registry (can fail if runtime is shutting down)
-        try self.runtime().tasks.add(&task.impl.base);
-        errdefer _ = self.runtime().tasks.remove(&task.impl.base);
+        // Add to global awaitable registry (can fail if runtime is shutting down)
+        try self.runtime().tasks.add(&task.impl.base.awaitable);
+        errdefer _ = self.runtime().tasks.remove(&task.impl.base.awaitable);
 
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(&task.impl.base, .maybe_remote);
@@ -1027,26 +969,6 @@ pub const Executor = struct {
         unreachable; // Should always timeout or be canceled
     }
 
-    /// Check if task list is empty and initiate shutdown if so.
-    /// Only one executor will succeed in closing the registry due to atomic transition.
-    /// Can be called by any executor.
-    fn maybeShutdown(self: *Executor) void {
-        if (self.runtime_ptr.tasks.isEmpty()) {
-            // Try to atomically close the registry (empty_open → empty_closed)
-            if (self.runtime_ptr.tasks.close()) {
-                // We won the race - initiate shutdown
-                self.runtime_ptr.shutting_down.store(true, .release);
-
-                // Wake all executors (including main if sleeping in event loop)
-                for (self.runtime_ptr.executors.items) |*executor| {
-                    executor.shutdown_async.notify() catch {};
-                }
-            } else |_| {
-                // Another executor is closing or tasks were added - do nothing
-            }
-        }
-    }
-
     /// Run the executor event loop.
     /// Main executor (id=0) orchestrates shutdown when all tasks complete.
     /// Worker executors (id>0) run until signaled to shut down by main executor.
@@ -1064,7 +986,7 @@ pub const Executor = struct {
 
         // Check if we're starting with an empty task list
         // If so, immediately initiate shutdown (no work to do)
-        self.maybeShutdown();
+        self.runtime_ptr.maybeShutdown();
 
         var spin_count: u8 = 0;
         while (true) {
@@ -1112,13 +1034,9 @@ pub const Executor = struct {
                         // Track task completion
                         self.metrics.tasks_completed += 1;
 
-                        // Remove from global task registry and release runtime's reference
-                        _ = self.runtime_ptr.tasks.remove(current_task);
-                        self.runtime().releaseAwaitable(current_awaitable);
+                        // Release runtime's reference and check for shutdown
+                        self.runtime().releaseAwaitable(current_awaitable, true);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
-
-                        // Check if we just removed the last task and maybe initiate shutdown
-                        self.maybeShutdown();
                     }
                 }
 
@@ -1499,7 +1417,7 @@ pub const Runtime = struct {
 
     // Multi-executor coordination
     next_executor: std.atomic.Value(usize),
-    tasks: AnyTaskList = .{}, // Global task registry with built-in closed state
+    tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
 
     /// Thread-local storage for the current executor
@@ -1562,9 +1480,9 @@ pub const Runtime = struct {
             tp.shutdown();
         }
 
-        // Drain any remaining tasks from global registry
-        while (self.tasks.pop()) |task| {
-            self.releaseAwaitable(&task.awaitable);
+        // Drain any remaining awaitables from global registry
+        while (self.tasks.pop()) |awaitable| {
+            self.releaseAwaitable(awaitable, false);
         }
 
         // Deinit all executors (they own their threads)
@@ -1798,9 +1716,35 @@ pub const Runtime = struct {
         return self.executors.items[0].loop.now();
     }
 
-    fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
+    /// Check if task list is empty and initiate shutdown if so.
+    /// Only one executor will succeed in closing the registry due to atomic transition.
+    /// Can be called by any executor.
+    fn maybeShutdown(self: *Runtime) void {
+        if (self.tasks.isEmpty()) {
+            // Try to atomically close the registry (empty_open → empty_closed)
+            if (self.tasks.close()) {
+                // We won the race - initiate shutdown
+                self.shutting_down.store(true, .release);
+
+                // Wake all executors (including main if sleeping in event loop)
+                for (self.executors.items) |*executor| {
+                    executor.shutdown_async.notify() catch {};
+                }
+            } else |_| {
+                // Another executor is closing or tasks were added - do nothing
+            }
+        }
+    }
+
+    fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable, comptime done: bool) void {
+        if (done) {
+            _ = self.tasks.remove(awaitable);
+        }
         if (awaitable.ref_count.decr()) {
             awaitable.destroy_fn(self, awaitable);
+        }
+        if (done) {
+            self.maybeShutdown();
         }
     }
 

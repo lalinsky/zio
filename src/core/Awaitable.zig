@@ -35,6 +35,11 @@ pub const Awaitable = struct {
     // - pointer = waiting (has waiters, task not complete)
     waiting_list: WaitQueue(WaitNode) = .empty,
 
+    // Intrusive list node for Runtime.tasks registry (WaitQueue)
+    next: ?*Awaitable = null,
+    prev: ?*Awaitable = null,
+    in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+
     pub const State = WaitQueue(WaitNode).State;
     pub const not_complete = State.sentinel0;
     pub const complete = State.sentinel1;
