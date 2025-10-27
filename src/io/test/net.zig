@@ -156,6 +156,49 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     try runtime.runUntilComplete(Test.mainFn, .{ runtime, server_addr, client_addr }, .{});
 }
 
+pub fn checkShutdown(addr: anytype, options: anytype) !void {
+    const Test = struct {
+        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
+            const server = try addr_inner.listen(rt, options_inner);
+            defer server.close(rt);
+
+            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            defer server_task.deinit();
+
+            var client_task = try rt.spawn(clientFn, .{ rt, server }, .{});
+            defer client_task.deinit();
+
+            // TODO use TaskGroup
+
+            try server_task.join(rt);
+            try client_task.join(rt);
+        }
+
+        pub fn serverFn(rt: *Runtime, server: Server) !void {
+            const client = try server.accept(rt);
+            defer client.close(rt);
+            client.shutdown(rt, .send) catch {};
+        }
+
+        pub fn clientFn(rt: *Runtime, server: Server) !void {
+            const client = try server.socket.address.connect(rt);
+            defer client.close(rt);
+
+            var buf: [32]u8 = undefined;
+            var reader = client.reader(rt, &buf);
+
+            try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+
+            client.shutdown(rt, .both) catch {};
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer runtime.deinit();
+
+    try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options }, .{});
+}
+
 test "UnixAddress: listen/accept/connect/read/write" {
     if (!std.net.has_unix_sockets) return error.SkipZigTest;
 
@@ -206,4 +249,27 @@ test "UnixAddress: bind/sendTo/receiveFrom" {
     const server_addr = try UnixAddress.init(server_path);
     const client_addr = try UnixAddress.init(client_path);
     try checkBind(server_addr, client_addr);
+}
+
+test "UnixAddress: listen/accept/connect/read/EOF" {
+    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const addr = try UnixAddress.init(path);
+    try checkShutdown(addr, UnixAddress.ListenOptions{});
+}
+
+test "IpAddress: listen/accept/connect/read/EOF IPv4" {
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    try checkShutdown(addr, IpAddress.ListenOptions{});
+}
+
+test "IpAddress: listen/accept/connect/read/EOF IPv6" {
+    const addr = try IpAddress.parseIp6("::1", 0);
+    checkShutdown(addr, IpAddress.ListenOptions{}) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
 }
