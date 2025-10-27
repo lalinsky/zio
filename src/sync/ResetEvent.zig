@@ -52,6 +52,7 @@ const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../core/task.zig").resumeTask;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
+const Timeout = @import("../core/timeout.zig").Timeout;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
 
@@ -182,37 +183,19 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
         return;
     }
 
-    const TimeoutContext = struct {
-        wait_queue: *WaitQueue(WaitNode),
-        wait_node: *WaitNode,
-    };
-
-    var timeout_ctx = TimeoutContext{
-        .wait_queue = &self.wait_queue,
-        .wait_node = &task.awaitable.wait_node,
-    };
+    // Set up timeout
+    var timeout = Timeout.init(runtime);
+    defer timeout.clear(runtime);
+    timeout.set(runtime, @intCast(timeout_ns / 1_000_000));
 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.timedWaitForReadyWithCallback(
-        .preparing_to_wait,
-        .waiting,
-        timeout_ns,
-        TimeoutContext,
-        &timeout_ctx,
-        struct {
-            fn onTimeout(ctx: *TimeoutContext) bool {
-                // Try to remove from wait queue - if successful, we timed out
-                // If failed, we were already signaled
-                return ctx.wait_queue.remove(ctx.wait_node);
-            }
-        }.onTimeout,
-    ) catch |err| {
-        // Remove from queue if canceled (timeout already handled by callback)
-        if (err == error.Canceled) {
-            _ = self.wait_queue.remove(&task.awaitable.wait_node);
-        }
-        return err;
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
+        // Try to remove from queue
+        _ = self.wait_queue.remove(&task.awaitable.wait_node);
+
+        // Check if timeout or explicit cancel
+        return if (timeout.triggered) error.Timeout else error.Canceled;
     };
 
     // Acquire fence: synchronize-with set()'s .release in popAll

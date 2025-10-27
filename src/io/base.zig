@@ -7,6 +7,7 @@ const AnyTask = @import("../core/task.zig").AnyTask;
 const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
+const Timeout = @import("../core/timeout.zig").Timeout;
 
 pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
     var cancel_completion: xev.Completion = .{ .op = .{ .cancel = .{ .c = completion } } };
