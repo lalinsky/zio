@@ -487,7 +487,6 @@ pub const Executor = struct {
     /// - `.ready`: Reschedule immediately (cooperative yielding)
     /// - `.waiting_io`: Suspend until I/O completes (e.g., waiting for xev completion)
     /// - `.waiting_sync`: Suspend until sync primitive signals (e.g., mutex, condition, channel)
-    /// - `.dead`: Mark coroutine as complete (internal use only)
     ///
     /// ## Cancellation Mode
     ///
@@ -535,12 +534,6 @@ pub const Executor = struct {
         // This bypasses LIFO slot for fairness - yields always go to back of queue
         if (desired_state == .ready) {
             self.scheduleTaskLocal(current_task, true); // is_yield = true
-        }
-
-        // If dead, always switch to scheduler for cleanup
-        if (desired_state == .dead) {
-            coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
-            unreachable;
         }
 
         // Try to switch directly to the next ready task (checks LIFO slot first)
@@ -682,16 +675,10 @@ pub const Executor = struct {
                 defer self.current_coroutine = null;
                 coroutines.switchContext(&self.main_context, &task.coro.context);
 
-                // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
+                // Handle finished coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
                 if (self.current_coroutine) |current_coro| {
-                    const current_task = AnyTask.fromCoroutine(current_coro);
-
-                    // Check if coroutine finished execution and mark task as dead
                     if (current_coro.finished) {
-                        current_task.state.store(.dead, .release);
-                    }
-
-                    if (current_task.state.load(.acquire) == .dead) {
+                        const current_task = AnyTask.fromCoroutine(current_coro);
                         const current_awaitable = &current_task.awaitable;
 
                         // Release stack immediately since coroutine execution is complete

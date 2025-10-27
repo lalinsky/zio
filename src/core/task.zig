@@ -32,7 +32,6 @@ pub const AnyTask = struct {
         waiting_io = 0b0000_0100,
         waiting_sync = 0b0000_0101,
         waiting_completion = 0b0000_0110,
-        dead = 0b1000_0000,
 
         pub fn isWaiting(self: State) bool {
             return (@intFromEnum(self) & 0b0100) != 0;
