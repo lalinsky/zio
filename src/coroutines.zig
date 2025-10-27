@@ -405,7 +405,7 @@ pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
     stack: ?Stack,
-    state: std.atomic.Value(CoroutineState),
+    finished: bool = false,
 
     pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.ReturnType(func))) void {
         const Result = meta.ReturnType(func);
@@ -424,7 +424,7 @@ pub const Coroutine = struct {
                 const result = @call(.always_inline, func, coro_data.args);
                 _ = coro_data.result_ptr.set(result);
 
-                coro.state.store(.dead, .release);
+                coro.finished = true;
                 switchContext(&coro.context, coro.parent_context_ptr);
                 unreachable;
             }

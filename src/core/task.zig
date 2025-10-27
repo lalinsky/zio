@@ -20,12 +20,11 @@ pub const CreateOptions = struct {
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
+    state: std.atomic.Value(State),
 
     // Shared xev timer for timeout handling
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
-
-    // Shared xev timer for timeout handling
     timeouts: TimeoutHeap = .{ .context = {} },
 
     // Number of active timeouts currently registered
@@ -36,6 +35,13 @@ pub const AnyTask = struct {
 
     // Number of times this task was pinned to the current executor
     pin_count: u8 = 0,
+
+    pub const State = enum(u8) {
+        new,
+        ready,
+        preparing_to_wait,
+        waiting,
+    };
 
     pub const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
@@ -68,6 +74,15 @@ pub const AnyTask = struct {
 
     pub inline fn getLoop(self: *AnyTask) *xev.Loop {
         return self.getExecutor().getLoop();
+    }
+
+    /// Check if this task can be migrated to a different executor.
+    /// Returns false if the task is pinned or canceled, true otherwise.
+    pub inline fn canMigrate(self: *const AnyTask) bool {
+        if (self.pin_count > 0) return false;
+        if (self.awaitable.canceled.load(.acquire)) return false;
+        // TODO: Enable migration once we have work-stealing
+        return false;
     }
 
     fn getNextTimeout(self: *AnyTask, now: i64) ?struct { timeout: *Timeout, delay_ms: u64 } {
@@ -200,8 +215,8 @@ pub fn Task(comptime T: type) type {
                         .coro = .{
                             .stack = stack,
                             .parent_context_ptr = &executor.main_context,
-                            .state = .init(.waiting_sync),
                         },
+                        .state = .init(.new),
                     },
                     .future_result = .{},
                 },

@@ -11,7 +11,6 @@ const Timeoutable = @import("common.zig").Timeoutable;
 
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
-const CoroutineState = coroutines.CoroutineState;
 
 // const Error = coroutines.Error;
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
@@ -171,7 +170,7 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
 
         executor.timedWaitForReadyWithCallback(
             .ready,
-            .waiting_sync,
+            .waiting,
             timeout_ns,
             TimeoutContext,
             &timeout_ctx,
@@ -468,14 +467,16 @@ pub const Executor = struct {
         try self.runtime.tasks.add(&task.impl.base.awaitable);
         errdefer _ = self.runtime.tasks.remove(&task.impl.base.awaitable);
 
+        // Increment ref count for JoinHandle BEFORE scheduling
+        // This prevents race where task completes before we create the handle
+        task.impl.base.awaitable.ref_count.incr();
+        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(&task.impl.base, .maybe_remote);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
-
-        // Increment ref count for JoinHandle
-        task.impl.base.awaitable.ref_count.incr();
 
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
@@ -487,9 +488,7 @@ pub const Executor = struct {
     /// Suspends the current coroutine and allows other tasks to run. The coroutine
     /// will be rescheduled according to `desired_state`:
     /// - `.ready`: Reschedule immediately (cooperative yielding)
-    /// - `.waiting_io`: Suspend until I/O completes (e.g., waiting for xev completion)
-    /// - `.waiting_sync`: Suspend until sync primitive signals (e.g., mutex, condition, channel)
-    /// - `.dead`: Mark coroutine as complete (internal use only)
+    /// - `.waiting`: Suspend until resumed (I/O, sync primitives, timeout, cancellation, etc.)
     ///
     /// ## Cancellation Mode
     ///
@@ -506,7 +505,7 @@ pub const Executor = struct {
     ///
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
-    pub fn yield(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
@@ -523,7 +522,7 @@ pub const Executor = struct {
         }
 
         // Atomically transition state - if this fails, someone changed our state
-        if (current_coro.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
+        if (current_task.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
             // CAS failed - someone changed our state
             if (actual_state == .ready) {
                 // We were woken up before we could yield - don't suspend
@@ -537,12 +536,6 @@ pub const Executor = struct {
         // This bypasses LIFO slot for fairness - yields always go to back of queue
         if (desired_state == .ready) {
             self.scheduleTaskLocal(current_task, true); // is_yield = true
-        }
-
-        // If dead, always switch to scheduler for cleanup
-        if (desired_state == .dead) {
-            coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
-            unreachable;
         }
 
         // Try to switch directly to the next ready task (checks LIFO slot first)
@@ -630,7 +623,7 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        self.timedWaitForReady(.ready, .waiting_io, milliseconds * 1_000_000) catch |err| switch (err) {
+        self.timedWaitForReady(.ready, .waiting, milliseconds * 1_000_000) catch |err| switch (err) {
             error.Timeout => return, // Expected for sleep - not an error
             error.Canceled => return error.Canceled, // Propagate cancellation
         };
@@ -684,9 +677,9 @@ pub const Executor = struct {
                 defer self.current_coroutine = null;
                 coroutines.switchContext(&self.main_context, &task.coro.context);
 
-                // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
+                // Handle finished coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
                 if (self.current_coroutine) |current_coro| {
-                    if (current_coro.state.load(.acquire) == .dead) {
+                    if (current_coro.finished) {
                         const current_task = AnyTask.fromCoroutine(current_coro);
                         const current_awaitable = &current_task.awaitable;
 
@@ -708,7 +701,7 @@ pub const Executor = struct {
                     }
                 }
 
-                // Other states (.ready, .waiting_io, .waiting_sync) are handled by yield() or markReady()
+                // Other states (.ready, .waiting) are handled by yield() or markReady()
             }
 
             // Move yielded coroutines back to ready queue
@@ -818,44 +811,30 @@ pub const Executor = struct {
     /// Atomically transitions task state to .ready and schedules it for execution.
     ///
     /// Task migration for cache locality:
-    /// - Sync tasks (.waiting_sync) with .maybe_remote: May migrate to current executor if in same runtime
-    /// - I/O tasks (.waiting_io): Always stay on home executor (cannot migrate)
-    /// - Spawn tasks (.ready): Schedule on home executor
+    /// - Tasks resumed with .maybe_remote: May migrate to current executor if conditions allow
+    /// - Tasks resumed with .local: Always stay on home executor (I/O callbacks, timeouts, cancellation)
+    /// - New/ready tasks: Schedule on home executor
     ///
     /// The `mode` parameter:
-    /// - `.maybe_remote`: Enables migration for sync tasks, uses remote queue when needed
-    /// - `.local`: No migration, always uses home executor (for I/O callbacks)
+    /// - `.maybe_remote`: Enables migration, uses remote queue when needed
+    /// - `.local`: No migration, always uses home executor
     pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
-        const old_state = task.coro.state.swap(.ready, .acq_rel);
+        const old_state = task.state.swap(.ready, .acq_rel);
 
         // Task hasn't yielded yet - it will see .ready and skip the yield
         if (old_state == .preparing_to_wait) return;
 
-        // I/O tasks cannot migrate (bound to home executor's event loop)
-        if (old_state == .waiting_io) {
-            if (mode == .maybe_remote) {
-                if (Runtime.current_executor == self) {
-                    self.scheduleTaskLocal(task, false);
-                } else {
-                    self.scheduleTaskRemote(task);
-                }
-            } else {
-                assert(Runtime.current_executor == self);
-                self.scheduleTaskLocal(task, false);
-            }
-            return;
-        }
-
         // Task already transitioned to .ready by another thread - avoid double-schedule
         if (old_state == .ready) return;
 
-        // Any non-waiting state is a bug
-        if (!old_state.isWaiting()) {
+        // Validate state transitions
+        if (old_state != .new and old_state != .waiting) {
             std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
         }
 
-        // Sync tasks can migrate for cache locality (waiting_sync state only)
-        if (old_state == .waiting_sync and mode == .maybe_remote and task.pin_count == 0 and false) {
+        // Migration is allowed only when mode == .maybe_remote
+        // (I/O callbacks, timeouts, cancellation use .local mode and don't migrate)
+        if (old_state == .waiting and mode == .maybe_remote and task.canMigrate()) {
             const current_exec = Runtime.current_executor orelse {
                 self.scheduleTaskRemote(task);
                 return;
@@ -876,7 +855,7 @@ pub const Executor = struct {
             return;
         }
 
-        // Default path: .ready state (spawn) or .local mode
+        // Default path: schedule on appropriate executor
         if (mode == .maybe_remote) {
             if (Runtime.current_executor == self) {
                 self.scheduleTaskLocal(task, false);
@@ -905,8 +884,8 @@ pub const Executor = struct {
     /// another source (in which case the timeout is ignored).
     pub fn timedWaitForReadyWithCallback(
         self: *Executor,
-        expected_state: CoroutineState,
-        desired_state: CoroutineState,
+        expected_state: AnyTask.State,
+        desired_state: AnyTask.State,
         timeout_ns: u64,
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
@@ -968,7 +947,7 @@ pub const Executor = struct {
         }
     }
 
-    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+    pub fn timedWaitForReady(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, timeout_ns: u64) (Timeoutable || Cancelable)!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(
@@ -1158,13 +1137,15 @@ pub const Runtime = struct {
         try self.tasks.add(&task.impl.base.awaitable);
         errdefer _ = self.tasks.remove(&task.impl.base.awaitable);
 
+        // Increment ref count for JoinHandle BEFORE scheduling
+        // This prevents race where task completes before we create the handle
+        task.impl.base.awaitable.ref_count.incr();
+        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+
         // Schedule the task to run on the thread pool
         thread_pool.schedule(
             xev.ThreadPool.Batch.from(&task.impl.base.thread_pool_task),
         );
-
-        // Increment ref count for JoinHandle
-        task.impl.base.awaitable.ref_count.incr();
 
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }

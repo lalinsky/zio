@@ -89,7 +89,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Add to wait queue before releasing mutex
     self.wait_queue.push(&task.awaitable.wait_node);
@@ -97,9 +97,9 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     // Atomically release mutex
     mutex.unlock(runtime);
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting_sync, .allow_cancel) catch |err| {
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // On cancellation, remove from queue and reacquire mutex
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
         // Must reacquire mutex before returning
@@ -151,7 +151,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     self.wait_queue.push(&task.awaitable.wait_node);
 
@@ -168,11 +168,11 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     // Atomically release mutex
     mutex.unlock(runtime);
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.timedWaitForReadyWithCallback(
         .preparing_to_wait,
-        .waiting_sync,
+        .waiting,
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
