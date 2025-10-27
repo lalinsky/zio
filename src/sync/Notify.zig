@@ -51,6 +51,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
+const Timeout = @import("../core/timeout.zig").Timeout;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
 
@@ -142,43 +143,29 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     const task = runtime.getCurrentTask() orelse unreachable;
     const executor = task.getExecutor();
 
+    // Set up timeout
+    var timeout = Timeout.init(runtime);
+    defer timeout.clear(runtime);
+    timeout.set(runtime, @intCast(timeout_ns / 1_000_000));
+
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
 
     // Push to wait queue
     self.wait_queue.push(&task.awaitable.wait_node);
 
-    const TimeoutContext = struct {
-        wait_queue: *WaitQueue(WaitNode),
-        wait_node: *WaitNode,
-    };
-
-    var timeout_ctx = TimeoutContext{
-        .wait_queue = &self.wait_queue,
-        .wait_node = &task.awaitable.wait_node,
-    };
-
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.timedWaitForReadyWithCallback(
-        .preparing_to_wait,
-        .waiting,
-        timeout_ns,
-        TimeoutContext,
-        &timeout_ctx,
-        struct {
-            fn onTimeout(ctx: *TimeoutContext) bool {
-                // Try to remove from wait queue - if successful, we timed out
-                // If failed, we were already signaled
-                return ctx.wait_queue.remove(ctx.wait_node);
-            }
-        }.onTimeout,
-    ) catch |err| {
-        // Remove from queue if canceled (timeout already handled by callback)
-        if (err == error.Canceled) {
-            _ = self.wait_queue.remove(&task.awaitable.wait_node);
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
+        // Try to remove from queue
+        if (!self.wait_queue.remove(&task.awaitable.wait_node)) {
+            // We were already removed by signal/broadcast
+            // We "stole" a wakeup, so wake another waiter
+            self.signal();
         }
-        return err;
+
+        // Check if timeout or explicit cancel
+        return if (timeout.triggered) error.Timeout else error.Canceled;
     };
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
