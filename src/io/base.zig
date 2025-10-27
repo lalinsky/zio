@@ -22,8 +22,22 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
     defer if (canceled) rt.endShield();
 
     while (completion.state() == .active) {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
         var executor = rt.getCurrentExecutor() orelse @panic("no active executor");
-        executor.yield(.ready, .waiting, .allow_cancel) catch |err| switch (err) {
+
+        // Transition to preparing_to_wait state before yielding
+        task.state.store(.preparing_to_wait, .release);
+
+        // Re-check completion state after setting preparing_to_wait
+        // If IO completed, restore ready state and exit
+        if (completion.state() != .active) {
+            task.state.store(.ready, .release);
+            break;
+        }
+
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        // If IO completes before the yield, the CAS inside yield() will fail and we won't suspend
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {
                 if (!canceled) {
                     canceled = true;
