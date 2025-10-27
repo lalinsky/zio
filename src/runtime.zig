@@ -1178,7 +1178,7 @@ pub const Executor = struct {
         }
 
         // Sync tasks can migrate for cache locality (waiting_sync state only)
-        if (old_state == .waiting_sync and mode == .maybe_remote and task.pin_count == 0) {
+        if (old_state == .waiting_sync and mode == .maybe_remote and task.pin_count == 0 and false) {
             const current_exec = Runtime.current_executor orelse {
                 self.scheduleTaskRemote(task);
                 return;
