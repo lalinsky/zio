@@ -264,10 +264,6 @@ fn timeoutCallback(
     const task: *AnyTask = @fieldParentPtr("timer_c", completion);
     std.debug.assert(task == timeout.task);
 
-    // Mark this one as triggered, user can convert this to error.Timeout
-    // TODO: Should we only mark triggered if we were the one who canceled the task?
-    timeout.triggered = true;
-
     // Remove this timeout from the heap
     if (timeout.active) {
         task.timeouts.remove(timeout);
@@ -278,8 +274,13 @@ fn timeoutCallback(
     task.updateTimer(loop);
 
     // Cancel the task (sets canceled flag and resumes it)
-    // TODO: Race condition in cancel between storing cancelled and wake?
-    task.awaitable.cancel();
+    const was_canceled = task.awaitable.canceled.swap(true, .acq_rel);
+    if (!was_canceled) {
+        // Mark this one as triggered (user can convert error.Canceled to error.Timeout)
+        timeout.triggered = true;
+        // Wake the task (it will see the canceled flag)
+        resumeTask(task, .local);
+    }
 
     return .disarm;
 }
