@@ -624,7 +624,7 @@ pub const Executor = struct {
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
         // Set up timeout
-        var timeout = Timeout.init(self.runtime);
+        var timeout = Timeout.init;
         defer timeout.clear(self.runtime);
         timeout.set(self.runtime, milliseconds * std.time.ns_per_ms);
 

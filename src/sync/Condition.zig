@@ -157,7 +157,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     self.wait_queue.push(&task.awaitable.wait_node);
 
     // Set up timeout
-    var timeout = Timeout.init(runtime);
+    var timeout = Timeout.init;
     defer timeout.clear(runtime);
     timeout.set(runtime, timeout_ns);
 

@@ -10,47 +10,40 @@ const AnyTask = @import("task.zig").AnyTask;
 /// When a timeout expires, operations return error.Canceled and the `triggered` field is set to true,
 /// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
 pub const Timeout = struct {
-    task: *AnyTask,
+    task: ?*AnyTask = null,
     heap: xev.heap.IntrusiveField(Timeout) = .{},
     deadline_ms: i64 = undefined,
-    active: bool = false,
     triggered: bool = false,
 
-    /// Initialize a Timeout for the current task.
-    /// The Timeout must be cleared with clear() when done.
-    /// Panics if not called from within a coroutine.
-    pub fn init(rt: *Runtime) Timeout {
-        const task = rt.getCurrentTask() orelse @panic("Timeout.init requires active task");
-        return .{ .task = task };
-    }
+    pub const init: Timeout = .{};
 
     pub fn clear(self: *Timeout, rt: *Runtime) void {
-        const executor = self.task.getExecutor();
+        const task = self.task orelse return;
+        const executor = task.getExecutor();
         std.debug.assert(executor.runtime == rt);
 
-        if (self.active) {
-            self.active = false;
-            self.task.timeout_count -= 1;
-            self.task.timeouts.remove(self);
-            self.task.maybeUpdateTimer();
-        }
+        task.timeouts.remove(self);
+        task.maybeUpdateTimer();
+        self.task = null;
     }
 
     pub fn set(self: *Timeout, rt: *Runtime, timeout_ns: u64) void {
-        const executor = self.task.getExecutor();
+        const task = self.task orelse rt.getCurrentTask() orelse unreachable;
+
+        const executor = task.getExecutor();
         std.debug.assert(executor.runtime == rt);
 
-        if (self.active) {
-            self.task.timeouts.remove(self);
+        if (self.task == null) {
+            self.task = task;
         } else {
-            self.active = true;
-            self.task.timeout_count += 1;
+            task.timeouts.remove(self);
         }
+
         self.triggered = false;
         const timeout_ms: i64 = @intCast((timeout_ns + std.time.ns_per_ms / 2) / std.time.ns_per_ms);
         self.deadline_ms = executor.loop.now() + timeout_ms;
-        self.task.timeouts.insert(self);
-        self.task.maybeUpdateTimer();
+        task.timeouts.insert(self);
+        task.maybeUpdateTimer();
     }
 };
 
@@ -66,7 +59,7 @@ test "Timeout: smoke test" {
     // TODO: test real timeouts
     const Test = struct {
         fn main(rt: *Runtime) !void {
-            var timeout = Timeout.init(rt);
+            var timeout = Timeout.init;
             defer timeout.clear(rt);
 
             timeout.set(rt, 100 * std.time.ns_per_ms);

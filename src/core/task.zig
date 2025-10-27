@@ -27,9 +27,6 @@ pub const AnyTask = struct {
     timer_cancel_c: xev.Completion = .{},
     timeouts: TimeoutHeap = .{ .context = {} },
 
-    // Number of active timeouts currently registered
-    timeout_count: u8 = 0,
-
     // Number of active cancelation sheilds
     shield_count: u8 = 0,
 
@@ -89,11 +86,10 @@ pub const AnyTask = struct {
         while (true) {
             var timeout = self.timeouts.peek() orelse return null;
             if (timeout.deadline_ms < now) {
-                std.debug.assert(timeout.active);
+                std.debug.assert(timeout.task != null);
                 const removed = self.timeouts.deleteMin();
                 std.debug.assert(timeout == removed);
-                self.timeout_count -= 1;
-                timeout.active = false;
+                timeout.task = null;
                 continue;
             }
             return .{
@@ -264,15 +260,12 @@ fn timeoutCallback(
     result catch return .disarm;
     const timeout = userdata orelse return .disarm;
 
-    const task: *AnyTask = @fieldParentPtr("timer_c", completion);
-    std.debug.assert(task == timeout.task);
+    const task = timeout.task orelse return .disarm;
+    std.debug.assert(task == @as(*AnyTask, @fieldParentPtr("timer_c", completion)));
 
     // Remove this timeout from the heap
-    if (timeout.active) {
-        task.timeouts.remove(timeout);
-        timeout.active = false;
-        task.timeout_count -= 1;
-    }
+    task.timeouts.remove(timeout);
+    timeout.task = null;
 
     // Clear the timer's userdata so maybeUpdateTimer knows the timer is not set
     completion.userdata = null;

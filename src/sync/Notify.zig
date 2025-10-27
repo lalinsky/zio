@@ -144,7 +144,7 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     const executor = task.getExecutor();
 
     // Set up timeout
-    var timeout = Timeout.init(runtime);
+    var timeout = Timeout.init;
     defer timeout.clear(runtime);
     timeout.set(runtime, timeout_ns);
 

@@ -184,7 +184,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     }
 
     // Set up timeout
-    var timeout = Timeout.init(runtime);
+    var timeout = Timeout.init;
     defer timeout.clear(runtime);
     timeout.set(runtime, timeout_ns);
 
