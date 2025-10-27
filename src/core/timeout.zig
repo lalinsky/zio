@@ -6,11 +6,15 @@ const AnyTask = @import("task.zig").AnyTask;
 /// A timeout that applies to all I/O operations on the current task.
 /// Multiple Timeout instances can be nested - the earliest deadline always applies.
 /// Timeouts are stack-allocated and managed via defer pattern.
+///
+/// When a timeout expires, operations return error.Canceled and the `triggered` field is set to true,
+/// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
 pub const Timeout = struct {
     task: *AnyTask,
     deadline_ns: u64 = 0,
     heap: xev.heap.IntrusiveField(Timeout) = .{},
     in_heap: bool = false,
+    triggered: bool = false,
 
     /// Initialize a Timeout for the current task.
     /// The Timeout must be deinitialized with deinit() when done.

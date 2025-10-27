@@ -489,7 +489,7 @@ pub const Stream = struct {
         rt: *Runtime,
         stream: Stream,
         interface: std.Io.Reader,
-        err: ?(xev.ReadError || error{Timeout}) = null,
+        err: ?xev.ReadError = null,
 
         pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
             return .{
@@ -541,7 +541,7 @@ pub const Stream = struct {
         rt: *Runtime,
         stream: Stream,
         interface: std.Io.Writer,
-        err: ?(xev.WriteError || error{Timeout}) = null,
+        err: ?xev.WriteError = null,
 
         pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
             return .{

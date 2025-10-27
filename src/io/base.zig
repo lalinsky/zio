@@ -27,11 +27,20 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
 
         // Check if already past deadline
         if (now_ns >= timeout.deadline_ns) {
-            return error.Timeout;
+            timeout.triggered = true;
+            return error.Canceled;
         }
 
         // Use timed wait with remaining time
-        return timedWaitForIo(rt, completion, timeout.deadline_ns - now_ns);
+        timedWaitForIo(rt, completion, timeout.deadline_ns - now_ns) catch |err| switch (err) {
+            error.Timeout => {
+                // Mark the timeout that expired
+                timeout.triggered = true;
+                return error.Canceled;
+            },
+            error.Canceled => return error.Canceled,
+        };
+        return;
     }
 
     // No timeout - use original infinite wait logic
@@ -161,145 +170,13 @@ pub fn IoOperation(comptime op: []const u8) type {
     };
 }
 
+/// Sleep for the specified duration in milliseconds.
+/// Note: sleep() uses the task's timer mechanism and is NOT interruptible by Timeout.
+/// For timeout-aware waiting, use other I/O operations or condition variables.
 pub fn sleep(rt: *Runtime, duration_ms: u64) !void {
     const executor = rt.getCurrentExecutor().?;
-
-    var completion: xev.Completion = .{ .op = .{ .timer = .{
-        .next = executor.loop.timer_next(duration_ms),
-    } } };
-
-    _ = try runIo(rt, &completion, "timer");
+    return executor.sleep(duration_ms);
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-const Timeout = @import("../core/timeout.zig").Timeout;
-
-test "Timeout: basic timeout on sleep" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn testTask(rt: *Runtime) !void {
-            var timeout = Timeout.init(rt);
-            defer timeout.deinit(rt);
-
-            timeout.set(rt, 100); // 100ms timeout
-
-            // Try to sleep for 1 second - should timeout
-            const result = sleep(rt, 1000);
-            try testing.expectError(error.Timeout, result);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.testTask, .{runtime}, .{});
-}
-
-test "Timeout: nested timeouts - inner more restrictive" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn testTask(rt: *Runtime) !void {
-            var outer_timeout = Timeout.init(rt);
-            defer outer_timeout.deinit(rt);
-            outer_timeout.set(rt, 1000); // 1 second
-
-            {
-                var inner_timeout = Timeout.init(rt);
-                defer inner_timeout.deinit(rt);
-                inner_timeout.set(rt, 50); // 50ms (more restrictive)
-
-                // Should timeout after 50ms due to inner timeout
-                const result = sleep(rt, 500);
-                try testing.expectError(error.Timeout, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.testTask, .{runtime}, .{});
-}
-
-test "Timeout: nested timeouts - outer applies after inner deinit" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn testTask(rt: *Runtime) !void {
-            var outer_timeout = Timeout.init(rt);
-            defer outer_timeout.deinit(rt);
-            outer_timeout.set(rt, 200); // 200ms
-
-            // Inner timeout that gets removed
-            {
-                var inner_timeout = Timeout.init(rt);
-                defer inner_timeout.deinit(rt);
-                inner_timeout.set(rt, 50); // 50ms
-
-                // Sleep for less than inner timeout - should succeed
-                try sleep(rt, 30);
-            }
-
-            // Now only outer timeout applies
-            // Sleep for 100ms should succeed (under 200ms outer timeout)
-            try sleep(rt, 100);
-
-            // But sleeping another 150ms should fail (total >200ms)
-            const result = sleep(rt, 150);
-            try testing.expectError(error.Timeout, result);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.testTask, .{runtime}, .{});
-}
-
-test "Timeout: no timeout allows infinite wait" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn testTask(rt: *Runtime) !void {
-            // Sleep without any timeout should succeed
-            try sleep(rt, 50);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.testTask, .{runtime}, .{});
-}
-
-test "Timeout: multiple set() calls update deadline" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn testTask(rt: *Runtime) !void {
-            var timeout = Timeout.init(rt);
-            defer timeout.deinit(rt);
-
-            timeout.set(rt, 50); // Initial: 50ms
-
-            // Sleep for 30ms
-            try sleep(rt, 30);
-
-            // Update to 100ms from now
-            timeout.set(rt, 100);
-
-            // Should succeed (new deadline is 100ms from the set() call)
-            try sleep(rt, 80);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.testTask, .{runtime}, .{});
-}
+// NOTE: Timeout tests are in the signal and networking tests since sleep() is not timeout-aware.
+// Timeouts work with I/O operations like socket reads/writes, file I/O, and signal waits.
