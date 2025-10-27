@@ -8,6 +8,7 @@ const Coroutine = @import("../coroutines.zig").Coroutine;
 const coroutines = @import("../coroutines.zig");
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
+const TimeoutHeap = @import("timeout.zig").TimeoutHeap;
 
 /// Options for creating a task
 pub const CreateOptions = struct {
@@ -23,6 +24,7 @@ pub const AnyTask = struct {
     timer_generation: u2 = 0,
     shield_count: u32 = 0,
     pin_count: u32 = 0,
+    timeout_heap: TimeoutHeap = .{ .context = {} },
 
     pub const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,

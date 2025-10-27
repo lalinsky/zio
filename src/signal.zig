@@ -257,7 +257,8 @@ pub const Signal = struct {
     /// The internal counter is reset after each wait, ensuring signals are not lost.
     ///
     /// Returns error.Canceled if the task is cancelled while waiting.
-    pub fn wait(self: *Signal, rt: *Runtime) Cancelable!void {
+    /// Returns error.Timeout if a Timeout is active on the current task and expires.
+    pub fn wait(self: *Signal, rt: *Runtime) (Cancelable || error{Timeout})!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
