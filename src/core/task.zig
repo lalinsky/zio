@@ -89,9 +89,12 @@ pub const AnyTask = struct {
         while (true) {
             var timeout = self.timeouts.peek() orelse return null;
             if (timeout.deadline_ms < now) {
+                std.debug.assert(timeout.active);
                 const removed = self.timeouts.deleteMin();
                 std.debug.assert(timeout == removed);
+                self.timeout_count -= 1;
                 timeout.active = false;
+                continue;
             }
             return .{
                 .timeout = timeout,
