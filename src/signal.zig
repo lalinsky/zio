@@ -262,7 +262,7 @@ pub const Signal = struct {
         }
 
         const AnyTask = @import("runtime.zig").AnyTask;
-        const resumeTask = @import("runtime.zig").resumeTask;
+        const resumeTask = @import("core/task.zig").resumeTask;
         const waitForIo = @import("io/base.zig").waitForIo;
 
         const WaitContext = struct {
@@ -327,7 +327,7 @@ pub const Signal = struct {
         }
 
         const AnyTask = @import("runtime.zig").AnyTask;
-        const resumeTask = @import("runtime.zig").resumeTask;
+        const resumeTask = @import("core/task.zig").resumeTask;
         const timedWaitForIo = @import("io/base.zig").timedWaitForIo;
 
         const WaitContext = struct {
