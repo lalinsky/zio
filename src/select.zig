@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
-const AnyTask = @import("runtime.zig").AnyTask;
+const AnyTask = @import("core/task.zig").AnyTask;
 const WaitNode = @import("core/WaitNode.zig");
 const meta = @import("meta.zig");
 

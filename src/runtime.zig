@@ -20,11 +20,10 @@ const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
 
-pub const AnyTask = @import("core/task.zig").AnyTask;
+const AnyTask = @import("core/task.zig").AnyTask;
 const Task = @import("core/task.zig").Task;
 const ResumeMode = @import("core/task.zig").ResumeMode;
-pub const resumeTask = @import("core/task.zig").resumeTask;
-pub const AnyBlockingTask = @import("core/blocking_task.zig").AnyBlockingTask;
+const resumeTask = @import("core/task.zig").resumeTask;
 const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
 
 const select = @import("select.zig");
