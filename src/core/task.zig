@@ -60,6 +60,15 @@ pub const AnyTask = struct {
     pub inline fn getExecutor(self: *AnyTask) *Executor {
         return Executor.fromCoroutine(&self.coro);
     }
+
+    /// Check if this task can be migrated to a different executor.
+    /// Returns false if the task is pinned or canceled, true otherwise.
+    pub inline fn canMigrate(self: *const AnyTask) bool {
+        if (self.pin_count > 0) return false;
+        if (self.awaitable.canceled.load(.acquire)) return false;
+        // TODO: Enable migration once we have work-stealing
+        return false;
+    }
 };
 
 // Typed task that contains the AnyTask and FutureResult

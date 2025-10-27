@@ -831,7 +831,7 @@ pub const Executor = struct {
 
         // Migration is allowed only when mode == .maybe_remote
         // (I/O callbacks, timeouts, cancellation use .local mode and don't migrate)
-        if (old_state == .waiting and mode == .maybe_remote and task.pin_count == 0 and false) {
+        if (old_state == .waiting and mode == .maybe_remote and task.canMigrate()) {
             const current_exec = Runtime.current_executor orelse {
                 self.scheduleTaskRemote(task);
                 return;
