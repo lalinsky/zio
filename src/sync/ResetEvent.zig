@@ -122,13 +122,13 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
         // Event was set, return immediately
-        task.coro.state.store(.ready, .release);
+        task.state.store(.ready, .release);
         return;
     }
 
@@ -172,13 +172,13 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
         // Event was set, return immediately
-        task.coro.state.store(.ready, .release);
+        task.state.store(.ready, .release);
         return;
     }
 

@@ -18,11 +18,26 @@ pub const CreateOptions = struct {
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
+    state: std.atomic.Value(State),
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
     shield_count: u32 = 0,
     pin_count: u32 = 0,
+
+    pub const State = enum(u8) {
+        new = 0b0000_0000,
+        ready = 0b0000_0001,
+        preparing_to_wait = 0b0000_0010,
+        waiting_io = 0b0000_0100,
+        waiting_sync = 0b0000_0101,
+        waiting_completion = 0b0000_0110,
+        dead = 0b1000_0000,
+
+        pub fn isWaiting(self: State) bool {
+            return (@intFromEnum(self) & 0b0100) != 0;
+        }
+    };
 
     pub const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
@@ -105,8 +120,8 @@ pub fn Task(comptime T: type) type {
                         .coro = .{
                             .stack = stack,
                             .parent_context_ptr = &executor.main_context,
-                            .state = .init(.waiting_sync),
                         },
+                        .state = .init(.new),
                     },
                     .future_result = .{},
                 },

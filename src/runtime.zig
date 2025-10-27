@@ -11,7 +11,6 @@ const Timeoutable = @import("common.zig").Timeoutable;
 
 const coroutines = @import("coroutines.zig");
 const Coroutine = coroutines.Coroutine;
-const CoroutineState = coroutines.CoroutineState;
 
 // const Error = coroutines.Error;
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
@@ -505,7 +504,7 @@ pub const Executor = struct {
     ///
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
-    pub fn yield(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
 
@@ -522,7 +521,7 @@ pub const Executor = struct {
         }
 
         // Atomically transition state - if this fails, someone changed our state
-        if (current_coro.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
+        if (current_task.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
             // CAS failed - someone changed our state
             if (actual_state == .ready) {
                 // We were woken up before we could yield - don't suspend
@@ -685,8 +684,14 @@ pub const Executor = struct {
 
                 // Handle dead coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
                 if (self.current_coroutine) |current_coro| {
-                    if (current_coro.state.load(.acquire) == .dead) {
-                        const current_task = AnyTask.fromCoroutine(current_coro);
+                    const current_task = AnyTask.fromCoroutine(current_coro);
+
+                    // Check if coroutine finished execution and mark task as dead
+                    if (current_coro.finished) {
+                        current_task.state.store(.dead, .release);
+                    }
+
+                    if (current_task.state.load(.acquire) == .dead) {
                         const current_awaitable = &current_task.awaitable;
 
                         // Release stack immediately since coroutine execution is complete
@@ -825,7 +830,7 @@ pub const Executor = struct {
     /// - `.maybe_remote`: Enables migration for sync tasks, uses remote queue when needed
     /// - `.local`: No migration, always uses home executor (for I/O callbacks)
     pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
-        const old_state = task.coro.state.swap(.ready, .acq_rel);
+        const old_state = task.state.swap(.ready, .acq_rel);
 
         // Task hasn't yielded yet - it will see .ready and skip the yield
         if (old_state == .preparing_to_wait) return;
@@ -848,8 +853,11 @@ pub const Executor = struct {
         // Task already transitioned to .ready by another thread - avoid double-schedule
         if (old_state == .ready) return;
 
-        // Any non-waiting state is a bug
-        if (!old_state.isWaiting()) {
+        // New task being spawned - treat like ready state
+        if (old_state == .new) {
+            // Fall through to default scheduling path
+        } else if (!old_state.isWaiting()) {
+            // Any other non-waiting state is a bug
             std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
         }
 
@@ -929,8 +937,8 @@ pub const Executor = struct {
     /// another source (in which case the timeout is ignored).
     pub fn timedWaitForReadyWithCallback(
         self: *Executor,
-        expected_state: CoroutineState,
-        desired_state: CoroutineState,
+        expected_state: AnyTask.State,
+        desired_state: AnyTask.State,
         timeout_ns: u64,
         comptime TimeoutContext: type,
         timeout_ctx: *TimeoutContext,
@@ -1032,7 +1040,7 @@ pub const Executor = struct {
         );
     }
 
-    pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+    pub fn timedWaitForReady(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, timeout_ns: u64) (Timeoutable || Cancelable)!void {
         const DummyContext = struct {};
         var dummy: DummyContext = .{};
         return self.timedWaitForReadyWithCallback(

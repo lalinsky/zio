@@ -75,14 +75,14 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     // Slow path: add to FIFO wait queue
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue, or if mutex is unlocked, acquire it atomically
     // This prevents the race: unlocked -> has_waiters (skipping locked_once)
     const result = self.queue.pushOrTransition(unlocked, locked_once, &task.awaitable.wait_node);
     if (result == .transitioned) {
         // Mutex was unlocked, we acquired it via transition to locked_once
-        task.coro.state.store(.ready, .release);
+        task.state.store(.ready, .release);
         return;
     }
 

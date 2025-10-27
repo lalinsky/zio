@@ -107,7 +107,7 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Push to wait queue
     self.wait_queue.push(&task.awaitable.wait_node);
@@ -143,7 +143,7 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Push to wait queue
     self.wait_queue.push(&task.awaitable.wait_node);

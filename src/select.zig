@@ -184,9 +184,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         checkSelfWait(task, @field(futures, field.name));
     }
 
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
     defer {
-        const prev = task.coro.state.swap(.ready, .release);
+        const prev = task.state.swap(.ready, .release);
         std.debug.assert(prev == .preparing_to_wait or prev == .ready);
     }
 
@@ -247,11 +247,11 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     if (task) |t| checkSelfWait(t, future);
 
     if (task) |t| {
-        t.coro.state.store(.preparing_to_wait, .release);
+        t.state.store(.preparing_to_wait, .release);
     }
     defer {
         if (task) |t| {
-            const prev = t.coro.state.swap(.ready, .release);
+            const prev = t.state.swap(.ready, .release);
             std.debug.assert(prev == .preparing_to_wait or prev == .ready);
         }
     }
