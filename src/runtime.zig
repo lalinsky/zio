@@ -133,10 +133,9 @@ fn shutdownCallback(
     return .disarm;
 }
 
-// Re-export Awaitable types from core module
 const awaitable_module = @import("core/awaitable.zig");
-pub const Awaitable = awaitable_module.Awaitable;
-pub const AwaitableKind = awaitable_module.AwaitableKind;
+const Awaitable = awaitable_module.Awaitable;
+const AwaitableKind = awaitable_module.AwaitableKind;
 const AwaitableList = awaitable_module.AwaitableList;
 
 /// Wait for an awaitable to complete with a timeout. Works from both coroutines and threads.
