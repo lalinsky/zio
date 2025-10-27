@@ -271,7 +271,11 @@ fn timeoutCallback(
     if (timeout.active) {
         task.timeouts.remove(timeout);
         timeout.active = false;
+        task.timeout_count -= 1;
     }
+
+    // Clear the timer's userdata so maybeUpdateTimer knows the timer is not set
+    completion.userdata = null;
 
     // Configure the next timer
     task.updateTimer(loop);

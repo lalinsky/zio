@@ -623,10 +623,20 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        self.timedWaitForReady(.ready, .waiting, milliseconds * 1_000_000) catch |err| switch (err) {
-            error.Timeout => return, // Expected for sleep - not an error
-            error.Canceled => return error.Canceled, // Propagate cancellation
+        // Set up timeout
+        var timeout = Timeout.init(self.runtime);
+        defer timeout.clear(self.runtime);
+        timeout.set(self.runtime, milliseconds * std.time.ns_per_ms);
+
+        // Yield with atomic state transition (.ready -> .waiting)
+        self.yield(.ready, .waiting, .allow_cancel) catch {
+            // Check if timeout or explicit cancel
+            if (timeout.triggered) return; // Expected for sleep
+            return error.Canceled;
         };
+
+        // Yield returned successfully - check if timeout fired
+        if (timeout.triggered) return; // Expected for sleep
         unreachable; // Should always timeout or be canceled
     }
 
