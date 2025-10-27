@@ -466,14 +466,16 @@ pub const Executor = struct {
         try self.runtime.tasks.add(&task.impl.base.awaitable);
         errdefer _ = self.runtime.tasks.remove(&task.impl.base.awaitable);
 
+        // Increment ref count for JoinHandle BEFORE scheduling
+        // This prevents race where task completes before we create the handle
+        task.impl.base.awaitable.ref_count.incr();
+        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(&task.impl.base, .maybe_remote);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
-
-        // Increment ref count for JoinHandle
-        task.impl.base.awaitable.ref_count.incr();
 
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
@@ -1199,13 +1201,15 @@ pub const Runtime = struct {
         try self.tasks.add(&task.impl.base.awaitable);
         errdefer _ = self.tasks.remove(&task.impl.base.awaitable);
 
+        // Increment ref count for JoinHandle BEFORE scheduling
+        // This prevents race where task completes before we create the handle
+        task.impl.base.awaitable.ref_count.incr();
+        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+
         // Schedule the task to run on the thread pool
         thread_pool.schedule(
             xev.ThreadPool.Batch.from(&task.impl.base.thread_pool_task),
         );
-
-        // Increment ref count for JoinHandle
-        task.impl.base.awaitable.ref_count.incr();
 
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
