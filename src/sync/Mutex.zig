@@ -26,7 +26,7 @@ const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-const resumeTask = @import("../runtime.zig").resumeTask;
+const resumeTask = @import("../core/task.zig").resumeTask;
 const WaitNode = @import("../core/WaitNode.zig");
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 

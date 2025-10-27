@@ -4,6 +4,8 @@ const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
+const AnyTask = @import("core/task.zig").AnyTask;
+const resumeTask = @import("core/task.zig").resumeTask;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -261,8 +263,6 @@ pub const Signal = struct {
             return;
         }
 
-        const AnyTask = @import("runtime.zig").AnyTask;
-        const resumeTask = @import("runtime.zig").resumeTask;
         const waitForIo = @import("io/base.zig").waitForIo;
 
         const WaitContext = struct {
@@ -326,8 +326,6 @@ pub const Signal = struct {
             return;
         }
 
-        const AnyTask = @import("runtime.zig").AnyTask;
-        const resumeTask = @import("runtime.zig").resumeTask;
         const timedWaitForIo = @import("io/base.zig").timedWaitForIo;
 
         const WaitContext = struct {
