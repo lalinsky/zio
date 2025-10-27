@@ -20,6 +20,13 @@ const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
 
+pub const AnyTask = @import("core/task.zig").AnyTask;
+const Task = @import("core/task.zig").Task;
+const ResumeMode = @import("core/task.zig").ResumeMode;
+pub const resumeTask = @import("core/task.zig").resumeTask;
+pub const AnyBlockingTask = @import("core/blocking_task.zig").AnyBlockingTask;
+const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
+
 const select = @import("select.zig");
 
 const Io = @import("io.zig").Io;
@@ -95,25 +102,6 @@ fn noopTimerCancelCallback(
     return .disarm;
 }
 
-// Thread pool callback for blocking tasks
-fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
-    const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
-
-    // Check if the task was canceled before it started executing
-    if (!any_blocking_task.awaitable.canceled.load(.acquire)) {
-        // Execute the user's blocking function only if not canceled
-        any_blocking_task.execute_fn(any_blocking_task);
-    }
-
-    // Mark awaitable as complete and wake all waiters (thread-safe)
-    // Even if canceled, we still mark as complete so waiters wake up
-    any_blocking_task.awaitable.markComplete();
-
-    // Release the blocking task's reference and check for shutdown
-    const runtime = any_blocking_task.runtime;
-    runtime.releaseAwaitable(&any_blocking_task.awaitable, true);
-}
-
 // Async callback for remote ready tasks wakeup (cross-thread resumption)
 // This just wakes up the loop - the actual draining happens in run().
 fn remoteWakeupCallback(
@@ -147,11 +135,10 @@ fn shutdownCallback(
 }
 
 // Re-export Awaitable types from core module
-const awaitable_module = @import("core/Awaitable.zig");
+const awaitable_module = @import("core/awaitable.zig");
 pub const Awaitable = awaitable_module.Awaitable;
 pub const AwaitableKind = awaitable_module.AwaitableKind;
-
-const AwaitableList = @import("core/AwaitableList.zig");
+const AwaitableList = awaitable_module.AwaitableList;
 
 /// Wait for an awaitable to complete with a timeout. Works from both coroutines and threads.
 /// Returns error.Timeout if the timeout expires before completion.
@@ -228,285 +215,6 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
             try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns - elapsed_ns);
         }
     }
-}
-
-/// Resume mode - controls cross-thread checking
-pub const ResumeMode = enum {
-    /// May resume on a different executor - checks thread-local executor
-    maybe_remote,
-    /// Always resumes on the current executor - skips check (use for IO callbacks)
-    local,
-};
-
-/// Resume a coroutine (mark it as ready).
-/// Accepts *Awaitable, *AnyTask, or *Coroutine.
-/// The coroutine must currently be in waiting state.
-///
-/// The `mode` parameter controls cross-thread checking:
-/// - `.maybe_remote`: Checks if we're on the same executor (use for wait lists, futures)
-/// - `.local`: Assumes we're on the same executor (use for IO callbacks)
-pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
-    const T = @TypeOf(obj);
-    const task: *AnyTask = switch (T) {
-        *AnyTask => obj,
-        *Awaitable => AnyTask.fromAwaitable(obj),
-        *Coroutine => AnyTask.fromCoroutine(obj),
-        else => @compileError("resumeTask() requires, *AnyTask, *Awaitable or *Coroutine, got " ++ @typeName(T)),
-    };
-
-    const home_executor = Executor.fromCoroutine(&task.coro);
-    home_executor.scheduleTask(task, mode);
-}
-
-// Task for runtime scheduling - coroutine-based tasks
-pub const AnyTask = struct {
-    awaitable: Awaitable,
-    coro: Coroutine,
-    timer_c: xev.Completion = .{},
-    timer_cancel_c: xev.Completion = .{},
-    timer_generation: u2 = 0,
-    shield_count: u32 = 0,
-    pin_count: u32 = 0,
-
-    const wait_node_vtable = WaitNode.VTable{
-        .wake = waitNodeWake,
-    };
-
-    fn waitNodeWake(wait_node: *WaitNode) void {
-        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
-        resumeTask(awaitable, .maybe_remote);
-    }
-
-    pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
-        assert(awaitable.kind == .task);
-        return @fieldParentPtr("awaitable", awaitable);
-    }
-
-    pub inline fn fromWaitNode(wait_node: *WaitNode) *AnyTask {
-        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
-        assert(awaitable.kind == .task);
-        return @fieldParentPtr("awaitable", awaitable);
-    }
-
-    pub inline fn fromCoroutine(coro: *Coroutine) *AnyTask {
-        return @fieldParentPtr("coro", coro);
-    }
-
-    /// Get the executor that owns this task.
-    pub inline fn getExecutor(self: *AnyTask) *Executor {
-        return Executor.fromCoroutine(&self.coro);
-    }
-};
-
-// Blocking task for runtime scheduling - thread pool based tasks
-pub const AnyBlockingTask = struct {
-    awaitable: Awaitable,
-    thread_pool_task: xev.ThreadPool.Task,
-    runtime: *Runtime,
-    execute_fn: *const fn (*AnyBlockingTask) void,
-
-    const wait_node_vtable = WaitNode.VTable{};
-
-    pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
-        assert(awaitable.kind == .blocking_task);
-        return @fieldParentPtr("awaitable", awaitable);
-    }
-};
-
-// Future for runtime - not backed by computation, can be set from callbacks
-// Shared implementation for all Future types (Task, BlockingTask, Future)
-fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type {
-    return struct {
-        base: Base,
-        future_result: FutureResult(T),
-
-        // Future protocol - Result type
-        pub const Result = T;
-
-        pub fn wait(parent: *Parent) Cancelable!select.WaitResult(T) {
-            // Check if already completed
-            if (parent.impl.future_result.get()) |res| {
-                return .{ .value = res };
-            }
-
-            // Wait for completion using select.wait()
-            const runtime = Parent.getRuntime(parent);
-            return try select.wait(runtime, parent);
-        }
-
-        pub fn cancel(parent: *Parent) void {
-            parent.impl.base.awaitable.cancel();
-        }
-
-        pub fn fromAny(base: *Base) *Parent {
-            const impl_ptr: *@This() = @fieldParentPtr("base", base);
-            return @fieldParentPtr("impl", impl_ptr);
-        }
-
-        pub fn fromAwaitable(awaitable: *Awaitable) *Parent {
-            const base_ptr = Base.fromAwaitable(awaitable);
-            return fromAny(base_ptr);
-        }
-
-        pub fn deinit(parent: *Parent) void {
-            const runtime = Parent.getRuntime(parent);
-            runtime.releaseAwaitable(&parent.impl.base.awaitable, false);
-        }
-
-        /// Registers a wait node to be notified when the task completes.
-        /// This is part of the Future protocol for select().
-        /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(parent: *const Parent, wait_node: *WaitNode) bool {
-            return parent.impl.base.awaitable.asyncWait(wait_node);
-        }
-
-        /// Cancels a pending wait operation by removing the wait node.
-        /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(parent: *const Parent, wait_node: *WaitNode) void {
-            parent.impl.base.awaitable.asyncCancelWait(wait_node);
-        }
-
-        /// Returns pointer to the underlying awaitable for self-wait detection.
-        /// This is part of the Future protocol for select().
-        pub fn toAwaitable(parent: *const Parent) *const Awaitable {
-            return &parent.impl.base.awaitable;
-        }
-
-        /// Gets the result value.
-        /// This is part of the Future protocol for select().
-        /// Asserts that the task has completed.
-        pub fn getResult(parent: *Parent) T {
-            return parent.impl.future_result.get().?;
-        }
-    };
-}
-
-// Typed task that contains the AnyTask and FutureResult
-pub fn Task(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Impl = FutureImpl(T, AnyTask, Self);
-
-        impl: Impl,
-
-        pub const Result = Impl.Result;
-        pub const deinit = Impl.deinit;
-        pub const wait = Impl.wait;
-        pub const cancel = Impl.cancel;
-        pub const fromAny = Impl.fromAny;
-        pub const fromAwaitable = Impl.fromAwaitable;
-        pub const asyncWait = Impl.asyncWait;
-        pub const asyncCancelWait = Impl.asyncCancelWait;
-        pub const toAwaitable = Impl.toAwaitable;
-        pub const getResult = Impl.getResult;
-
-        pub fn getRuntime(self: *Self) *Runtime {
-            const executor = Executor.fromCoroutine(&self.impl.base.coro);
-            return executor.runtime;
-        }
-
-        fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
-            const any_task = AnyTask.fromAwaitable(awaitable);
-            const self = fromAny(any_task);
-            // Stack is released by executor when coroutine becomes dead
-            std.debug.assert(any_task.coro.stack == null);
-            runtime.allocator.destroy(self);
-        }
-    };
-}
-
-// Typed blocking task that contains the AnyBlockingTask and FutureResult
-pub fn BlockingTask(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Impl = FutureImpl(T, AnyBlockingTask, Self);
-
-        impl: Impl,
-
-        pub const Result = Impl.Result;
-        pub const deinit = Impl.deinit;
-        pub const wait = Impl.wait;
-        pub const cancel = Impl.cancel;
-        pub const fromAny = Impl.fromAny;
-        pub const fromAwaitable = Impl.fromAwaitable;
-        pub const asyncWait = Impl.asyncWait;
-        pub const asyncCancelWait = Impl.asyncCancelWait;
-        pub const toAwaitable = Impl.toAwaitable;
-        pub const getResult = Impl.getResult;
-
-        pub fn getRuntime(self: *Self) *Runtime {
-            return self.impl.base.runtime;
-        }
-
-        pub fn init(
-            runtime: *Runtime,
-            allocator: Allocator,
-            func: anytype,
-            args: meta.ArgsType(func),
-        ) !*Self {
-            const thread_pool = runtime.thread_pool orelse return error.NoThreadPool;
-
-            const Args = @TypeOf(args);
-
-            const TaskData = struct {
-                blocking_task: Self,
-                args: Args,
-
-                fn execute(any_blocking_task: *AnyBlockingTask) void {
-                    const blocking_task = Self.fromAny(any_blocking_task);
-                    const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
-
-                    const res = @call(.always_inline, func, self.args);
-                    _ = self.blocking_task.impl.future_result.set(res);
-                }
-
-                fn destroy(rt: *Runtime, awaitable: *Awaitable) void {
-                    const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
-                    const blocking_task = Self.fromAny(any_blocking_task);
-                    const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
-                    rt.allocator.destroy(self);
-                }
-            };
-
-            const task_data = try allocator.create(TaskData);
-            errdefer allocator.destroy(task_data);
-
-            task_data.* = .{
-                .blocking_task = .{
-                    .impl = .{
-                        .base = .{
-                            .awaitable = .{
-                                .kind = .blocking_task,
-                                .destroy_fn = &TaskData.destroy,
-                                .wait_node = .{
-                                    .vtable = &AnyBlockingTask.wait_node_vtable,
-                                },
-                            },
-                            .thread_pool_task = .{ .callback = threadPoolCallback },
-                            .runtime = runtime,
-                            .execute_fn = &TaskData.execute,
-                        },
-                        .future_result = FutureResult(T){},
-                    },
-                },
-                .args = args,
-            };
-
-            // Add to global awaitable registry (can fail if runtime is shutting down)
-            try runtime.tasks.add(&task_data.blocking_task.impl.base.awaitable);
-            errdefer _ = runtime.tasks.remove(&task_data.blocking_task.impl.base.awaitable);
-
-            // Schedule the task to run on the thread pool
-            thread_pool.schedule(
-                xev.ThreadPool.Batch.from(&task_data.blocking_task.impl.base.thread_pool_task),
-            );
-
-            // Increment ref count for the JoinHandle
-            task_data.blocking_task.impl.base.awaitable.ref_count.incr();
-
-            return &task_data.blocking_task;
-        }
-    };
 }
 
 // Public handle for spawned tasks and futures
@@ -750,42 +458,12 @@ pub const Executor = struct {
 
     pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
-        const TypedTask = Task(Result);
 
-        // Allocate task struct
-        const task = try self.allocator.create(TypedTask);
-        errdefer self.allocator.destroy(task);
-
-        // Acquire stack from pool (thread-safe with stack pool changes)
-        const stack = try self.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
-        errdefer self.stack_pool.release(stack);
-
-        task.* = .{
-            .impl = .{
-                .base = .{
-                    .awaitable = .{
-                        .kind = .task,
-                        .destroy_fn = &TypedTask.destroyFn,
-                        .wait_node = .{
-                            .vtable = &AnyTask.wait_node_vtable,
-                        },
-                    },
-                    .coro = .{
-                        .stack = stack,
-                        .parent_context_ptr = &self.main_context,
-                        .state = .init(.waiting_sync),
-                    },
-                },
-                .future_result = .{},
-            },
-        };
-
-        task.impl.base.coro.setup(func, args, &task.impl.future_result);
-
-        // Set pin count if task is pinned or assigned to a specific executor
-        if (options.pinned or options.executor.isId()) {
-            task.impl.base.pin_count = 1;
-        }
+        const task = try Task(Result).create(self, func, args, .{
+            .stack_size = options.stack_size,
+            .pinned = options.pinned or options.executor.isId(),
+        });
+        errdefer task.destroy(self.runtime);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
         try self.runtime.tasks.add(&task.impl.base.awaitable);
@@ -1536,15 +1214,23 @@ pub const Runtime = struct {
             return error.RuntimeShutdown;
         }
 
-        if (self.thread_pool == null) return error.ThreadPoolRequired;
+        const thread_pool = self.thread_pool orelse return error.NoThreadPool;
 
         const Result = meta.ReturnType(func);
-        const task = try BlockingTask(Result).init(
-            self,
-            self.allocator,
-            func,
-            args,
+        const task = try BlockingTask(Result).create(self, func, args);
+        errdefer task.destroy(self);
+
+        // Add to global awaitable registry (can fail if runtime is shutting down)
+        try self.tasks.add(&task.impl.base.awaitable);
+        errdefer _ = self.tasks.remove(&task.impl.base.awaitable);
+
+        // Schedule the task to run on the thread pool
+        thread_pool.schedule(
+            xev.ThreadPool.Batch.from(&task.impl.base.thread_pool_task),
         );
+
+        // Increment ref count for JoinHandle
+        task.impl.base.awaitable.ref_count.incr();
 
         return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
     }
@@ -1730,7 +1416,7 @@ pub const Runtime = struct {
         }
     }
 
-    fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable, comptime done: bool) void {
+    pub fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable, comptime done: bool) void {
         if (done) {
             _ = self.tasks.remove(awaitable);
         }
