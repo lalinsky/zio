@@ -186,7 +186,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     // Set up timeout
     var timeout = Timeout.init(runtime);
     defer timeout.clear(runtime);
-    timeout.set(runtime, @intCast(timeout_ns / 1_000_000));
+    timeout.set(runtime, timeout_ns);
 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend

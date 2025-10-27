@@ -146,7 +146,7 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     // Set up timeout
     var timeout = Timeout.init(runtime);
     defer timeout.clear(runtime);
-    timeout.set(runtime, @intCast(timeout_ns / 1_000_000));
+    timeout.set(runtime, timeout_ns);
 
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);

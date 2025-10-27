@@ -159,7 +159,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     // Set up timeout
     var timeout = Timeout.init(runtime);
     defer timeout.clear(runtime);
-    timeout.set(runtime, @intCast(timeout_ns / 1_000_000));
+    timeout.set(runtime, timeout_ns);
 
     // Atomically release mutex
     mutex.unlock(runtime);

@@ -36,7 +36,7 @@ pub const Timeout = struct {
         }
     }
 
-    pub fn set(self: *Timeout, rt: *Runtime, timeout_ms: u32) void {
+    pub fn set(self: *Timeout, rt: *Runtime, timeout_ns: u64) void {
         const executor = self.task.getExecutor();
         std.debug.assert(executor.runtime == rt);
 
@@ -47,6 +47,7 @@ pub const Timeout = struct {
             self.task.timeout_count += 1;
         }
         self.triggered = false;
+        const timeout_ms: i64 = @intCast(timeout_ns / std.time.ns_per_ms);
         self.deadline_ms = executor.loop.now() + timeout_ms;
         self.task.timeouts.insert(self);
         self.task.maybeUpdateTimer();
@@ -68,7 +69,7 @@ test "Timeout: smoke test" {
             var timeout = Timeout.init(rt);
             defer timeout.clear(rt);
 
-            timeout.set(rt, 100);
+            timeout.set(rt, 100 * std.time.ns_per_ms);
         }
     };
 
