@@ -1,10 +1,10 @@
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-const NUM_ROUNDS: u32 = 1_000_000;
+const NUM_ROUNDS: u32 = 1_000_000_0;
 
 async fn pinger(
-    mut ping_tx: mpsc::Sender<u32>,
+    ping_tx: mpsc::Sender<u32>,
     mut pong_rx: mpsc::Receiver<u32>,
     rounds: u32,
 ) {
@@ -16,7 +16,7 @@ async fn pinger(
 
 async fn ponger(
     mut ping_rx: mpsc::Receiver<u32>,
-    mut pong_tx: mpsc::Sender<u32>,
+    pong_tx: mpsc::Sender<u32>,
     rounds: u32,
 ) {
     for _ in 0..rounds {

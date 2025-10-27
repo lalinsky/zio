@@ -11,7 +11,7 @@ import (
 
 const (
 	NUM_CLIENTS          = 10
-	MESSAGES_PER_CLIENT  = 10_000
+	MESSAGES_PER_CLIENT  = 50_000
 	MESSAGE_SIZE         = 64
 	SERVER_ADDR          = "127.0.0.1:45679"
 )

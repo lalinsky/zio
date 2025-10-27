@@ -5,7 +5,7 @@ use tokio::sync::Barrier;
 use std::sync::Arc;
 
 const NUM_CLIENTS: usize = 10;
-const MESSAGES_PER_CLIENT: usize = 10_000;
+const MESSAGES_PER_CLIENT: usize = 50_000;
 const MESSAGE_SIZE: usize = 64;
 const SERVER_ADDR: &str = "127.0.0.1:45681";
 
