@@ -169,7 +169,7 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
 
         executor.timedWaitForReadyWithCallback(
             .ready,
-            .waiting_sync,
+            .waiting,
             timeout_ns,
             TimeoutContext,
             &timeout_ctx,
@@ -485,8 +485,7 @@ pub const Executor = struct {
     /// Suspends the current coroutine and allows other tasks to run. The coroutine
     /// will be rescheduled according to `desired_state`:
     /// - `.ready`: Reschedule immediately (cooperative yielding)
-    /// - `.waiting_io`: Suspend until I/O completes (e.g., waiting for xev completion)
-    /// - `.waiting_sync`: Suspend until sync primitive signals (e.g., mutex, condition, channel)
+    /// - `.waiting`: Suspend until resumed (I/O, sync primitives, timeout, cancellation, etc.)
     ///
     /// ## Cancellation Mode
     ///
@@ -621,7 +620,7 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        self.timedWaitForReady(.ready, .waiting_io, milliseconds * 1_000_000) catch |err| switch (err) {
+        self.timedWaitForReady(.ready, .waiting, milliseconds * 1_000_000) catch |err| switch (err) {
             error.Timeout => return, // Expected for sleep - not an error
             error.Canceled => return error.Canceled, // Propagate cancellation
         };
@@ -699,7 +698,7 @@ pub const Executor = struct {
                     }
                 }
 
-                // Other states (.ready, .waiting_io, .waiting_sync) are handled by yield() or markReady()
+                // Other states (.ready, .waiting) are handled by yield() or markReady()
             }
 
             // Move yielded coroutines back to ready queue
@@ -809,47 +808,30 @@ pub const Executor = struct {
     /// Atomically transitions task state to .ready and schedules it for execution.
     ///
     /// Task migration for cache locality:
-    /// - Sync tasks (.waiting_sync) with .maybe_remote: May migrate to current executor if in same runtime
-    /// - I/O tasks (.waiting_io): Always stay on home executor (cannot migrate)
-    /// - Spawn tasks (.ready): Schedule on home executor
+    /// - Tasks resumed with .maybe_remote: May migrate to current executor if conditions allow
+    /// - Tasks resumed with .local: Always stay on home executor (I/O callbacks, timeouts, cancellation)
+    /// - New/ready tasks: Schedule on home executor
     ///
     /// The `mode` parameter:
-    /// - `.maybe_remote`: Enables migration for sync tasks, uses remote queue when needed
-    /// - `.local`: No migration, always uses home executor (for I/O callbacks)
+    /// - `.maybe_remote`: Enables migration, uses remote queue when needed
+    /// - `.local`: No migration, always uses home executor
     pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
         const old_state = task.state.swap(.ready, .acq_rel);
 
         // Task hasn't yielded yet - it will see .ready and skip the yield
         if (old_state == .preparing_to_wait) return;
 
-        // I/O tasks cannot migrate (bound to home executor's event loop)
-        if (old_state == .waiting_io) {
-            if (mode == .maybe_remote) {
-                if (Runtime.current_executor == self) {
-                    self.scheduleTaskLocal(task, false);
-                } else {
-                    self.scheduleTaskRemote(task);
-                }
-            } else {
-                assert(Runtime.current_executor == self);
-                self.scheduleTaskLocal(task, false);
-            }
-            return;
-        }
-
         // Task already transitioned to .ready by another thread - avoid double-schedule
         if (old_state == .ready) return;
 
-        // New task being spawned - treat like ready state
-        if (old_state == .new) {
-            // Fall through to default scheduling path
-        } else if (!old_state.isWaiting()) {
-            // Any other non-waiting state is a bug
+        // Validate state transitions
+        if (old_state != .new and old_state != .waiting) {
             std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
         }
 
-        // Sync tasks can migrate for cache locality (waiting_sync state only)
-        if (old_state == .waiting_sync and mode == .maybe_remote and task.pin_count == 0 and false) {
+        // Migration is allowed only when mode == .maybe_remote
+        // (I/O callbacks, timeouts, cancellation use .local mode and don't migrate)
+        if (old_state == .waiting and mode == .maybe_remote and task.pin_count == 0 and false) {
             const current_exec = Runtime.current_executor orelse {
                 self.scheduleTaskRemote(task);
                 return;
@@ -870,7 +852,7 @@ pub const Executor = struct {
             return;
         }
 
-        // Default path: .ready state (spawn) or .local mode
+        // Default path: schedule on appropriate executor
         if (mode == .maybe_remote) {
             if (Runtime.current_executor == self) {
                 self.scheduleTaskLocal(task, false);

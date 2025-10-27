@@ -23,7 +23,7 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
 
     while (completion.state() == .active) {
         var executor = rt.getCurrentExecutor() orelse @panic("no active executor");
-        executor.yield(.ready, .waiting_io, .allow_cancel) catch |err| switch (err) {
+        executor.yield(.ready, .waiting, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {
                 if (!canceled) {
                     canceled = true;
@@ -62,7 +62,7 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64
     while (completion.state() == .active) {
         task.getExecutor().timedWaitForReadyWithCallback(
             .ready,
-            .waiting_io,
+            .waiting,
             timeout_ns,
             TimeoutContext,
             &timeout_ctx,

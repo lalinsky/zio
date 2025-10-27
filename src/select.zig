@@ -219,7 +219,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     }
 
     // Yield and wait for one to complete
-    try executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel);
+    try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
 
     // We should have at least one future with result
     // TODO What to do if we have multiple?
@@ -283,7 +283,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
             defer if (shielded) rt.endShield();
 
             while (true) {
-                executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel) catch |err| switch (err) {
+                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| switch (err) {
                     error.Canceled => {
                         if (shielded) unreachable;
                         rt.beginShield();
@@ -296,7 +296,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
             }
         } else {
             // Propagate cancellation to caller
-            try executor.yield(.preparing_to_wait, .waiting_completion, .allow_cancel);
+            try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
         }
     } else {
         // Thread path: park on futex

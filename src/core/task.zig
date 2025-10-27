@@ -26,16 +26,10 @@ pub const AnyTask = struct {
     pin_count: u32 = 0,
 
     pub const State = enum(u8) {
-        new = 0b0000_0000,
-        ready = 0b0000_0001,
-        preparing_to_wait = 0b0000_0010,
-        waiting_io = 0b0000_0100,
-        waiting_sync = 0b0000_0101,
-        waiting_completion = 0b0000_0110,
-
-        pub fn isWaiting(self: State) bool {
-            return (@intFromEnum(self) & 0b0100) != 0;
-        }
+        new,
+        ready,
+        preparing_to_wait,
+        waiting,
     };
 
     pub const wait_node_vtable = WaitNode.VTable{

@@ -86,9 +86,9 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
         return;
     }
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting_sync, .allow_cancel) catch |err| {
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Cancellation - try to remove ourselves from queue
         if (!self.queue.remove(&task.awaitable.wait_node)) {
             // Already inherited the lock
