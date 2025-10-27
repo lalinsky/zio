@@ -46,6 +46,7 @@ pub const Timeout = struct {
             self.active = true;
             self.task.timeout_count += 1;
         }
+        self.triggered = false;
         self.deadline_ms = executor.loop.now() + timeout_ms;
         self.task.timeouts.insert(self);
         self.task.maybeUpdateTimer();
