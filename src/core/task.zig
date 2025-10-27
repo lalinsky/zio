@@ -269,7 +269,7 @@ fn timeoutCallback(
     timeout.triggered = true;
 
     // Remove this timeout from the heap
-    if (!timeout.active) {
+    if (timeout.active) {
         task.timeouts.remove(timeout);
         timeout.active = false;
     }
