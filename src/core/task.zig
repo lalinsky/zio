@@ -19,12 +19,23 @@ pub const CreateOptions = struct {
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
+
+    // Shared xev timer for timeout handling
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
-    shield_count: u32 = 0,
-    pin_count: u32 = 0,
-    timeout_heap: TimeoutHeap = .{ .context = {} },
+
+    // Shared xev timer for timeout handling
+    timeouts: TimeoutHeap = .{ .context = {} },
+
+    // Number of active timeouts currently registered
+    timeout_count: u8 = 0,
+
+    // Number of active cancelation sheilds
+    shield_count: u8 = 0,
+
+    // Number of times this task was pinned to the current executor
+    pin_count: u8 = 0,
 
     pub const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,

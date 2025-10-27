@@ -18,32 +18,6 @@ pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
 }
 
 pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
-
-    // Check if there's an active timeout deadline
-    if (task.timeout_heap.peek()) |timeout| {
-        const executor = task.getExecutor();
-        const now_ns = @as(u64, @intCast(executor.loop.now())) * 1_000_000;
-
-        // Check if already past deadline
-        if (now_ns >= timeout.deadline_ns) {
-            timeout.triggered = true;
-            return error.Canceled;
-        }
-
-        // Use timed wait with remaining time
-        timedWaitForIo(rt, completion, timeout.deadline_ns - now_ns) catch |err| switch (err) {
-            error.Timeout => {
-                // Mark the timeout that expired
-                timeout.triggered = true;
-                return error.Canceled;
-            },
-            error.Canceled => return error.Canceled,
-        };
-        return;
-    }
-
-    // No timeout - use original infinite wait logic
     var canceled = false;
     defer if (canceled) rt.endShield();
 
@@ -169,14 +143,3 @@ pub fn IoOperation(comptime op: []const u8) type {
         }
     };
 }
-
-/// Sleep for the specified duration in milliseconds.
-/// Note: sleep() uses the task's timer mechanism and is NOT interruptible by Timeout.
-/// For timeout-aware waiting, use other I/O operations or condition variables.
-pub fn sleep(rt: *Runtime, duration_ms: u64) !void {
-    const executor = rt.getCurrentExecutor().?;
-    return executor.sleep(duration_ms);
-}
-
-// NOTE: Timeout tests are in the signal and networking tests since sleep() is not timeout-aware.
-// Timeouts work with I/O operations like socket reads/writes, file I/O, and signal waits.
