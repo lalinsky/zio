@@ -2,26 +2,19 @@ const std = @import("std");
 const zio = @import("zio");
 
 const NUM_CLIENTS = 10;
-const MESSAGES_PER_CLIENT = 10_000;
+const MESSAGES_PER_CLIENT = 50_000;
 const MESSAGE_SIZE = 64; // bytes
 
 fn handleClient(rt: *zio.Runtime, in_stream: zio.net.Stream) !void {
     var stream = in_stream;
     defer stream.close(rt);
 
-    var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(rt, &read_buffer);
-
-    var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(rt, &write_buffer);
+    var buffer: [MESSAGE_SIZE]u8 = undefined;
 
     while (true) {
-        const n = reader.interface.stream(&writer.interface, .unlimited) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        _ = n;
-        try writer.interface.flush();
+        const n = try stream.read(rt, &buffer);
+        if (n == 0) break;
+        try stream.writeAll(rt, buffer[0..n]);
     }
 }
 
@@ -59,12 +52,6 @@ fn clientTask(
     defer stream.close(rt);
     defer stream.shutdown(rt, .both) catch {};
 
-    var reader_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(rt, &reader_buffer);
-
-    var writer_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(rt, &writer_buffer);
-
     var send_buffer: [MESSAGE_SIZE]u8 = undefined;
     var recv_buffer: [MESSAGE_SIZE]u8 = undefined;
 
@@ -78,13 +65,13 @@ fn clientTask(
     while (i < MESSAGES_PER_CLIENT) : (i += 1) {
         const msg_start = std.time.nanoTimestamp();
 
-        try writer.interface.writeAll(&send_buffer);
-        try writer.interface.flush();
+        try stream.writeAll(rt, &send_buffer);
 
-        try reader.interface.readSliceAll(&recv_buffer);
-
-        if (!std.mem.eql(u8, &send_buffer, &recv_buffer)) {
-            return error.UnexpectedData;
+        var bytes_received: usize = 0;
+        while (bytes_received < MESSAGE_SIZE) {
+            const n = try stream.read(rt, recv_buffer[bytes_received..]);
+            if (n == 0) return error.UnexpectedEndOfStream;
+            bytes_received += n;
         }
 
         const msg_end = std.time.nanoTimestamp();
