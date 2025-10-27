@@ -265,6 +265,7 @@ fn timeoutCallback(
     std.debug.assert(task == timeout.task);
 
     // Mark this one as triggered, user can convert this to error.Timeout
+    // TODO: Should we only mark triggered if we were the one who canceled the task?
     timeout.triggered = true;
 
     // Remove this timeout from the heap
@@ -276,9 +277,9 @@ fn timeoutCallback(
     // Configure the next timer
     task.updateTimer(loop);
 
-    // Resume the task
-    // TODO call cancel() here
-    resumeTask(task, .local);
+    // Cancel the task (sets canceled flag and resumes it)
+    // TODO: Race condition in cancel between storing cancelled and wake?
+    task.awaitable.cancel();
 
     return .disarm;
 }
