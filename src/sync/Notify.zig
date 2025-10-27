@@ -176,6 +176,9 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     if (builtin.mode == .Debug) {
         std.debug.assert(!task.awaitable.wait_node.in_list);
     }
+
+    // If timeout fired, we should have received error.Canceled from yield
+    std.debug.assert(!timeout.triggered);
 }
 
 // Future protocol implementation for use with select()

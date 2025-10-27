@@ -47,7 +47,7 @@ pub const Timeout = struct {
             self.task.timeout_count += 1;
         }
         self.triggered = false;
-        const timeout_ms: i64 = @intCast(timeout_ns / std.time.ns_per_ms);
+        const timeout_ms: i64 = @intCast((timeout_ns + std.time.ns_per_ms / 2) / std.time.ns_per_ms);
         self.deadline_ms = executor.loop.now() + timeout_ms;
         self.task.timeouts.insert(self);
         self.task.maybeUpdateTimer();

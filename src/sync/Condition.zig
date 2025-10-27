@@ -170,6 +170,9 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         // Try to remove from queue
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
 
+        // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait
+        timeout.clear(runtime);
+
         // Must reacquire mutex before returning
         mutex.lockUncancelable(runtime);
         // Cancellation during lock has priority over timeout
@@ -179,9 +182,15 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         return if (timeout.triggered) error.Timeout else error.Canceled;
     };
 
+    // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait
+    timeout.clear(runtime);
+
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable(runtime);
     try runtime.checkCanceled();
+
+    // If timeout fired, we should have received error.Canceled from yield or checkCanceled
+    std.debug.assert(!timeout.triggered);
 }
 
 /// Wakes one task waiting on this condition variable.
