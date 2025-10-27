@@ -463,7 +463,7 @@ pub const Executor = struct {
             .stack_size = options.stack_size,
             .pinned = options.pinned or options.executor.isId(),
         });
-        errdefer task.destroy(self.runtime);
+        errdefer task.destroy(self);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
         try self.runtime.tasks.add(&task.impl.base.awaitable);

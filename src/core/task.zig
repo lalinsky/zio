@@ -86,7 +86,7 @@ pub fn Task(comptime T: type) type {
         ) !*Self {
             // Allocate task struct
             const task = try executor.allocator.create(Self);
-            errdefer task.destroy(executor.runtime);
+            errdefer executor.allocator.destroy(executor.runtime);
 
             // Acquire stack from pool
             const stack = try executor.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
@@ -122,8 +122,8 @@ pub fn Task(comptime T: type) type {
             return task;
         }
 
-        pub fn destroy(self: *Self, runtime: *Runtime) void {
-            self.impl.base.awaitable.destroy_fn(runtime, &self.impl.base.awaitable);
+        pub fn destroy(self: *Self, executor: *Executor) void {
+            self.impl.base.awaitable.destroy_fn(executor.runtime, &self.impl.base.awaitable);
         }
 
         pub fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
