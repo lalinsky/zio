@@ -18,11 +18,19 @@ pub const CreateOptions = struct {
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
+    state: std.atomic.Value(State),
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
     timer_generation: u2 = 0,
     shield_count: u32 = 0,
     pin_count: u32 = 0,
+
+    pub const State = enum(u8) {
+        new,
+        ready,
+        preparing_to_wait,
+        waiting,
+    };
 
     pub const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
@@ -51,6 +59,15 @@ pub const AnyTask = struct {
     /// Get the executor that owns this task.
     pub inline fn getExecutor(self: *AnyTask) *Executor {
         return Executor.fromCoroutine(&self.coro);
+    }
+
+    /// Check if this task can be migrated to a different executor.
+    /// Returns false if the task is pinned or canceled, true otherwise.
+    pub inline fn canMigrate(self: *const AnyTask) bool {
+        if (self.pin_count > 0) return false;
+        if (self.awaitable.canceled.load(.acquire)) return false;
+        // TODO: Enable migration once we have work-stealing
+        return false;
     }
 };
 
@@ -105,8 +122,8 @@ pub fn Task(comptime T: type) type {
                         .coro = .{
                             .stack = stack,
                             .parent_context_ptr = &executor.main_context,
-                            .state = .init(.waiting_sync),
                         },
+                        .state = .init(.new),
                     },
                     .future_result = .{},
                 },

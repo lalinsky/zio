@@ -122,19 +122,19 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
         // Event was set, return immediately
-        task.coro.state.store(.ready, .release);
+        task.state.store(.ready, .release);
         return;
     }
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting_sync, .allow_cancel) catch |err| {
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // On cancellation, remove from queue
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
         return err;
@@ -172,13 +172,13 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
-    task.coro.state.store(.preparing_to_wait, .release);
+    task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
         // Event was set, return immediately
-        task.coro.state.store(.ready, .release);
+        task.state.store(.ready, .release);
         return;
     }
 
@@ -192,11 +192,11 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
         .wait_node = &task.awaitable.wait_node,
     };
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting_sync)
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.timedWaitForReadyWithCallback(
         .preparing_to_wait,
-        .waiting_sync,
+        .waiting,
         timeout_ns,
         TimeoutContext,
         &timeout_ctx,
