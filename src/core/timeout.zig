@@ -3,8 +3,6 @@ const xev = @import("xev");
 const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("task.zig").AnyTask;
 
-const Deadline = @TypeOf(xev.Loop.timer_next(undefined, 0));
-
 /// A timeout that applies to all I/O operations on the current task.
 /// Multiple Timeout instances can be nested - the earliest deadline always applies.
 /// Timeouts are stack-allocated and managed via defer pattern.
@@ -14,7 +12,7 @@ const Deadline = @TypeOf(xev.Loop.timer_next(undefined, 0));
 pub const Timeout = struct {
     task: *AnyTask,
     heap: xev.heap.IntrusiveField(Timeout) = .{},
-    deadline: Deadline = undefined,
+    deadline_ms: i64 = undefined,
     active: bool = false,
     triggered: bool = false,
 
@@ -31,37 +29,32 @@ pub const Timeout = struct {
         std.debug.assert(executor.runtime == rt);
 
         if (self.active) {
-            self.task.timeouts.remove(self);
-            self.task.timeout_count -= 1;
             self.active = false;
+            self.task.timeout_count -= 1;
+            self.task.timeouts.remove(self);
+            self.task.maybeUpdateTimer();
         }
     }
 
-    pub fn set(self: *Timeout, rt: *Runtime, timeout_ms: u64) void {
+    pub fn set(self: *Timeout, rt: *Runtime, timeout_ms: u32) void {
         const executor = self.task.getExecutor();
         std.debug.assert(executor.runtime == rt);
 
         if (self.active) {
             self.task.timeouts.remove(self);
         } else {
-            self.task.timeout_count += 1;
             self.active = true;
+            self.task.timeout_count += 1;
         }
-        self.deadline = executor.loop.timer_next(timeout_ms);
+        self.deadline_ms = executor.loop.now() + timeout_ms;
         self.task.timeouts.insert(self);
-        // TODO: start the timer if we are the first timeout
+        self.task.maybeUpdateTimer();
     }
 };
 
 /// Timeout heap comparator - orders by earliest deadline first
 fn timeoutLess(_: void, a: *Timeout, b: *Timeout) bool {
-    if (@typeInfo(Deadline) == .int) {
-        return a.deadline < b.deadline;
-    } else {
-        const a_ns = a.deadline.sec * std.time.ns_per_s + a.deadline.nsec;
-        const b_ns = b.deadline.sec * std.time.ns_per_s + b.deadline.nsec;
-        return a_ns < b_ns;
-    }
+    return a.deadline_ms < b.deadline_ms;
 }
 
 /// Heap type for storing timeouts, ordered by earliest deadline

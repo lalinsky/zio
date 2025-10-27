@@ -8,6 +8,7 @@ const Coroutine = @import("../coroutines.zig").Coroutine;
 const coroutines = @import("../coroutines.zig");
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
+const Timeout = @import("timeout.zig").Timeout;
 const TimeoutHeap = @import("timeout.zig").TimeoutHeap;
 
 /// Options for creating a task
@@ -23,7 +24,6 @@ pub const AnyTask = struct {
     // Shared xev timer for timeout handling
     timer_c: xev.Completion = .{},
     timer_cancel_c: xev.Completion = .{},
-    timer_generation: u2 = 0,
 
     // Shared xev timer for timeout handling
     timeouts: TimeoutHeap = .{ .context = {} },
@@ -64,6 +64,88 @@ pub const AnyTask = struct {
     /// Get the executor that owns this task.
     pub inline fn getExecutor(self: *AnyTask) *Executor {
         return Executor.fromCoroutine(&self.coro);
+    }
+
+    pub inline fn getLoop(self: *AnyTask) *xev.Loop {
+        return self.getExecutor().getLoop();
+    }
+
+    fn getNextTimeout(self: *AnyTask, now: i64) ?struct { timeout: *Timeout, delay_ms: u64 } {
+        while (true) {
+            var timeout = self.timeouts.peek() orelse return null;
+            if (timeout.deadline_ms < now) {
+                const removed = self.timeouts.deleteMin();
+                std.debug.assert(timeout == removed);
+                timeout.active = false;
+            }
+            return .{
+                .timeout = timeout,
+                .delay_ms = @intCast(timeout.deadline_ms - now),
+            };
+        }
+        unreachable;
+    }
+
+    pub fn cancelTimer(self: *AnyTask, loop: *xev.Loop) void {
+        if (self.timer_c.state() == .dead) {
+            return;
+        }
+
+        if (self.timer_c.userdata == null) {
+            return;
+        }
+
+        // Even if the cancel fails for some reason, and the callback will get triggered
+        // it will see null and do nothing.
+        self.timer_c.userdata = null;
+
+        var timer = xev.Timer.init() catch unreachable;
+        defer timer.deinit();
+
+        // Cancel the timer, but don't want for the cancelation to be finished.
+        timer.cancel(
+            loop,
+            &self.timer_c,
+            &self.timer_cancel_c,
+            void,
+            null,
+            noopTimerCancelCallback,
+        );
+    }
+
+    pub fn setTimer(self: *AnyTask, loop: *xev.Loop, timeout: *Timeout, delay_ms: u64) void {
+        var timer = xev.Timer.init() catch unreachable;
+        defer timer.deinit();
+
+        timer.reset(
+            loop,
+            &self.timer_c,
+            &self.timer_cancel_c,
+            delay_ms,
+            Timeout,
+            timeout,
+            timeoutCallback,
+        );
+    }
+
+    pub fn updateTimer(self: *AnyTask, loop: *xev.Loop) void {
+        const next = self.getNextTimeout(loop.now()) orelse {
+            self.cancelTimer(loop);
+            return;
+        };
+        self.setTimer(loop, next.timeout, next.delay_ms);
+    }
+
+    pub fn maybeUpdateTimer(self: *AnyTask) void {
+        const executor = self.getExecutor();
+        const next = self.getNextTimeout(executor.loop.now()) orelse {
+            self.cancelTimer(&executor.loop);
+            return;
+        };
+        if (@as(?*anyopaque, @ptrCast(next.timeout)) != self.timer_c.userdata) {
+            self.setTimer(&executor.loop, next.timeout, next.delay_ms);
+            return;
+        }
     }
 };
 
@@ -152,6 +234,52 @@ pub fn Task(comptime T: type) type {
             runtime.allocator.destroy(self);
         }
     };
+}
+
+// Callback for timeout timer
+fn timeoutCallback(
+    userdata: ?*Timeout,
+    loop: *xev.Loop,
+    completion: *xev.Completion,
+    result: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    result catch return .disarm;
+    const timeout = userdata orelse return .disarm;
+
+    const task: *AnyTask = @fieldParentPtr("timer_c", completion);
+    std.debug.assert(task == timeout.task);
+
+    // Mark this one as triggered, user can convert this to error.Timeout
+    timeout.triggered = true;
+
+    // Remove this timeout from the heap
+    if (!timeout.active) {
+        task.timeouts.remove(timeout);
+        timeout.active = false;
+    }
+
+    // Configure the next timer
+    task.updateTimer(loop);
+
+    // Resume the task
+    // TODO call cancel() here
+    resumeTask(task, .local);
+
+    return .disarm;
+}
+
+// Noop callback for timeout timer cancellation
+fn noopTimerCancelCallback(
+    ud: ?*void,
+    l: *xev.Loop,
+    c: *xev.Completion,
+    r: xev.CancelError!void,
+) xev.CallbackAction {
+    _ = ud;
+    _ = l;
+    _ = c;
+    _ = r catch {};
+    return .disarm;
 }
 
 /// Resume mode - controls cross-thread checking

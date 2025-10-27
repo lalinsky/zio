@@ -25,6 +25,7 @@ const Task = @import("core/task.zig").Task;
 const ResumeMode = @import("core/task.zig").ResumeMode;
 const resumeTask = @import("core/task.zig").resumeTask;
 const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
+const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
 
@@ -898,31 +899,6 @@ pub const Executor = struct {
         self.metrics = .{};
     }
 
-    /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
-    /// Uses lower 2 bits for generation (pointers are aligned).
-    inline fn packTimerUserdata(comptime T: type, ptr: *T, generation: u2) ?*anyopaque {
-        comptime {
-            if (@alignOf(T) < 4) @compileError("Timer userdata T must be at least 4-byte aligned");
-        }
-        const addr = @intFromPtr(ptr);
-        const tagged = addr | @as(usize, generation);
-        return @ptrFromInt(tagged);
-    }
-
-    /// Unpack a tagged pointer into the original pointer and generation.
-    inline fn unpackTimerUserdata(comptime T: type, userdata: ?*anyopaque) struct { ptr: *T, generation: u2 } {
-        comptime {
-            if (@alignOf(T) < 4) @compileError("Timer userdata T must be at least 4-byte aligned");
-        }
-        const addr = @intFromPtr(userdata);
-        const generation: u2 = @truncate(addr & 0x3);
-        const ptr_addr = addr & ~@as(usize, 0x3);
-        return .{
-            .ptr = @ptrFromInt(ptr_addr),
-            .generation = generation,
-        };
-    }
-
     /// Wait for the current coroutine to be marked ready, with a timeout and custom timeout handler.
     /// The onTimeout callback is called when the timer fires, and should return true if the
     /// coroutine should be woken with error.Timeout, or false if it was already signaled by
@@ -953,83 +929,43 @@ pub const Executor = struct {
         defer timer.deinit();
 
         // Use timer reset which handles both initial start and restart after cancel
-        // Pack context pointer with generation in lower 2 bits
-        const tagged_userdata = packTimerUserdata(CallbackContext, &ctx, task.timer_generation);
+        // TODO: replace with zio.Timeout
         timer.reset(
             &self.loop,
             &task.timer_c,
             &task.timer_cancel_c,
             timeout_ns / 1_000_000,
-            anyopaque,
-            tagged_userdata,
+            CallbackContext,
+            &ctx,
             struct {
                 fn callback(
-                    userdata: ?*anyopaque,
-                    l: *xev.Loop,
+                    userdata: ?*CallbackContext,
+                    _: *xev.Loop,
                     c: *xev.Completion,
-                    r: xev.Timer.RunError!void,
+                    _: xev.Timer.RunError!void,
                 ) xev.CallbackAction {
-                    _ = l;
-                    _ = r catch {};
-
-                    // Get task safely from completion (always valid)
-                    const t: *AnyTask = @fieldParentPtr("timer_c", c);
-
-                    // Unpack generation from tagged pointer (no deref yet!)
-                    const unpacked = unpackTimerUserdata(CallbackContext, userdata);
-
-                    // Check if this callback is from a stale timer
-                    if (t.timer_generation != unpacked.generation) {
-                        // Stale callback - context is freed, don't touch it!
-                        return .disarm;
-                    }
-
-                    // Generation matches - safe to dereference context
-                    const ctx_ptr = unpacked.ptr;
-                    if (onTimeout(ctx_ptr.user_ctx)) {
-                        ctx_ptr.timed_out = true;
-                        resumeTask(&t.coro, .local);
+                    if (userdata) |ctx_ptr| {
+                        if (onTimeout(ctx_ptr.user_ctx)) {
+                            ctx_ptr.timed_out = true;
+                            const t: *AnyTask = @fieldParentPtr("timer_c", c);
+                            resumeTask(&t.coro, .local);
+                        }
                     }
                     return .disarm;
                 }
             }.callback,
         );
+        defer task.cancelTimer(&self.loop);
 
         // Wait for either timeout or external markReady
         self.yield(expected_state, desired_state, .allow_cancel) catch |err| {
             // Invalidate pending callbacks before unwinding so they ignore this stack frame.
-            task.timer_generation +%= 1;
-            timer.cancel(
-                &self.loop,
-                &task.timer_c,
-                &task.timer_cancel_c,
-                void,
-                null,
-                noopTimerCancelCallback,
-            );
             return err;
         };
 
         if (ctx.timed_out) {
             return error.Timeout;
         }
-
-        // Timer already completed, no need to cancel
-        if (task.timer_c.state() == .dead) {
-            return;
-        }
-
-        // Was awakened by external markReady → increment generation to invalidate
-        // any pending timer callback, then cancel async
-        task.timer_generation +%= 1;
-        timer.cancel(
-            &self.loop,
-            &task.timer_c,
-            &task.timer_cancel_c,
-            void,
-            null,
-            noopTimerCancelCallback,
-        );
     }
 
     pub fn timedWaitForReady(self: *Executor, expected_state: CoroutineState, desired_state: CoroutineState, timeout_ns: u64) (Timeoutable || Cancelable)!void {
