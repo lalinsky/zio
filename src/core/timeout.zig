@@ -17,7 +17,7 @@ pub const Timeout = struct {
     triggered: bool = false,
 
     /// Initialize a Timeout for the current task.
-    /// The Timeout must be deinitialized with deinit() when done.
+    /// The Timeout must be cleared with clear() when done.
     /// Panics if not called from within a coroutine.
     pub fn init(rt: *Runtime) Timeout {
         const task = rt.getCurrentTask() orelse @panic("Timeout.init requires active task");
