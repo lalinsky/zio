@@ -304,7 +304,10 @@ pub const Socket = struct {
             },
         };
 
-        const bytes_read = try runIo(rt, &completion, "recvfrom");
+        const bytes_read = runIo(rt, &completion, "recvfrom") catch |err| switch (err) {
+            error.EOF => 0, // EOF is not an error
+            else => return err,
+        };
         const addr_bytes = std.mem.asBytes(&completion.op.recvfrom.addr)[0..completion.op.recvfrom.addr_size];
         const addr = Address.fromStorage(addr_bytes);
 
@@ -340,7 +343,10 @@ pub const Socket = struct {
             },
         };
 
-        const bytes_read = try runIo(rt, &completion, "recvmsg");
+        const bytes_read = runIo(rt, &completion, "recvmsg") catch |err| switch (err) {
+            error.EOF => 0, // EOF is not an error
+            else => return err,
+        };
 
         // Extract address from msghdr
         const addr_bytes: [*]const u8 = @ptrCast(msg.name);
@@ -437,10 +443,12 @@ pub const Stream = struct {
     /// Returns the number of bytes read, which may be less than buf.len.
     /// A return value of 0 indicates end-of-stream.
     pub fn read(self: Stream, rt: *Runtime, buf: []u8) !usize {
-        return netRead(rt, self.socket.handle, &.{buf});
+        var bufs = [_][]u8{buf};
+        return netRead(rt, self.socket.handle, &bufs);
     }
 
-    /// Reads data from the stream into the provided buffer until it is full or EOF.
+    /// Reads data from the stream into the provided buffer until it is full or the stream is closed.
+    /// A return value of 0 indicates end-of-stream.
     pub fn readAll(self: Stream, rt: *Runtime, buf: []u8) !void {
         var offset: usize = 0;
         while (offset < buf.len) {
@@ -515,7 +523,6 @@ pub const Stream = struct {
             const dest = iovecs_buffer[0..dest_n];
             std.debug.assert(dest[0].len > 0);
             const n = netRead(r.rt, r.stream.socket.handle, dest) catch |err| {
-                if (err == error.EOF) return error.EndOfStream;
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -683,7 +690,10 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
         },
     } };
 
-    return runIo(rt, &completion, "recv");
+    return runIo(rt, &completion, "recv") catch |err| switch (err) {
+        error.EOF => 0, // EOF is not an error
+        else => err,
+    };
 }
 
 fn addBuf(buf: *xev.WriteBuffer, data: []const u8) !void {
