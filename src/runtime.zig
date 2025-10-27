@@ -158,38 +158,27 @@ pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns
             return;
         }
 
-        const TimeoutContext = struct {
-            wait_queue: *WaitQueue(WaitNode),
-            wait_node: *WaitNode,
-        };
+        // Set up timeout
+        var timeout = Timeout.init;
+        defer timeout.clear(runtime);
+        timeout.set(runtime, timeout_ns);
 
-        var timeout_ctx = TimeoutContext{
-            .wait_queue = &awaitable.waiting_list,
-            .wait_node = &task.awaitable.wait_node,
-        };
+        // Transition to preparing_to_wait state before yielding
+        task.state.store(.preparing_to_wait, .release);
 
-        executor.timedWaitForReadyWithCallback(
-            .ready,
-            .waiting,
-            timeout_ns,
-            TimeoutContext,
-            &timeout_ctx,
-            struct {
-                fn onTimeout(ctx: *TimeoutContext) bool {
-                    return ctx.wait_queue.remove(ctx.wait_node);
-                }
-            }.onTimeout,
-        ) catch |err| {
-            // Handle both timeout and cancellation from yield
-            if (err == error.Canceled) {
-                _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
-            }
-            return err;
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
+            // Try to remove from wait queue
+            _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
+
+            // Check if timeout or explicit cancel
+            return if (timeout.triggered) error.Timeout else error.Canceled;
         };
 
         // Pair with markComplete()'s .release
         _ = awaitable.done.load(.acquire);
         // Yield returned successfully, awaitable must be complete
+        std.debug.assert(!timeout.triggered);
     } else {
         // Thread path: use ThreadWaiter with futex timedWait
         var thread_waiter = ThreadWaiter.init();
