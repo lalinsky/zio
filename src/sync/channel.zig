@@ -1,6 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
+const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 const select = @import("../select.zig").select;
 
@@ -52,8 +52,8 @@ pub fn Channel(comptime T: type) type {
         count: usize = 0,
 
         mutex: std.Thread.Mutex = .{},
-        receiver_queue: WaitQueue(WaitNode) = .empty,
-        sender_queue: WaitQueue(WaitNode) = .empty,
+        receiver_queue: SimpleWaitQueue(WaitNode) = .empty,
+        sender_queue: SimpleWaitQueue(WaitNode) = .empty,
 
         closed: bool = false,
 
@@ -143,11 +143,9 @@ pub fn Channel(comptime T: type) type {
             self.mutex.lock();
 
             if (self.count == 0) {
+                const is_closed = self.closed;
                 self.mutex.unlock();
-                if (self.closed) {
-                    return error.ChannelClosed;
-                }
-                return error.ChannelEmpty;
+                return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
             }
 
             const item = self.buffer[self.head];
@@ -266,15 +264,19 @@ pub fn Channel(comptime T: type) type {
                 self.count = 0;
             }
 
+            // Swap out the wait queues while holding the lock
+            var receivers = self.receiver_queue.popAll();
+            var senders = self.sender_queue.popAll();
+
             self.mutex.unlock();
 
             // Wake all receivers so they can see the channel is closed
-            while (self.receiver_queue.pop()) |node| {
+            while (receivers.pop()) |node| {
                 node.wake();
             }
 
             // Wake all senders so they can see the channel is closed
-            while (self.sender_queue.pop()) |node| {
+            while (senders.pop()) |node| {
                 node.wake();
             }
         }
