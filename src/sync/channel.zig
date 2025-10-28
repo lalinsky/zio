@@ -1,7 +1,7 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Mutex = @import("Mutex.zig");
-const Condition = @import("Condition.zig");
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
+const WaitNode = @import("../core/WaitNode.zig");
 
 /// A bounded FIFO channel for communication between async tasks.
 ///
@@ -50,9 +50,9 @@ pub fn Channel(comptime T: type) type {
         tail: usize = 0,
         count: usize = 0,
 
-        mutex: Mutex = Mutex.init,
-        not_empty: Condition = Condition.init,
-        not_full: Condition = Condition.init,
+        mutex: std.Thread.Mutex = .{},
+        receiver_queue: WaitQueue(WaitNode) = .empty,
+        sender_queue: WaitQueue(WaitNode) = .empty,
 
         closed: bool = false,
 
@@ -66,16 +66,16 @@ pub fn Channel(comptime T: type) type {
         }
 
         /// Checks if the channel is empty.
-        pub fn isEmpty(self: *Self, rt: *Runtime) !bool {
-            try self.mutex.lock(rt);
-            defer self.mutex.unlock(rt);
+        pub fn isEmpty(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
             return self.count == 0;
         }
 
         /// Checks if the channel is full.
-        pub fn isFull(self: *Self, rt: *Runtime) !bool {
-            try self.mutex.lock(rt);
-            defer self.mutex.unlock(rt);
+        pub fn isFull(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
             return self.count == self.buffer.len;
         }
 
@@ -87,28 +87,49 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
-            try self.mutex.lock(rt);
-            defer self.mutex.unlock(rt);
+            const task = rt.getCurrentTask() orelse unreachable;
+            const executor = task.getExecutor();
 
-            // Wait while empty and not closed
-            while (self.count == 0 and !self.closed) {
-                try self.not_empty.wait(rt, &self.mutex);
+            while (true) {
+                self.mutex.lock();
+
+                // Check if closed and empty
+                if (self.closed and self.count == 0) {
+                    self.mutex.unlock();
+                    return error.ChannelClosed;
+                }
+
+                // Fast path: item available
+                if (self.count > 0) {
+                    const item = self.buffer[self.head];
+                    self.head = (self.head + 1) % self.buffer.len;
+                    self.count -= 1;
+
+                    // Wake one sender if any
+                    const sender_node = self.sender_queue.pop();
+                    self.mutex.unlock();
+                    if (sender_node) |node| {
+                        node.wake();
+                    }
+                    return item;
+                }
+
+                // Slow path: empty, need to wait
+                task.state.store(.preparing_to_wait, .release);
+                self.receiver_queue.push(&task.awaitable.wait_node);
+                self.mutex.unlock();
+
+                // Yield with cancellation support
+                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+                    // Cancelled - remove from queue
+                    self.mutex.lock();
+                    _ = self.receiver_queue.remove(&task.awaitable.wait_node);
+                    self.mutex.unlock();
+                    return err;
+                };
+
+                // Woken up, loop to try again
             }
-
-            // If closed and empty, return error
-            if (self.closed and self.count == 0) {
-                return error.ChannelClosed;
-            }
-
-            // Get item from head
-            const item = self.buffer[self.head];
-            self.head = (self.head + 1) % self.buffer.len;
-            self.count -= 1;
-
-            // Signal that channel is not full
-            self.not_full.signal(rt);
-
-            return item;
         }
 
         /// Tries to receive a value without blocking.
@@ -117,10 +138,9 @@ pub fn Channel(comptime T: type) type {
         ///
         /// Returns `error.ChannelEmpty` if the channel is empty.
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
-        /// Returns `error.Canceled` if the task is cancelled while acquiring the lock.
-        pub fn tryReceive(self: *Self, rt: *Runtime) !T {
-            try self.mutex.lock(rt);
-            defer self.mutex.unlock(rt);
+        pub fn tryReceive(self: *Self) !T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
             if (self.count == 0) {
                 if (self.closed) {
@@ -133,7 +153,10 @@ pub fn Channel(comptime T: type) type {
             self.head = (self.head + 1) % self.buffer.len;
             self.count -= 1;
 
-            self.not_full.signal(rt);
+            // Wake one sender if any
+            if (self.sender_queue.pop()) |node| {
+                node.wake();
+            }
 
             return item;
         }
@@ -145,29 +168,48 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            try self.mutex.lock(rt);
-            defer self.mutex.unlock(rt);
+            const task = rt.getCurrentTask() orelse unreachable;
+            const executor = task.getExecutor();
 
-            if (self.closed) {
-                return error.ChannelClosed;
-            }
+            while (true) {
+                self.mutex.lock();
 
-            // Wait while full
-            while (self.count == self.buffer.len) {
-                try self.not_full.wait(rt, &self.mutex);
-                // Check if closed while waiting
                 if (self.closed) {
+                    self.mutex.unlock();
                     return error.ChannelClosed;
                 }
+
+                // Fast path: space available
+                if (self.count < self.buffer.len) {
+                    self.buffer[self.tail] = item;
+                    self.tail = (self.tail + 1) % self.buffer.len;
+                    self.count += 1;
+
+                    // Wake one receiver if any
+                    const receiver_node = self.receiver_queue.pop();
+                    self.mutex.unlock();
+                    if (receiver_node) |node| {
+                        node.wake();
+                    }
+                    return;
+                }
+
+                // Slow path: full, need to wait
+                task.state.store(.preparing_to_wait, .release);
+                self.sender_queue.push(&task.awaitable.wait_node);
+                self.mutex.unlock();
+
+                // Yield with cancellation support
+                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+                    // Cancelled - remove from queue
+                    self.mutex.lock();
+                    _ = self.sender_queue.remove(&task.awaitable.wait_node);
+                    self.mutex.unlock();
+                    return err;
+                };
+
+                // Woken up, loop to check condition and try again
             }
-
-            // Add item to tail
-            self.buffer[self.tail] = item;
-            self.tail = (self.tail + 1) % self.buffer.len;
-            self.count += 1;
-
-            // Signal that channel is not empty
-            self.not_empty.signal(rt);
         }
 
         /// Tries to send a value without blocking.
@@ -176,10 +218,9 @@ pub fn Channel(comptime T: type) type {
         ///
         /// Returns `error.ChannelFull` if the channel is full.
         /// Returns `error.ChannelClosed` if the channel is closed.
-        /// Returns `error.Canceled` if the task is cancelled while acquiring the lock.
-        pub fn trySend(self: *Self, rt: *Runtime, item: T) !void {
-            try self.mutex.lock(rt);
-            defer self.mutex.unlock(rt);
+        pub fn trySend(self: *Self, item: T) !void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
             if (self.closed) {
                 return error.ChannelClosed;
@@ -193,7 +234,10 @@ pub fn Channel(comptime T: type) type {
             self.tail = (self.tail + 1) % self.buffer.len;
             self.count += 1;
 
-            self.not_empty.signal(rt);
+            // Wake one receiver if any
+            if (self.receiver_queue.pop()) |node| {
+                node.wake();
+            }
         }
 
         /// Closes the channel.
@@ -204,11 +248,8 @@ pub fn Channel(comptime T: type) type {
         ///
         /// If `immediate` is true, clears all buffered items immediately. This causes
         /// receivers to get `error.ChannelClosed` right away instead of draining.
-        ///
-        /// This operation is shielded from cancellation to ensure the close completes.
-        pub fn close(self: *Self, rt: *Runtime, immediate: bool) void {
-            self.mutex.lockUncancelable(rt);
-            defer self.mutex.unlock(rt);
+        pub fn close(self: *Self, immediate: bool) void {
+            self.mutex.lock();
 
             self.closed = true;
 
@@ -219,9 +260,17 @@ pub fn Channel(comptime T: type) type {
                 self.count = 0;
             }
 
-            // Wake all waiters so they can see the channel is closed
-            self.not_empty.broadcast(rt);
-            self.not_full.broadcast(rt);
+            self.mutex.unlock();
+
+            // Wake all receivers so they can see the channel is closed
+            while (self.receiver_queue.pop()) |node| {
+                node.wake();
+            }
+
+            // Wake all senders so they can see the channel is closed
+            while (self.sender_queue.pop()) |node| {
+                node.wake();
+            }
         }
     };
 }
@@ -273,27 +322,28 @@ test "Channel: trySend and tryReceive" {
 
     const TestFn = struct {
         fn testTry(rt: *Runtime, ch: *Channel(u32)) !void {
+            _ = rt;
             // tryReceive on empty channel should fail
-            const empty_err = ch.tryReceive(rt);
+            const empty_err = ch.tryReceive();
             try testing.expectError(error.ChannelEmpty, empty_err);
 
             // trySend should succeed
-            try ch.trySend(rt, 1);
-            try ch.trySend(rt, 2);
+            try ch.trySend(1);
+            try ch.trySend(2);
 
             // trySend on full channel should fail
-            const full_err = ch.trySend(rt, 3);
+            const full_err = ch.trySend(3);
             try testing.expectError(error.ChannelFull, full_err);
 
             // tryReceive should succeed
-            const val1 = try ch.tryReceive(rt);
+            const val1 = try ch.tryReceive();
             try testing.expectEqual(@as(u32, 1), val1);
 
-            const val2 = try ch.tryReceive(rt);
+            const val2 = try ch.tryReceive();
             try testing.expectEqual(@as(u32, 2), val2);
 
             // tryReceive on empty channel should fail again
-            const empty_err2 = ch.tryReceive(rt);
+            const empty_err2 = ch.tryReceive();
             try testing.expectError(error.ChannelEmpty, empty_err2);
         }
     };
@@ -420,7 +470,7 @@ test "Channel: close graceful" {
         fn producer(rt: *Runtime, ch: *Channel(u32)) !void {
             try ch.send(rt, 1);
             try ch.send(rt, 2);
-            ch.close(rt, false); // Graceful close - items remain
+            ch.close(false); // Graceful close - items remain
         }
 
         fn consumer(rt: *Runtime, ch: *Channel(u32), results: *[3]?u32) !void {
@@ -458,7 +508,7 @@ test "Channel: close immediate" {
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
-            ch.close(rt, true); // Immediate close - clears all items
+            ch.close(true); // Immediate close - clears all items
         }
 
         fn consumer(rt: *Runtime, ch: *Channel(u32), result: *?u32) !void {
@@ -489,12 +539,12 @@ test "Channel: send on closed channel" {
 
     const TestFn = struct {
         fn testClosed(rt: *Runtime, ch: *Channel(u32)) !void {
-            ch.close(rt, false);
+            ch.close(false);
 
             const put_err = ch.send(rt, 1);
             try testing.expectError(error.ChannelClosed, put_err);
 
-            const tryput_err = ch.trySend(rt, 2);
+            const tryput_err = ch.trySend(2);
             try testing.expectError(error.ChannelClosed, tryput_err);
         }
     };
