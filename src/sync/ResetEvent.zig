@@ -412,7 +412,7 @@ test "ResetEvent: select" {
             var task = try rt.spawn(setterTask, .{ rt, &reset_event }, .{});
             defer task.deinit();
 
-            const result = try select(rt, .{ .event = &reset_event, .task = task });
+            const result = try select(rt, .{ .event = &reset_event, .task = &task });
             try std.testing.expectEqual(.event, result);
         }
     };

@@ -697,17 +697,17 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
 }
 
 fn addBuf(buf: *xev.WriteBuffer, data: []const u8) !void {
-    if (buf.vectors.len < buf.vectors.data.len) {
-        buf.vectors.data[buf.vectors.len] = if (xev.backend == .iocp) .{
-            .buf = @constCast(data.ptr),
-            .len = @intCast(data.len),
-        } else .{
-            .base = data.ptr,
-            .len = data.len,
-        };
-        buf.vectors.len += 1;
-    }
-    return error.BufferFull;
+    if (data.len == 0) return;
+    if (buf.vectors.len >= buf.vectors.data.len) return error.BufferFull;
+
+    buf.vectors.data[buf.vectors.len] = if (xev.backend == .iocp) .{
+        .buf = @constCast(data.ptr),
+        .len = @intCast(data.len),
+    } else .{
+        .base = data.ptr,
+        .len = data.len,
+    };
+    buf.vectors.len += 1;
 }
 
 fn fillBuf(out: *xev.WriteBuffer, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) void {

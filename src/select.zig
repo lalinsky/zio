@@ -37,15 +37,18 @@ const ThreadWaiter = struct {
 //   * needs to have asyncCancelWait(*WaitNode) void method
 //   * needs to have getResult() Result method
 
-/// Extract the Future type, handling both direct types and pointers
+/// Extract the Future type from a pointer type
+/// Enforces that T must be a pointer
 fn FutureType(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .pointer => |ptr| ptr.child,
-        else => T,
-    };
+    const type_info = @typeInfo(T);
+    if (type_info != .pointer) {
+        @compileError("Future must be a pointer type, got: " ++ @typeName(T) ++
+            ". Use '&' to pass by pointer (e.g., &future instead of future)");
+    }
+    return type_info.pointer.child;
 }
 
-/// Extract the Result type from a future (handles both direct futures and pointers)
+/// Extract the Result type from a future pointer
 fn FutureResult(comptime future_type: type) type {
     const Future = FutureType(future_type);
     return Future.Result;
@@ -112,8 +115,8 @@ test "SelectResult: result types" {
     };
 
     const Select = SelectResult(struct {
-        future1: Future1,
-        future2: Future2,
+        future1: *Future1,
+        future2: *Future2,
     });
 
     _ = Select{ .future1 = {} };
@@ -153,7 +156,12 @@ pub const SelectWaiter = struct {
 };
 
 /// Wait for multiple futures simultaneously and return whichever completes first.
-/// `handles` is a struct with each field a `JoinHandle(T)`, where `T` can be different for each field.
+///
+/// **Important**: All futures MUST be passed as pointers (use `&` prefix).
+/// This ensures consistent behavior and prevents accidental copies.
+///
+/// `futures` is a struct with each field a pointer to a future (e.g., `*JoinHandle(T)`),
+/// where `T` can be different for each field.
 /// Returns a tagged union with the same field names, containing the result of whichever completed first.
 ///
 /// When multiple handles complete at the same time, fields are checked in declaration order
@@ -163,7 +171,7 @@ pub const SelectWaiter = struct {
 /// ```
 /// var h1 = try rt.spawn(task1, .{}, .{});
 /// var h2 = try rt.spawn(task2, .{}, .{});
-/// const result = rt.select(.{ .first = h1, .second = h2 });
+/// const result = rt.select(.{ .first = &h1, .second = &h2 });
 /// switch (result) {
 ///     .first => |val| ...,
 ///     .second => |val| ...,
@@ -314,6 +322,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
 
 /// Wait for a single future to complete.
 /// Similar to select() but for a single future, returns the result.
+/// `future` must be a pointer to a future type.
 /// Works from both coroutines and threads.
 /// Returns Cancelable error if the task is canceled while waiting (coroutine only).
 ///
@@ -330,6 +339,7 @@ pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@T
 /// Wait for a single future to complete, never propagating cancellation.
 /// When canceled, cancels the child task and continues waiting with shield enabled.
 /// This ensures the function always returns a result and never returns error.Canceled.
+/// `future` must be a pointer to a future type.
 /// Works from both coroutines and threads.
 ///
 /// Example:
@@ -365,7 +375,7 @@ test "select: basic - first completes" {
             var fast = try rt.spawn(fastTask, .{rt}, .{});
             defer fast.deinit();
 
-            const result = try select(rt, .{ .fast = fast, .slow = slow });
+            const result = try select(rt, .{ .fast = &fast, .slow = &slow });
             switch (result) {
                 .slow => |val| try testing.expectEqual(@as(i32, 42), val),
                 .fast => |val| try testing.expectEqual(@as(i32, 99), val),
@@ -406,7 +416,7 @@ test "select: already complete - fast path" {
             defer slow.deinit();
 
             // immediate should already be complete, select should return immediately
-            const result = try select(rt, .{ .immediate = immediate, .slow = slow });
+            const result = try select(rt, .{ .immediate = &immediate, .slow = &slow });
             switch (result) {
                 .immediate => |val| try testing.expectEqual(@as(i32, 123), val),
                 .slow => return error.TestUnexpectedResult,
@@ -448,9 +458,9 @@ test "select: heterogeneous types" {
             defer bool_handle.deinit();
 
             const result = try select(rt, .{
-                .string = string_handle,
-                .int = int_handle,
-                .bool = bool_handle,
+                .string = &string_handle,
+                .int = &int_handle,
+                .bool = &bool_handle,
             });
 
             switch (result) {
@@ -496,7 +506,7 @@ test "select: with cancellation" {
             var h2 = try rt.spawn(slowTask2, .{rt}, .{});
             defer h2.deinit();
 
-            const result = try select(rt, .{ .first = h1, .second = h2 });
+            const result = try select(rt, .{ .first = &h1, .second = &h2 });
             return switch (result) {
                 .first => |v| v,
                 .second => |v| v,
@@ -550,8 +560,8 @@ test "select: with error unions - success case" {
             defer validate_handle.deinit();
 
             const result = try select(rt, .{
-                .validate = validate_handle,
-                .parse = parse_handle,
+                .validate = &validate_handle,
+                .parse = &parse_handle,
             });
 
             // Result is a union where each field has the original error type
@@ -606,7 +616,7 @@ test "select: with error unions - error case" {
             var slow = try rt.spawn(slowTask, .{rt}, .{});
             defer slow.deinit();
 
-            const result = try select(rt, .{ .failing = failing, .slow = slow });
+            const result = try select(rt, .{ .failing = &failing, .slow = &slow });
 
             switch (result) {
                 .failing => |val_or_err| {
@@ -664,7 +674,7 @@ test "select: with mixed error types" {
 
             // select returns Cancelable!SelectUnion(...)
             // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
-            const result = try select(rt, .{ .h2 = h2, .h1 = h1, .h3 = h3 });
+            const result = try select(rt, .{ .h2 = &h2, .h1 = &h1, .h3 = &h3 });
 
             switch (result) {
                 .h1 => |val_or_err| {
