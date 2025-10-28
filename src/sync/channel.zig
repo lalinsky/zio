@@ -143,11 +143,9 @@ pub fn Channel(comptime T: type) type {
             self.mutex.lock();
 
             if (self.count == 0) {
+                const is_closed = self.closed;
                 self.mutex.unlock();
-                if (self.closed) {
-                    return error.ChannelClosed;
-                }
-                return error.ChannelEmpty;
+                return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
             }
 
             const item = self.buffer[self.head];
