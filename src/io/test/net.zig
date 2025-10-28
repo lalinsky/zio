@@ -59,16 +59,16 @@ test "UnixAddress: init" {
     try std.testing.expectEqual(std.posix.AF.UNIX, addr.any.family);
 }
 
-pub fn checkListen(addr: anytype, options: anytype) !void {
+pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const Test = struct {
-        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
+        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
 
             var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
             defer server_task.deinit();
 
-            var client_task = try rt.spawn(clientFn, .{ rt, server }, .{});
+            var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner }, .{});
             defer client_task.deinit();
 
             // TODO use TaskGroup
@@ -90,12 +90,11 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
             client.shutdown(rt, .both) catch {};
         }
 
-        pub fn clientFn(rt: *Runtime, server: Server) !void {
+        pub fn clientFn(rt: *Runtime, server: Server, write_buffer_inner: []u8) !void {
             const client = try server.socket.address.connect(rt);
             defer client.close(rt);
 
-            var buf: [32]u8 = undefined;
-            var writer = client.writer(rt, &buf);
+            var writer = client.writer(rt, write_buffer_inner);
 
             try writer.interface.writeAll("hello\n");
             try writer.interface.flush();
@@ -107,7 +106,7 @@ pub fn checkListen(addr: anytype, options: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options }, .{});
+    try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
@@ -205,18 +204,44 @@ test "UnixAddress: listen/accept/connect/read/write" {
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
 
+    var write_buffer: [32]u8 = undefined;
     const addr = try UnixAddress.init(path);
-    try checkListen(addr, UnixAddress.ListenOptions{});
+    try checkListen(addr, UnixAddress.ListenOptions{}, &write_buffer);
 }
 
 test "IpAddress: listen/accept/connect/read/write IPv4" {
+    var write_buffer: [32]u8 = undefined;
     const addr = try IpAddress.parseIp4("127.0.0.1", 0);
-    try checkListen(addr, IpAddress.ListenOptions{});
+    try checkListen(addr, IpAddress.ListenOptions{}, &write_buffer);
 }
 
 test "IpAddress: listen/accept/connect/read/write IPv6" {
+    var write_buffer: [32]u8 = undefined;
     const addr = try IpAddress.parseIp6("::1", 0);
-    checkListen(addr, IpAddress.ListenOptions{}) catch |err| {
+    checkListen(addr, IpAddress.ListenOptions{}, &write_buffer) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
+}
+
+test "UnixAddress: listen/accept/connect/read/write unbuffered" {
+    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const addr = try UnixAddress.init(path);
+    try checkListen(addr, UnixAddress.ListenOptions{}, &.{});
+}
+
+test "IpAddress: listen/accept/connect/read/write unbuffered IPv4" {
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    try checkListen(addr, IpAddress.ListenOptions{}, &.{});
+}
+
+test "IpAddress: listen/accept/connect/read/write unbuffered IPv6" {
+    const addr = try IpAddress.parseIp6("::1", 0);
+    checkListen(addr, IpAddress.ListenOptions{}, &.{}) catch |err| {
         if (err == error.AddressNotAvailable) return error.SkipZigTest;
         return err;
     };
