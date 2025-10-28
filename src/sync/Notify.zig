@@ -115,8 +115,16 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // On cancellation, remove from queue
-        _ = self.wait_queue.remove(&task.awaitable.wait_node);
+        // On cancellation, try to remove from queue
+        const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+        if (!was_in_queue) {
+            // We were already removed by signal() which will wake us.
+            // Since we're being cancelled and won't process the signal,
+            // wake another waiter to receive the signal instead.
+            if (self.wait_queue.pop()) |next_waiter| {
+                next_waiter.wake();
+            }
+        }
         return err;
     };
 
@@ -176,7 +184,15 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     ) catch |err| {
         // Remove from queue if canceled (timeout already handled by callback)
         if (err == error.Canceled) {
-            _ = self.wait_queue.remove(&task.awaitable.wait_node);
+            const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+            if (!was_in_queue) {
+                // We were already removed by signal() which will wake us.
+                // Since we're being cancelled and won't process the signal,
+                // wake another waiter to receive the signal instead.
+                if (self.wait_queue.pop()) |next_waiter| {
+                    next_waiter.wake();
+                }
+            }
         }
         return err;
     };

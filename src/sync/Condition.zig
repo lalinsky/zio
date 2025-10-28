@@ -100,8 +100,16 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // On cancellation, remove from queue and reacquire mutex
-        _ = self.wait_queue.remove(&task.awaitable.wait_node);
+        // On cancellation, try to remove from queue
+        const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+        if (!was_in_queue) {
+            // We were already removed by signal() which will wake us.
+            // Since we're being cancelled and won't process the signal,
+            // wake another waiter to receive the signal instead.
+            if (self.wait_queue.pop()) |next_waiter| {
+                next_waiter.wake();
+            }
+        }
         // Must reacquire mutex before returning
         mutex.lockUncancelable(runtime);
         return err;
