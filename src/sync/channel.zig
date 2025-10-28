@@ -141,9 +141,9 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         pub fn tryReceive(self: *Self) !T {
             self.mutex.lock();
-            defer self.mutex.unlock();
 
             if (self.count == 0) {
+                self.mutex.unlock();
                 if (self.closed) {
                     return error.ChannelClosed;
                 }
@@ -154,8 +154,10 @@ pub fn Channel(comptime T: type) type {
             self.head = (self.head + 1) % self.buffer.len;
             self.count -= 1;
 
-            // Wake one sender if any
-            if (self.sender_queue.pop()) |node| {
+            // Pop sender node while holding lock, wake after unlock
+            const sender_node = self.sender_queue.pop();
+            self.mutex.unlock();
+            if (sender_node) |node| {
                 node.wake();
             }
 
@@ -221,13 +223,14 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         pub fn trySend(self: *Self, item: T) !void {
             self.mutex.lock();
-            defer self.mutex.unlock();
 
             if (self.closed) {
+                self.mutex.unlock();
                 return error.ChannelClosed;
             }
 
             if (self.count == self.buffer.len) {
+                self.mutex.unlock();
                 return error.ChannelFull;
             }
 
@@ -235,8 +238,10 @@ pub fn Channel(comptime T: type) type {
             self.tail = (self.tail + 1) % self.buffer.len;
             self.count += 1;
 
-            // Wake one receiver if any
-            if (self.receiver_queue.pop()) |node| {
+            // Pop receiver node while holding lock, wake after unlock
+            const receiver_node = self.receiver_queue.pop();
+            self.mutex.unlock();
+            if (receiver_node) |node| {
                 node.wake();
             }
         }
