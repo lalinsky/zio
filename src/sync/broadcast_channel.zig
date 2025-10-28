@@ -124,6 +124,9 @@ pub fn BroadcastChannel(comptime T: type) type {
             self.mutex.lock();
             defer self.mutex.unlock();
 
+            // Guard against double-subscribe (would corrupt the list)
+            std.debug.assert(consumer.prev == null and consumer.next == null);
+
             consumer.read_pos = self.write_pos;
             self.consumers.append(consumer);
         }
@@ -132,6 +135,10 @@ pub fn BroadcastChannel(comptime T: type) type {
         pub fn unsubscribe(self: *Self, consumer: *Consumer) void {
             self.mutex.lock();
             defer self.mutex.unlock();
+
+            // Guard against unsubscribing a consumer that's not in the list
+            std.debug.assert(consumer.prev != null or consumer.next != null or
+                self.consumers.first == consumer or self.consumers.last == consumer);
 
             self.consumers.remove(consumer);
         }
