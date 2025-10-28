@@ -105,6 +105,16 @@ pub fn SimpleWaitQueue(comptime T: type) type {
             return head;
         }
 
+        /// Remove and return all items from the queue.
+        /// Must be called with external synchronization.
+        /// Returns a new queue containing all items; the original queue becomes empty.
+        /// This is useful for processing all items without repeated locking.
+        pub fn popAll(self: *Self) Self {
+            const result = self.*;
+            self.* = .empty;
+            return result;
+        }
+
         /// Remove a specific item from the queue.
         /// Must be called with external synchronization.
         /// Returns true if the item was found and removed, false otherwise.
