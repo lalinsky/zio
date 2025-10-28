@@ -1,6 +1,6 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
+const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 const select = @import("../select.zig").select;
 
@@ -52,8 +52,8 @@ pub fn Channel(comptime T: type) type {
         count: usize = 0,
 
         mutex: std.Thread.Mutex = .{},
-        receiver_queue: WaitQueue(WaitNode) = .empty,
-        sender_queue: WaitQueue(WaitNode) = .empty,
+        receiver_queue: SimpleWaitQueue(WaitNode) = .empty,
+        sender_queue: SimpleWaitQueue(WaitNode) = .empty,
 
         closed: bool = false,
 

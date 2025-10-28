@@ -4,7 +4,8 @@
 //! (mutexes, condition variables, semaphores, etc.). Application code should use
 //! higher-level primitives from the sync module instead of using these queues directly.
 //!
-//! Provides two variants:
+//! Provides three variants:
+//! - SimpleWaitQueue: Non-atomic queue for use under external synchronization (e.g., mutex)
 //! - WaitQueue: 16-byte queue with separate head and tail pointers
 //! - CompactWaitQueue: 8-byte queue with tail stored in head node
 
@@ -12,6 +13,133 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
+
+/// Simple wait queue for use under external synchronization (e.g., mutex).
+///
+/// **Low-level primitive**: This is intended for implementing synchronization primitives.
+/// Application code should use higher-level abstractions from the sync module instead.
+///
+/// This is a non-atomic wait queue that must be protected by an external lock.
+/// Use this when you already have a mutex protecting your data structure - it's
+/// simpler and faster than WaitQueue since it doesn't need atomic operations or
+/// mutation spinlocks.
+///
+/// Provides O(1) push, pop, and remove operations using a doubly-linked list.
+///
+/// T must be a struct type with:
+/// - `next` field of type ?*T
+/// - `prev` field of type ?*T
+/// - `in_list` field of type bool (debug mode only)
+///
+/// Usage:
+/// ```zig
+/// const MyNode = struct {
+///     next: ?*MyNode = null,
+///     prev: ?*MyNode = null,
+///     in_list: bool = false, // Required in debug mode
+///     data: i32,
+/// };
+/// var mutex: std.Thread.Mutex = .{};
+/// var queue: SimpleWaitQueue(MyNode) = .empty;
+///
+/// mutex.lock();
+/// defer mutex.unlock();
+/// queue.push(&node);
+/// ```
+pub fn SimpleWaitQueue(comptime T: type) type {
+    return struct {
+        head: ?*T = null,
+        tail: ?*T = null,
+
+        const Self = @This();
+
+        /// Empty queue constant for convenient initialization
+        pub const empty: Self = .{};
+
+        /// Check if the queue is empty
+        pub fn isEmpty(self: *const Self) bool {
+            return self.head == null;
+        }
+
+        /// Add item to the end of the queue.
+        /// Must be called with external synchronization.
+        pub fn push(self: *Self, item: *T) void {
+            if (builtin.mode == .Debug) {
+                std.debug.assert(!item.in_list);
+                item.in_list = true;
+            }
+
+            item.next = null;
+            item.prev = self.tail;
+
+            if (self.tail) |tail| {
+                tail.next = item;
+            } else {
+                self.head = item;
+            }
+
+            self.tail = item;
+        }
+
+        /// Remove and return the item at the front of the queue.
+        /// Must be called with external synchronization.
+        /// Returns null if queue is empty.
+        pub fn pop(self: *Self) ?*T {
+            const head = self.head orelse return null;
+
+            if (builtin.mode == .Debug) {
+                std.debug.assert(head.in_list);
+                head.in_list = false;
+            }
+
+            self.head = head.next;
+            if (self.head) |new_head| {
+                new_head.prev = null;
+            } else {
+                self.tail = null;
+            }
+
+            head.next = null;
+            head.prev = null;
+
+            return head;
+        }
+
+        /// Remove a specific item from the queue.
+        /// Must be called with external synchronization.
+        /// Returns true if the item was found and removed, false otherwise.
+        pub fn remove(self: *Self, item: *T) bool {
+            // Check if item is in the list by verifying pointers
+            if (item.prev == null and self.head != item) {
+                return false;
+            }
+            if (item.next == null and self.tail != item) {
+                return false;
+            }
+
+            if (builtin.mode == .Debug) {
+                item.in_list = false;
+            }
+
+            if (item.prev) |prev| {
+                prev.next = item.next;
+            } else {
+                self.head = item.next;
+            }
+
+            if (item.next) |next| {
+                next.prev = item.prev;
+            } else {
+                self.tail = item.prev;
+            }
+
+            item.next = null;
+            item.prev = null;
+
+            return true;
+        }
+    };
+}
 
 /// Generic wait queue with two sentinel states for synchronization primitives.
 ///
@@ -455,6 +583,150 @@ pub fn WaitQueue(comptime T: type) type {
             }
         }
     };
+}
+
+test "SimpleWaitQueue basic operations" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        in_list: bool = false,
+        value: i32,
+    };
+
+    var queue: SimpleWaitQueue(TestNode) = .empty;
+
+    // Initially empty
+    try testing.expect(queue.isEmpty());
+    try testing.expectEqual(@as(?*TestNode, null), queue.pop());
+
+    // Create nodes
+    var node1 = TestNode{ .value = 1 };
+    var node2 = TestNode{ .value = 2 };
+    var node3 = TestNode{ .value = 3 };
+
+    // Push items
+    queue.push(&node1);
+    try testing.expect(!queue.isEmpty());
+    queue.push(&node2);
+    queue.push(&node3);
+
+    // Pop items (FIFO order)
+    const popped1 = queue.pop();
+    try testing.expectEqual(&node1, popped1);
+    try testing.expectEqual(@as(i32, 1), popped1.?.value);
+
+    const popped2 = queue.pop();
+    try testing.expectEqual(&node2, popped2);
+
+    const popped3 = queue.pop();
+    try testing.expectEqual(&node3, popped3);
+
+    // Empty again
+    try testing.expect(queue.isEmpty());
+    try testing.expectEqual(@as(?*TestNode, null), queue.pop());
+}
+
+test "SimpleWaitQueue remove operations" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        in_list: bool = false,
+        value: i32,
+    };
+
+    var queue: SimpleWaitQueue(TestNode) = .empty;
+
+    var node1 = TestNode{ .value = 1 };
+    var node2 = TestNode{ .value = 2 };
+    var node3 = TestNode{ .value = 3 };
+
+    // Push three items
+    queue.push(&node1);
+    queue.push(&node2);
+    queue.push(&node3);
+
+    // Remove middle item
+    try testing.expect(queue.remove(&node2));
+    try testing.expect(!queue.isEmpty());
+
+    // Try to remove same item again - should fail
+    try testing.expect(!queue.remove(&node2));
+
+    // Remove head
+    try testing.expect(queue.remove(&node1));
+
+    // Remove tail
+    try testing.expect(queue.remove(&node3));
+
+    // Queue should be empty
+    try testing.expect(queue.isEmpty());
+
+    // Try to remove from empty queue
+    try testing.expect(!queue.remove(&node1));
+}
+
+test "SimpleWaitQueue remove head and tail" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        in_list: bool = false,
+        value: i32,
+    };
+
+    var queue: SimpleWaitQueue(TestNode) = .empty;
+
+    var node1 = TestNode{ .value = 1 };
+    var node2 = TestNode{ .value = 2 };
+    var node3 = TestNode{ .value = 3 };
+
+    // Test removing head
+    queue.push(&node1);
+    queue.push(&node2);
+    try testing.expect(queue.remove(&node1));
+    const popped = queue.pop();
+    try testing.expectEqual(&node2, popped);
+    try testing.expect(queue.isEmpty());
+
+    // Test removing tail
+    queue.push(&node1);
+    queue.push(&node2);
+    queue.push(&node3);
+    try testing.expect(queue.remove(&node3));
+    try testing.expectEqual(&node1, queue.pop());
+    try testing.expectEqual(&node2, queue.pop());
+    try testing.expect(queue.isEmpty());
+}
+
+test "SimpleWaitQueue empty constant" {
+    const testing = std.testing;
+
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        in_list: bool = false,
+        value: i32,
+    };
+
+    // Test .empty initialization
+    var queue: SimpleWaitQueue(TestNode) = .empty;
+    try testing.expect(queue.isEmpty());
+    try testing.expectEqual(@as(?*TestNode, null), queue.head);
+    try testing.expectEqual(@as(?*TestNode, null), queue.tail);
+
+    // Verify it works
+    var node = TestNode{ .value = 42 };
+    queue.push(&node);
+    try testing.expect(!queue.isEmpty());
+
+    const popped = queue.pop();
+    try testing.expectEqual(&node, popped);
+    try testing.expect(queue.isEmpty());
 }
 
 test "WaitQueue basic operations" {
