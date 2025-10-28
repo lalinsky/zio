@@ -697,6 +697,7 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
 }
 
 fn addBuf(buf: *xev.WriteBuffer, data: []const u8) !void {
+    if (data.len == 0) return;
     if (buf.vectors.len < buf.vectors.data.len) {
         buf.vectors.data[buf.vectors.len] = if (xev.backend == .iocp) .{
             .buf = @constCast(data.ptr),
