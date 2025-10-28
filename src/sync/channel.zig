@@ -2,6 +2,7 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
+const select = @import("../select.zig").select;
 
 /// A bounded FIFO channel for communication between async tasks.
 ///
@@ -271,6 +272,291 @@ pub fn Channel(comptime T: type) type {
             while (self.sender_queue.pop()) |node| {
                 node.wake();
             }
+        }
+
+        /// Creates an AsyncReceive operation for use with select().
+        ///
+        /// Returns a single-shot future that will receive one value from the channel.
+        /// Create a new AsyncReceive for each select() operation.
+        ///
+        /// Example:
+        /// ```zig
+        /// var recv = channel.asyncReceive();
+        /// const result = try select(rt, .{ .recv = recv });
+        /// switch (result) {
+        ///     .recv => |val| std.debug.print("Received: {}\n", .{val}),
+        /// }
+        /// ```
+        pub fn asyncReceive(self: *Self) AsyncReceive(T) {
+            return AsyncReceive(T).init(self);
+        }
+
+        /// Creates an AsyncSend operation for use with select().
+        ///
+        /// Returns a single-shot future that will send the given value to the channel.
+        /// Create a new AsyncSend for each select() operation.
+        ///
+        /// Example:
+        /// ```zig
+        /// var send = channel.asyncSend(42);
+        /// const result = try select(rt, .{ .send = send });
+        /// ```
+        pub fn asyncSend(self: *Self, item: T) AsyncSend(T) {
+            return AsyncSend(T).init(self, item);
+        }
+    };
+}
+
+/// AsyncReceive represents a pending receive operation on a Channel.
+/// This type implements the Future protocol and can be used with select().
+///
+/// Each AsyncReceive is single-shot - it represents one receive operation.
+/// Create a new AsyncReceive for each select() operation.
+///
+/// Example:
+/// ```zig
+/// var recv1 = channel1.asyncReceive();
+/// var recv2 = channel2.asyncReceive();
+/// const result = try select(rt, .{ .ch1 = recv1, .ch2 = recv2 });
+/// switch (result) {
+///     .ch1 => |val| try testing.expectEqual(@as(u32, 42), val),
+///     .ch2 => |val| try testing.expectEqual(@as(u32, 99), val),
+/// }
+/// ```
+pub fn AsyncReceive(comptime T: type) type {
+    return struct {
+        channel_wait_node: WaitNode,
+        parent_wait_node: ?*WaitNode = null,
+        channel: *Channel(T),
+        result: ?Result = null,
+
+        const Self = @This();
+
+        pub const Result = error{ChannelClosed}!T;
+
+        const wait_node_vtable = WaitNode.VTable{
+            .wake = waitNodeWake,
+        };
+
+        fn init(channel: *Channel(T)) Self {
+            return .{
+                .channel_wait_node = .{
+                    .vtable = &wait_node_vtable,
+                },
+                .channel = channel,
+            };
+        }
+
+        fn waitNodeWake(wait_node: *WaitNode) void {
+            const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
+
+            // Perform the receive operation under lock
+            self.channel.mutex.lock();
+
+            if (self.channel.count > 0) {
+                // Take item from buffer
+                const item = self.channel.buffer[self.channel.head];
+                self.channel.head = (self.channel.head + 1) % self.channel.buffer.len;
+                self.channel.count -= 1;
+
+                // Wake one sender if any
+                const sender_node = self.channel.sender_queue.pop();
+                self.channel.mutex.unlock();
+
+                self.result = item;
+                if (sender_node) |node| {
+                    node.wake();
+                }
+            } else if (self.channel.closed) {
+                self.channel.mutex.unlock();
+                self.result = error.ChannelClosed;
+            } else {
+                // Shouldn't happen - woken but nothing available
+                self.channel.mutex.unlock();
+                self.result = error.ChannelClosed;
+            }
+
+            // Wake the parent (SelectWaiter or task wait node)
+            if (self.parent_wait_node) |parent| {
+                parent.wake();
+            }
+        }
+
+        /// Register for notification when receive can complete.
+        /// Returns false if operation completed immediately (fast path).
+        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+            self.parent_wait_node = wait_node;
+
+            self.channel.mutex.lock();
+
+            // Fast path: item available
+            if (self.channel.count > 0) {
+                const item = self.channel.buffer[self.channel.head];
+                self.channel.head = (self.channel.head + 1) % self.channel.buffer.len;
+                self.channel.count -= 1;
+
+                // Wake one sender if any
+                const sender_node = self.channel.sender_queue.pop();
+                self.channel.mutex.unlock();
+
+                self.result = item;
+                if (sender_node) |node| {
+                    node.wake();
+                }
+                return false; // Already ready
+            }
+
+            // Fast path: channel closed
+            if (self.channel.closed) {
+                self.channel.mutex.unlock();
+                self.result = error.ChannelClosed;
+                return false; // Already ready (with error)
+            }
+
+            // Slow path: enqueue and wait
+            self.channel.receiver_queue.push(&self.channel_wait_node);
+            self.channel.mutex.unlock();
+            return true; // Need to wait
+        }
+
+        /// Cancel a pending wait operation.
+        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
+            _ = wait_node;
+            self.channel.mutex.lock();
+            _ = self.channel.receiver_queue.remove(&self.channel_wait_node);
+            self.channel.mutex.unlock();
+        }
+
+        /// Get the result of the receive operation.
+        /// Must only be called after asyncWait() returns false or the wait_node is woken.
+        pub fn getResult(self: *Self) Result {
+            return self.result.?;
+        }
+    };
+}
+
+/// AsyncSend represents a pending send operation on a Channel.
+/// This type implements the Future protocol and can be used with select().
+///
+/// Each AsyncSend is single-shot - it represents one send operation with a specific value.
+/// Create a new AsyncSend for each select() operation.
+///
+/// Example:
+/// ```zig
+/// var send1 = channel1.asyncSend(42);
+/// var send2 = channel2.asyncSend(99);
+/// const result = try select(rt, .{ .ch1 = send1, .ch2 = send2 });
+/// ```
+pub fn AsyncSend(comptime T: type) type {
+    return struct {
+        channel_wait_node: WaitNode,
+        parent_wait_node: ?*WaitNode = null,
+        channel: *Channel(T),
+        item: T,
+        result: ?Result = null,
+
+        const Self = @This();
+
+        pub const Result = error{ChannelClosed}!void;
+
+        const wait_node_vtable = WaitNode.VTable{
+            .wake = waitNodeWake,
+        };
+
+        fn init(channel: *Channel(T), item: T) Self {
+            return .{
+                .channel_wait_node = .{
+                    .vtable = &wait_node_vtable,
+                },
+                .channel = channel,
+                .item = item,
+            };
+        }
+
+        fn waitNodeWake(wait_node: *WaitNode) void {
+            const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
+
+            // Perform the send operation under lock
+            self.channel.mutex.lock();
+
+            if (self.channel.closed) {
+                self.channel.mutex.unlock();
+                self.result = error.ChannelClosed;
+            } else if (self.channel.count < self.channel.buffer.len) {
+                // Space available - perform send
+                self.channel.buffer[self.channel.tail] = self.item;
+                self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
+                self.channel.count += 1;
+
+                // Wake one receiver if any
+                const receiver_node = self.channel.receiver_queue.pop();
+                self.channel.mutex.unlock();
+
+                self.result = {};
+                if (receiver_node) |node| {
+                    node.wake();
+                }
+            } else {
+                // Shouldn't happen - woken but no space
+                self.channel.mutex.unlock();
+                self.result = error.ChannelClosed;
+            }
+
+            // Wake the parent (SelectWaiter or task wait node)
+            if (self.parent_wait_node) |parent| {
+                parent.wake();
+            }
+        }
+
+        /// Register for notification when send can complete.
+        /// Returns false if operation completed immediately (fast path).
+        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+            self.parent_wait_node = wait_node;
+
+            self.channel.mutex.lock();
+
+            // Fast path: channel closed
+            if (self.channel.closed) {
+                self.channel.mutex.unlock();
+                self.result = error.ChannelClosed;
+                return false; // Already ready (with error)
+            }
+
+            // Fast path: space available
+            if (self.channel.count < self.channel.buffer.len) {
+                self.channel.buffer[self.channel.tail] = self.item;
+                self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
+                self.channel.count += 1;
+
+                // Wake one receiver if any
+                const receiver_node = self.channel.receiver_queue.pop();
+                self.channel.mutex.unlock();
+
+                self.result = {};
+                if (receiver_node) |node| {
+                    node.wake();
+                }
+                return false; // Already ready
+            }
+
+            // Slow path: enqueue and wait
+            self.channel.sender_queue.push(&self.channel_wait_node);
+            self.channel.mutex.unlock();
+            return true; // Need to wait
+        }
+
+        /// Cancel a pending wait operation.
+        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
+            _ = wait_node;
+            self.channel.mutex.lock();
+            _ = self.channel.sender_queue.remove(&self.channel_wait_node);
+            self.channel.mutex.unlock();
+        }
+
+        /// Get the result of the send operation.
+        /// Must only be called after asyncWait() returns false or the wait_node is woken.
+        pub fn getResult(self: *Self) Result {
+            return self.result.?;
         }
     };
 }
@@ -590,4 +876,289 @@ test "Channel: ring buffer wrapping" {
     };
 
     try runtime.runUntilComplete(TestFn.testWrap, .{ runtime, &channel }, .{});
+}
+
+test "Channel: asyncReceive with select - basic" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield(); // Let receiver start waiting
+            try ch.send(rt, 42);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32)) !void {
+            var recv = ch.asyncReceive();
+            const result = try select(rt, .{ .recv = &recv });
+            switch (result) {
+                .recv => |val| {
+                    try testing.expectEqual(@as(u32, 42), try val);
+                },
+            }
+        }
+    };
+
+    var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel }, .{});
+    defer sender_task.deinit();
+    var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel }, .{});
+    defer receiver_task.deinit();
+
+    try runtime.run();
+}
+
+test "Channel: asyncReceive with select - already ready" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn test_ready(rt: *Runtime, ch: *Channel(u32)) !void {
+            // Send first, so receiver finds it ready
+            try ch.send(rt, 99);
+
+            var recv = ch.asyncReceive();
+            const result = try select(rt, .{ .recv = &recv });
+            switch (result) {
+                .recv => |val| {
+                    try testing.expectEqual(@as(u32, 99), try val);
+                },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.test_ready, .{ runtime, &channel }, .{});
+}
+
+test "Channel: asyncReceive with select - closed channel" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn test_closed(rt: *Runtime, ch: *Channel(u32)) !void {
+            ch.close(false);
+
+            var recv = ch.asyncReceive();
+            const result = try select(rt, .{ .recv = &recv });
+            switch (result) {
+                .recv => |val| {
+                    try testing.expectError(error.ChannelClosed, val);
+                },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.test_closed, .{ runtime, &channel }, .{});
+}
+
+test "Channel: asyncSend with select - basic" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [2]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield(); // Let receiver start
+            var send = ch.asyncSend(42);
+            const result = try select(rt, .{ .send = &send });
+            switch (result) {
+                .send => |res| {
+                    try res;
+                },
+            }
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try rt.yield();
+            const val = try ch.receive(rt);
+            try testing.expectEqual(@as(u32, 42), val);
+        }
+    };
+
+    var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel }, .{});
+    defer sender_task.deinit();
+    var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel }, .{});
+    defer receiver_task.deinit();
+
+    try runtime.run();
+}
+
+test "Channel: asyncSend with select - already ready" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn test_ready(rt: *Runtime, ch: *Channel(u32)) !void {
+            // Channel has space, send should complete immediately
+            var send = ch.asyncSend(123);
+            const result = try select(rt, .{ .send = &send });
+            switch (result) {
+                .send => |res| {
+                    try res;
+                },
+            }
+
+            // Verify item was sent
+            const val = try ch.receive(rt);
+            try testing.expectEqual(@as(u32, 123), val);
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.test_ready, .{ runtime, &channel }, .{});
+}
+
+test "Channel: asyncSend with select - closed channel" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [5]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn test_closed(rt: *Runtime, ch: *Channel(u32)) !void {
+            ch.close(false);
+
+            var send = ch.asyncSend(42);
+            const result = try select(rt, .{ .send = &send });
+            switch (result) {
+                .send => |res| {
+                    try testing.expectError(error.ChannelClosed, res);
+                },
+            }
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.test_closed, .{ runtime, &channel }, .{});
+}
+
+test "Channel: select on both send and receive" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer1: [5]u32 = undefined;
+    var channel1 = Channel(u32).init(&buffer1);
+
+    // Make channel2 full so send blocks
+    var buffer2: [2]u32 = undefined;
+    var channel2 = Channel(u32).init(&buffer2);
+
+    const TestFn = struct {
+        fn testMain(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32)) !void {
+            // Fill channel2 so send blocks
+            try ch2.send(rt, 1);
+            try ch2.send(rt, 2);
+
+            var which: u8 = 0;
+            var select_task = try rt.spawn(selectTask, .{ rt, ch1, ch2, &which }, .{});
+            defer select_task.deinit();
+            var sender_task = try rt.spawn(sender, .{ rt, ch1 }, .{});
+            defer sender_task.deinit();
+
+            _ = try select_task.join(rt);
+            _ = try sender_task.join(rt);
+
+            // Receive should win (sender provides value)
+            try testing.expectEqual(@as(u8, 1), which);
+        }
+
+        fn selectTask(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32), which: *u8) !void {
+            var recv = ch1.asyncReceive();
+            var send = ch2.asyncSend(99);
+
+            const result = try select(rt, .{ .recv = &recv, .send = &send });
+            switch (result) {
+                .recv => |val| {
+                    try testing.expectEqual(@as(u32, 42), try val);
+                    which.* = 1;
+                },
+                .send => |res| {
+                    try res;
+                    which.* = 2;
+                },
+            }
+        }
+
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try ch.send(rt, 42);
+        }
+    };
+
+    try runtime.runUntilComplete(TestFn.testMain, .{ runtime, &channel1, &channel2 }, .{});
+}
+
+test "Channel: select with multiple receivers" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer1: [5]u32 = undefined;
+    var channel1 = Channel(u32).init(&buffer1);
+
+    var buffer2: [5]u32 = undefined;
+    var channel2 = Channel(u32).init(&buffer2);
+
+    const TestFn = struct {
+        fn selectTask(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32), which: *u8) !void {
+            var recv1 = ch1.asyncReceive();
+            var recv2 = ch2.asyncReceive();
+
+            const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
+            switch (result) {
+                .ch1 => |val| {
+                    try testing.expectEqual(@as(u32, 42), try val);
+                    which.* = 1;
+                },
+                .ch2 => |val| {
+                    try testing.expectEqual(@as(u32, 99), try val);
+                    which.* = 2;
+                },
+            }
+        }
+
+        fn sender2(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try ch.send(rt, 99);
+        }
+    };
+
+    var which: u8 = 0;
+    var select_task = try runtime.spawn(TestFn.selectTask, .{ runtime, &channel1, &channel2, &which }, .{});
+    defer select_task.deinit();
+    var sender_task = try runtime.spawn(TestFn.sender2, .{ runtime, &channel2 }, .{});
+    defer sender_task.deinit();
+
+    try runtime.run();
+
+    // ch2 should win
+    try testing.expectEqual(@as(u8, 2), which);
 }
