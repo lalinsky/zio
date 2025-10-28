@@ -420,7 +420,7 @@ test "Notify: select" {
             var task = try rt.spawn(signalerTask, .{ rt, &notify }, .{});
             defer task.deinit();
 
-            const result = try select(rt, .{ .notify = &notify, .task = task });
+            const result = try select(rt, .{ .notify = &notify, .task = &task });
             try std.testing.expectEqual(.notify, result);
         }
     };
