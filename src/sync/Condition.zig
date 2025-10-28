@@ -194,7 +194,14 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     ) catch |err| {
         // Remove from queue if canceled (timeout already handled by callback)
         if (err == error.Canceled) {
-            _ = self.wait_queue.remove(&task.awaitable.wait_node);
+            const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+            if (!was_in_queue) {
+                // Already removed by signal(); we won't process it due to cancel,
+                // so wake another waiter to consume the signal.
+                if (self.wait_queue.pop()) |next_waiter| {
+                    next_waiter.wake();
+                }
+            }
         }
         // Must reacquire mutex before returning
         mutex.lockUncancelable(runtime);
