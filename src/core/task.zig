@@ -69,10 +69,6 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
-    pub inline fn getLoop(self: *AnyTask) *xev.Loop {
-        return self.getExecutor().getLoop();
-    }
-
     /// Check if this task can be migrated to a different executor.
     /// Returns false if the task is pinned or canceled, true otherwise.
     pub inline fn canMigrate(self: *const AnyTask) bool {
