@@ -228,7 +228,15 @@ pub fn asyncWait(self: *Notify, wait_node: *WaitNode) bool {
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
 pub fn asyncCancelWait(self: *Notify, wait_node: *WaitNode) void {
-    _ = self.wait_queue.remove(wait_node);
+    const was_in_queue = self.wait_queue.remove(wait_node);
+    if (!was_in_queue) {
+        // We were already removed by signal() which will wake us.
+        // Since we're being cancelled and won't process the signal,
+        // wake another waiter to receive the signal instead.
+        if (self.wait_queue.pop()) |next_waiter| {
+            next_waiter.wake();
+        }
+    }
 }
 
 test "Notify basic signal/wait" {
