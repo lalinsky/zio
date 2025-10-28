@@ -122,10 +122,21 @@ pub fn Channel(comptime T: type) type {
 
                 // Yield with cancellation support
                 executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-                    // Cancelled - remove from queue
+                    // Cancelled - try to remove from queue
                     self.mutex.lock();
-                    _ = self.receiver_queue.remove(&task.awaitable.wait_node);
-                    self.mutex.unlock();
+                    const was_in_queue = self.receiver_queue.remove(&task.awaitable.wait_node);
+                    if (!was_in_queue) {
+                        // We were already removed by a sender who will wake us.
+                        // Since we're being cancelled and won't consume the item,
+                        // wake another receiver to consume it instead.
+                        const next_receiver = self.receiver_queue.pop();
+                        self.mutex.unlock();
+                        if (next_receiver) |node| {
+                            node.wake();
+                        }
+                    } else {
+                        self.mutex.unlock();
+                    }
                     return err;
                 };
 
@@ -202,10 +213,21 @@ pub fn Channel(comptime T: type) type {
 
                 // Yield with cancellation support
                 executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-                    // Cancelled - remove from queue
+                    // Cancelled - try to remove from queue
                     self.mutex.lock();
-                    _ = self.sender_queue.remove(&task.awaitable.wait_node);
-                    self.mutex.unlock();
+                    const was_in_queue = self.sender_queue.remove(&task.awaitable.wait_node);
+                    if (!was_in_queue) {
+                        // We were already removed by a receiver who will wake us.
+                        // Since we're being cancelled and won't send the item,
+                        // wake another sender to use the buffer slot instead.
+                        const next_sender = self.sender_queue.pop();
+                        self.mutex.unlock();
+                        if (next_sender) |node| {
+                            node.wake();
+                        }
+                    } else {
+                        self.mutex.unlock();
+                    }
                     return err;
                 };
 
@@ -430,8 +452,19 @@ pub fn AsyncReceive(comptime T: type) type {
         pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
             _ = wait_node;
             self.channel.mutex.lock();
-            _ = self.channel.receiver_queue.remove(&self.channel_wait_node);
-            self.channel.mutex.unlock();
+            const was_in_queue = self.channel.receiver_queue.remove(&self.channel_wait_node);
+            if (!was_in_queue) {
+                // We were already removed by a sender who will wake us.
+                // Since we're being cancelled and won't consume the item,
+                // wake another receiver to consume it instead.
+                const next_receiver = self.channel.receiver_queue.pop();
+                self.channel.mutex.unlock();
+                if (next_receiver) |node| {
+                    node.wake();
+                }
+            } else {
+                self.channel.mutex.unlock();
+            }
         }
 
         /// Get the result of the receive operation.
@@ -556,8 +589,19 @@ pub fn AsyncSend(comptime T: type) type {
         pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
             _ = wait_node;
             self.channel.mutex.lock();
-            _ = self.channel.sender_queue.remove(&self.channel_wait_node);
-            self.channel.mutex.unlock();
+            const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
+            if (!was_in_queue) {
+                // We were already removed by a receiver who will wake us.
+                // Since we're being cancelled and won't send the item,
+                // wake another sender to use the buffer slot instead.
+                const next_sender = self.channel.sender_queue.pop();
+                self.channel.mutex.unlock();
+                if (next_sender) |node| {
+                    node.wake();
+                }
+            } else {
+                self.channel.mutex.unlock();
+            }
         }
 
         /// Get the result of the send operation.
