@@ -376,9 +376,9 @@ pub fn AsyncReceive(comptime T: type) type {
                 self.channel.mutex.unlock();
                 self.result = error.ChannelClosed;
             } else {
-                // Shouldn't happen - woken but nothing available
+                // Should never happen - woken but nothing available and not closed
                 self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
+                unreachable;
             }
 
             // Wake the parent (SelectWaiter or task wait node)
@@ -502,9 +502,9 @@ pub fn AsyncSend(comptime T: type) type {
                     node.wake();
                 }
             } else {
-                // Shouldn't happen - woken but no space
+                // Should never happen - woken but no space and not closed
                 self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
+                unreachable;
             }
 
             // Wake the parent (SelectWaiter or task wait node)
