@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `Channel.asyncSend()` and `Channel.asyncReceive()` methods for using channels with `select()`
+
+### Changed
+
+- **BREAKING**: `select()` and `wait()` now require futures to be passed as pointers (use `&future` instead of `future`)
+- **BREAKING**: Channel methods `isEmpty()`, `isFull()`, `tryReceive()`, `trySend()`, and `close()` no longer require a Runtime parameter
+
 ## [0.4.0] - 2025-10-25
 
 ### Added

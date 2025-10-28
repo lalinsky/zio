@@ -282,7 +282,7 @@ pub fn Channel(comptime T: type) type {
         /// Example:
         /// ```zig
         /// var recv = channel.asyncReceive();
-        /// const result = try select(rt, .{ .recv = recv });
+        /// const result = try select(rt, .{ .recv = &recv });
         /// switch (result) {
         ///     .recv => |val| std.debug.print("Received: {}\n", .{val}),
         /// }
@@ -299,7 +299,7 @@ pub fn Channel(comptime T: type) type {
         /// Example:
         /// ```zig
         /// var send = channel.asyncSend(42);
-        /// const result = try select(rt, .{ .send = send });
+        /// const result = try select(rt, .{ .send = &send });
         /// ```
         pub fn asyncSend(self: *Self, item: T) AsyncSend(T) {
             return AsyncSend(T).init(self, item);
@@ -317,7 +317,7 @@ pub fn Channel(comptime T: type) type {
 /// ```zig
 /// var recv1 = channel1.asyncReceive();
 /// var recv2 = channel2.asyncReceive();
-/// const result = try select(rt, .{ .ch1 = recv1, .ch2 = recv2 });
+/// const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
 /// switch (result) {
 ///     .ch1 => |val| try testing.expectEqual(@as(u32, 42), val),
 ///     .ch2 => |val| try testing.expectEqual(@as(u32, 99), val),
@@ -445,7 +445,7 @@ pub fn AsyncReceive(comptime T: type) type {
 /// ```zig
 /// var send1 = channel1.asyncSend(42);
 /// var send2 = channel2.asyncSend(99);
-/// const result = try select(rt, .{ .ch1 = send1, .ch2 = send2 });
+/// const result = try select(rt, .{ .ch1 = &send1, .ch2 = &send2 });
 /// ```
 pub fn AsyncSend(comptime T: type) type {
     return struct {

@@ -42,7 +42,8 @@ const ThreadWaiter = struct {
 fn FutureType(comptime T: type) type {
     const type_info = @typeInfo(T);
     if (type_info != .pointer) {
-        @compileError("Future must be a pointer type, got: " ++ @typeName(T));
+        @compileError("Future must be a pointer type, got: " ++ @typeName(T) ++
+            ". Use '&' to pass by pointer (e.g., &future instead of future)");
     }
     return type_info.pointer.child;
 }
@@ -155,7 +156,12 @@ pub const SelectWaiter = struct {
 };
 
 /// Wait for multiple futures simultaneously and return whichever completes first.
-/// `futures` is a struct with each field a pointer to a future (e.g., `*JoinHandle(T)`), where `T` can be different for each field.
+///
+/// **Important**: All futures MUST be passed as pointers (use `&` prefix).
+/// This ensures consistent behavior and prevents accidental copies.
+///
+/// `futures` is a struct with each field a pointer to a future (e.g., `*JoinHandle(T)`),
+/// where `T` can be different for each field.
 /// Returns a tagged union with the same field names, containing the result of whichever completed first.
 ///
 /// When multiple handles complete at the same time, fields are checked in declaration order
