@@ -352,6 +352,11 @@ pub fn AsyncReceive(comptime T: type) type {
             // Perform the receive operation under lock
             self.channel.mutex.lock();
 
+            // Read and clear parent_wait_node while holding the lock to prevent
+            // race with cancellation (which could free/reuse the parent)
+            const parent = self.parent_wait_node;
+            self.parent_wait_node = null;
+
             // Check if we've been lapped
             if (self.consumer.read_pos + self.channel.buffer.len < self.channel.write_pos) {
                 self.consumer.read_pos = self.channel.write_pos - self.channel.buffer.len;
@@ -373,8 +378,8 @@ pub fn AsyncReceive(comptime T: type) type {
             }
 
             // Wake the parent (SelectWaiter or task wait node)
-            if (self.parent_wait_node) |parent| {
-                parent.wake();
+            if (parent) |p| {
+                p.wake();
             }
         }
 
@@ -417,8 +422,12 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Cancel a pending wait operation.
         pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
-            _ = wait_node;
             self.channel.mutex.lock();
+
+            // Verify and clear parent_wait_node under lock to prevent race with waitNodeWake
+            std.debug.assert(self.parent_wait_node == wait_node);
+            self.parent_wait_node = null;
+
             const was_in_queue = self.channel.wait_queue.remove(&self.channel_wait_node);
             if (!was_in_queue) {
                 // We were already removed by a sender who will wake us.
