@@ -442,9 +442,13 @@ pub fn AsyncReceive(comptime T: type) type {
         pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
             self.channel.mutex.lock();
 
-            // Verify and clear parent_wait_node under lock to prevent race with waitNodeWake
-            std.debug.assert(self.parent_wait_node == wait_node);
-            self.parent_wait_node = null;
+            // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
+            // If waitNodeWake already cleared it, parent_wait_node will be null.
+            // If it's something else, that's a bug (wrong wait_node passed).
+            if (self.parent_wait_node) |parent| {
+                std.debug.assert(parent == wait_node);
+                self.parent_wait_node = null;
+            }
 
             const was_in_queue = self.channel.wait_queue.remove(&self.channel_wait_node);
             if (!was_in_queue) {
