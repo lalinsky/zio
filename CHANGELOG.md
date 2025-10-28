@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `Channel.asyncSend()` and `Channel.asyncReceive()` methods for using channels with `select()`
+- Added `Channel.asyncSend()`, `Channel.asyncReceive()` and `BroadcastChannel.asyncReceive()` methods for using channels with `select()`
 
 ### Changed
 
