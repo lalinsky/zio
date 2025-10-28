@@ -59,57 +59,43 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) !void {
 
 pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
 
     var canceled = false;
     var timed_out = false;
     defer if (canceled or timed_out) rt.endShield();
 
-    const TimeoutContext = struct {
-        completion: *xev.Completion,
-        canceled: *bool,
-    };
-
-    var timeout_ctx = TimeoutContext{
-        .completion = completion,
-        .canceled = &canceled,
-    };
+    // Set up timeout
+    var timeout = Timeout.init;
+    defer timeout.clear(rt);
+    timeout.set(rt, timeout_ns);
 
     while (completion.state() == .active) {
-        task.getExecutor().timedWaitForReadyWithCallback(
-            .ready,
-            .waiting,
-            timeout_ns,
-            TimeoutContext,
-            &timeout_ctx,
-            struct {
-                fn onTimeout(ctx: *TimeoutContext) bool {
-                    // Only timeout if I/O hasn't completed and hasn't been canceled
-                    return ctx.completion.state() == .active and ctx.canceled.* == false;
-                }
-            }.onTimeout,
-        ) catch |err| switch (err) {
-            error.Timeout => {
-                // Cancel the I/O operation on timeout
-                if (!timed_out) {
+        // Transition to preparing_to_wait state before yielding
+        task.state.store(.preparing_to_wait, .release);
+
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+            if (err == error.Canceled and timeout.triggered) {
+                // Timeout triggered - cancel I/O if it's still active and we haven't already
+                if (completion.state() == .active and !timed_out and !canceled) {
                     timed_out = true;
-                    if (!canceled) {
-                        rt.beginShield();
-                        cancelIo(rt, completion);
-                    }
+                    timeout.clear(rt); // Clear timeout so subsequent iterations don't timeout
+                    rt.beginShield();
+                    cancelIo(rt, completion);
                 }
                 continue;
-            },
-            error.Canceled => {
-                if (!canceled) {
-                    canceled = true;
-                    if (!timed_out) {
-                        rt.beginShield();
-                        cancelIo(rt, completion);
-                    }
-                }
-                continue;
-            },
+            }
+            // Explicit cancellation - cancel I/O if it's still active and we haven't already
+            if (completion.state() == .active and !canceled and !timed_out) {
+                canceled = true;
+                timeout.clear(rt); // Clear timeout so we don't get a spurious timeout
+                rt.beginShield();
+                cancelIo(rt, completion);
+            }
+            continue;
         };
+
         std.debug.assert(completion.state() == .dead);
         break;
     }
