@@ -267,13 +267,28 @@ pub fn Channel(comptime T: type) type {
             self.mutex.unlock();
 
             // Wake all receivers so they can see the channel is closed
-            while (self.receiver_queue.pop()) |node| {
-                node.wake();
+            // Pop under lock to avoid races with concurrent remove() during cancellation
+            while (true) {
+                self.mutex.lock();
+                const node = self.receiver_queue.pop();
+                self.mutex.unlock();
+                if (node) |n| {
+                    n.wake();
+                } else {
+                    break;
+                }
             }
 
             // Wake all senders so they can see the channel is closed
-            while (self.sender_queue.pop()) |node| {
-                node.wake();
+            while (true) {
+                self.mutex.lock();
+                const node = self.sender_queue.pop();
+                self.mutex.unlock();
+                if (node) |n| {
+                    n.wake();
+                } else {
+                    break;
+                }
             }
         }
 
