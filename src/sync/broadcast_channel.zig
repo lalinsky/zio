@@ -161,17 +161,19 @@ pub fn BroadcastChannel(comptime T: type) type {
                 self.mutex.lock();
 
                 // Check if we've been lapped (more than buffer.len behind)
-                if (consumer.read_pos + self.buffer.len < self.write_pos) {
+                // Use wrapping subtraction to handle counter overflow correctly
+                const unread = self.write_pos -% consumer.read_pos;
+                if (unread > self.buffer.len) {
                     // Skip to the oldest available message
-                    consumer.read_pos = self.write_pos - self.buffer.len;
+                    consumer.read_pos = self.write_pos -% self.buffer.len;
                     self.mutex.unlock();
                     return error.Lagged;
                 }
 
                 // Fast path: message available
-                if (consumer.read_pos < self.write_pos) {
+                if (unread > 0) {
                     const item = self.buffer[consumer.read_pos % self.buffer.len];
-                    consumer.read_pos += 1;
+                    consumer.read_pos +%= 1;
                     self.mutex.unlock();
                     return item;
                 }
@@ -222,14 +224,17 @@ pub fn BroadcastChannel(comptime T: type) type {
             self.mutex.lock();
             defer self.mutex.unlock();
 
+            // Use wrapping subtraction to handle counter overflow correctly
+            const unread = self.write_pos -% consumer.read_pos;
+
             // Check if we've been lapped
-            if (consumer.read_pos + self.buffer.len < self.write_pos) {
-                consumer.read_pos = self.write_pos - self.buffer.len;
+            if (unread > self.buffer.len) {
+                consumer.read_pos = self.write_pos -% self.buffer.len;
                 return error.Lagged;
             }
 
             // Check if caught up
-            if (consumer.read_pos >= self.write_pos) {
+            if (unread == 0) {
                 if (self.closed) {
                     return error.Closed;
                 }
@@ -237,7 +242,7 @@ pub fn BroadcastChannel(comptime T: type) type {
             }
 
             const item = self.buffer[consumer.read_pos % self.buffer.len];
-            consumer.read_pos += 1;
+            consumer.read_pos +%= 1;
 
             return item;
         }
@@ -258,7 +263,7 @@ pub fn BroadcastChannel(comptime T: type) type {
             }
 
             self.buffer[self.write_pos % self.buffer.len] = item;
-            self.write_pos += 1;
+            self.write_pos +%= 1;
 
             // Wake all waiting consumers
             var waiters = self.wait_queue.popAll();
@@ -364,15 +369,18 @@ pub fn AsyncReceive(comptime T: type) type {
             const parent = self.parent_wait_node;
             self.parent_wait_node = null;
 
+            // Use wrapping subtraction to handle counter overflow correctly
+            const unread = self.channel.write_pos -% self.consumer.read_pos;
+
             // Check if we've been lapped
-            if (self.consumer.read_pos + self.channel.buffer.len < self.channel.write_pos) {
-                self.consumer.read_pos = self.channel.write_pos - self.channel.buffer.len;
+            if (unread > self.channel.buffer.len) {
+                self.consumer.read_pos = self.channel.write_pos -% self.channel.buffer.len;
                 self.channel.mutex.unlock();
                 self.result = error.Lagged;
-            } else if (self.consumer.read_pos < self.channel.write_pos) {
+            } else if (unread > 0) {
                 // Take item from buffer
                 const item = self.channel.buffer[self.consumer.read_pos % self.channel.buffer.len];
-                self.consumer.read_pos += 1;
+                self.consumer.read_pos +%= 1;
                 self.channel.mutex.unlock();
                 self.result = item;
             } else if (self.channel.closed) {
@@ -397,18 +405,21 @@ pub fn AsyncReceive(comptime T: type) type {
 
             self.channel.mutex.lock();
 
+            // Use wrapping subtraction to handle counter overflow correctly
+            const unread = self.channel.write_pos -% self.consumer.read_pos;
+
             // Check if we've been lapped
-            if (self.consumer.read_pos + self.channel.buffer.len < self.channel.write_pos) {
-                self.consumer.read_pos = self.channel.write_pos - self.channel.buffer.len;
+            if (unread > self.channel.buffer.len) {
+                self.consumer.read_pos = self.channel.write_pos -% self.channel.buffer.len;
                 self.channel.mutex.unlock();
                 self.result = error.Lagged;
                 return false; // Already ready (with error)
             }
 
             // Fast path: message available
-            if (self.consumer.read_pos < self.channel.write_pos) {
+            if (unread > 0) {
                 const item = self.channel.buffer[self.consumer.read_pos % self.channel.buffer.len];
-                self.consumer.read_pos += 1;
+                self.consumer.read_pos +%= 1;
                 self.channel.mutex.unlock();
                 self.result = item;
                 return false; // Already ready
@@ -1051,4 +1062,81 @@ test "BroadcastChannel: select with multiple broadcast channels" {
 
     // ch2 should win
     try testing.expectEqual(@as(u8, 2), which);
+}
+
+test "BroadcastChannel: position counter overflow handling" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buffer: [3]u32 = undefined;
+    var channel = BroadcastChannel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn test_overflow(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
+            _ = rt;
+            ch.subscribe(consumer);
+            defer ch.unsubscribe(consumer);
+
+            // Simulate near-overflow condition by setting positions close to usize max
+            // This tests that wrapping arithmetic works correctly
+            const near_max = std.math.maxInt(usize) - 5;
+
+            ch.mutex.lock();
+            ch.write_pos = near_max;
+            consumer.read_pos = near_max;
+            ch.mutex.unlock();
+
+            // Send items that will cause write_pos to wrap around
+            try ch.send(100);
+            try ch.send(101);
+            try ch.send(102);
+
+            // Verify we can receive correctly even after overflow
+            const val1 = try ch.tryReceive(consumer);
+            try testing.expectEqual(@as(u32, 100), val1);
+
+            const val2 = try ch.tryReceive(consumer);
+            try testing.expectEqual(@as(u32, 101), val2);
+
+            const val3 = try ch.tryReceive(consumer);
+            try testing.expectEqual(@as(u32, 102), val3);
+
+            // At this point: write_pos has wrapped to (maxInt - 2),
+            // consumer.read_pos has wrapped to (maxInt - 2)
+            // Send more items - write_pos will continue wrapping
+            try ch.send(103);
+            try ch.send(104);
+            try ch.send(105);
+
+            // Receive them to verify wrapping arithmetic works
+            const val4 = try ch.tryReceive(consumer);
+            try testing.expectEqual(@as(u32, 103), val4);
+
+            const val5 = try ch.tryReceive(consumer);
+            try testing.expectEqual(@as(u32, 104), val5);
+
+            const val6 = try ch.tryReceive(consumer);
+            try testing.expectEqual(@as(u32, 105), val6);
+
+            // Now test lag detection with wrapped counters
+            // Send more than buffer capacity without consuming
+            try ch.send(200);
+            try ch.send(201);
+            try ch.send(202);
+            try ch.send(203); // This overwrites oldest (200)
+
+            // Next receive should detect lag correctly even with wrapped positions
+            const err = ch.tryReceive(consumer);
+            try testing.expectError(error.Lagged, err);
+
+            // After lag, we should be at the oldest available message (201)
+            const val7 = try ch.tryReceive(consumer);
+            try testing.expectEqual(@as(u32, 201), val7);
+        }
+    };
+
+    var consumer = BroadcastChannel(u32).Consumer{};
+    try runtime.runUntilComplete(TestFn.test_overflow, .{ runtime, &channel, &consumer }, .{});
 }
