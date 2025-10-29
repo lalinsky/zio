@@ -39,8 +39,18 @@ const ThreadWaiter = struct {
 //   const Result = T
 //     The type of value this future produces when complete.
 //
-//   fn asyncWait(self: *Self, wait_node: *WaitNode) bool
+//   const WaitContext = void | SomeStruct
+//     Optional per-wait mutable state. Use void if the future needs no per-wait state.
+//     If non-void, this struct will be allocated on the caller's stack and passed to
+//     asyncWait/asyncCancelWait. Useful for storing completions, results, or other
+//     data that varies per wait operation.
+//
+//   fn asyncWait(self: *Self, wait_node: *WaitNode) bool           // if WaitContext == void
+//   fn asyncWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
 //     Register for notification when this future completes.
+//
+//     If WaitContext != void, the ctx parameter points to caller-allocated per-wait state
+//     that persists for the duration of this wait operation.
 //
 //     Returns:
 //       - false: Operation already complete (fast path). Result is available via getResult().
@@ -52,8 +62,10 @@ const ThreadWaiter = struct {
 //       - If returns false, getResult() can be called immediately
 //       - If returns true, wait_node.wake() will be called exactly once when complete
 //       - Thread-safe: can be called from any thread
+//       - The ctx pointer (if present) remains valid until asyncCancelWait() or wait_node.wake()
 //
-//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void
+//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void     // if WaitContext == void
+//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) void  // if WaitContext != void
 //     Cancel a pending wait operation by removing the wait_node from internal queues.
 //
 //     Must be called if asyncWait() returned true and the caller no longer wants to wait
@@ -110,6 +122,47 @@ fn checkSelfWait(task: *AnyTask, future: anytype) void {
             }
         }
     }
+}
+
+/// Extract the WaitContext type from a future pointer type
+fn FutureWaitContext(comptime future_type: type) type {
+    const Future = FutureType(future_type);
+    if (@hasDecl(Future, "WaitContext")) {
+        return Future.WaitContext;
+    }
+    return void;
+}
+
+/// Check if a future has a non-void WaitContext
+fn hasWaitContext(comptime future_type: type) bool {
+    return FutureWaitContext(future_type) != void;
+}
+
+/// Build a struct type containing WaitContext fields for each future that needs one
+fn WaitContextsType(comptime futures_type: type) type {
+    const fields = @typeInfo(futures_type).@"struct".fields;
+    var context_fields: []const std.builtin.Type.StructField = &.{};
+
+    inline for (fields) |field| {
+        const WaitCtx = FutureWaitContext(field.type);
+        if (WaitCtx != void) {
+            const ctx_field = std.builtin.Type.StructField{
+                .name = field.name,
+                .type = WaitCtx,
+                .default_value = null,
+                .is_comptime = false,
+                .alignment = @alignOf(WaitCtx),
+            };
+            context_fields = context_fields ++ &[_]std.builtin.Type.StructField{ctx_field};
+        }
+    }
+
+    return @Type(.{ .@"struct" = .{
+        .layout = .auto,
+        .fields = context_fields,
+        .decls = &.{},
+        .is_tuple = false,
+    } });
 }
 
 /// Wrapper for wait() result to avoid nested error unions
@@ -251,6 +304,10 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Winner tracking: NO_WINNER means no winner yet
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
 
+    // Allocate WaitContext struct on stack for futures that need per-wait state
+    const ContextsType = WaitContextsType(S);
+    var contexts: ContextsType = undefined;
+
     // Create waiter structures on the stack
     var waiters: [fields.len]SelectWaiter = undefined;
     inline for (&waiters, 0..) |*waiter, i| {
@@ -263,7 +320,11 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         inline for (fields, 0..) |field, i| {
             if (winner_index != i) {
                 var future = @field(futures, field.name);
-                future.asyncCancelWait(&waiters[i].wait_node);
+                if (comptime hasWaitContext(field.type)) {
+                    future.asyncCancelWait(&waiters[i].wait_node, &@field(contexts, field.name));
+                } else {
+                    future.asyncCancelWait(&waiters[i].wait_node);
+                }
             }
         }
     }
@@ -271,7 +332,11 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Add waiters to all waiting lists - fast path: return immediately if already complete
     inline for (fields, 0..) |field, i| {
         var future = @field(futures, field.name);
-        const waiting = future.asyncWait(&waiters[i].wait_node);
+        const waiting = if (comptime hasWaitContext(field.type))
+            future.asyncWait(&waiters[i].wait_node, &@field(contexts, field.name))
+        else
+            future.asyncWait(&waiters[i].wait_node);
+
         if (!waiting) {
             winner.store(i, .release);
             return @unionInit(U, field.name, future.getResult());
@@ -320,9 +385,18 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var waiter = SelectWaiter.init(wait_node, &winner, 0);
 
+    // Allocate WaitContext if needed
+    const WaitCtx = FutureWaitContext(@TypeOf(future));
+    var context: WaitCtx = undefined;
+    const has_context = comptime (WaitCtx != void);
+
     // Fast path: check if already complete
     var fut = future;
-    const added = fut.asyncWait(&waiter.wait_node);
+    const added = if (has_context)
+        fut.asyncWait(&waiter.wait_node, &context)
+    else
+        fut.asyncWait(&waiter.wait_node);
+
     if (!added) {
         return .{ .value = fut.getResult() };
     }
@@ -330,7 +404,11 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     // Clean up waiter on exit
     defer {
         if (winner.load(.acquire) == NO_WINNER) {
-            fut.asyncCancelWait(&waiter.wait_node);
+            if (has_context) {
+                fut.asyncCancelWait(&waiter.wait_node, &context);
+            } else {
+                fut.asyncCancelWait(&waiter.wait_node);
+            }
         }
     }
 
