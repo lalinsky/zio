@@ -413,7 +413,7 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             self.parent_wait_node = wait_node;
 
             self.channel.mutex.lock();
@@ -449,7 +449,7 @@ pub fn AsyncReceive(comptime T: type) type {
         }
 
         /// Cancel a pending wait operation.
-        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
             _ = wait_node;
             self.channel.mutex.lock();
             const was_in_queue = self.channel.receiver_queue.remove(&self.channel_wait_node);
@@ -550,7 +550,7 @@ pub fn AsyncSend(comptime T: type) type {
 
         /// Register for notification when send can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             self.parent_wait_node = wait_node;
 
             self.channel.mutex.lock();
@@ -586,7 +586,7 @@ pub fn AsyncSend(comptime T: type) type {
         }
 
         /// Cancel a pending wait operation.
-        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
             _ = wait_node;
             self.channel.mutex.lock();
             const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
