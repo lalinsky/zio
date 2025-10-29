@@ -6,6 +6,9 @@ const AnyTask = @import("core/task.zig").AnyTask;
 const WaitNode = @import("core/WaitNode.zig");
 const meta = @import("meta.zig");
 
+/// Sentinel value indicating no winner has been selected yet
+const NO_WINNER = std.math.maxInt(usize);
+
 /// Thread waiter for non-coroutine contexts
 const ThreadWaiter = struct {
     wait_node: WaitNode,
@@ -127,31 +130,35 @@ test "SelectResult: result types" {
 pub const SelectWaiter = struct {
     wait_node: WaitNode,
     parent: *WaitNode,
-    wake_counter: *std.atomic.Value(u32),
-    signaled: std.atomic.Value(bool) = .init(false),
+    winner: *std.atomic.Value(usize),
+    index: usize,
 
     const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
     };
 
-    pub fn init(parent: *WaitNode, wake_counter: *std.atomic.Value(u32)) SelectWaiter {
+    pub fn init(parent: *WaitNode, winner: *std.atomic.Value(usize), index: usize) SelectWaiter {
         return .{
             .wait_node = .{
                 .vtable = &wait_node_vtable,
             },
             .parent = parent,
-            .wake_counter = wake_counter,
-            .signaled = .init(false),
+            .winner = winner,
+            .index = index,
         };
     }
 
     fn waitNodeWake(wait_node: *WaitNode) void {
         const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
-        self.signaled.store(true, .release);
-        const prev_val = self.wake_counter.fetchAdd(1, .acq_rel);
-        if (prev_val == 0) {
+
+        // Try to claim winner slot with our index
+        const prev = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
+
+        if (prev == null) {
+            // We won! Wake parent task
             self.parent.wake();
         }
+        // else: someone else already won, don't wake parent again
     }
 };
 
@@ -198,19 +205,20 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         std.debug.assert(prev == .preparing_to_wait or prev == .ready);
     }
 
-    // Keep track of the number of wakeups (== number of futures that became ready)
-    var ready: std.atomic.Value(u32) = .init(0);
+    // Winner tracking: NO_WINNER means no winner yet
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
 
     // Create waiter structures on the stack
     var waiters: [fields.len]SelectWaiter = undefined;
-    inline for (&waiters) |*waiter| {
-        waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &ready);
+    inline for (&waiters, 0..) |*waiter, i| {
+        waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &winner, i);
     }
 
     // Clean up waiters on all exit paths
     defer {
+        const winner_index = winner.load(.acquire);
         inline for (fields, 0..) |field, i| {
-            if (!waiters[i].signaled.load(.acquire)) {
+            if (winner_index != i) {
                 var future = @field(futures, field.name);
                 future.asyncCancelWait(&waiters[i].wait_node);
             }
@@ -222,6 +230,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         var future = @field(futures, field.name);
         const waiting = future.asyncWait(&waiters[i].wait_node);
         if (!waiting) {
+            winner.store(i, .release);
             return @unionInit(U, field.name, future.getResult());
         }
     }
@@ -229,13 +238,13 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Yield and wait for one to complete
     try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
 
-    // We should have at least one future with result
-    // TODO What to do if we have multiple?
-    std.debug.assert(ready.load(.acquire) > 0);
+    // O(1) winner lookup
+    const winner_index = winner.load(.acquire);
+    std.debug.assert(winner_index != NO_WINNER);
 
-    // Find which one completed by checking signaled flags
+    // Return result from winner
     inline for (fields, 0..) |field, i| {
-        if (waiters[i].signaled.load(.acquire)) {
+        if (i == winner_index) {
             var future = @field(futures, field.name);
             return @unionInit(U, field.name, future.getResult());
         }
@@ -264,8 +273,9 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
         }
     }
 
-    var ready: std.atomic.Value(u32) = .init(0);
-    var waiter = SelectWaiter.init(wait_node, &ready);
+    // Winner tracking: for single future, winner is always 0 if signaled
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiter = SelectWaiter.init(wait_node, &winner, 0);
 
     // Fast path: check if already complete
     var fut = future;
@@ -276,7 +286,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
 
     // Clean up waiter on exit
     defer {
-        if (!waiter.signaled.load(.acquire)) {
+        if (winner.load(.acquire) == NO_WINNER) {
             fut.asyncCancelWait(&waiter.wait_node);
         }
     }
@@ -314,8 +324,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     }
 
     // We should have been signaled
-    std.debug.assert(ready.load(.acquire) > 0);
-    std.debug.assert(waiter.signaled.load(.acquire));
+    std.debug.assert(winner.load(.acquire) == 0);
 
     return .{ .value = fut.getResult() };
 }
