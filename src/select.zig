@@ -314,11 +314,15 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &winner, i);
     }
 
+    // Track how many futures we've registered with (for cleanup)
+    var registered_count: usize = 0;
+
     // Clean up waiters on all exit paths
     defer {
         const winner_index = winner.load(.acquire);
         inline for (fields, 0..) |field, i| {
-            if (winner_index != i) {
+            // Only cancel if we registered and didn't win
+            if (i < registered_count and winner_index != i) {
                 var future = @field(futures, field.name);
                 if (comptime hasWaitContext(field.type)) {
                     future.asyncCancelWait(rt, &waiters[i].wait_node, &@field(contexts, field.name));
@@ -336,6 +340,8 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
             future.asyncWait(rt, &waiters[i].wait_node, &@field(contexts, field.name))
         else
             future.asyncWait(rt, &waiters[i].wait_node);
+
+        registered_count += 1;
 
         if (!waiting) {
             winner.store(i, .release);
