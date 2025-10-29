@@ -382,6 +382,11 @@ pub fn AsyncReceive(comptime T: type) type {
             // Perform the receive operation under lock
             self.channel.mutex.lock();
 
+            // Read and clear parent_wait_node while holding the lock to prevent
+            // race with cancellation (which could free/reuse the parent)
+            const parent = self.parent_wait_node;
+            self.parent_wait_node = null;
+
             if (self.channel.count > 0) {
                 // Take item from buffer
                 const item = self.channel.buffer[self.channel.head];
@@ -406,14 +411,14 @@ pub fn AsyncReceive(comptime T: type) type {
             }
 
             // Wake the parent (SelectWaiter or task wait node)
-            if (self.parent_wait_node) |parent| {
-                parent.wake();
+            if (parent) |p| {
+                p.wake();
             }
         }
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             self.parent_wait_node = wait_node;
 
             self.channel.mutex.lock();
@@ -449,9 +454,17 @@ pub fn AsyncReceive(comptime T: type) type {
         }
 
         /// Cancel a pending wait operation.
-        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
-            _ = wait_node;
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
             self.channel.mutex.lock();
+
+            // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
+            // If waitNodeWake already cleared it, parent_wait_node will be null.
+            // If it's something else, that's a bug (wrong wait_node passed).
+            if (self.parent_wait_node) |parent| {
+                std.debug.assert(parent == wait_node);
+                self.parent_wait_node = null;
+            }
+
             const was_in_queue = self.channel.receiver_queue.remove(&self.channel_wait_node);
             if (!was_in_queue) {
                 // We were already removed by a sender who will wake us.
@@ -519,6 +532,11 @@ pub fn AsyncSend(comptime T: type) type {
             // Perform the send operation under lock
             self.channel.mutex.lock();
 
+            // Read and clear parent_wait_node while holding the lock to prevent
+            // race with cancellation (which could free/reuse the parent)
+            const parent = self.parent_wait_node;
+            self.parent_wait_node = null;
+
             if (self.channel.closed) {
                 self.channel.mutex.unlock();
                 self.result = error.ChannelClosed;
@@ -543,14 +561,14 @@ pub fn AsyncSend(comptime T: type) type {
             }
 
             // Wake the parent (SelectWaiter or task wait node)
-            if (self.parent_wait_node) |parent| {
-                parent.wake();
+            if (parent) |p| {
+                p.wake();
             }
         }
 
         /// Register for notification when send can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             self.parent_wait_node = wait_node;
 
             self.channel.mutex.lock();
@@ -586,9 +604,17 @@ pub fn AsyncSend(comptime T: type) type {
         }
 
         /// Cancel a pending wait operation.
-        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
-            _ = wait_node;
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
             self.channel.mutex.lock();
+
+            // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
+            // If waitNodeWake already cleared it, parent_wait_node will be null.
+            // If it's something else, that's a bug (wrong wait_node passed).
+            if (self.parent_wait_node) |parent| {
+                std.debug.assert(parent == wait_node);
+                self.parent_wait_node = null;
+            }
+
             const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
             if (!was_in_queue) {
                 // We were already removed by a receiver who will wake us.

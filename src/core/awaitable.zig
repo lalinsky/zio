@@ -148,13 +148,13 @@ pub fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) 
         /// Registers a wait node to be notified when the task completes.
         /// This is part of the Future protocol for select().
         /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(parent: *const Parent, wait_node: *WaitNode) bool {
+        pub fn asyncWait(parent: *const Parent, _: *Runtime, wait_node: *WaitNode) bool {
             return parent.impl.base.awaitable.asyncWait(wait_node);
         }
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(parent: *const Parent, wait_node: *WaitNode) void {
+        pub fn asyncCancelWait(parent: *const Parent, _: *Runtime, wait_node: *WaitNode) void {
             parent.impl.base.awaitable.asyncCancelWait(wait_node);
         }
 

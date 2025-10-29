@@ -62,7 +62,7 @@ pub fn Future(comptime T: type) type {
         /// Registers a wait node to be notified when the future is set.
         /// This is part of the Future protocol for select().
         /// Returns false if the future is already set (no wait needed), true if added to queue.
-        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             // Fast path: check if already set
             if (self.value.isSet()) {
                 return false;
@@ -74,7 +74,7 @@ pub fn Future(comptime T: type) type {
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
             _ = self.wait_queue.remove(wait_node);
         }
     };

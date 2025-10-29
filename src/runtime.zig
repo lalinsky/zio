@@ -258,13 +258,13 @@ pub fn JoinHandle(comptime T: type) type {
         /// Registers a wait node to be notified when the task completes.
         /// This is part of the Future protocol for select().
         /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(self: Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: Self, _: *Runtime, wait_node: *WaitNode) bool {
             return self.awaitable.asyncWait(wait_node);
         }
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(self: Self, wait_node: *WaitNode) void {
+        pub fn asyncCancelWait(self: Self, _: *Runtime, wait_node: *WaitNode) void {
             self.awaitable.asyncCancelWait(wait_node);
         }
 

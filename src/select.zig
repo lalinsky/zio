@@ -6,6 +6,9 @@ const AnyTask = @import("core/task.zig").AnyTask;
 const WaitNode = @import("core/WaitNode.zig");
 const meta = @import("meta.zig");
 
+/// Sentinel value indicating no winner has been selected yet
+const NO_WINNER = std.math.maxInt(usize);
+
 /// Thread waiter for non-coroutine contexts
 const ThreadWaiter = struct {
     wait_node: WaitNode,
@@ -31,11 +34,66 @@ const ThreadWaiter = struct {
     }
 };
 
-// Future protocol:
-//   * needs to have const Result = T
-//   * needs to have asyncWait(*WaitNode) bool method (returns false if already complete)
-//   * needs to have asyncCancelWait(*WaitNode) void method
-//   * needs to have getResult() Result method
+// Future protocol - Any type implementing these methods can be used with select():
+//
+//   const Result = T
+//     The type of value this future produces when complete.
+//
+//   const WaitContext = void | SomeStruct
+//     Optional per-wait mutable state. Use void if the future needs no per-wait state.
+//     If non-void, this struct will be allocated on the caller's stack and passed to
+//     asyncWait/asyncCancelWait. Useful for storing completions, results, or other
+//     data that varies per wait operation.
+//
+//   fn asyncWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) bool           // if WaitContext == void
+//   fn asyncWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
+//     Register for notification when this future completes.
+//
+//     If WaitContext != void, the ctx parameter points to caller-allocated per-wait state
+//     that persists for the duration of this wait operation.
+//
+//     Returns:
+//       - false: Operation already complete (fast path). Result is available via getResult().
+//                The wait_node was NOT added to any queue.
+//       - true: Operation pending (slow path). The wait_node was added to an internal wait
+//               queue and will be woken via wait_node.wake() when the operation completes.
+//
+//     Guarantees:
+//       - If returns false, getResult() can be called immediately
+//       - If returns true, wait_node.wake() will be called exactly once when complete
+//       - Thread-safe: can be called from any thread
+//       - The ctx pointer (if present) remains valid until asyncCancelWait() or wait_node.wake()
+//
+//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) void     // if WaitContext == void
+//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) void  // if WaitContext != void
+//     Cancel a pending wait operation by removing the wait_node from internal queues.
+//
+//     Must be called if asyncWait() returned true and the caller no longer wants to wait
+//     (e.g., select() chose a different future).
+//
+//     Behavior:
+//       - If wait_node is still queued: Removes it. The future will not wake this wait_node.
+//       - If wait_node was already removed (race with completion): The future has committed
+//         to waking this wait_node. For queuing operations (Channel, Notify), the
+//         implementation must transfer the wakeup to another waiter to avoid losing the
+//         signal/item.
+//
+//     Guarantees:
+//       - Thread-safe: can be called from any thread
+//       - Safe to call even if asyncWait() returned false (becomes a no-op)
+//       - After calling, wait_node.wake() will not be called (unless race occurred, see above)
+//
+//   fn getResult(self: *Self) Result
+//     Retrieve the result of the completed operation.
+//
+//     Must only be called after asyncWait() returns false or after wait_node.wake() is called.
+//
+//     Returns: The result value. For operations that can fail, Result may be an error union
+//              (e.g., error{ChannelClosed}!T).
+//
+//     Guarantees:
+//       - All side effects from the operation that produced the result are visible
+//       - Thread-safe: can be called from any thread after completion
 
 /// Extract the Future type from a pointer type
 /// Enforces that T must be a pointer
@@ -64,6 +122,47 @@ fn checkSelfWait(task: *AnyTask, future: anytype) void {
             }
         }
     }
+}
+
+/// Extract the WaitContext type from a future pointer type
+fn FutureWaitContext(comptime future_type: type) type {
+    const Future = FutureType(future_type);
+    if (@hasDecl(Future, "WaitContext")) {
+        return Future.WaitContext;
+    }
+    return void;
+}
+
+/// Check if a future has a non-void WaitContext
+fn hasWaitContext(comptime future_type: type) bool {
+    return FutureWaitContext(future_type) != void;
+}
+
+/// Build a struct type containing WaitContext fields for each future that needs one
+fn WaitContextsType(comptime futures_type: type) type {
+    const fields = @typeInfo(futures_type).@"struct".fields;
+    var context_fields: []const std.builtin.Type.StructField = &.{};
+
+    inline for (fields) |field| {
+        const WaitCtx = FutureWaitContext(field.type);
+        if (WaitCtx != void) {
+            const ctx_field = std.builtin.Type.StructField{
+                .name = field.name,
+                .type = WaitCtx,
+                .default_value = null,
+                .is_comptime = false,
+                .alignment = @alignOf(WaitCtx),
+            };
+            context_fields = context_fields ++ &[_]std.builtin.Type.StructField{ctx_field};
+        }
+    }
+
+    return @Type(.{ .@"struct" = .{
+        .layout = .auto,
+        .fields = context_fields,
+        .decls = &.{},
+        .is_tuple = false,
+    } });
 }
 
 /// Wrapper for wait() result to avoid nested error unions
@@ -127,31 +226,35 @@ test "SelectResult: result types" {
 pub const SelectWaiter = struct {
     wait_node: WaitNode,
     parent: *WaitNode,
-    wake_counter: *std.atomic.Value(u32),
-    signaled: std.atomic.Value(bool) = .init(false),
+    winner: *std.atomic.Value(usize),
+    index: usize,
 
     const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
     };
 
-    pub fn init(parent: *WaitNode, wake_counter: *std.atomic.Value(u32)) SelectWaiter {
+    pub fn init(parent: *WaitNode, winner: *std.atomic.Value(usize), index: usize) SelectWaiter {
         return .{
             .wait_node = .{
                 .vtable = &wait_node_vtable,
             },
             .parent = parent,
-            .wake_counter = wake_counter,
-            .signaled = .init(false),
+            .winner = winner,
+            .index = index,
         };
     }
 
     fn waitNodeWake(wait_node: *WaitNode) void {
         const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
-        self.signaled.store(true, .release);
-        const prev_val = self.wake_counter.fetchAdd(1, .acq_rel);
-        if (prev_val == 0) {
+
+        // Try to claim winner slot with our index
+        const prev = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
+
+        if (prev == null) {
+            // We won! Wake parent task
             self.parent.wake();
         }
+        // else: someone else already won, don't wake parent again
     }
 };
 
@@ -198,21 +301,34 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         std.debug.assert(prev == .preparing_to_wait or prev == .ready);
     }
 
-    // Keep track of the number of wakeups (== number of futures that became ready)
-    var ready: std.atomic.Value(u32) = .init(0);
+    // Winner tracking: NO_WINNER means no winner yet
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+
+    // Allocate WaitContext struct on stack for futures that need per-wait state
+    const ContextsType = WaitContextsType(S);
+    var contexts: ContextsType = undefined;
 
     // Create waiter structures on the stack
     var waiters: [fields.len]SelectWaiter = undefined;
-    inline for (&waiters) |*waiter| {
-        waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &ready);
+    inline for (&waiters, 0..) |*waiter, i| {
+        waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &winner, i);
     }
+
+    // Track how many futures we've registered with (for cleanup)
+    var registered_count: usize = 0;
 
     // Clean up waiters on all exit paths
     defer {
+        const winner_index = winner.load(.acquire);
         inline for (fields, 0..) |field, i| {
-            if (!waiters[i].signaled.load(.acquire)) {
+            // Only cancel if we registered and didn't win
+            if (i < registered_count and winner_index != i) {
                 var future = @field(futures, field.name);
-                future.asyncCancelWait(&waiters[i].wait_node);
+                if (comptime hasWaitContext(field.type)) {
+                    future.asyncCancelWait(rt, &waiters[i].wait_node, &@field(contexts, field.name));
+                } else {
+                    future.asyncCancelWait(rt, &waiters[i].wait_node);
+                }
             }
         }
     }
@@ -220,8 +336,15 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Add waiters to all waiting lists - fast path: return immediately if already complete
     inline for (fields, 0..) |field, i| {
         var future = @field(futures, field.name);
-        const waiting = future.asyncWait(&waiters[i].wait_node);
+        const waiting = if (comptime hasWaitContext(field.type))
+            future.asyncWait(rt, &waiters[i].wait_node, &@field(contexts, field.name))
+        else
+            future.asyncWait(rt, &waiters[i].wait_node);
+
+        registered_count += 1;
+
         if (!waiting) {
+            winner.store(i, .release);
             return @unionInit(U, field.name, future.getResult());
         }
     }
@@ -229,13 +352,13 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Yield and wait for one to complete
     try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
 
-    // We should have at least one future with result
-    // TODO What to do if we have multiple?
-    std.debug.assert(ready.load(.acquire) > 0);
+    // O(1) winner lookup
+    const winner_index = winner.load(.acquire);
+    std.debug.assert(winner_index != NO_WINNER);
 
-    // Find which one completed by checking signaled flags
+    // Return result from winner
     inline for (fields, 0..) |field, i| {
-        if (waiters[i].signaled.load(.acquire)) {
+        if (i == winner_index) {
             var future = @field(futures, field.name);
             return @unionInit(U, field.name, future.getResult());
         }
@@ -264,20 +387,34 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
         }
     }
 
-    var ready: std.atomic.Value(u32) = .init(0);
-    var waiter = SelectWaiter.init(wait_node, &ready);
+    // Winner tracking: for single future, winner is always 0 if signaled
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiter = SelectWaiter.init(wait_node, &winner, 0);
+
+    // Allocate WaitContext if needed
+    const WaitCtx = FutureWaitContext(@TypeOf(future));
+    var context: WaitCtx = undefined;
+    const has_context = comptime (WaitCtx != void);
 
     // Fast path: check if already complete
     var fut = future;
-    const added = fut.asyncWait(&waiter.wait_node);
+    const added = if (has_context)
+        fut.asyncWait(rt, &waiter.wait_node, &context)
+    else
+        fut.asyncWait(rt, &waiter.wait_node);
+
     if (!added) {
         return .{ .value = fut.getResult() };
     }
 
     // Clean up waiter on exit
     defer {
-        if (!waiter.signaled.load(.acquire)) {
-            fut.asyncCancelWait(&waiter.wait_node);
+        if (winner.load(.acquire) == NO_WINNER) {
+            if (has_context) {
+                fut.asyncCancelWait(rt, &waiter.wait_node, &context);
+            } else {
+                fut.asyncCancelWait(rt, &waiter.wait_node);
+            }
         }
     }
 
@@ -314,8 +451,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     }
 
     // We should have been signaled
-    std.debug.assert(ready.load(.acquire) > 0);
-    std.debug.assert(waiter.signaled.load(.acquire));
+    std.debug.assert(winner.load(.acquire) == 0);
 
     return .{ .value = fut.getResult() };
 }
