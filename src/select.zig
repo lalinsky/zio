@@ -34,11 +34,54 @@ const ThreadWaiter = struct {
     }
 };
 
-// Future protocol:
-//   * needs to have const Result = T
-//   * needs to have asyncWait(*WaitNode) bool method (returns false if already complete)
-//   * needs to have asyncCancelWait(*WaitNode) void method
-//   * needs to have getResult() Result method
+// Future protocol - Any type implementing these methods can be used with select():
+//
+//   const Result = T
+//     The type of value this future produces when complete.
+//
+//   fn asyncWait(self: *Self, wait_node: *WaitNode) bool
+//     Register for notification when this future completes.
+//
+//     Returns:
+//       - false: Operation already complete (fast path). Result is available via getResult().
+//                The wait_node was NOT added to any queue.
+//       - true: Operation pending (slow path). The wait_node was added to an internal wait
+//               queue and will be woken via wait_node.wake() when the operation completes.
+//
+//     Guarantees:
+//       - If returns false, getResult() can be called immediately
+//       - If returns true, wait_node.wake() will be called exactly once when complete
+//       - Thread-safe: can be called from any thread
+//
+//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void
+//     Cancel a pending wait operation by removing the wait_node from internal queues.
+//
+//     Must be called if asyncWait() returned true and the caller no longer wants to wait
+//     (e.g., select() chose a different future).
+//
+//     Behavior:
+//       - If wait_node is still queued: Removes it. The future will not wake this wait_node.
+//       - If wait_node was already removed (race with completion): The future has committed
+//         to waking this wait_node. For queuing operations (Channel, Notify), the
+//         implementation must transfer the wakeup to another waiter to avoid losing the
+//         signal/item.
+//
+//     Guarantees:
+//       - Thread-safe: can be called from any thread
+//       - Safe to call even if asyncWait() returned false (becomes a no-op)
+//       - After calling, wait_node.wake() will not be called (unless race occurred, see above)
+//
+//   fn getResult(self: *Self) Result
+//     Retrieve the result of the completed operation.
+//
+//     Must only be called after asyncWait() returns false or after wait_node.wake() is called.
+//
+//     Returns: The result value. For operations that can fail, Result may be an error union
+//              (e.g., error{ChannelClosed}!T).
+//
+//     Guarantees:
+//       - All side effects from the operation that produced the result are visible
+//       - Thread-safe: can be called from any thread after completion
 
 /// Extract the Future type from a pointer type
 /// Enforces that T must be a pointer
