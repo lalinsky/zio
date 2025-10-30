@@ -396,9 +396,7 @@ pub const Signal = struct {
             const cancelIo = @import("io/base.zig").cancelIo;
             cancelIo(rt, &ctx.completion);
         } else {
-            // The xev operation already completed, which means the signal was received
-            // but we're cancelling because another future won the select race.
-            // Notify the event again so another waiter can be woken.
+            // Signal was delivered but not consumed; wake another waiter to handle it.
             self.entry.event.notify() catch {};
         }
     }
