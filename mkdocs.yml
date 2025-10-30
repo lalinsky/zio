@@ -1,0 +1,52 @@
+site_name: ZIO
+site_description: Async I/O framework for Zig
+site_url: https://lalinsky.github.io/zio/
+repo_url: https://github.com/lalinsky/zio
+repo_name: lalinsky/zio
+
+theme:
+  name: material
+  icon:
+    logo: material/swap-horizontal-bold
+  palette:
+    - scheme: default
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.annotation
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - FAQ: faq.md
+  - Changelog: changelog.md
+  - API Documentation: apidocs/
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
