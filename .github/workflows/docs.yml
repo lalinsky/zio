@@ -26,11 +26,23 @@ jobs:
         with:
           version: 0.15.1
 
-      - name: Build docs
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install MkDocs
+        run: pip install mkdocs-material
+
+      - name: Build API docs
         run: zig build docs
+
+      - name: Build MkDocs site
+        run: mkdocs build
 
       - name: Prepare docs for deployment
         run: |
+          mv site _site
           mkdir -p _site/apidocs
           cp -r zig-out/docs/* _site/apidocs/
 
