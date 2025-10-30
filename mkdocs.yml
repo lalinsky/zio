@@ -35,6 +35,7 @@ nav:
   - FAQ: faq.md
   - Changelog: changelog.md
   - User Guide:
+    - Tasks: tasks.md
     - Networking: networking.md
     - Files: files.md
     - Signals: signals.md
