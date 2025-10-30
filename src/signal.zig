@@ -4,8 +4,7 @@ const xev = @import("xev");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
-const AnyTask = @import("core/task.zig").AnyTask;
-const resumeTask = @import("core/task.zig").resumeTask;
+const WaitNode = @import("core/WaitNode.zig");
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -228,6 +227,13 @@ pub const Signal = struct {
     kind: SignalKind,
     entry: *HandlerEntry,
 
+    // Future protocol - allows Signal to be used with select()
+    pub const Result = void;
+    pub const WaitContext = struct {
+        completion: xev.Completion = undefined,
+        parent_wait_node: ?*WaitNode = null,
+    };
+
     /// Initializes a new signal watcher for the specified signal kind.
     /// Multiple watchers can be registered for the same signal type.
     ///
@@ -265,43 +271,24 @@ pub const Signal = struct {
 
         const waitForIo = @import("io/base.zig").waitForIo;
 
-        const WaitContext = struct {
-            task: *AnyTask,
-            result: xev.Async.WaitError!void = undefined,
-        };
-
         const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
 
-        var ctx = WaitContext{ .task = task };
-        var completion: xev.Completion = undefined;
+        var ctx = WaitContext{
+            .parent_wait_node = &task.awaitable.wait_node,
+        };
 
         // Register async wait callback (this also adds to the loop)
         self.entry.event.wait(
             &executor.loop,
-            &completion,
+            &ctx.completion,
             WaitContext,
             &ctx,
-            struct {
-                fn callback(
-                    userdata: ?*WaitContext,
-                    _: *xev.Loop,
-                    _: *xev.Completion,
-                    result: xev.Async.WaitError!void,
-                ) xev.CallbackAction {
-                    const context = userdata.?;
-                    context.result = result;
-                    resumeTask(context.task, .local);
-                    return .disarm;
-                }
-            }.callback,
+            waitCallback,
         );
 
         // Wait for signal (handles cancellation)
-        try waitForIo(rt, &completion);
-
-        // Check result - ignore any xev errors, just ensure signal was received
-        ctx.result catch {};
+        try waitForIo(rt, &ctx.completion);
 
         // Consume the counter
         _ = self.entry.counter.swap(0, .acquire);
@@ -328,45 +315,92 @@ pub const Signal = struct {
 
         const timedWaitForIo = @import("io/base.zig").timedWaitForIo;
 
-        const WaitContext = struct {
-            task: *AnyTask,
-            result: xev.Async.WaitError!void = undefined,
-        };
-
         const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
 
-        var ctx = WaitContext{ .task = task };
-        var completion: xev.Completion = undefined;
+        var ctx = WaitContext{
+            .parent_wait_node = &task.awaitable.wait_node,
+        };
 
         // Register async wait callback (this also adds to the loop)
         self.entry.event.wait(
             &executor.loop,
-            &completion,
+            &ctx.completion,
             WaitContext,
             &ctx,
-            struct {
-                fn callback(
-                    userdata: ?*WaitContext,
-                    _: *xev.Loop,
-                    _: *xev.Completion,
-                    result: xev.Async.WaitError!void,
-                ) xev.CallbackAction {
-                    const context = userdata.?;
-                    context.result = result;
-                    resumeTask(context.task, .local);
-                    return .disarm;
-                }
-            }.callback,
+            waitCallback,
         );
 
         // Wait for signal with timeout (handles cancellation)
-        try timedWaitForIo(rt, &completion, timeout_ns);
-
-        // Check result - ignore any xev errors, just ensure signal was received
-        ctx.result catch {};
+        try timedWaitForIo(rt, &ctx.completion, timeout_ns);
 
         // Consume the counter
+        _ = self.entry.counter.swap(0, .acquire);
+    }
+
+    /// Registers a wait node to be notified when the signal is received.
+    /// This is part of the Future protocol for select().
+    /// Returns false if the signal was already received (no wait needed), true if added to event loop.
+    pub fn asyncWait(self: *Signal, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+        // Fast path: signal already received
+        if (self.entry.counter.swap(0, .acquire) > 0) {
+            return false;
+        }
+
+        const task = rt.getCurrentTask() orelse unreachable;
+        const executor = task.getExecutor();
+
+        // Store parent_wait_node
+        ctx.parent_wait_node = wait_node;
+
+        // Register xev async wait - store context in userdata
+        self.entry.event.wait(
+            &executor.loop,
+            &ctx.completion,
+            WaitContext,
+            ctx,
+            waitCallback,
+        );
+
+        return true;
+    }
+
+    fn waitCallback(
+        userdata: ?*WaitContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Async.WaitError!void,
+    ) xev.CallbackAction {
+        const ctx = userdata.?;
+        result catch {};
+
+        // Wake the parent if it's still registered
+        if (ctx.parent_wait_node) |parent| {
+            parent.wake();
+        }
+
+        return .disarm;
+    }
+
+    /// Cancels a pending wait operation by cancelling the xev completion.
+    /// This is part of the Future protocol for select().
+    pub fn asyncCancelWait(self: *Signal, rt: *Runtime, _: *WaitNode, ctx: *WaitContext) void {
+        _ = self;
+
+        // Clear parent to prevent callback from waking
+        ctx.parent_wait_node = null;
+
+        // Cancel if still active
+        if (ctx.completion.state() == .active) {
+            const cancelIo = @import("io/base.zig").cancelIo;
+            cancelIo(rt, &ctx.completion);
+        }
+    }
+
+    /// Gets the result value.
+    /// This is part of the Future protocol for select().
+    pub fn getResult(self: *Signal) void {
+        // Consume the counter to ensure signal is acknowledged
         _ = self.entry.counter.swap(0, .acquire);
     }
 };
@@ -521,4 +555,136 @@ test "Signal: timedWait receives signal before timeout" {
     try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
 
     try std.testing.expect(ctx.signal_received);
+}
+
+test "Signal: select on multiple signals" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const select = @import("select.zig").select;
+
+    const TestContext = struct {
+        signal_received: std.atomic.Value(u8) = .init(0),
+
+        fn mainTask(self: *@This(), r: *Runtime) !void {
+            var h1 = try r.spawn(waitForSignals, .{ self, r }, .{});
+            defer h1.deinit();
+            var h2 = try r.spawn(sendSignal, .{r}, .{});
+            defer h2.deinit();
+
+            try h1.join(r);
+            try h2.join(r);
+        }
+
+        fn waitForSignals(self: *@This(), r: *Runtime) !void {
+            var sig1 = try Signal.init(.user1);
+            defer sig1.deinit();
+            var sig2 = try Signal.init(.user2);
+            defer sig2.deinit();
+
+            const result = try select(r, .{ .sig1 = &sig1, .sig2 = &sig2 });
+            switch (result) {
+                .sig1 => self.signal_received.store(@intFromEnum(SignalKind.user1), .monotonic),
+                .sig2 => self.signal_received.store(@intFromEnum(SignalKind.user2), .monotonic),
+            }
+        }
+
+        fn sendSignal(r: *Runtime) !void {
+            try r.sleep(10);
+            try std.posix.raise(@intFromEnum(SignalKind.user2));
+        }
+    };
+
+    var ctx = TestContext{};
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+
+    try std.testing.expectEqual(@intFromEnum(SignalKind.user2), ctx.signal_received.load(.monotonic));
+}
+
+test "Signal: select with signal already received (fast path)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const select = @import("select.zig").select;
+
+    const TestContext = struct {
+        signal_received: bool = false,
+
+        fn mainTask(self: *@This(), r: *Runtime) !void {
+            var sig = try Signal.init(.user1);
+            defer sig.deinit();
+
+            // Send signal first
+            try std.posix.raise(@intFromEnum(SignalKind.user1));
+
+            // Small delay to ensure signal is processed
+            try r.sleep(10);
+
+            // Now select should return immediately (fast path)
+            const result = try select(r, .{ .sig = &sig });
+            switch (result) {
+                .sig => self.signal_received = true,
+            }
+        }
+    };
+
+    var ctx = TestContext{};
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+
+    try std.testing.expect(ctx.signal_received);
+}
+
+test "Signal: select with signal and task" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const select = @import("select.zig").select;
+
+    const TestContext = struct {
+        winner: enum { signal, task } = .task,
+
+        fn slowTask(r: *Runtime) !u32 {
+            try r.sleep(100);
+            return 42;
+        }
+
+        fn mainTask(self: *@This(), r: *Runtime) !void {
+            var sig = try Signal.init(.user1);
+            defer sig.deinit();
+
+            var task = try r.spawn(slowTask, .{r}, .{});
+            defer task.deinit();
+
+            var sender = try r.spawn(sendSignal, .{r}, .{});
+            defer sender.deinit();
+
+            // Signal should win (arrives much sooner)
+            const result = try select(r, .{ .sig = &sig, .task = &task });
+            switch (result) {
+                .sig => self.winner = .signal,
+                .task => |val| {
+                    _ = try val;
+                    self.winner = .task;
+                },
+            }
+
+            try sender.join(r);
+        }
+
+        fn sendSignal(r: *Runtime) !void {
+            try r.sleep(10);
+            try std.posix.raise(@intFromEnum(SignalKind.user1));
+        }
+    };
+
+    var ctx = TestContext{};
+    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+
+    try std.testing.expectEqual(.signal, ctx.winner);
 }
