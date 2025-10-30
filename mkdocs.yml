@@ -31,10 +31,13 @@ theme:
     - content.code.copy
 
 nav:
-  - Home: index.md
+  - Overview: index.md
   - FAQ: faq.md
   - Changelog: changelog.md
-  - API Documentation: apidocs/
+  - User Guide:
+    - Signals: signals.md
+  - Reference:
+    - API Documentation: apidocs/
 
 markdown_extensions:
   - pymdownx.highlight:
