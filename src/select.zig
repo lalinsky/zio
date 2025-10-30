@@ -149,7 +149,7 @@ fn WaitContextsType(comptime futures_type: type) type {
             const ctx_field = std.builtin.Type.StructField{
                 .name = field.name,
                 .type = WaitCtx,
-                .default_value = null,
+                .default_value_ptr = null,
                 .is_comptime = false,
                 .alignment = @alignOf(WaitCtx),
             };
