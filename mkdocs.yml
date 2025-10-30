@@ -35,3 +35,4 @@ nav:
       - Runtime & Tasks: user-guide/runtime.md
       - Networking: user-guide/networking.md
       - File I/O: user-guide/file-io.md
+  - API Reference: apidocs/index.html

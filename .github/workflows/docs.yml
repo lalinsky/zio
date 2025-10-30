@@ -21,16 +21,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+
+      - name: Install MkDocs
+        run: pip install mkdocs-material
+
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
 
-      - name: Build docs
+      - name: Build MkDocs site
+        run: mkdocs build
+
+      - name: Build Zig autodocs
         run: zig build docs
 
       - name: Prepare docs for deployment
         run: |
+          mkdir -p _site
+          cp -r site/* _site/
           mkdir -p _site/apidocs
           cp -r zig-out/docs/* _site/apidocs/
 
@@ -42,7 +55,7 @@ jobs:
   deploy:
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}apidocs/
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
     steps:
