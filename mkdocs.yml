@@ -6,6 +6,8 @@ repo_name: lalinsky/zio
 
 theme:
   name: material
+  icon:
+    logo: material/swap-horizontal-bold
   palette:
     - scheme: default
       primary: green
