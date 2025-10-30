@@ -1,5 +1,10 @@
 # ZIO - Async I/O framework for Zig
 
+[![CI](https://github.com/lalinsky/zio/actions/workflows/test.yml/badge.svg)](https://github.com/lalinsky/zio/actions/workflows/test.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Zig](https://img.shields.io/badge/zig-0.15.1-orange.svg)](https://ziglang.org/download/)
+[![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
+
 There are two ways of doing asynchronous I/O, either you use callbacks and have the I/O operation call you when it's done, or you have some sort of continuation system and suspend your code while waiting for I/O. Callback-based APIs are easier to implement, they don't need any special runtime or language support. However, they are much harder to use, you need to manage state yourself and most likely need many more allocations to do so.
 
 This project started out of my frustration with the state of networking in Zig. I've tried to write a nice wrapper for libuv in Zig, but it just doesn't work, you have to allocate memory all the time, you need to depend on reference counted pointers. Then it occurred to me that I could do Go-style stackful coroutines and use the stack for storing the state. The resulting code feels much more idiomatic. So I did an experiment with custom assembly for switching contexts, used libuv as my event loop, created a translation layer from libuv callbacks to coroutines, later switched libuv for libxev, and then worked more on the scheduler, especially making it run in multi-threaded mode.
