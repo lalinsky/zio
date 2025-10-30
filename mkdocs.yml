@@ -36,6 +36,7 @@ nav:
     - Tasks: tasks.md
     - Networking: networking.md
     - Files: files.md
+    - Synchronization: sync.md
     - Signals: signals.md
   - Reference:
     - API Documentation: apidocs/
