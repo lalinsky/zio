@@ -32,8 +32,6 @@ theme:
 
 nav:
   - Overview: index.md
-  - FAQ: faq.md
-  - Changelog: changelog.md
   - User Guide:
     - Tasks: tasks.md
     - Networking: networking.md
@@ -41,6 +39,9 @@ nav:
     - Signals: signals.md
   - Reference:
     - API Documentation: apidocs/
+  - Project:
+    - FAQ: faq.md
+    - Changelog: changelog.md
 
 markdown_extensions:
   - pymdownx.highlight:
