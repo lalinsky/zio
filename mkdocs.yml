@@ -35,6 +35,8 @@ nav:
   - FAQ: faq.md
   - Changelog: changelog.md
   - User Guide:
+    - Networking: networking.md
+    - Files: files.md
     - Signals: signals.md
   - Reference:
     - API Documentation: apidocs/
