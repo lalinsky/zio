@@ -385,15 +385,21 @@ pub const Signal = struct {
     /// Cancels a pending wait operation by cancelling the xev completion.
     /// This is part of the Future protocol for select().
     pub fn asyncCancelWait(self: *Signal, rt: *Runtime, _: *WaitNode, ctx: *WaitContext) void {
-        _ = self;
+        // Check if the xev operation already completed
+        const was_active = ctx.completion.state() == .active;
 
         // Clear parent to prevent callback from waking
         ctx.parent_wait_node = null;
 
         // Cancel if still active
-        if (ctx.completion.state() == .active) {
+        if (was_active) {
             const cancelIo = @import("io/base.zig").cancelIo;
             cancelIo(rt, &ctx.completion);
+        } else {
+            // The xev operation already completed, which means the signal was received
+            // but we're cancelling because another future won the select race.
+            // Notify the event again so another waiter can be woken.
+            self.entry.event.notify() catch {};
         }
     }
 
