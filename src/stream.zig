@@ -10,7 +10,7 @@ pub fn StreamReader(comptime T: type) type {
 
         stream: T,
         runtime: *Runtime,
-        interface: std.io.Reader,
+        interface: std.Io.Reader,
 
         pub fn init(stream: T, runtime: *Runtime, buffer: []u8) Self {
             return .{
@@ -29,7 +29,7 @@ pub fn StreamReader(comptime T: type) type {
             };
         }
 
-        fn streamFn(io_reader: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
+        fn streamFn(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
             const r: *Self = @alignCast(@fieldParentPtr("interface", io_reader));
             const dest = limit.slice(try w.writableSliceGreedy(1));
 
@@ -43,7 +43,7 @@ pub fn StreamReader(comptime T: type) type {
             return n;
         }
 
-        fn discard(io_reader: *std.io.Reader, limit: std.io.Limit) std.io.Reader.Error!usize {
+        fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
             const r: *Self = @alignCast(@fieldParentPtr("interface", io_reader));
             // Use the buffer as temporary storage for discarded data
             var total_discarded: usize = 0;
@@ -61,7 +61,7 @@ pub fn StreamReader(comptime T: type) type {
             return total_discarded;
         }
 
-        fn readVec(io_reader: *std.io.Reader, data: [][]u8) std.io.Reader.Error!usize {
+        fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
             const r: *Self = @alignCast(@fieldParentPtr("interface", io_reader));
 
             var buf: xev.ReadBuffer = .{ .vectors = .{ .data = undefined, .len = 0 } };
@@ -96,7 +96,7 @@ pub fn StreamWriter(comptime T: type) type {
 
         stream: T,
         runtime: *Runtime,
-        interface: std.io.Writer,
+        interface: std.Io.Writer,
 
         pub fn init(stream: T, runtime: *Runtime, buffer: []u8) Self {
             return .{
@@ -113,7 +113,7 @@ pub fn StreamWriter(comptime T: type) type {
             };
         }
 
-        fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
+        fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const w: *Self = @alignCast(@fieldParentPtr("interface", io_writer));
             const buffered = io_writer.buffered();
 
@@ -180,7 +180,7 @@ pub fn StreamWriter(comptime T: type) type {
             return io_writer.consume(n);
         }
 
-        fn flush(io_writer: *std.io.Writer) std.io.Writer.Error!void {
+        fn flush(io_writer: *std.Io.Writer) std.Io.Writer.Error!void {
             const w: *Self = @alignCast(@fieldParentPtr("interface", io_writer));
 
             while (io_writer.end > 0) {
@@ -230,7 +230,7 @@ const BufferStream = struct {
 
     /// Implements readBuf for StreamReader compatibility.
     /// Returns error.EndOfStream when no more data available (NOT 0).
-    fn readBuf(self: *BufferStream, rt: anytype, buf: *xev.ReadBuffer) std.io.Reader.Error!usize {
+    fn readBuf(self: *BufferStream, rt: anytype, buf: *xev.ReadBuffer) std.Io.Reader.Error!usize {
         _ = rt; // Unused in mock
         const available = self.buffer.items[self.read_pos..];
         if (available.len == 0) return error.EndOfStream;
@@ -265,7 +265,7 @@ const BufferStream = struct {
     }
 
     /// Implements writeBuf for StreamWriter compatibility.
-    fn writeBuf(self: *BufferStream, rt: anytype, buf: xev.WriteBuffer) std.io.Writer.Error!usize {
+    fn writeBuf(self: *BufferStream, rt: anytype, buf: xev.WriteBuffer) std.Io.Writer.Error!usize {
         _ = rt; // Unused in mock
         return switch (buf) {
             .slice => |src| blk: {
@@ -500,7 +500,9 @@ test "StreamReader: takeByte reads first byte correctly" {
     // Read rest of first line
     const line1 = try reader.interface.takeDelimiterExclusive('\r');
     try testing.expectEqualStrings("1", line1);
+    _ = try reader.interface.takeByte(); // Skip '\r'
     _ = try reader.interface.takeDelimiterExclusive('\n');
+    _ = try reader.interface.takeByte(); // Skip '\n'
 
     // Read second line
     const line2 = try reader.interface.takeDelimiterExclusive('\r');
