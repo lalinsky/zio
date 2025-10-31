@@ -372,6 +372,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example: JoinHandle(MyError!i32) can be cast to JoinHandle(anyerror!i32)
         pub fn cast(self: Self, comptime T2: type) JoinHandle(T2) {
+            assert(self.awaitable != null);
             const P1 = meta.Payload(T);
             const P2 = meta.Payload(T2);
             if (P1 != P2) {
