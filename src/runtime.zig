@@ -239,7 +239,15 @@ pub fn JoinHandle(comptime T: type) type {
 
         /// Wait for the task to complete and return its result.
         ///
+        /// This method automatically handles three execution contexts:
+        /// 1. Called from within a task: Uses the running executor to wait
+        /// 2. Called from executor thread (not in task): Runs the executor until completion
+        /// 3. Called from external thread: Uses futex-based waiting
+        ///
         /// If the current task is canceled while waiting, the spawned task will be canceled too.
+        ///
+        /// Note: When the executor is run inline (path 2), any executor errors will cause a panic
+        /// since these represent fundamental I/O errors that prevent progress.
         ///
         /// Example:
         /// ```zig
@@ -250,10 +258,47 @@ pub fn JoinHandle(comptime T: type) type {
             // If awaitable is null, result is already cached
             const awaitable = self.awaitable orelse return self.result;
 
-            // Wait for completion
-            _ = select.waitUntilComplete(rt, awaitable);
+            // Path 1: We're in a task - use existing wait mechanism
+            if (rt.getCurrentTask()) |_| {
+                _ = select.waitUntilComplete(rt, awaitable);
+                self.finishAwaitable(rt, awaitable);
+                return self.result;
+            }
 
-            // Get result and release awaitable
+            // Path 2: We have a current executor but we're not in a task
+            // This means the executor is associated with this thread but not running
+            // We should run the executor until the task completes
+            if (Runtime.current_executor) |executor| {
+                // Determine which executor owns the awaitable
+                const target_executor = switch (awaitable.kind) {
+                    .task => blk: {
+                        const task_ptr = Task(T).fromAwaitable(awaitable);
+                        break :blk task_ptr.impl.base.getExecutor();
+                    },
+                    .blocking_task => blk: {
+                        // Blocking tasks don't have an executor, run on current
+                        break :blk executor;
+                    },
+                };
+
+                // Check if we can run on this thread's executor
+                if (target_executor == executor) {
+                    // Run our executor until this task completes
+                    // Panic on executor errors - these are fundamental I/O errors
+                    rt.runUntilTaskComplete(awaitable) catch |err| {
+                        std.debug.panic("Executor failed during join: {}", .{err});
+                    };
+                    self.finishAwaitable(rt, awaitable);
+                    return self.result;
+                } else {
+                    // Task is on a different executor - we need to coordinate
+                    // For now, fall through to futex path (external thread behavior)
+                    // TODO: This could be improved to run the current executor while waiting
+                }
+            }
+
+            // Path 3: External thread or cross-executor wait - use futex
+            _ = select.waitUntilComplete(rt, awaitable);
             self.finishAwaitable(rt, awaitable);
             return self.result;
         }
@@ -711,6 +756,96 @@ pub const Executor = struct {
             error.Canceled => return error.Canceled, // Propagate cancellation
         };
         unreachable; // Should always timeout or be canceled
+    }
+
+    /// Run the executor event loop until a specific task completes.
+    /// Similar to run() but exits when the given awaitable is marked done.
+    /// Used by JoinHandle.join() when called from an executor thread that isn't running.
+    pub fn runUntilTaskComplete(self: *Executor, target_awaitable: *Awaitable) !void {
+        // Initialize loop on this thread
+        try self.initLoop();
+        defer self.deinitLoop();
+
+        // Signal that executor is ready
+        self.ready.set();
+
+        // Set thread-local current executor
+        Runtime.current_executor = self;
+        defer Runtime.current_executor = null;
+
+        var spin_count: u8 = 0;
+        while (!target_awaitable.done.load(.acquire)) {
+            // Exit if loop was stopped (by shutdown callback)
+            if (self.loop.stopped()) break;
+
+            // Time-based stack pool cleanup
+            const now = std.time.milliTimestamp();
+            if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
+                self.stack_pool.cleanup();
+                self.last_cleanup_ms = now;
+            }
+
+            // Drain remote ready queue (cross-thread tasks)
+            // Atomically drain all remote ready tasks and append to ready queue
+            var drained = self.next_ready_queue_remote.popAll();
+            while (drained.pop()) |task| {
+                self.ready_queue.push(task);
+            }
+
+            // Process all ready coroutines (once)
+            // getNextTask() checks LIFO slot first for cache locality, then ready_queue
+            while (self.getNextTask()) |wait_node| {
+                const task = AnyTask.fromWaitNode(wait_node);
+
+                self.current_coroutine = &task.coro;
+                defer self.current_coroutine = null;
+                coroutines.switchContext(&self.main_context, &task.coro.context);
+
+                // Handle finished coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
+                if (self.current_coroutine) |current_coro| {
+                    if (current_coro.finished) {
+                        const current_task = AnyTask.fromCoroutine(current_coro);
+                        const current_awaitable = &current_task.awaitable;
+
+                        // Release stack immediately since coroutine execution is complete
+                        if (current_coro.stack) |stack| {
+                            self.stack_pool.release(stack);
+                            current_coro.stack = null;
+                        }
+
+                        // Mark awaitable as complete and wake all waiters (coroutines and threads)
+                        current_awaitable.markComplete();
+
+                        // Track task completion
+                        self.metrics.tasks_completed += 1;
+
+                        // Release runtime's reference and check for shutdown
+                        self.runtime.releaseAwaitable(current_awaitable, true);
+                        // If ref_count > 0, Task(T) handles still exist, keep the task alive
+                    }
+                }
+
+                // Other states (.ready, .waiting) are handled by yield() or markReady()
+            }
+
+            // Move yielded coroutines back to ready queue
+            self.ready_queue.concatByMoving(&self.next_ready_queue);
+
+            // Determine event loop run mode based on work availability and spin count
+            // Spin briefly with non-blocking polls before blocking to reduce cross-thread wakeup latency
+            const has_work = self.ready_queue.head != null or self.lifo_slot != null;
+            const run_mode: xev.RunMode = if (has_work or spin_count < 16) .no_wait else .once;
+
+            // Run event loop
+            try self.loop.run(run_mode);
+
+            // Update spin count: reset if work found, increment if spinning, don't change if blocked
+            if (has_work) {
+                spin_count = 0;
+            } else if (run_mode == .no_wait) {
+                spin_count +%= 1;
+            }
+        }
     }
 
     /// Run the executor event loop.
@@ -1207,11 +1342,23 @@ pub const Runtime = struct {
             .shutting_down = std.atomic.Value(bool).init(false),
         };
 
+        // Associate the calling thread with the main executor (executor 0)
+        // This allows join() to detect that it's being called from the executor thread
+        // and run the executor inline if needed
+        Runtime.current_executor = &runtime.executors.items[0];
+
         return runtime;
     }
 
     pub fn deinit(self: *Runtime) void {
         const allocator = self.allocator;
+
+        // Clear the threadlocal executor association if it points to this runtime's executor
+        if (Runtime.current_executor) |current| {
+            if (current.runtime == self) {
+                Runtime.current_executor = null;
+            }
+        }
 
         // Shutdown ThreadPool before cleaning up executors
         if (self.thread_pool) |tp| {
@@ -1326,6 +1473,43 @@ pub const Runtime = struct {
 
         // Run main executor on current thread
         const main_result = self.executors.items[0].run();
+
+        // Join all worker threads
+        for (self.executors.items[1..]) |*executor| {
+            if (executor.thread) |thread| {
+                thread.join();
+            }
+        }
+
+        return main_result;
+    }
+
+    /// Run the runtime until a specific awaitable completes.
+    /// Used internally by JoinHandle.join() when called from executor thread that isn't running.
+    pub fn runUntilTaskComplete(self: *Runtime, awaitable: *Awaitable) !void {
+        // If single-threaded, just run the main executor until task completes
+        if (self.executors.items.len == 1) {
+            return self.executors.items[0].runUntilTaskComplete(awaitable);
+        }
+
+        // Multi-threaded: spawn worker threads for executors[1..]
+        for (self.executors.items[1..], 1..) |*executor, i| {
+            executor.thread = try std.Thread.spawn(.{}, workerThreadFn, .{ self, i });
+        }
+
+        // Wait for all workers to be ready (loop initialized)
+        for (self.executors.items[1..]) |*executor| {
+            executor.ready.wait();
+        }
+
+        // Run main executor on current thread until target task completes
+        const main_result = self.executors.items[0].runUntilTaskComplete(awaitable);
+
+        // Signal shutdown to workers
+        self.shutting_down.store(true, .release);
+        for (self.executors.items) |*executor| {
+            executor.shutdown_async.notify() catch {};
+        }
 
         // Join all worker threads
         for (self.executors.items[1..]) |*executor| {
@@ -1799,4 +1983,47 @@ test "runtime: sleep is cancelable" {
     };
 
     try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+}
+
+test "runtime: join without explicit rt.run()" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn simpleTask(value: i32) i32 {
+            return value * 2;
+        }
+    };
+
+    // Spawn a task
+    var handle = try runtime.spawn(TestContext.simpleTask, .{21}, .{});
+    defer handle.cancel(runtime);
+
+    // Join without calling rt.run() - should run executor inline
+    const result = handle.join(runtime);
+    try testing.expectEqual(@as(i32, 42), result);
+}
+
+test "runtime: join without rt.run() - async task" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn asyncTask(rt: *Runtime) !i32 {
+            try rt.sleep(10);
+            return 99;
+        }
+    };
+
+    // Spawn an async task
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    defer handle.cancel(runtime);
+
+    // Join without calling rt.run() - should run executor inline
+    const result = handle.join(runtime);
+    try testing.expectEqual(@as(i32, 99), try result);
 }
