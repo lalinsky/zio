@@ -23,9 +23,9 @@ const FreeListNode = struct {
     next: ?*FreeListNode = null,
     prev: ?*FreeListNode = null,
     in_list: bool = false,
-    returned_at: i64,
+    returned_at: std.time.Instant,
 
-    fn fromStack(stack: Stack, returned_at: i64) *FreeListNode {
+    fn fromStack(stack: Stack, returned_at: std.time.Instant) *FreeListNode {
         assert(stack.len >= MIN_STACK_SIZE);
         const node: *FreeListNode = @ptrCast(@alignCast(stack.ptr));
         node.* = .{
@@ -57,18 +57,19 @@ const Bucket = struct {
         return try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(alignment), size);
     }
 
-    fn release(self: *Bucket, stack: Stack) void {
-        const node = FreeListNode.fromStack(stack, std.time.milliTimestamp());
+    fn release(self: *Bucket, stack: Stack, returned_at: std.time.Instant) void {
+        const node = FreeListNode.fromStack(stack, returned_at);
         self.queue.push(node);
     }
 
-    fn cleanupOld(self: *Bucket, size: usize, allocator: Allocator, now: i64, retention_ms: i64, min_warm: usize) void {
+    fn cleanupOld(self: *Bucket, size: usize, allocator: Allocator, now: std.time.Instant, retention_ns: u64, min_warm: usize) void {
         var kept_count: usize = 0;
 
         // Pop from front (oldest first due to FIFO)
         while (self.queue.pop()) |node| {
+            const age_ns = now.since(node.returned_at);
             // Check if stack is too old
-            if (node.returned_at + retention_ms < now and kept_count >= min_warm) {
+            if (age_ns > retention_ns and kept_count >= min_warm) {
                 // Too old and we have enough warm stacks - free it
                 allocator.free(node.toStack(size));
             } else {
@@ -100,14 +101,14 @@ pub const StackPoolOptions = struct {
 pub const StackPool = struct {
     buckets: [NUM_BUCKETS]Bucket,
     allocator: Allocator,
-    retention_ms: i64,
+    retention_ns: u64,
     min_warm_count: usize,
 
     pub fn init(allocator: Allocator, options: StackPoolOptions) StackPool {
         return .{
             .buckets = [_]Bucket{.{}} ** NUM_BUCKETS,
             .allocator = allocator,
-            .retention_ms = options.retention_ms,
+            .retention_ns = @as(u64, @intCast(options.retention_ms)) * std.time.ns_per_ms,
             .min_warm_count = options.min_warm_count,
         };
     }
@@ -154,7 +155,8 @@ pub const StackPool = struct {
         assert(stack.len >= MIN_STACK_SIZE);
 
         if (selectBucket(stack.len)) |bucket_idx| {
-            self.buckets[bucket_idx].release(stack);
+            const now = std.time.Instant.now() catch unreachable;
+            self.buckets[bucket_idx].release(stack, now);
         } else {
             // Too large for pool, free directly
             self.allocator.free(stack);
@@ -162,9 +164,9 @@ pub const StackPool = struct {
     }
 
     pub fn cleanup(self: *StackPool) void {
-        const now = std.time.milliTimestamp();
+        const now = std.time.Instant.now() catch unreachable;
         for (&self.buckets, 0..) |*bucket, i| {
-            bucket.cleanupOld(bucketSize(i), self.allocator, now, self.retention_ms, self.min_warm_count);
+            bucket.cleanupOld(bucketSize(i), self.allocator, now, self.retention_ns, self.min_warm_count);
         }
     }
 };

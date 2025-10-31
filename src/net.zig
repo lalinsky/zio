@@ -66,7 +66,7 @@ fn getAddressListBlocking(
     const port_c = try arena_allocator.dupeZ(u8, port_str);
 
     const hints = std.c.addrinfo{
-        .flags = std.c.AI.NUMERICSERV,
+        .flags = .{ .NUMERICSERV = true },
         .family = std.posix.AF.UNSPEC,
         .socktype = std.posix.SOCK.STREAM,
         .protocol = std.posix.IPPROTO.TCP,
@@ -78,8 +78,8 @@ fn getAddressListBlocking(
 
     var res: ?*std.c.addrinfo = null;
     const rc = std.c.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res);
-    if (rc != 0) return error.UnknownHostName;
-    defer std.c.freeaddrinfo(res);
+    if (@intFromEnum(rc) != 0) return error.UnknownHostName;
+    defer std.c.freeaddrinfo(res.?);
 
     // Count results
     var count: usize = 0;

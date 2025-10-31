@@ -221,12 +221,12 @@ pub const Address = extern union {
         return switch (sockaddr.family) {
             std.posix.AF.INET => blk: {
                 var addr: IpAddress = .{ .in = undefined };
-                @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
+                @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.posix.sockaddr.in)]);
                 break :blk addr;
             },
             std.posix.AF.INET6 => blk: {
                 var addr: IpAddress = .{ .in6 = undefined };
-                @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
+                @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.posix.sockaddr.in6)]);
                 break :blk addr;
             },
             else => unreachable,
@@ -295,12 +295,7 @@ pub const Socket = struct {
         else
             self.handle;
 
-        const addr_len = switch (addr.any.family) {
-            std.posix.AF.INET => addr.ip.in.getOsSockLen(),
-            std.posix.AF.INET6 => addr.ip.in6.getOsSockLen(),
-            std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
-            else => unreachable,
-        };
+        const addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&addr.any));
 
         try std.posix.bind(sock, &addr.any, addr_len);
 

@@ -444,7 +444,7 @@ pub const Executor = struct {
 
     // Stack pool cleanup tracking
     cleanup_interval_ms: i64,
-    last_cleanup_ms: i64 = 0,
+    cleanup_timer: std.time.Timer,
 
     // Runtime metrics
     metrics: ExecutorMetrics = .{},
@@ -456,7 +456,7 @@ pub const Executor = struct {
     thread: ?std.Thread = null,
 
     // Coordination for thread startup
-    ready: std.Thread.ResetEvent = .{},
+    ready: std.Thread.ResetEvent = .unset,
 
     /// Get the Executor instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
@@ -472,6 +472,7 @@ pub const Executor = struct {
             .loop = undefined,
             .stack_pool = StackPool.init(allocator, options.stack_pool),
             .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
+            .cleanup_timer = try std.time.Timer.start(),
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .remote_wakeup = undefined,
@@ -735,10 +736,10 @@ pub const Executor = struct {
             if (self.loop.stopped()) break;
 
             // Time-based stack pool cleanup
-            const now = std.time.milliTimestamp();
-            if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
+            const elapsed_ms = @as(i64, @intCast(self.cleanup_timer.read() / std.time.ns_per_ms));
+            if (elapsed_ms >= self.cleanup_interval_ms) {
                 self.stack_pool.cleanup();
-                self.last_cleanup_ms = now;
+                self.cleanup_timer.reset();
             }
 
             // Drain remote ready queue (cross-thread tasks)
@@ -1372,7 +1373,8 @@ pub const Runtime = struct {
             }
         }
         // Not in coroutine - use blocking sleep (cannot be canceled)
-        std.Thread.sleep(milliseconds * std.time.ns_per_ms);
+        const ns = milliseconds * std.time.ns_per_ms;
+        std.posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.
