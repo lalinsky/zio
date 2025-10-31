@@ -147,11 +147,11 @@ test "Barrier: basic synchronization" {
     };
 
     var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[0] }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[1] }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
     var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[2] }, .{});
-    defer task3.deinit();
+    defer task3.cancel(runtime);
 
     try runtime.run();
 
@@ -180,11 +180,11 @@ test "Barrier: leader detection" {
     };
 
     var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
     var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count }, .{});
-    defer task3.deinit();
+    defer task3.cancel(runtime);
 
     try runtime.run();
 
@@ -220,9 +220,9 @@ test "Barrier: reusable for multiple cycles" {
     };
 
     var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
 
     try runtime.run();
 
@@ -278,11 +278,11 @@ test "Barrier: ordering test" {
     };
 
     var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[0], &final_order }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[1], &final_order }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
     var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[2], &final_order }, .{});
-    defer task3.deinit();
+    defer task3.cancel(runtime);
 
     try runtime.run();
 
@@ -317,15 +317,15 @@ test "Barrier: many coroutines" {
     };
 
     var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[0] }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[1] }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
     var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[2] }, .{});
-    defer task3.deinit();
+    defer task3.cancel(runtime);
     var task4 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[3] }, .{});
-    defer task4.deinit();
+    defer task4.cancel(runtime);
     var task5 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[4] }, .{});
-    defer task5.deinit();
+    defer task5.cancel(runtime);
 
     try runtime.run();
 

@@ -261,9 +261,9 @@ test "Notify basic signal/wait" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_finished }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify }, .{});
-    defer signaler_task.deinit();
+    defer signaler_task.cancel(runtime);
 
     try runtime.run();
 
@@ -311,13 +311,13 @@ test "Notify broadcast to multiple waiters" {
     };
 
     var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter1.deinit();
+    defer waiter1.cancel(runtime);
     var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter2.deinit();
+    defer waiter2.cancel(runtime);
     var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter3.deinit();
+    defer waiter3.cancel(runtime);
     var broadcaster_task = try runtime.spawn(TestFn.broadcaster, .{ runtime, &notify }, .{});
-    defer broadcaster_task.deinit();
+    defer broadcaster_task.cancel(runtime);
 
     try runtime.run();
 
@@ -352,13 +352,13 @@ test "Notify multiple signals to multiple waiters" {
     };
 
     var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter1.deinit();
+    defer waiter1.cancel(runtime);
     var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter2.deinit();
+    defer waiter2.cancel(runtime);
     var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter3.deinit();
+    defer waiter3.cancel(runtime);
     var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify }, .{});
-    defer signaler_task.deinit();
+    defer signaler_task.cancel(runtime);
 
     try runtime.run();
 
@@ -413,9 +413,9 @@ test "Notify timedWait success" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &wait_succeeded }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify }, .{});
-    defer signaler_task.deinit();
+    defer signaler_task.cancel(runtime);
 
     try runtime.run();
 
@@ -442,7 +442,7 @@ test "Notify: select" {
             var notify = Notify.init;
 
             var task = try rt.spawn(signalerTask, .{ rt, &notify }, .{});
-            defer task.deinit();
+            defer task.cancel(rt);
 
             const result = try select(rt, .{ .notify = &notify, .task = &task });
             try std.testing.expectEqual(.notify, result);

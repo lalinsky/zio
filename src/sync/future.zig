@@ -127,11 +127,11 @@ test "Future: await from coroutine" {
 
             // Spawn setter coroutine
             var setter_handle = try rt.spawn(setterTask, .{ rt, &future }, .{});
-            defer setter_handle.deinit();
+            defer setter_handle.cancel(rt);
 
             // Spawn getter coroutine
             var getter_handle = try rt.spawn(getterTask, .{ rt, &future }, .{});
-            defer getter_handle.deinit();
+            defer getter_handle.cancel(rt);
 
             const result = try getter_handle.join(rt);
             try testing.expectEqual(@as(i32, 123), result);
@@ -165,15 +165,15 @@ test "Future: multiple waiters" {
 
             // Spawn multiple waiters
             var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
-            defer waiter1.deinit();
+            defer waiter1.cancel(rt);
             var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
-            defer waiter2.deinit();
+            defer waiter2.cancel(rt);
             var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
-            defer waiter3.deinit();
+            defer waiter3.cancel(rt);
 
             // Spawn setter
             var setter = try rt.spawn(setterTask, .{ rt, &future }, .{});
-            defer setter.deinit();
+            defer setter.cancel(rt);
 
             // Wait for all to complete
             _ = try waiter1.join(rt);

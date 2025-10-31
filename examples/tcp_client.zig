@@ -41,7 +41,7 @@ pub fn main() !void {
     defer runtime.deinit();
 
     var task = try runtime.spawn(clientTask, .{runtime}, .{});
-    defer task.deinit();
+    defer task.cancel(runtime);
 
     try runtime.run();
 }

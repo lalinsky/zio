@@ -420,9 +420,9 @@ test "Signal: basic signal handling" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var h1 = try r.spawn(waitForSignal, .{ self, r }, .{});
-            defer h1.deinit();
+            defer h1.cancel(r);
             var h2 = try r.spawn(sendSignal, .{r}, .{});
-            defer h2.deinit();
+            defer h2.cancel(r);
 
             try h1.join(r);
             try h2.join(r);
@@ -459,13 +459,13 @@ test "Signal: multiple handlers for same signal" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var h1 = try r.spawn(waitForSignal, .{ self, r }, .{});
-            defer h1.deinit();
+            defer h1.cancel(r);
             var h2 = try r.spawn(waitForSignal, .{ self, r }, .{});
-            defer h2.deinit();
+            defer h2.cancel(r);
             var h3 = try r.spawn(waitForSignal, .{ self, r }, .{});
-            defer h3.deinit();
+            defer h3.cancel(r);
             var h4 = try r.spawn(sendSignal, .{r}, .{});
-            defer h4.deinit();
+            defer h4.cancel(r);
 
             try h1.join(r);
             try h2.join(r);
@@ -533,9 +533,9 @@ test "Signal: timedWait receives signal before timeout" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var h1 = try r.spawn(waitForSignalTimed, .{ self, r }, .{});
-            defer h1.deinit();
+            defer h1.cancel(r);
             var h2 = try r.spawn(sendSignal, .{r}, .{});
-            defer h2.deinit();
+            defer h2.cancel(r);
 
             try h1.join(r);
             try h2.join(r);
@@ -574,9 +574,9 @@ test "Signal: select on multiple signals" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var h1 = try r.spawn(waitForSignals, .{ self, r }, .{});
-            defer h1.deinit();
+            defer h1.cancel(r);
             var h2 = try r.spawn(sendSignal, .{r}, .{});
-            defer h2.deinit();
+            defer h2.cancel(r);
 
             try h1.join(r);
             try h2.join(r);
@@ -663,10 +663,10 @@ test "Signal: select with signal and task" {
             defer sig.deinit();
 
             var task = try r.spawn(slowTask, .{r}, .{});
-            defer task.deinit();
+            defer task.cancel(r);
 
             var sender = try r.spawn(sendSignal, .{r}, .{});
-            defer sender.deinit();
+            defer sender.cancel(r);
 
             // Signal should win (arrives much sooner)
             const result = try select(r, .{ .sig = &sig, .task = &task });

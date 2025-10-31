@@ -29,7 +29,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     zio.init(allocator);
-    defer zio.deinit();
+    defer zio.cancel(rt);
 
     std.debug.print("Starting virtual thread demo\n", .{});
 

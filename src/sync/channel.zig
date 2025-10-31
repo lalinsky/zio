@@ -663,9 +663,9 @@ test "Channel: basic send and receive" {
 
     var results: [3]u32 = undefined;
     var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
-    defer producer_task.deinit();
+    defer producer_task.cancel(runtime);
     var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &results }, .{});
-    defer consumer_task.deinit();
+    defer consumer_task.cancel(runtime);
 
     try runtime.run();
 
@@ -736,9 +736,9 @@ test "Channel: blocking behavior when empty" {
 
     var result: u32 = 0;
     var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &result }, .{});
-    defer consumer_task.deinit();
+    defer consumer_task.cancel(runtime);
     var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
-    defer producer_task.deinit();
+    defer producer_task.cancel(runtime);
 
     try runtime.run();
 
@@ -771,9 +771,9 @@ test "Channel: blocking behavior when full" {
 
     var count: u32 = 0;
     var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel, &count }, .{});
-    defer producer_task.deinit();
+    defer producer_task.cancel(runtime);
     var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel }, .{});
-    defer consumer_task.deinit();
+    defer consumer_task.cancel(runtime);
 
     try runtime.run();
 
@@ -806,13 +806,13 @@ test "Channel: multiple producers and consumers" {
 
     var sum: u32 = 0;
     var producer1 = try runtime.spawn(TestFn.producer, .{ runtime, &channel, @as(u32, 0) }, .{});
-    defer producer1.deinit();
+    defer producer1.cancel(runtime);
     var producer2 = try runtime.spawn(TestFn.producer, .{ runtime, &channel, @as(u32, 100) }, .{});
-    defer producer2.deinit();
+    defer producer2.cancel(runtime);
     var consumer1 = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &sum }, .{});
-    defer consumer1.deinit();
+    defer consumer1.cancel(runtime);
     var consumer2 = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &sum }, .{});
-    defer consumer2.deinit();
+    defer consumer2.cancel(runtime);
 
     try runtime.run();
 
@@ -846,9 +846,9 @@ test "Channel: close graceful" {
 
     var results: [3]?u32 = .{ null, null, null };
     var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
-    defer producer_task.deinit();
+    defer producer_task.cancel(runtime);
     var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &results }, .{});
-    defer consumer_task.deinit();
+    defer consumer_task.cancel(runtime);
 
     try runtime.run();
 
@@ -882,9 +882,9 @@ test "Channel: close immediate" {
 
     var result: ?u32 = null;
     var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel }, .{});
-    defer producer_task.deinit();
+    defer producer_task.cancel(runtime);
     var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &result }, .{});
-    defer consumer_task.deinit();
+    defer consumer_task.cancel(runtime);
 
     try runtime.run();
 
@@ -982,9 +982,9 @@ test "Channel: asyncReceive with select - basic" {
     };
 
     var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
     var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel }, .{});
-    defer receiver_task.deinit();
+    defer receiver_task.cancel(runtime);
 
     try runtime.run();
 }
@@ -1072,9 +1072,9 @@ test "Channel: asyncSend with select - basic" {
     };
 
     var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
     var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel }, .{});
-    defer receiver_task.deinit();
+    defer receiver_task.cancel(runtime);
 
     try runtime.run();
 }
@@ -1155,9 +1155,9 @@ test "Channel: select on both send and receive" {
 
             var which: u8 = 0;
             var select_task = try rt.spawn(selectTask, .{ rt, ch1, ch2, &which }, .{});
-            defer select_task.deinit();
+            defer select_task.cancel(rt);
             var sender_task = try rt.spawn(sender, .{ rt, ch1 }, .{});
-            defer sender_task.deinit();
+            defer sender_task.cancel(rt);
 
             _ = try select_task.join(rt);
             _ = try sender_task.join(rt);
@@ -1230,9 +1230,9 @@ test "Channel: select with multiple receivers" {
 
     var which: u8 = 0;
     var select_task = try runtime.spawn(TestFn.selectTask, .{ runtime, &channel1, &channel2, &which }, .{});
-    defer select_task.deinit();
+    defer select_task.cancel(runtime);
     var sender_task = try runtime.spawn(TestFn.sender2, .{ runtime, &channel2 }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
 
     try runtime.run();
 
