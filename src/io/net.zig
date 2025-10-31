@@ -13,49 +13,93 @@ pub const ShutdownHow = std.posix.ShutdownHow;
 
 pub const IpAddress = extern union {
     any: std.posix.sockaddr,
-    in: std.net.Ip4Address,
-    in6: std.net.Ip6Address,
+    in: std.posix.sockaddr.in,
+    in6: std.posix.sockaddr.in6,
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
-        return .{ .in = std.net.Ip4Address.init(addr, port) };
+        const addr_int = std.mem.readInt(u32, &addr, .big);
+        return .{ .in = .{
+            .family = std.posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, port),
+            .addr = addr_int,
+            .zero = [8]u8{ 0, 0, 0, 0, 0, 0, 0, 0 },
+        } };
     }
 
     pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
-        return .{ .in6 = std.net.Ip6Address.init(addr, port, flowinfo, scope_id) };
-    }
-
-    pub fn fromStd(addr: std.net.Address) IpAddress {
-        switch (addr.any.family) {
-            std.posix.AF.INET => return .{ .in = addr.in },
-            std.posix.AF.INET6 => return .{ .in6 = addr.in6 },
-            else => unreachable,
-        }
-    }
-
-    pub fn parseIpAndPort(name: []const u8) !IpAddress {
-        const addr = try std.net.Address.parseIpAndPort(name);
-        return fromStd(addr);
-    }
-
-    pub fn parseIp(name: []const u8, port: u16) !IpAddress {
-        const addr = try std.net.Address.parseIp(name, port);
-        return fromStd(addr);
+        return .{ .in6 = .{
+            .family = std.posix.AF.INET6,
+            .port = std.mem.nativeToBig(u16, port),
+            .flowinfo = flowinfo,
+            .addr = addr,
+            .scope_id = scope_id,
+        } };
     }
 
     pub fn parseIp4(buf: []const u8, port: u16) !IpAddress {
-        return .{ .in = try std.net.Ip4Address.parse(buf, port) };
+        var addr: [4]u8 = undefined;
+        var octets = std.mem.splitScalar(u8, buf, '.');
+        var i: usize = 0;
+        while (octets.next()) |octet| : (i += 1) {
+            if (i >= 4) return error.InvalidIpAddress;
+            addr[i] = std.fmt.parseInt(u8, octet, 10) catch return error.InvalidIpAddress;
+        }
+        if (i != 4) return error.InvalidIpAddress;
+        return initIp4(addr, port);
     }
 
     pub fn parseIp6(buf: []const u8, port: u16) !IpAddress {
-        return .{ .in6 = try std.net.Ip6Address.parse(buf, port) };
+        var addr: [16]u8 = undefined;
+        // Simple IPv6 parser - handles full notation
+        var parts = std.mem.splitScalar(u8, buf, ':');
+        var i: usize = 0;
+        while (parts.next()) |part| : (i += 2) {
+            if (i >= 16) return error.InvalidIpAddress;
+            if (part.len == 0) {
+                // Handle :: compression
+                @memset(addr[i..], 0);
+                break;
+            }
+            const value = std.fmt.parseInt(u16, part, 16) catch return error.InvalidIpAddress;
+            std.mem.writeInt(u16, addr[i..][0..2], value, .big);
+        }
+        return initIp6(addr, port, 0, 0);
+    }
+
+    pub fn parseIp(name: []const u8, port: u16) !IpAddress {
+        // Try IPv4 first
+        return parseIp4(name, port) catch {
+            // Try IPv6
+            return parseIp6(name, port);
+        };
+    }
+
+    pub fn parseIpAndPort(name: []const u8) !IpAddress {
+        // For IPv6: [addr]:port
+        if (std.mem.indexOf(u8, name, "[")) |_| {
+            const start = std.mem.indexOf(u8, name, "[") orelse return error.InvalidFormat;
+            const end = std.mem.indexOf(u8, name, "]") orelse return error.InvalidFormat;
+            const colon = std.mem.lastIndexOf(u8, name, ":") orelse return error.InvalidFormat;
+            if (colon <= end) return error.InvalidFormat;
+            const addr_str = name[start + 1 .. end];
+            const port_str = name[colon + 1 ..];
+            const port = try std.fmt.parseInt(u16, port_str, 10);
+            return parseIp6(addr_str, port);
+        }
+        // For IPv4: addr:port
+        const colon = std.mem.lastIndexOf(u8, name, ":") orelse return error.InvalidFormat;
+        const addr_str = name[0..colon];
+        const port_str = name[colon + 1 ..];
+        const port = try std.fmt.parseInt(u16, port_str, 10);
+        return parseIp4(addr_str, port);
     }
 
     /// Returns the port in native endian.
     /// Asserts that the address is ip4 or ip6.
     pub fn getPort(self: IpAddress) u16 {
         return switch (self.any.family) {
-            std.posix.AF.INET => self.in.getPort(),
-            std.posix.AF.INET6 => self.in6.getPort(),
+            std.posix.AF.INET => std.mem.bigToNative(u16, self.in.port),
+            std.posix.AF.INET6 => std.mem.bigToNative(u16, self.in6.port),
             else => unreachable,
         };
     }
@@ -64,16 +108,34 @@ pub const IpAddress = extern union {
     /// Asserts that the address is ip4 or ip6.
     pub fn setPort(self: *IpAddress, port: u16) void {
         switch (self.any.family) {
-            std.posix.AF.INET => self.in.setPort(port),
-            std.posix.AF.INET6 => self.in6.setPort(port),
+            std.posix.AF.INET => self.in.port = std.mem.nativeToBig(u16, port),
+            std.posix.AF.INET6 => self.in6.port = std.mem.nativeToBig(u16, port),
             else => unreachable,
         }
     }
 
     pub fn format(self: IpAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
-            std.posix.AF.INET => try self.in.format(w),
-            std.posix.AF.INET6 => try self.in6.format(w),
+            std.posix.AF.INET => {
+                const addr_bytes = std.mem.toBytes(self.in.addr);
+                try w.print("{}.{}.{}.{}:{}", .{
+                    addr_bytes[0],
+                    addr_bytes[1],
+                    addr_bytes[2],
+                    addr_bytes[3],
+                    std.mem.bigToNative(u16, self.in.port),
+                });
+            },
+            std.posix.AF.INET6 => {
+                const addr = self.in6.addr;
+                try w.writeAll("[");
+                var i: usize = 0;
+                while (i < 8) : (i += 1) {
+                    if (i > 0) try w.writeAll(":");
+                    try w.print("{x}", .{std.mem.readInt(u16, addr[i * 2 ..][0..2], .big)});
+                }
+                try w.print("]:{}", .{std.mem.bigToNative(u16, self.in6.port)});
+            },
             else => unreachable,
         }
     }
