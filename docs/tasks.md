@@ -95,7 +95,7 @@ fn myTask(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     const buf: [256]u8 = undefined;
     while (true) {
         // This will return error.Canceled if the task is canceled
-        const n = try stream.read(buf);
+        const n = try stream.read(rt, &buf);
         try processData(buf[0..n]);
     }
 }
