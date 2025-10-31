@@ -63,7 +63,7 @@ fn clientTask(
     var i: usize = 0;
     const start_idx = client_id * MESSAGES_PER_CLIENT;
     while (i < MESSAGES_PER_CLIENT) : (i += 1) {
-        const msg_start = std.time.nanoTimestamp();
+        var msg_timer = try std.time.Timer.start();
 
         try stream.writeAll(rt, &send_buffer);
 
@@ -74,8 +74,7 @@ fn clientTask(
             bytes_received += n;
         }
 
-        const msg_end = std.time.nanoTimestamp();
-        latencies[start_idx + i] = @intCast(msg_end - msg_start);
+        latencies[start_idx + i] = msg_timer.read();
     }
 }
 
@@ -103,7 +102,7 @@ fn benchmarkTask(
     // Wait for server to be ready
     try server_ready.wait(rt);
 
-    const start = std.time.nanoTimestamp();
+    var timer = try std.time.Timer.start();
 
     // Spawn all clients
     const client_tasks = try allocator.alloc(zio.JoinHandle(anyerror!void), NUM_CLIENTS);
@@ -120,14 +119,12 @@ fn benchmarkTask(
         try task.join(rt);
     }
 
-    const end = std.time.nanoTimestamp();
-
     // Signal server to shut down
     server_done.set();
     try server.join(rt);
 
     // Calculate statistics
-    const elapsed_ns = @as(u64, @intCast(end - start));
+    const elapsed_ns = timer.read();
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
     const elapsed_s = elapsed_ms / 1000.0;
 
