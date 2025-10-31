@@ -33,7 +33,6 @@ pub const Io = if (!is_zig_0_15) std.Io else struct {
                 const rt = Runtime.fromIo(io);
                 if (self.task) |*task| {
                     self.result = task.join(rt);
-                    task.deinit();
                     self.task = null;
                 }
                 return self.result;

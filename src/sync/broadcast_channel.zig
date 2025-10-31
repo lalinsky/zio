@@ -506,9 +506,9 @@ test "BroadcastChannel: basic send and receive" {
     var results: [3]u32 = undefined;
 
     var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel, &barrier }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
     var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier }, .{});
-    defer receiver_task.deinit();
+    defer receiver_task.cancel(runtime);
 
     try runtime.run();
 
@@ -554,13 +554,13 @@ test "BroadcastChannel: multiple consumers receive same messages" {
     var sum3: u32 = 0;
 
     var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel, &barrier }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
     var receiver1_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel, &consumer1, &sum1, &barrier }, .{});
-    defer receiver1_task.deinit();
+    defer receiver1_task.cancel(runtime);
     var receiver2_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel, &consumer2, &sum2, &barrier }, .{});
-    defer receiver2_task.deinit();
+    defer receiver2_task.cancel(runtime);
     var receiver3_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel, &consumer3, &sum3, &barrier }, .{});
-    defer receiver3_task.deinit();
+    defer receiver3_task.cancel(runtime);
 
     try runtime.run();
 
@@ -789,9 +789,9 @@ test "BroadcastChannel: consumers can drain after close" {
     var results: [4]?u32 = .{ null, null, null, null };
 
     var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel, &barrier }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
     var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier }, .{});
-    defer receiver_task.deinit();
+    defer receiver_task.cancel(runtime);
 
     try runtime.run();
 
@@ -838,9 +838,9 @@ test "BroadcastChannel: waiting consumers wake on close" {
     var got_closed = false;
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &channel, &consumer, &got_closed, &barrier }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var closer_task = try runtime.spawn(TestFn.closer, .{ runtime, &channel, &barrier }, .{});
-    defer closer_task.deinit();
+    defer closer_task.cancel(runtime);
 
     try runtime.run();
 
@@ -909,9 +909,9 @@ test "BroadcastChannel: asyncReceive with select - basic" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel, &barrier }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
     var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel, &consumer, &barrier }, .{});
-    defer receiver_task.deinit();
+    defer receiver_task.cancel(runtime);
 
     try runtime.run();
 }
@@ -1058,9 +1058,9 @@ test "BroadcastChannel: select with multiple broadcast channels" {
     var consumer2 = BroadcastChannel(u32).Consumer{};
     var which: u8 = 0;
     var select_task = try runtime.spawn(TestFn.selectTask, .{ runtime, &channel1, &channel2, &consumer1, &consumer2, &which }, .{});
-    defer select_task.deinit();
+    defer select_task.cancel(runtime);
     var sender_task = try runtime.spawn(TestFn.sender2, .{ runtime, &channel2 }, .{});
-    defer sender_task.deinit();
+    defer sender_task.cancel(runtime);
 
     try runtime.run();
 

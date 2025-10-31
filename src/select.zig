@@ -507,9 +507,9 @@ test "select: basic - first completes" {
 
         fn asyncTask(rt: *Runtime) !void {
             var slow = try rt.spawn(slowTask, .{rt}, .{});
-            defer slow.deinit();
+            defer slow.cancel(rt);
             var fast = try rt.spawn(fastTask, .{rt}, .{});
-            defer fast.deinit();
+            defer fast.cancel(rt);
 
             const result = try select(rt, .{ .fast = &fast, .slow = &slow });
             switch (result) {
@@ -542,14 +542,14 @@ test "select: already complete - fast path" {
 
         fn asyncTask(rt: *Runtime) !void {
             var immediate = try rt.spawn(immediateTask, .{}, .{});
-            defer immediate.deinit();
+            defer immediate.cancel(rt);
 
             // Give immediate task a chance to complete
             try rt.yield();
             try rt.yield();
 
             var slow = try rt.spawn(slowTask, .{rt}, .{});
-            defer slow.deinit();
+            defer slow.cancel(rt);
 
             // immediate should already be complete, select should return immediately
             const result = try select(rt, .{ .immediate = &immediate, .slow = &slow });
@@ -587,11 +587,11 @@ test "select: heterogeneous types" {
 
         fn asyncTask(rt: *Runtime) !void {
             var int_handle = try rt.spawn(intTask, .{rt}, .{});
-            defer int_handle.deinit();
+            defer int_handle.cancel(rt);
             var string_handle = try rt.spawn(stringTask, .{rt}, .{});
-            defer string_handle.deinit();
+            defer string_handle.cancel(rt);
             var bool_handle = try rt.spawn(boolTask, .{rt}, .{});
-            defer bool_handle.deinit();
+            defer bool_handle.cancel(rt);
 
             const result = try select(rt, .{
                 .string = &string_handle,
@@ -638,9 +638,9 @@ test "select: with cancellation" {
 
         fn selectTask(rt: *Runtime) !i32 {
             var h1 = try rt.spawn(slowTask1, .{rt}, .{});
-            defer h1.deinit();
+            defer h1.cancel(rt);
             var h2 = try rt.spawn(slowTask2, .{rt}, .{});
-            defer h2.deinit();
+            defer h2.cancel(rt);
 
             const result = try select(rt, .{ .first = &h1, .second = &h2 });
             return switch (result) {
@@ -651,7 +651,7 @@ test "select: with cancellation" {
 
         fn asyncTask(rt: *Runtime) !void {
             var select_handle = try rt.spawn(selectTask, .{rt}, .{});
-            defer select_handle.deinit();
+            defer select_handle.cancel(rt);
 
             // Give it a chance to start waiting
             try rt.yield();
@@ -691,9 +691,9 @@ test "select: with error unions - success case" {
 
         fn asyncTask(rt: *Runtime) !void {
             var parse_handle = try rt.spawn(parseTask, .{rt}, .{});
-            defer parse_handle.deinit();
+            defer parse_handle.cancel(rt);
             var validate_handle = try rt.spawn(validateTask, .{rt}, .{});
-            defer validate_handle.deinit();
+            defer validate_handle.cancel(rt);
 
             const result = try select(rt, .{
                 .validate = &validate_handle,
@@ -748,9 +748,9 @@ test "select: with error unions - error case" {
 
         fn asyncTask(rt: *Runtime) !void {
             var failing = try rt.spawn(failingTask, .{rt}, .{});
-            defer failing.deinit();
+            defer failing.cancel(rt);
             var slow = try rt.spawn(slowTask, .{rt}, .{});
-            defer slow.deinit();
+            defer slow.cancel(rt);
 
             const result = try select(rt, .{ .failing = &failing, .slow = &slow });
 
@@ -802,11 +802,11 @@ test "select: with mixed error types" {
 
         fn asyncTask(rt: *Runtime) !void {
             var h1 = try rt.spawn(task1, .{rt}, .{});
-            defer h1.deinit();
+            defer h1.cancel(rt);
             var h2 = try rt.spawn(task2, .{rt}, .{});
-            defer h2.deinit();
+            defer h2.cancel(rt);
             var h3 = try rt.spawn(task3, .{rt}, .{});
-            defer h3.deinit();
+            defer h3.cancel(rt);
 
             // select returns Cancelable!SelectUnion(...)
             // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
@@ -854,7 +854,7 @@ test "wait: plain type" {
                     f.set(42);
                 }
             }.run, .{&future}, .{});
-            defer task.deinit();
+            defer task.cancel(rt);
 
             // Wait for the future
             const result = try wait(rt, &future);
@@ -884,7 +884,7 @@ test "wait: error union" {
                     f.set(123);
                 }
             }.run, .{&future}, .{});
-            defer task.deinit();
+            defer task.cancel(rt);
 
             // Wait for the future
             const result = try wait(rt, &future);
@@ -915,7 +915,7 @@ test "wait: error union with error" {
                     f.set(MyError.Foo);
                 }
             }.run, .{&future}, .{});
-            defer task.deinit();
+            defer task.cancel(rt);
 
             // Wait for the future
             const result = try wait(rt, &future);

@@ -66,10 +66,10 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
             defer server.close(rt);
 
             var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
-            defer server_task.deinit();
+            defer server_task.cancel(rt);
 
             var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner }, .{});
-            defer client_task.deinit();
+            defer client_task.cancel(rt);
 
             // TODO use TaskGroup
 
@@ -116,10 +116,10 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
             defer socket.close(rt);
 
             var server_task = try rt.spawn(serverFn, .{ rt, socket }, .{});
-            defer server_task.deinit();
+            defer server_task.cancel(rt);
 
             var client_task = try rt.spawn(clientFn, .{ rt, socket, client_addr_inner }, .{});
-            defer client_task.deinit();
+            defer client_task.cancel(rt);
 
             try server_task.join(rt);
             try client_task.join(rt);
@@ -162,10 +162,10 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
             defer server.close(rt);
 
             var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
-            defer server_task.deinit();
+            defer server_task.cancel(rt);
 
             var client_task = try rt.spawn(clientFn, .{ rt, server }, .{});
-            defer client_task.deinit();
+            defer client_task.cancel(rt);
 
             // TODO use TaskGroup
 
