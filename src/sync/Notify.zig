@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A signal-triggered synchronization primitive for async tasks.
 //!
 //! Notify is a stateless synchronization primitive that allows tasks to wait for

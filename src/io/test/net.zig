@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const meta = @import("../../meta.zig");

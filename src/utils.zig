@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! Low-level utilities for implementing synchronization primitives and memory management.
 //!
 //! These are internal building blocks not intended for direct use in application code.

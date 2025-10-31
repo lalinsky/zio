@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! Wait queues for thread-safe synchronization primitives.
 //!
 //! This is a low-level building block for implementing synchronization primitives

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A counting semaphore for controlling access to a limited resource.
 //!
 //! A semaphore maintains a count of available permits. Tasks can acquire permits

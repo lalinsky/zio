@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A condition variable for coordinating async tasks.
 //!
 //! Condition variables allow tasks to wait for certain conditions to become true
