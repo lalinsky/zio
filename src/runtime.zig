@@ -234,6 +234,15 @@ pub fn JoinHandle(comptime T: type) type {
             self.awaitable = null;
         }
 
+        /// Wait for the task to complete and return its result.
+        ///
+        /// If the current task is canceled while waiting, the spawned task will be canceled too.
+        ///
+        /// Example:
+        /// ```zig
+        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// const result = handle.join(rt);
+        /// ```
         pub fn join(self: *Self, rt: *Runtime) T {
             // If awaitable is null, result is already cached
             const awaitable = self.awaitable orelse return self.result;
@@ -291,11 +300,18 @@ pub fn JoinHandle(comptime T: type) type {
             }
         }
 
-        /// Request cancellation of this task and wait for completion.
-        /// For coroutine tasks: Sets the cancellation flag, which will be checked at the next yield point.
-        /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
-        /// For futures: Has no effect (futures are not cancelable).
-        /// This is idempotent - if awaitable is null or task is already done, this is a no-op.
+        /// Request cancellation and wait for the task to complete.
+        ///
+        /// Safe to call after `join()` - typically used in defer for cleanup.
+        ///
+        /// Example:
+        /// ```zig
+        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// defer handle.cancel(rt);
+        /// // Do some other work that could return early
+        /// const result = handle.join(rt);
+        /// // cancel() in defer is a no-op since join() already completed
+        /// ```
         pub fn cancel(self: *Self, rt: *Runtime) void {
             // If awaitable is null, already completed/detached - no-op
             const awaitable = self.awaitable orelse return;
@@ -316,10 +332,15 @@ pub fn JoinHandle(comptime T: type) type {
             self.finishAwaitable(rt, awaitable);
         }
 
-        /// Detach this task, allowing it to run in the background.
-        /// Releases the handle's reference to the awaitable immediately.
+        /// Detach the task, allowing it to run in the background.
+        ///
         /// After detaching, the result is no longer retrievable.
-        /// This is idempotent - if awaitable is null, this is a no-op.
+        ///
+        /// Example:
+        /// ```zig
+        /// var handle = try rt.spawn(backgroundTask, .{}, .{});
+        /// handle.detach(rt); // Task runs independently
+        /// ```
         pub fn detach(self: *Self, rt: *Runtime) void {
             // If awaitable is null, already detached - no-op
             const awaitable = self.awaitable orelse return;
