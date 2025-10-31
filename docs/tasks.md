@@ -2,17 +2,19 @@
 
 ## Introduction
 
-You will not get much benefit from asynchronous I/O if you can only perform one operation at a time.
-You need to introduce concurrency into your program, and that is traditionally not an easy problem to solve.
+You would not get much benefit from asynchronous I/O if you only perform one operation at a time.
+You need to introduce concurrency into your program in order to get the most out of it,
+and that is traditionally not an easy problem to solve.
 
-In Zio, tasks are the fundamental building block for concurrency. Tasks are what other platforms call
-stackful coroutines, user-space threads, virtual threads, or fibers. They suspend while waiting on I/O
-or other operations, allowing other tasks to run on the same CPU thread. And if configured to do so,
-tasks can migrate between CPU threads, allowing for parallelism.
-
+Zio does this through tasks, they are the fundamental building block for concurrency.
+Tasks are what other platforms call stackful coroutines, virtual threads, or fibers.
+They suspend while waiting on I/O or other operations, allowing other tasks to run on the same CPU thread.
 Because tasks suspend/resume as needed, it allows you to write concurrent code in a clear, sequential style.
 
-## Spawning Tasks
+You can run thousands of tasks on a single CPU thread, they will still run concurrently, just not in parallel.
+If you configure the runtime, you can also run tasks on multiple CPU threads, allowing for parallelism.
+
+## Spawning
 
 Tasks are created using the [`spawn`](/zio/apidocs/#zio.runtime.Runtime.spawn) method on the runtime. The basic syntax is:
 
@@ -33,11 +35,24 @@ fn taskFunction(arg1: TypeA, arg2: TypeB) !void {
 }
 ```
 
-Tasks start running immediately after being spawned (or as soon as a CPU thread is available).
+## Results
+
+Tasks can have results, you should use the [`join()`](/zio/apidocs/#zio.runtime.Runtime.spawn) method to wait on the task to complete and get the result:
+
+```
+fn sum(a: i32, b: i32) i32 {
+    return a + b;
+}
+
+const task = try rt.spawn(sum, .{ 1, 2 }, .{});
+const result = rt.join();
+
+std.debug.assert(result == 3);
+```
 
 ## Cancellation
 
-Tasks can be cancelled using the [`cancel`](/zio/apidocs/#zio.runtime.JoinHandle.cancel) method:
+Tasks can be cancelled using the [`cancel()`](/zio/apidocs/#zio.runtime.JoinHandle.cancel) method:
 
 ```zig
 task.cancel();

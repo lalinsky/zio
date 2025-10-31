@@ -302,9 +302,9 @@ test "ResetEvent wait/set signaling" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_finished }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
-    defer setter_task.deinit();
+    defer setter_task.cancel(runtime);
 
     try runtime.run();
 
@@ -363,13 +363,13 @@ test "ResetEvent multiple waiters broadcast" {
     };
 
     var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
-    defer waiter1.deinit();
+    defer waiter1.cancel(runtime);
     var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
-    defer waiter2.deinit();
+    defer waiter2.cancel(runtime);
     var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
-    defer waiter3.deinit();
+    defer waiter3.cancel(runtime);
     var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
-    defer setter_task.deinit();
+    defer setter_task.cancel(runtime);
 
     try runtime.run();
 
@@ -424,7 +424,7 @@ test "ResetEvent: select" {
             var reset_event = ResetEvent.init;
 
             var task = try rt.spawn(setterTask, .{ rt, &reset_event }, .{});
-            defer task.deinit();
+            defer task.cancel(rt);
 
             const result = try select(rt, .{ .event = &reset_event, .task = &task });
             try std.testing.expectEqual(.event, result);

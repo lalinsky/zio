@@ -220,26 +220,47 @@ pub fn JoinHandle(comptime T: type) type {
         const Self = @This();
         pub const Result = T;
 
-        awaitable: *Awaitable,
+        awaitable: ?*Awaitable,
+        result: T,
 
-        pub fn deinit(self: *Self) void {
-            const runtime = switch (self.awaitable.kind) {
-                .task => Task(T).fromAwaitable(self.awaitable).getRuntime(),
-                .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).getRuntime(),
+        /// Helper to get result from awaitable and release it
+        fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
+            const result = switch (awaitable.kind) {
+                .task => Task(T).fromAwaitable(awaitable).impl.future_result.get().?,
+                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.future_result.get().?,
             };
-            runtime.releaseAwaitable(self.awaitable, false);
+            self.result = result;
+            rt.releaseAwaitable(awaitable, false);
+            self.awaitable = null;
         }
 
+        /// Wait for the task to complete and return its result.
+        ///
+        /// If the current task is canceled while waiting, the spawned task will be canceled too.
+        ///
+        /// Example:
+        /// ```zig
+        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// const result = handle.join(rt);
+        /// ```
         pub fn join(self: *Self, rt: *Runtime) T {
-            return switch (self.awaitable.kind) {
-                .task => select.waitUntilComplete(rt, Task(T).fromAwaitable(self.awaitable)),
-                .blocking_task => select.waitUntilComplete(rt, BlockingTask(T).fromAwaitable(self.awaitable)),
-            };
+            // If awaitable is null, result is already cached
+            const awaitable = self.awaitable orelse return self.result;
+
+            // Wait for completion
+            _ = select.waitUntilComplete(rt, awaitable);
+
+            // Get result and release awaitable
+            self.finishAwaitable(rt, awaitable);
+            return self.result;
         }
 
         /// Check if the task has completed and a result is available.
         pub fn hasResult(self: *const Self) bool {
-            return self.awaitable.done.load(.acquire);
+            if (self.awaitable) |awaitable| {
+                return awaitable.done.load(.acquire);
+            }
+            return true; // If awaitable is null, result is already cached
         }
 
         /// Get the result value of type T (preserving any error union).
@@ -248,42 +269,95 @@ pub fn JoinHandle(comptime T: type) type {
         pub fn getResult(self: *Self) T {
             assert(self.hasResult());
 
-            // Get the stored result of type T
-            return switch (self.awaitable.kind) {
-                .task => Task(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
-                .blocking_task => BlockingTask(T).fromAwaitable(self.awaitable).impl.future_result.get().?,
+            // If awaitable is null, return cached result
+            if (self.awaitable == null) {
+                return self.result;
+            }
+
+            // Get the stored result of type T from awaitable
+            const awaitable = self.awaitable.?;
+            return switch (awaitable.kind) {
+                .task => Task(T).fromAwaitable(awaitable).impl.future_result.get().?,
+                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.future_result.get().?,
             };
         }
 
         /// Registers a wait node to be notified when the task completes.
         /// This is part of the Future protocol for select().
         /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(self: Self, _: *Runtime, wait_node: *WaitNode) bool {
-            return self.awaitable.asyncWait(wait_node);
+        pub fn asyncWait(self: Self, rt: *Runtime, wait_node: *WaitNode) bool {
+            if (self.awaitable) |awaitable| {
+                return awaitable.asyncWait(rt, wait_node);
+            }
+            return false; // Already complete
         }
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(self: Self, _: *Runtime, wait_node: *WaitNode) void {
-            self.awaitable.asyncCancelWait(wait_node);
+        pub fn asyncCancelWait(self: Self, rt: *Runtime, wait_node: *WaitNode) void {
+            if (self.awaitable) |awaitable| {
+                awaitable.asyncCancelWait(rt, wait_node);
+            }
         }
 
-        /// Request cancellation of this task.
-        /// For coroutine tasks: Sets the cancellation flag, which will be checked at the next yield point.
-        /// For blocking tasks: Sets the cancellation flag, which will skip execution if not yet started.
-        /// For futures: Has no effect (futures are not cancelable).
+        /// Request cancellation and wait for the task to complete.
+        ///
+        /// Safe to call after `join()` - typically used in defer for cleanup.
+        ///
+        /// Example:
+        /// ```zig
+        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// defer handle.cancel(rt);
+        /// // Do some other work that could return early
+        /// const result = handle.join(rt);
+        /// // cancel() in defer is a no-op since join() already completed
+        /// ```
         pub fn cancel(self: *Self, rt: *Runtime) void {
-            _ = rt;
-            self.awaitable.cancel();
+            // If awaitable is null, already completed/detached - no-op
+            const awaitable = self.awaitable orelse return;
+
+            // If already done, just clean up
+            if (awaitable.done.load(.acquire)) {
+                self.finishAwaitable(rt, awaitable);
+                return;
+            }
+
+            // Request cancellation
+            awaitable.cancel();
+
+            // Wait for completion
+            _ = select.waitUntilComplete(rt, awaitable);
+
+            // Get result and release awaitable
+            self.finishAwaitable(rt, awaitable);
+        }
+
+        /// Detach the task, allowing it to run in the background.
+        ///
+        /// After detaching, the result is no longer retrievable.
+        ///
+        /// Example:
+        /// ```zig
+        /// var handle = try rt.spawn(backgroundTask, .{}, .{});
+        /// handle.detach(rt); // Task runs independently
+        /// ```
+        pub fn detach(self: *Self, rt: *Runtime) void {
+            // If awaitable is null, already detached - no-op
+            const awaitable = self.awaitable orelse return;
+
+            rt.releaseAwaitable(awaitable, false);
+            self.awaitable = null;
+            self.result = undefined;
         }
 
         /// Get the executor ID for this task.
         /// Only valid for coroutine tasks (not blocking tasks or futures).
-        /// Returns null if this is not a coroutine task.
+        /// Returns null if this is not a coroutine task or if already detached/completed.
         pub fn getExecutorId(self: *const Self) ?usize {
-            return switch (self.awaitable.kind) {
+            const awaitable = self.awaitable orelse return null;
+            return switch (awaitable.kind) {
                 .task => {
-                    const task = Task(T).fromAwaitable(self.awaitable);
+                    const task = Task(T).fromAwaitable(awaitable);
                     const executor = task.impl.base.getExecutor();
                     return executor.id;
                 },
@@ -298,6 +372,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example: JoinHandle(MyError!i32) can be cast to JoinHandle(anyerror!i32)
         pub fn cast(self: Self, comptime T2: type) JoinHandle(T2) {
+            assert(self.awaitable != null);
             const P1 = meta.Payload(T);
             const P2 = meta.Payload(T2);
             if (P1 != P2) {
@@ -305,7 +380,10 @@ pub fn JoinHandle(comptime T: type) type {
                     "Source payload: " ++ @typeName(P1) ++ ", target payload: " ++ @typeName(P2));
             }
 
-            return JoinHandle(T2){ .awaitable = self.awaitable };
+            return JoinHandle(T2){
+                .awaitable = self.awaitable,
+                .result = undefined,
+            };
         }
     };
 }
@@ -477,7 +555,10 @@ pub const Executor = struct {
         // Track task spawn
         self.metrics.tasks_spawned += 1;
 
-        return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
+        return JoinHandle(Result){
+            .awaitable = &task.impl.base.awaitable,
+            .result = undefined,
+        };
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
@@ -1211,7 +1292,10 @@ pub const Runtime = struct {
             xev.ThreadPool.Batch.from(&task.impl.base.thread_pool_task),
         );
 
-        return JoinHandle(Result){ .awaitable = &task.impl.base.awaitable };
+        return JoinHandle(Result){
+            .awaitable = &task.impl.base.awaitable,
+            .result = undefined,
+        };
     }
 
     /// Worker thread entry point
@@ -1255,7 +1339,7 @@ pub const Runtime = struct {
         var spawn_options = options;
         spawn_options.executor = ExecutorId.id(0);
         var handle = try self.spawn(func, args, spawn_options);
-        defer handle.deinit();
+        defer handle.cancel(self);
 
         // Run all executors
         try self.run();
@@ -1457,7 +1541,7 @@ test "runtime: multi-threaded with auto-detect executors" {
             for (&handles, 0..) |*handle, i| {
                 handle.* = try rt.spawn(task, .{ rt, i }, .{});
             }
-            defer for (&handles) |*handle| handle.deinit();
+            defer for (&handles) |*handle| handle.cancel(rt);
 
             // Wait for all tasks
             for (&handles, 0..) |*handle, i| {
@@ -1493,7 +1577,7 @@ test "runtime: multi-threaded with explicit executor count" {
             var n: usize = 0;
             defer {
                 for (handles[0..n]) |*handle| {
-                    handle.deinit();
+                    handle.cancel(rt);
                 }
             }
             for (&handles, 0..) |*handle, i| {
@@ -1531,7 +1615,7 @@ test "runtime: multi-threaded with executor pinning" {
             for (&handles, 0..) |*handle, i| {
                 handle.* = try rt.spawn(task, .{i}, .{ .executor = ExecutorId.id(i) });
             }
-            defer for (&handles) |*handle| handle.deinit();
+            defer for (&handles) |*handle| handle.cancel(rt);
 
             // Verify results
             for (&handles, 0..) |*handle, i| {
@@ -1561,7 +1645,7 @@ test "runtime: task colocation with getExecutorId" {
         fn mainTask(rt: *Runtime) !void {
             // Spawn first task on executor 2
             var handle1 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(2) });
-            defer handle1.deinit();
+            defer handle1.cancel(rt);
 
             // Get the executor ID from the first task
             const executor_id = handle1.getExecutorId();
@@ -1570,7 +1654,7 @@ test "runtime: task colocation with getExecutorId" {
 
             // Spawn second task colocated with the first task
             var handle2 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(executor_id.?) });
-            defer handle2.deinit();
+            defer handle2.cancel(rt);
 
             // Verify both tasks ran on the same executor
             const result1 = handle1.join(rt);
@@ -1598,7 +1682,7 @@ test "runtime: spawnBlocking smoke test" {
 
         fn asyncTask(rt: *Runtime) !void {
             var handle = try rt.spawnBlocking(blockingWork, .{21});
-            defer handle.deinit();
+            defer handle.cancel(rt);
 
             const result = handle.join(rt);
             try testing.expectEqual(@as(i32, 42), result);
@@ -1630,7 +1714,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
             {
                 var handle = try rt.spawn(taskSuccess, .{}, .{});
                 var casted = handle.cast(anyerror!i32);
-                defer casted.deinit();
+                defer casted.cancel(rt);
 
                 const result = try casted.join(rt);
                 try testing.expectEqual(@as(i32, 42), result);
@@ -1640,7 +1724,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
             {
                 var handle = try rt.spawn(taskError, .{}, .{});
                 var casted = handle.cast(anyerror!i32);
-                defer casted.deinit();
+                defer casted.cancel(rt);
 
                 const result = casted.join(rt);
                 try testing.expectError(error.Foo, result);
@@ -1692,7 +1776,7 @@ test "runtime: sleep is cancelable" {
             var timer = try std.time.Timer.start();
 
             var handle = try rt.spawn(sleepingTask, .{rt}, .{});
-            defer handle.deinit();
+            defer handle.cancel(rt);
 
             // Give it a chance to start sleeping
             try rt.yield();

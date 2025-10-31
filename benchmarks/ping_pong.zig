@@ -39,10 +39,10 @@ pub fn main() !void {
 
     // Spawn pinger and ponger tasks
     var pinger_task = try runtime.spawn(pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS }, .{});
-    defer pinger_task.deinit();
+    defer pinger_task.cancel(runtime);
 
     var ponger_task = try runtime.spawn(ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS }, .{});
-    defer ponger_task.deinit();
+    defer ponger_task.cancel(runtime);
 
     // Run until both tasks complete
     try runtime.run();

@@ -35,7 +35,7 @@ pub fn StreamReader(comptime T: type) type {
 
             var buf: xev.ReadBuffer = .{ .slice = dest };
             const n = r.stream.readBuf(r.runtime, &buf) catch |err| {
-                // Convert Canceled to ReadFailed since std.io.Reader doesn't support cancellation
+                // Convert Canceled to ReadFailed since std.Io.Reader doesn't support cancellation
                 return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
 
@@ -74,7 +74,7 @@ pub fn StreamReader(comptime T: type) type {
             if (dest_n == 0) return 0;
 
             const n = r.stream.readBuf(r.runtime, &buf) catch |err| {
-                // Convert Canceled to ReadFailed since std.io.Reader doesn't support cancellation
+                // Convert Canceled to ReadFailed since std.Io.Reader doesn't support cancellation
                 return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
 
