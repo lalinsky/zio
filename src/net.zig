@@ -17,11 +17,14 @@ pub const IpAddressList = struct {
     canon_name: ?[]u8,
 
     pub fn deinit(self: *IpAddressList) void {
-        // Here we copy the arena allocator into stack memory, because
+        // Save the child allocator before destroying the arena
+        const child_allocator = self.arena.child_allocator;
+        // Copy the arena allocator into stack memory, because
         // otherwise it would destroy itself while it was still working.
         var arena = self.arena;
         arena.deinit();
-        // self is destroyed
+        // Now destroy the struct itself
+        child_allocator.destroy(self);
     }
 };
 
