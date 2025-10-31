@@ -8,6 +8,17 @@ const native_os = builtin.target.os.tag;
 pub const msghdr = posix.msghdr;
 pub const msghdr_const = posix.msghdr_const;
 
+/// Get the socket address length for a given sockaddr.
+/// Determines the appropriate length based on the address family.
+pub fn getSockAddrLen(addr: *const posix.sockaddr) posix.socklen_t {
+    return switch (addr.family) {
+        posix.AF.INET => @sizeOf(posix.sockaddr.in),
+        posix.AF.INET6 => @sizeOf(posix.sockaddr.in6),
+        posix.AF.UNIX => @sizeOf(posix.sockaddr.un),
+        else => @sizeOf(posix.sockaddr.storage),
+    };
+}
+
 pub const RecvMsgError = error{
     /// The socket is marked nonblocking and the requested operation would block, and
     /// there is no global event loop configured.

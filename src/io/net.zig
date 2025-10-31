@@ -11,6 +11,17 @@ const has_unix_sockets = std.Io.net.has_unix_sockets;
 
 pub const ShutdownHow = std.posix.ShutdownHow;
 
+/// Get the socket address length for a given sockaddr.
+/// Determines the appropriate length based on the address family.
+fn getSockAddrLen(addr: *const std.posix.sockaddr) usize {
+    return switch (addr.family) {
+        std.posix.AF.INET => @sizeOf(std.posix.sockaddr.in),
+        std.posix.AF.INET6 => @sizeOf(std.posix.sockaddr.in6),
+        std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
+        else => unreachable,
+    };
+}
+
 pub const IpAddress = extern union {
     any: std.posix.sockaddr,
     in: std.posix.sockaddr.in,
@@ -203,25 +214,6 @@ pub const Address = extern union {
     ip: IpAddress,
     unix: UnixAddress,
 
-    /// Convert to std.net.Address
-    pub fn toStd(self: *const Address) std.net.Address {
-        return switch (self.any.family) {
-            std.posix.AF.INET, std.posix.AF.INET6 => std.net.Address.initPosix(@ptrCast(self)),
-            std.posix.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
-            else => unreachable,
-        };
-    }
-
-    /// Convert from std.net.Address
-    pub fn fromStd(addr: std.net.Address) Address {
-        return switch (addr.any.family) {
-            std.posix.AF.INET => Address{ .ip = .{ .in = addr.in } },
-            std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6 } },
-            std.posix.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
-            else => unreachable,
-        };
-    }
-
     /// Convert sockaddr to IpAddress from raw bytes.
     /// This properly handles IPv4 and IPv6 addresses without alignment issues.
     fn fromStorageIp(data: []const u8) IpAddress {
@@ -330,7 +322,7 @@ pub const Socket = struct {
 
     /// Connect the socket to a remote address
     pub fn connect(self: Socket, rt: *Runtime, addr: Address) !void {
-        try netConnect(rt, self.handle, addr.toStd());
+        try netConnect(rt, self.handle, addr);
     }
 
     /// Receives data from the socket into the provided buffer.
@@ -437,10 +429,13 @@ pub const Socket = struct {
                 .sendto = .{
                     .fd = self.handle,
                     .buffer = .{ .slice = data },
-                    .addr = addr.toStd(),
+                    .addr = undefined,
                 },
             },
         };
+
+        const addr_len = getSockAddrLen(&addr.any);
+        @memcpy(std.mem.asBytes(&completion.op.sendto.addr)[0..addr_len], std.mem.asBytes(&addr)[0..addr_len]);
 
         return try runIo(rt, &completion, "sendto");
     }
@@ -451,10 +446,9 @@ pub const Socket = struct {
             .len = data.len,
         }};
 
-        const std_addr = addr.toStd();
         var msg: std.posix.msghdr_const = .{
-            .name = @ptrCast(&std_addr.any),
-            .namelen = std_addr.getOsSockLen(),
+            .name = @ptrCast(@constCast(&addr.any)),
+            .namelen = @intCast(getSockAddrLen(&addr.any)),
             .iov = &iov,
             .iovlen = 1,
             .control = null,
@@ -701,7 +695,7 @@ pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    try netConnect(rt, fd, .initPosix(@ptrCast(&addr)));
+    try netConnect(rt, fd, .{ .ip = addr });
     return .{ .socket = .{ .handle = fd, .address = .{ .ip = addr } } };
 }
 
@@ -711,7 +705,7 @@ pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    try netConnect(rt, fd, .{ .un = addr.un });
+    try netConnect(rt, fd, .{ .unix = addr });
     return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
 }
 
@@ -860,13 +854,16 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
     return .{ .socket = .{ .handle = handle, .address = addr } };
 }
 
-pub fn netConnect(rt: *Runtime, fd: Handle, addr: std.net.Address) !void {
+pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
     var completion: xev.Completion = .{ .op = .{
         .connect = .{
             .socket = fd,
-            .addr = addr,
+            .addr = undefined,
         },
     } };
+
+    const addr_len = getSockAddrLen(&addr.any);
+    @memcpy(std.mem.asBytes(&completion.op.connect.addr)[0..addr_len], std.mem.asBytes(&addr)[0..addr_len]);
 
     return runIo(rt, &completion, "connect");
 }
