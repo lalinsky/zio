@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated to Zig 0.15.2 (minimum required version)
 - `select()` and `wait()` now require futures to be passed as pointers (use `&future` instead of `future`)
 - Channel methods `isEmpty()`, `isFull()`, `tryReceive()`, `trySend()`, and `close()` no longer require a `*Runtime` parameter
 - `JoinHandle.deinit()` is now `JoinHandle.detach()`
