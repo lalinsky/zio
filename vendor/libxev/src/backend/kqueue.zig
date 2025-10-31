@@ -1231,12 +1231,12 @@ pub const Completion = struct {
 
             .sendto => |*op| .{
                 .sendto = switch (op.buffer) {
-                    .slice => |v| posix.sendto(op.fd, v, 0, &op.addr.any, op.addr.getOsSockLen()),
-                    .array => |*v| posix.sendto(op.fd, v.array[0..v.len], 0, &op.addr.any, op.addr.getOsSockLen()),
+                    .slice => |v| posix.sendto(op.fd, v, 0, @ptrCast(&op.addr), op.addr.getOsSockLen()),
+                    .array => |*v| posix.sendto(op.fd, v.array[0..v.len], 0, @ptrCast(&op.addr), op.addr.getOsSockLen()),
                     .vectors => |v| blk: {
                         // Use sendmsg for vectored I/O instead of writev
                         var msg: posix.msghdr_const = .{
-                            .name = &op.addr.any,
+                            .name = @ptrCast(&op.addr),
                             .namelen = op.addr.getOsSockLen(),
                             .iov = v.data[0..v.len].ptr,
                             .iovlen = @intCast(v.len),
@@ -1762,11 +1762,13 @@ pub const CancelError = error{
 pub const AcceptError = posix.KEventError || posix.AcceptError || error{
     Canceled,
     Unexpected,
+    SocketNotListening,
 };
 
 pub const ConnectError = posix.KEventError || posix.ConnectError || error{
     Canceled,
     Unexpected,
+    AddressInUse,
 };
 
 pub const ReadError = posix.KEventError ||
