@@ -14,15 +14,16 @@ Because tasks suspend/resume as needed, it allows you to write concurrent code i
 You can run thousands of tasks on a single CPU thread, they will still run concurrently, just not in parallel.
 If you configure the runtime, you can also run tasks on multiple CPU threads, allowing for parallelism.
 
-## Spawning
+## Running Tasks
 
-Tasks are created using the [`spawn`](/zio/apidocs/#zio.runtime.Runtime.spawn) method on the runtime. The basic syntax is:
+Tasks are created using the [`spawn()`](/zio/apidocs/#zio.runtime.Runtime.spawn) method on the runtime. The basic syntax is:
 
 ```zig
 var task = try rt.spawn(taskFunction, .{ arg1, arg2 }, .{});
 ```
 
-The `spawn` method takes three parameters:
+The `spawn()` method takes three parameters:
+
 1. A function to run as a task
 2. A tuple of arguments to pass to the function
 3. Options for configuring the task (like stack size)
@@ -30,64 +31,103 @@ The `spawn` method takes three parameters:
 The task function should have a signature that matches the arguments you pass:
 
 ```zig
-fn taskFunction(arg1: TypeA, arg2: TypeB) !void {
+fn taskFunction(arg1: TypeA, arg2: TypeB) void {
     // Your task code here
 }
 ```
 
-## Results
+You should use [`join()`](/zio/apidocs/#zio.runtime.JoinHandle.join) to wait on the task to complete. This releases the resources associated with the task.
 
-Tasks can have results, you should use the [`join()`](/zio/apidocs/#zio.runtime.Runtime.spawn) method to wait on the task to complete and get the result:
+In the simplest case, you would do something like this:
 
+```zig
+var task = try rt.spawn(myTask, .{}, .{});
+task.join();
 ```
+
+Your task can also have result results and `join()` will return whatever value the task returned:
+
+```zig
 fn sum(a: i32, b: i32) i32 {
     return a + b;
 }
 
 const task = try rt.spawn(sum, .{ 1, 2 }, .{});
-const result = rt.join();
+const result = rt.join(rt);
 
 std.debug.assert(result == 3);
 ```
 
-## Cancellation
+And lastly, tasks can return errors, for example:
 
-Tasks can be cancelled using the [`cancel()`](/zio/apidocs/#zio.runtime.JoinHandle.cancel) method:
+```zig
+fn divide(a: i32, b: i32) !i32 {
+    if (b == 0) return error.DivisionByZero;
+    return a / b;
+}
+
+const task = try rt.spawn(divide, .{ 4, 2 }, .{});
+const result = try rt.join(rt); // using `try` here to catch the error
+
+std.debug.assert(result == 2);
+```
+
+## Canceling Tasks
+
+Tasks can be canceled using the [`cancel()`](/zio/apidocs/#zio.runtime.JoinHandle.cancel) method:
 
 ```zig
 task.cancel();
 ```
 
-When a task is cancelled:
+When a task is canceled:
 - The task will be interrupted at the next suspension point (e.g., when it waits for I/O)
-- Operations in the cancelled task will return `error.Canceled`
-- You should handle cancellation errors appropriately in your task code
+- Operations in the canceled task will return `error.Canceled`
+- You should handle the `error.Canceled` error appropriately in your task code and *always* propage it
 
 Example:
 
 ```zig
-fn myTask(allocator: std.mem.Allocator, stream: zio.net.Stream) !void {
-    defer stream.close();
+fn myTask(rt: *zio.Runtime, stream: zio.net.Stream) !void {
+    // The stream will get closed even if the task is canceled
+    defer stream.close(rt);
 
-    const buf = try allocator.alloc(u8, 1024);
-    defer allocator.free(buf);
-
+    const buf: [256]u8 = undefined;
     while (true) {
-        // This will return error.Canceled if the task is cancelled
+        // This will return error.Canceled if the task is canceled
         const n = try stream.read(buf);
         try processData(buf[0..n]);
     }
 }
 
-var task = try rt.spawn(myTask, .{ allocator, stream }, .{});
+var task = try rt.spawn(myTask, .{ rt, stream }, .{});
 
 // Later, cancel the task
-task.cancel();
+task.cancel(rt);
 ```
 
-When you receive `error.Canceled` in your task code, you should handle it appropriately
-and *always* propage it. In most cases, you can just use `try` and it will do the right thing,
-assuming you use `defer` and `errdefer` to handle cleanup of resources.
+You can safely call `cancel()` after successful `join()`, so this pattern becomes very common to clean up task resources:
+
+```zig
+var task = try rt.spawn(myTask, .{ rt, stream }, .{});
+defer task.cancel(rt);
+
+// Do some other work that can fail
+
+var result = task.join(rt);
+```
+
+## Detaching Tasks
+
+You can also start a task and let it run in the background. This is useful, for example, if you hava a server and want
+to handle each connection in a separate task. You can do this using the [`detach()`](/zio/apidocs/#zio.runtime.JoinHandle.detach) method:
+
+```zig
+var task = try rt.spawn(connectionHandler, .{ rt, stream }, .{});
+task.detach(rt);
+```
+
+After calling `detach()`, you should no longer do anything with the task.
 
 ## Stack Size
 
