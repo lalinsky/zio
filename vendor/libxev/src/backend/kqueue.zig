@@ -1996,7 +1996,7 @@ fn kevent_syscall(
             std.math.cast(c_int, changelist.len) orelse return error.Overflow,
             eventlist.ptr,
             std.math.cast(c_int, eventlist.len) orelse return error.Overflow,
-            0,
+            posix.system.KEVENT.FLAG.NONE,
             timeout,
         );
         switch (posix.errno(rc)) {
@@ -2758,7 +2758,7 @@ test "kqueue: mach port" {
         darwin.KernE.SUCCESS,
         darwin.getKernError(posix.system.mach_port_allocate(
             mach_self,
-            @intFromEnum(posix.system.MACH_PORT_RIGHT.RECEIVE),
+            posix.system.MACH.PORT.RIGHT.RECEIVE,
             &mach_port,
         )),
     );
@@ -2799,7 +2799,7 @@ test "kqueue: mach port" {
 
     // Send a message to the port
     var msg: darwin.mach_msg_header_t = .{
-        .msgh_bits = @intFromEnum(posix.system.MACH_MSG_TYPE.MAKE_SEND_ONCE),
+        .msgh_bits = @intFromEnum(posix.system.MACH.MSG.TYPE.MAKE_SEND_ONCE),
         .msgh_size = @sizeOf(darwin.mach_msg_header_t),
         .msgh_remote_port = mach_port,
         .msgh_local_port = darwin.MACH_PORT_NULL,

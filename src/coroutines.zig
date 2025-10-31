@@ -286,7 +286,8 @@ pub fn switchContext(
               .x15 = true,
               .x16 = true,
               .x17 = true,
-              .x18 = true,
+              // X18 is platform-reserved on Darwin and Windows, but free on Linux
+              .x18 = !builtin.os.tag.isDarwin() and builtin.os.tag != .windows,
               .x19 = true,
               .x20 = true,
               .x21 = true,
