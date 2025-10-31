@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const zio = @import("zio");
 
@@ -73,7 +76,7 @@ fn serverTask(rt: *zio.Runtime) !void {
         errdefer stream.close(rt);
 
         var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
-        task.deinit();
+        task.detach(rt);
     }
 }
 

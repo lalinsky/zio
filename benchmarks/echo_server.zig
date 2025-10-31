@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const zio = @import("zio");
 
@@ -32,7 +35,7 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
         errdefer stream.close(rt);
 
         var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
-        task.deinit();
+        task.detach(rt);
     }
 
     // Wait for signal that all clients are done before shutting down
@@ -98,7 +101,7 @@ fn benchmarkTask(
 
     // Spawn server
     var server = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done }, .{});
-    defer server.deinit();
+    defer server.cancel(rt);
 
     // Wait for server to be ready
     try server_ready.wait(rt);
@@ -116,7 +119,7 @@ fn benchmarkTask(
 
     // Wait for all clients to complete
     for (client_tasks) |*task| {
-        defer task.deinit();
+        defer task.detach(rt);
         try task.join(rt);
     }
 

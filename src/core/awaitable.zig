@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -44,6 +47,9 @@ pub const Awaitable = struct {
     prev: ?*Awaitable = null,
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 
+    // Future protocol - type-erased result type
+    pub const Result = void;
+
     pub const State = WaitQueue(WaitNode).State;
     pub const not_complete = State.sentinel0;
     pub const complete = State.sentinel1;
@@ -61,7 +67,7 @@ pub const Awaitable = struct {
     /// Registers a wait node to be notified when the awaitable completes.
     /// This is part of the Future protocol for select().
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
-    pub fn asyncWait(self: *const Awaitable, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *const Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
         // Fast path: check if already complete
         if (self.done.load(.acquire)) {
             return false;
@@ -76,7 +82,7 @@ pub const Awaitable = struct {
 
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
-    pub fn asyncCancelWait(self: *const Awaitable, wait_node: *WaitNode) void {
+    pub fn asyncCancelWait(self: *const Awaitable, _: *Runtime, wait_node: *WaitNode) void {
         // Cast away const to mutate the waiting list
         const mutable_self: *Awaitable = @constCast(self);
         _ = mutable_self.waiting_list.remove(wait_node);
@@ -94,6 +100,12 @@ pub const Awaitable = struct {
         while (self.waiting_list.popOrTransition(not_complete, complete)) |wait_node| {
             wait_node.wake();
         }
+    }
+
+    /// Get the result (void for type-erased awaitable)
+    /// Part of the Future protocol for use with select()
+    pub fn getResult(self: *Awaitable) void {
+        _ = self;
     }
 };
 
@@ -148,13 +160,13 @@ pub fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) 
         /// Registers a wait node to be notified when the task completes.
         /// This is part of the Future protocol for select().
         /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(parent: *const Parent, wait_node: *WaitNode) bool {
+        pub fn asyncWait(parent: *const Parent, _: *Runtime, wait_node: *WaitNode) bool {
             return parent.impl.base.awaitable.asyncWait(wait_node);
         }
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(parent: *const Parent, wait_node: *WaitNode) void {
+        pub fn asyncCancelWait(parent: *const Parent, _: *Runtime, wait_node: *WaitNode) void {
             parent.impl.base.awaitable.asyncCancelWait(wait_node);
         }
 

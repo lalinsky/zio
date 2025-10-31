@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const zio = @import("zio");
 
@@ -34,13 +37,13 @@ pub fn main() !void {
 
     // Spawn multiple tasks that increment shared counter
     var task0 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 0 }, .{});
-    defer task0.deinit();
+    defer task0.cancel(runtime);
     var task1 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 1 }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 2 }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
     var task3 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 3 }, .{});
-    defer task3.deinit();
+    defer task3.cancel(runtime);
 
     try runtime.run();
 

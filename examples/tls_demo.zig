@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const zio = @import("zio");
 
@@ -68,7 +71,7 @@ pub fn main() !void {
     defer runtime.deinit();
 
     var tls_task = try runtime.spawn(runTlsTask, .{runtime}, .{ .stack_size = 4 * 1024 * 1024 }); // Test 4MB stack
-    defer tls_task.deinit();
+    defer tls_task.cancel(runtime);
 
     try runtime.run();
 

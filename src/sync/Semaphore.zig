@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A counting semaphore for controlling access to a limited resource.
 //!
 //! A semaphore maintains a count of available permits. Tasks can acquire permits
@@ -171,11 +174,11 @@ test "Semaphore: basic wait/post" {
 
     var n: i32 = 0;
     var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
     var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n }, .{});
-    defer task3.deinit();
+    defer task3.cancel(runtime);
 
     try runtime.run();
 
@@ -229,9 +232,9 @@ test "Semaphore: timedWait success" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &got_permit }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var poster_task = try runtime.spawn(TestFn.poster, .{ runtime, &sem }, .{});
-    defer poster_task.deinit();
+    defer poster_task.cancel(runtime);
 
     try runtime.run();
 
@@ -255,11 +258,11 @@ test "Semaphore: multiple permits" {
     };
 
     var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &sem }, .{});
-    defer task1.deinit();
+    defer task1.cancel(runtime);
     var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &sem }, .{});
-    defer task2.deinit();
+    defer task2.cancel(runtime);
     var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &sem }, .{});
-    defer task3.deinit();
+    defer task3.cancel(runtime);
 
     try runtime.run();
 

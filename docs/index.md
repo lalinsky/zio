@@ -1,10 +1,5 @@
 # ZIO - Async I/O framework for Zig
 
-[![CI](https://github.com/lalinsky/zio/actions/workflows/test.yml/badge.svg)](https://github.com/lalinsky/zio/actions/workflows/test.yml)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Zig](https://img.shields.io/badge/zig-0.15.1-orange.svg)](https://ziglang.org/download/)
-[![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
-
 There are two ways of doing asynchronous I/O, either you use callbacks and have the I/O operation call you when it's done, or you have some sort of continuation system and suspend your code while waiting for I/O. Callback-based APIs are easier to implement, they don't need any special runtime or language support. However, they are much harder to use, you need to manage state yourself and most likely need many more allocations to do so.
 
 This project started out of my frustration with the state of networking in Zig. I've tried to write a nice wrapper for libuv in Zig, but it just doesn't work, you have to allocate memory all the time, you need to depend on reference counted pointers. Then it occurred to me that I could do Go-style stackful coroutines and use the stack for storing the state. The resulting code feels much more idiomatic. So I did an experiment with custom assembly for switching contexts, used libuv as my event loop, created a translation layer from libuv callbacks to coroutines, later switched libuv for libxev, and then worked more on the scheduler, especially making it run in multi-threaded mode.
@@ -105,23 +100,3 @@ pub fn main() !void {
 ```
 
 See `examples/*.zig` and [mini-redis](https://github.com/lalinsky/zio-mini-redis) for more examples.
-
-## Building
-
-```bash
-# Build the library and examples
-zig build
-
-# Run tests
-zig build test
-```
-
-## FAQ
-
-### How is this different from other Zig async I/O projects?
-
-There are many projects implementing stackful coroutines for Zig, unfortunately they are all missing something. The closest one to complete is [Tardy](https://github.com/tardy-org/tardy). Unfortunately, I didn't know about it when I started this project. However, even Tardy is missing many things that I wanted, like spawning non-cooperative tasks in a separate thread pool and being able to wait on their results from coroutines, more advanced synchronization primitives and Windows support. I wanted to start from an existing cross-platform event loop, originally [libuv](https://libuv.org/), later switched to [libxev](https://github.com/mitchellh/libxev), and just add coroutine runtime on top of that.
-
-### How is this different from the future `std.Io` interface in Zig?
-
-When I realized that the Zig team is working on the `std.Io` interface, I was questioning whether to continue working on this project, because there is a huge overlap. I still wanted something I can use now, instead of waiting and there are still things I'd be missing from `std.Io`, most specifically the ability to run tasks from a separate thread pool and wait on them from a coroutine, but also more control over task cancelation, and some more advanced synchronization primitives that are hard to implement without access to the event loop internals. I decided to continue with this project and when the interface is released, Zio will become one implementation of it.

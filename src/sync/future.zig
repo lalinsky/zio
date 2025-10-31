@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
@@ -62,7 +65,7 @@ pub fn Future(comptime T: type) type {
         /// Registers a wait node to be notified when the future is set.
         /// This is part of the Future protocol for select().
         /// Returns false if the future is already set (no wait needed), true if added to queue.
-        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             // Fast path: check if already set
             if (self.value.isSet()) {
                 return false;
@@ -74,7 +77,7 @@ pub fn Future(comptime T: type) type {
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) void {
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
             _ = self.wait_queue.remove(wait_node);
         }
     };
@@ -127,11 +130,11 @@ test "Future: await from coroutine" {
 
             // Spawn setter coroutine
             var setter_handle = try rt.spawn(setterTask, .{ rt, &future }, .{});
-            defer setter_handle.deinit();
+            defer setter_handle.cancel(rt);
 
             // Spawn getter coroutine
             var getter_handle = try rt.spawn(getterTask, .{ rt, &future }, .{});
-            defer getter_handle.deinit();
+            defer getter_handle.cancel(rt);
 
             const result = try getter_handle.join(rt);
             try testing.expectEqual(@as(i32, 123), result);
@@ -165,15 +168,15 @@ test "Future: multiple waiters" {
 
             // Spawn multiple waiters
             var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
-            defer waiter1.deinit();
+            defer waiter1.cancel(rt);
             var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
-            defer waiter2.deinit();
+            defer waiter2.cancel(rt);
             var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
-            defer waiter3.deinit();
+            defer waiter3.cancel(rt);
 
             // Spawn setter
             var setter = try rt.spawn(setterTask, .{ rt, &future }, .{});
-            defer setter.deinit();
+            defer setter.cancel(rt);
 
             // Wait for all to complete
             _ = try waiter1.join(rt);

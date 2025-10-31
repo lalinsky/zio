@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
@@ -105,8 +108,8 @@ pub const File = struct {
     }
 
     /// Low-level read function that accepts xev.ReadBuffer directly.
-    /// Returns std.io.Reader compatible errors.
-    pub fn readBuf(self: *File, rt: *Runtime, buffer: *xev.ReadBuffer) (Cancelable || std.io.Reader.Error)!usize {
+    /// Returns std.Io.Reader compatible errors.
+    pub fn readBuf(self: *File, rt: *Runtime, buffer: *xev.ReadBuffer) (Cancelable || std.Io.Reader.Error)!usize {
         var completion: xev.Completion = .{ .op = .{
             .pread = .{
                 .fd = self.fd,
@@ -130,8 +133,8 @@ pub const File = struct {
     }
 
     /// Low-level write function that accepts xev.WriteBuffer directly.
-    /// Returns std.io.Writer compatible errors.
-    pub fn writeBuf(self: *File, rt: *Runtime, buffer: xev.WriteBuffer) (Cancelable || std.io.Writer.Error)!usize {
+    /// Returns std.Io.Writer compatible errors.
+    pub fn writeBuf(self: *File, rt: *Runtime, buffer: xev.WriteBuffer) (Cancelable || std.Io.Writer.Error)!usize {
         var completion: xev.Completion = .{ .op = .{
             .pwrite = .{
                 .fd = self.fd,

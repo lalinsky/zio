@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const zio = @import("zio");
 
@@ -55,8 +58,8 @@ pub fn main() !void {
     var consumer_count: usize = 0;
 
     defer {
-        for (producers[0..producer_count]) |*task| task.deinit();
-        for (consumers[0..consumer_count]) |*task| task.deinit();
+        for (producers[0..producer_count]) |*task| task.cancel(runtime);
+        for (consumers[0..consumer_count]) |*task| task.cancel(runtime);
     }
 
     for (0..2) |i| {

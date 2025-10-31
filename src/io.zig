@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const meta = @import("meta.zig");
@@ -33,7 +36,6 @@ pub const Io = if (!is_zig_0_15) std.Io else struct {
                 const rt = Runtime.fromIo(io);
                 if (self.task) |*task| {
                     self.result = task.join(rt);
-                    task.deinit();
                     self.task = null;
                 }
                 return self.result;

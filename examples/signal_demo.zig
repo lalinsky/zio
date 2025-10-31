@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const zio = @import("zio");
 
@@ -52,11 +55,11 @@ pub fn main() !void {
 
     // Spawn server task
     var server_task = try runtime.spawn(serverTask, .{ runtime, &shutdown }, .{});
-    defer server_task.deinit();
+    defer server_task.cancel(runtime);
 
     // Spawn signal handler task
     var signal_task = try runtime.spawn(signalHandler, .{ runtime, &shutdown }, .{});
-    defer signal_task.deinit();
+    defer signal_task.cancel(runtime);
 
     // Run until all tasks complete
     try runtime.run();

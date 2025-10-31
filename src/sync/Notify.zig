@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A signal-triggered synchronization primitive for async tasks.
 //!
 //! Notify is a stateless synchronization primitive that allows tasks to wait for
@@ -206,14 +209,14 @@ pub fn getResult(self: *const Notify) void {
 /// Registers a wait node to be notified when signal() or broadcast() is called.
 /// This is part of the Future protocol for select().
 /// Always returns true since Notify has no persistent state (never pre-completed).
-pub fn asyncWait(self: *Notify, wait_node: *WaitNode) bool {
+pub fn asyncWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) bool {
     self.wait_queue.push(wait_node);
     return true;
 }
 
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
-pub fn asyncCancelWait(self: *Notify, wait_node: *WaitNode) void {
+pub fn asyncCancelWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) void {
     const was_in_queue = self.wait_queue.remove(wait_node);
     if (!was_in_queue) {
         // We were already removed by signal() which will wake us.
@@ -247,9 +250,9 @@ test "Notify basic signal/wait" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_finished }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify }, .{});
-    defer signaler_task.deinit();
+    defer signaler_task.cancel(runtime);
 
     try runtime.run();
 
@@ -297,13 +300,13 @@ test "Notify broadcast to multiple waiters" {
     };
 
     var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter1.deinit();
+    defer waiter1.cancel(runtime);
     var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter2.deinit();
+    defer waiter2.cancel(runtime);
     var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter3.deinit();
+    defer waiter3.cancel(runtime);
     var broadcaster_task = try runtime.spawn(TestFn.broadcaster, .{ runtime, &notify }, .{});
-    defer broadcaster_task.deinit();
+    defer broadcaster_task.cancel(runtime);
 
     try runtime.run();
 
@@ -338,13 +341,13 @@ test "Notify multiple signals to multiple waiters" {
     };
 
     var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter1.deinit();
+    defer waiter1.cancel(runtime);
     var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter2.deinit();
+    defer waiter2.cancel(runtime);
     var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count }, .{});
-    defer waiter3.deinit();
+    defer waiter3.cancel(runtime);
     var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify }, .{});
-    defer signaler_task.deinit();
+    defer signaler_task.cancel(runtime);
 
     try runtime.run();
 
@@ -399,9 +402,9 @@ test "Notify timedWait success" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &wait_succeeded }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify }, .{});
-    defer signaler_task.deinit();
+    defer signaler_task.cancel(runtime);
 
     try runtime.run();
 
@@ -428,7 +431,7 @@ test "Notify: select" {
             var notify = Notify.init;
 
             var task = try rt.spawn(signalerTask, .{ rt, &notify }, .{});
-            defer task.deinit();
+            defer task.cancel(rt);
 
             const result = try select(rt, .{ .notify = &notify, .task = &task });
             try std.testing.expectEqual(.notify, result);

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
@@ -38,7 +41,7 @@ pub fn getAddressList(
         std.net.getAddressList,
         .{ allocator, name, port },
     );
-    defer task.deinit();
+    defer task.cancel(runtime);
 
     return try task.join(runtime);
 }
@@ -157,10 +160,10 @@ test "tcpConnectToAddress: basic" {
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
     var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
-    defer server_task.deinit();
+    defer server_task.cancel(runtime);
 
     var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
-    defer client_task.deinit();
+    defer client_task.cancel(runtime);
 
     try runtime.run();
 
@@ -217,10 +220,10 @@ test "tcpConnectToHost: basic" {
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
     var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
-    defer server_task.deinit();
+    defer server_task.cancel(runtime);
 
     var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
-    defer client_task.deinit();
+    defer client_task.cancel(runtime);
 
     try runtime.run();
 

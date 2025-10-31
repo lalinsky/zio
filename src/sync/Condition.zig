@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A condition variable for coordinating async tasks.
 //!
 //! Condition variables allow tasks to wait for certain conditions to become true
@@ -285,9 +288,9 @@ test "Condition basic wait/signal" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &mutex, &condition, &ready }, .{});
-    defer signaler_task.deinit();
+    defer signaler_task.cancel(runtime);
 
     try runtime.run();
 
@@ -360,13 +363,13 @@ test "Condition broadcast" {
     };
 
     var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count }, .{});
-    defer waiter1.deinit();
+    defer waiter1.cancel(runtime);
     var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count }, .{});
-    defer waiter2.deinit();
+    defer waiter2.cancel(runtime);
     var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count }, .{});
-    defer waiter3.deinit();
+    defer waiter3.cancel(runtime);
     var broadcaster_task = try runtime.spawn(TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready }, .{});
-    defer broadcaster_task.deinit();
+    defer broadcaster_task.cancel(runtime);
 
     try runtime.run();
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! Generic lock-free intrusive stack for cross-thread communication.
 //!
 //! Uses atomic compare-and-swap for thread-safe push operations.

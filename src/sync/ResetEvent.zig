@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A manual-reset synchronization event for async tasks.
 //!
 //! ResetEvent is a boolean flag that tasks can wait on. It can be in one of two
@@ -230,7 +233,7 @@ pub fn getResult(self: *const ResetEvent) void {
 /// Registers a wait node to be notified when the event is set.
 /// This is part of the Future protocol for select().
 /// Returns false if the event is already set (no wait needed), true if added to queue.
-pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) bool {
+pub fn asyncWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) bool {
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     return self.wait_queue.pushUnless(is_set, wait_node);
@@ -238,7 +241,7 @@ pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) bool {
 
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
-pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) void {
+pub fn asyncCancelWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) void {
     _ = self.wait_queue.remove(wait_node);
 }
 
@@ -288,9 +291,9 @@ test "ResetEvent wait/set signaling" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_finished }, .{});
-    defer waiter_task.deinit();
+    defer waiter_task.cancel(runtime);
     var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
-    defer setter_task.deinit();
+    defer setter_task.cancel(runtime);
 
     try runtime.run();
 
@@ -349,13 +352,13 @@ test "ResetEvent multiple waiters broadcast" {
     };
 
     var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
-    defer waiter1.deinit();
+    defer waiter1.cancel(runtime);
     var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
-    defer waiter2.deinit();
+    defer waiter2.cancel(runtime);
     var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
-    defer waiter3.deinit();
+    defer waiter3.cancel(runtime);
     var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
-    defer setter_task.deinit();
+    defer setter_task.cancel(runtime);
 
     try runtime.run();
 
@@ -410,7 +413,7 @@ test "ResetEvent: select" {
             var reset_event = ResetEvent.init;
 
             var task = try rt.spawn(setterTask, .{ rt, &reset_event }, .{});
-            defer task.deinit();
+            defer task.cancel(rt);
 
             const result = try select(rt, .{ .event = &reset_event, .task = &task });
             try std.testing.expectEqual(.event, result);
