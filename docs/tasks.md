@@ -1,7 +1,5 @@
 # Tasks
 
-## Introduction
-
 You would not get much benefit from asynchronous I/O if you only perform one operation at a time.
 You need to introduce concurrency into your program in order to get the most out of it,
 and that is traditionally not an easy problem to solve.
@@ -81,6 +79,7 @@ task.cancel();
 ```
 
 When a task is canceled:
+
 - The task will be interrupted at the next suspension point (e.g., when it waits for I/O)
 - Operations in the canceled task will return `error.Canceled`
 - You should handle the `error.Canceled` error appropriately in your task code and *always* propage it
