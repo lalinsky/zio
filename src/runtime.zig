@@ -446,8 +446,8 @@ pub const Executor = struct {
     shutdown_completion: xev.Completion = undefined,
 
     // Stack pool cleanup tracking
-    cleanup_interval_ms: i64,
-    last_cleanup_ms: i64 = 0,
+    cleanup_interval_ns: u64,
+    cleanup_timer: std.time.Timer,
 
     // Runtime metrics
     metrics: ExecutorMetrics = .{},
@@ -474,7 +474,8 @@ pub const Executor = struct {
             .allocator = allocator,
             .loop = undefined,
             .stack_pool = StackPool.init(allocator, options.stack_pool),
-            .cleanup_interval_ms = options.stack_pool.cleanup_interval_ms,
+            .cleanup_interval_ns = options.stack_pool.cleanup_interval_ns,
+            .cleanup_timer = try std.time.Timer.start(),
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .remote_wakeup = undefined,
@@ -738,10 +739,9 @@ pub const Executor = struct {
             if (self.loop.stopped()) break;
 
             // Time-based stack pool cleanup
-            const now = std.time.milliTimestamp();
-            if (now - self.last_cleanup_ms >= self.cleanup_interval_ms) {
-                self.stack_pool.cleanup();
-                self.last_cleanup_ms = now;
+            if (self.cleanup_timer.read() >= self.cleanup_interval_ns) {
+                self.cleanup_timer.reset();
+                self.stack_pool.cleanup(self.cleanup_timer.started);
             }
 
             // Drain remote ready queue (cross-thread tasks)
