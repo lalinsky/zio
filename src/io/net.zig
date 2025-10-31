@@ -7,6 +7,7 @@ const runIo = @import("base.zig").runIo;
 const Handle = if (xev.backend == .iocp) std.os.windows.HANDLE else std.posix.socket_t;
 
 pub const default_kernel_backlog = 256;
+const has_unix_sockets = std.Io.net.has_unix_sockets;
 
 pub const ShutdownHow = std.posix.ShutdownHow;
 
@@ -97,12 +98,12 @@ pub const IpAddress = extern union {
 
 pub const UnixAddress = extern union {
     any: std.posix.sockaddr,
-    un: if (std.net.has_unix_sockets) std.posix.sockaddr.un else void,
+    un: if (has_unix_sockets) std.posix.sockaddr.un else void,
 
     pub const max_len = 108;
 
     pub fn init(path: []const u8) !UnixAddress {
-        if (!std.net.has_unix_sockets) unreachable;
+        if (!has_unix_sockets) unreachable;
         var un = std.posix.sockaddr.un{ .family = std.posix.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
         @memcpy(un.path[0..path.len], path);
@@ -115,7 +116,7 @@ pub const UnixAddress = extern union {
     };
 
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        if (!std.net.has_unix_sockets) unreachable;
+        if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
             std.posix.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
             else => unreachable,
@@ -144,7 +145,7 @@ pub const Address = extern union {
     pub fn toStd(self: *const Address) std.net.Address {
         return switch (self.any.family) {
             std.posix.AF.INET, std.posix.AF.INET6 => std.net.Address.initPosix(@ptrCast(self)),
-            std.posix.AF.UNIX => if (std.net.has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            std.posix.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
             else => unreachable,
         };
     }
@@ -154,7 +155,7 @@ pub const Address = extern union {
         return switch (addr.any.family) {
             std.posix.AF.INET => Address{ .ip = .{ .in = addr.in } },
             std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6 } },
-            std.posix.AF.UNIX => if (std.net.has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            std.posix.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
             else => unreachable,
         };
     }
@@ -185,7 +186,7 @@ pub const Address = extern union {
         return switch (sockaddr.family) {
             std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(data) },
             std.posix.AF.UNIX => blk: {
-                if (!std.net.has_unix_sockets) unreachable;
+                if (!has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
                 const copy_len = @min(data.len, @sizeOf(std.posix.sockaddr.un));
                 @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
@@ -618,7 +619,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
@@ -643,7 +644,7 @@ pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
 }
 
 pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
@@ -667,7 +668,7 @@ pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
 }
 
 pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createDatagramSocket(addr.any.family);
     errdefer netClose(rt, fd);
