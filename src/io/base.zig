@@ -52,18 +52,34 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) Cancelable!void {
 }
 
 pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    var executor = task.getExecutor();
+
     // Set up timeout
     var timeout = Timeout.init;
     defer timeout.clear(rt);
     timeout.set(rt, timeout_ns);
 
-    // Now wait for I/O
-    waitForIo(rt, completion) catch |err| {
-        // Check if this specific timeout triggered
+    // Transition to preparing_to_wait state before yielding
+    task.state.store(.preparing_to_wait, .release);
+
+    // Re-check completion state after setting preparing_to_wait
+    // If IO completed, restore ready state and exit
+    if (completion.state() != .active) {
+        task.state.store(.ready, .release);
+        return;
+    }
+
+    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+    // If IO completes before the yield, the CAS inside yield() will fail and we won't suspend
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+        timeout.clear(rt);
+        cancelIo(rt, completion);
         try rt.checkTimeout(&timeout);
-        // Not this timeout, return original error
         return err;
     };
+
+    std.debug.assert(completion.state() == .dead);
 }
 
 pub fn runIo(rt: *Runtime, completion: *xev.Completion, comptime op: []const u8) !meta.Payload(@FieldType(xev.Result, op)) {
