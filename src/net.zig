@@ -110,6 +110,7 @@ fn lookupHostBlocking(
                 .WSA_NOT_ENOUGH_MEMORY => return error.OutOfMemory,
                 .WSAHOST_NOT_FOUND => return error.UnknownHostName,
                 .WSATYPE_NOT_FOUND => return error.ServiceUnavailable,
+                .WSANO_DATA => return error.HostLacksNetworkAddresses,
                 .WSAEINVAL => unreachable,
                 .WSAESOCKTNOSUPPORT => unreachable,
                 .WSANOTINITIALISED => {
