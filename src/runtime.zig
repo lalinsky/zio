@@ -518,8 +518,8 @@ pub const Executor = struct {
         // Track yield
         self.metrics.yields += 1;
 
-        // Check and consume cancellation flag before yielding (unless shielded or no_cancel)
-        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
+        // Check and consume cancellation flag before yielding (unless no_cancel)
+        if (cancel_mode == .allow_cancel) {
             try current_task.checkCanceled(self.runtime);
         }
 
@@ -556,8 +556,8 @@ pub const Executor = struct {
         const resumed_executor = Runtime.current_executor orelse unreachable;
         std.debug.assert(resumed_executor.current_coroutine == current_coro);
 
-        // Check again after resuming in case we were canceled while suspended (unless shielded or no_cancel)
-        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
+        // Check again after resuming in case we were canceled while suspended (unless no_cancel)
+        if (cancel_mode == .allow_cancel) {
             try current_task.checkCanceled(resumed_executor.runtime);
         }
     }

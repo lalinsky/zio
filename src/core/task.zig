@@ -194,9 +194,12 @@ pub const AnyTask = struct {
     }
 
     /// Check if there are pending cancellation errors to consume.
-    /// If pending_errors > 0, decrements the count and returns error.Canceled.
+    /// If pending_errors > 0 and not shielded, decrements the count and returns error.Canceled.
     /// Otherwise returns void (no error).
     pub fn checkCanceled(self: *AnyTask, _: *Runtime) error{Canceled}!void {
+        // If shielded, don't check cancellation
+        if (self.shield_count > 0) return;
+
         // CAS loop to decrement pending_errors
         var current = self.awaitable.canceled_status.load(.acquire);
         while (true) {
