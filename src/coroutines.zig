@@ -32,8 +32,8 @@ pub const StackPtr = [*]align(stack_alignment) u8;
 const WindowsTIB = extern struct {
     fiber_data: u64, // TEB offset 0x20
     deallocation_stack: u64, // TEB offset 0x1478
-    stack_limit: u64, // TEB offset 0x10
     stack_base: u64, // TEB offset 0x08
+    stack_limit: u64, // TEB offset 0x10
 };
 
 const ExtraContext = if (builtin.os.tag == .windows) WindowsTIB else void;
@@ -94,9 +94,9 @@ pub fn switchContext(
                 \\ movq %%r11, 24(%%rax)
                 \\ movq 0x1478(%%r10), %%r11
                 \\ movq %%r11, 32(%%rax)
-                \\ movq 0x10(%%r10), %%r11
-                \\ movq %%r11, 40(%%rax)
                 \\ movq 0x08(%%r10), %%r11
+                \\ movq %%r11, 40(%%rax)
+                \\ movq 0x10(%%r10), %%r11
                 \\ movq %%r11, 48(%%rax)
                 \\
             else
@@ -114,9 +114,9 @@ pub fn switchContext(
                 \\ movq 32(%%rcx), %%r11
                 \\ movq %%r11, 0x1478(%%r10)
                 \\ movq 40(%%rcx), %%r11
-                \\ movq %%r11, 0x10(%%r10)
-                \\ movq 48(%%rcx), %%r11
                 \\ movq %%r11, 0x08(%%r10)
+                \\ movq 48(%%rcx), %%r11
+                \\ movq %%r11, 0x10(%%r10)
                 \\
             else
                 "")
@@ -200,7 +200,7 @@ pub fn switchContext(
                 \\ ldr x10, [x18, #0x20]
                 \\ ldr x11, [x18, #0x1478]
                 \\ stp x10, x11, [x0, #24]
-                \\ ldp x11, x10, [x18, #0x08]
+                \\ ldp x10, x11, [x18, #0x08]
                 \\ stp x10, x11, [x0, #40]
                 \\
             else
@@ -216,7 +216,7 @@ pub fn switchContext(
                 \\ str x10, [x18, #0x20]
                 \\ str x11, [x18, #0x1478]
                 \\ ldp x10, x11, [x1, #40]
-                \\ stp x11, x10, [x18, #0x08]
+                \\ stp x10, x11, [x18, #0x08]
                 \\
             else
                 "")
