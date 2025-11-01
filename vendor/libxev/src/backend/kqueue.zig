@@ -1231,12 +1231,12 @@ pub const Completion = struct {
 
             .sendto => |*op| .{
                 .sendto = switch (op.buffer) {
-                    .slice => |v| posix.sendto(op.fd, v, 0, &op.addr.any, op.addr.getOsSockLen()),
-                    .array => |*v| posix.sendto(op.fd, v.array[0..v.len], 0, &op.addr.any, op.addr.getOsSockLen()),
+                    .slice => |v| posix.sendto(op.fd, v, 0, @ptrCast(&op.addr), op.addr.getOsSockLen()),
+                    .array => |*v| posix.sendto(op.fd, v.array[0..v.len], 0, @ptrCast(&op.addr), op.addr.getOsSockLen()),
                     .vectors => |v| blk: {
                         // Use sendmsg for vectored I/O instead of writev
                         var msg: posix.msghdr_const = .{
-                            .name = &op.addr.any,
+                            .name = @ptrCast(&op.addr),
                             .namelen = op.addr.getOsSockLen(),
                             .iov = v.data[0..v.len].ptr,
                             .iovlen = @intCast(v.len),
@@ -1689,7 +1689,7 @@ pub const Operation = union(OperationType) {
     sendto: struct {
         fd: posix.fd_t,
         buffer: WriteBuffer,
-        addr: std.net.Address,
+        addr: posix.sockaddr.storage,
     },
 
     recvfrom: struct {
@@ -1762,11 +1762,13 @@ pub const CancelError = error{
 pub const AcceptError = posix.KEventError || posix.AcceptError || error{
     Canceled,
     Unexpected,
+    SocketNotListening,
 };
 
 pub const ConnectError = posix.KEventError || posix.ConnectError || error{
     Canceled,
     Unexpected,
+    AddressInUse,
 };
 
 pub const ReadError = posix.KEventError ||
@@ -1996,7 +1998,7 @@ fn kevent_syscall(
             std.math.cast(c_int, changelist.len) orelse return error.Overflow,
             eventlist.ptr,
             std.math.cast(c_int, eventlist.len) orelse return error.Overflow,
-            0,
+            posix.system.KEVENT.FLAG.NONE,
             timeout,
         );
         switch (posix.errno(rc)) {
@@ -2758,7 +2760,7 @@ test "kqueue: mach port" {
         darwin.KernE.SUCCESS,
         darwin.getKernError(posix.system.mach_port_allocate(
             mach_self,
-            @intFromEnum(posix.system.MACH_PORT_RIGHT.RECEIVE),
+            posix.system.MACH.PORT.RIGHT.RECEIVE,
             &mach_port,
         )),
     );
@@ -2799,7 +2801,7 @@ test "kqueue: mach port" {
 
     // Send a message to the port
     var msg: darwin.mach_msg_header_t = .{
-        .msgh_bits = @intFromEnum(posix.system.MACH_MSG_TYPE.MAKE_SEND_ONCE),
+        .msgh_bits = @intFromEnum(posix.system.MACH.MSG.TYPE.MAKE_SEND_ONCE),
         .msgh_size = @sizeOf(darwin.mach_msg_header_t),
         .msgh_remote_port = mach_port,
         .msgh_local_port = darwin.MACH_PORT_NULL,

@@ -459,7 +459,7 @@ pub const Executor = struct {
     thread: ?std.Thread = null,
 
     // Coordination for thread startup
-    ready: std.Thread.ResetEvent = .{},
+    ready: std.Thread.ResetEvent = .unset,
 
     /// Get the Executor instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
@@ -1375,7 +1375,8 @@ pub const Runtime = struct {
             }
         }
         // Not in coroutine - use blocking sleep (cannot be canceled)
-        std.Thread.sleep(milliseconds * std.time.ns_per_ms);
+        const ns = milliseconds * std.time.ns_per_ms;
+        std.posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.

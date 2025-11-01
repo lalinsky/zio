@@ -69,7 +69,7 @@ test "IpAddress: parseIpAndPort" {
 }
 
 test "UnixAddress: init" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!std.Io.net.has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -218,7 +218,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!std.Io.net.has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -244,7 +244,7 @@ test "IpAddress: listen/accept/connect/read/write IPv6" {
 }
 
 test "UnixAddress: listen/accept/connect/read/write unbuffered" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!std.Io.net.has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -280,7 +280,7 @@ test "IpAddress: bind/sendTo/receiveFrom IPv6" {
 }
 
 test "UnixAddress: bind/sendTo/receiveFrom" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!std.Io.net.has_unix_sockets) return error.SkipZigTest;
     // Windows doesn't support UDP Unix sockets
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
@@ -296,7 +296,7 @@ test "UnixAddress: bind/sendTo/receiveFrom" {
 }
 
 test "UnixAddress: listen/accept/connect/read/EOF" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!std.Io.net.has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};

@@ -70,8 +70,8 @@ const Bucket = struct {
 
         // Pop from front (oldest first due to FIFO)
         while (self.queue.pop()) |node| {
-            // Check if stack is too old
             const age_ns = now.since(node.returned_at);
+            // Check if stack is too old
             if (age_ns >= retention_ns and kept_count >= min_warm) {
                 // Too old and we have enough warm stacks - free it
                 allocator.free(node.toStack(size));

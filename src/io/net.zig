@@ -10,7 +10,7 @@ const runIo = @import("base.zig").runIo;
 const Handle = if (xev.backend == .iocp) std.os.windows.HANDLE else std.posix.socket_t;
 
 pub const default_kernel_backlog = 256;
-const has_unix_sockets = std.net.has_unix_sockets;
+const has_unix_sockets = std.Io.net.has_unix_sockets;
 
 pub const ShutdownHow = std.posix.ShutdownHow;
 
@@ -352,12 +352,12 @@ pub const Address = extern union {
         return switch (sockaddr.family) {
             std.posix.AF.INET => blk: {
                 var addr: IpAddress = .{ .in = undefined };
-                @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
+                @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.posix.sockaddr.in)]);
                 break :blk addr;
             },
             std.posix.AF.INET6 => blk: {
                 var addr: IpAddress = .{ .in6 = undefined };
-                @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
+                @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.posix.sockaddr.in6)]);
                 break :blk addr;
             },
             else => unreachable,
@@ -371,7 +371,7 @@ pub const Address = extern union {
         return switch (sockaddr.family) {
             std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(data) },
             std.posix.AF.UNIX => blk: {
-                if (!std.net.has_unix_sockets) unreachable;
+                if (!has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
                 const copy_len = @min(data.len, @sizeOf(std.posix.sockaddr.un));
                 @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
@@ -801,7 +801,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
@@ -850,7 +850,7 @@ pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
 }
 
 pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createDatagramSocket(addr.any.family);
     errdefer netClose(rt, fd);

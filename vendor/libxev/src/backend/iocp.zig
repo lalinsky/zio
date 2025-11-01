@@ -756,8 +756,8 @@ pub const Loop = struct {
                     buffer_count,
                     null,
                     0,
-                    &v.addr.any,
-                    @as(i32, @intCast(v.addr.getOsSockLen())),
+                    @ptrCast(&v.addr),
+                    @as(i32, @intCast(posix_utils.getSockAddrLen(@ptrCast(&v.addr)))),
                     &completion.overlapped,
                     null,
                 );
@@ -1368,7 +1368,7 @@ pub const Operation = union(OperationType) {
     sendto: struct {
         fd: windows.HANDLE,
         buffer: WriteBuffer,
-        addr: std.net.Address,
+        addr: posix.sockaddr.storage,
         wsa_buffer: windows.ws2_32.WSABUF = undefined,
     },
 
