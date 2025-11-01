@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const posix = std.posix;
 const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
 
@@ -17,7 +18,6 @@ pub const Stream = io_net.Stream;
 pub const IpAddressList = struct {
     arena: std.heap.ArenaAllocator,
     addrs: []IpAddress,
-    canon_name: ?[]u8,
 
     pub fn deinit(self: *IpAddressList) void {
         // Here we copy the arena allocator into stack memory, because
@@ -28,22 +28,146 @@ pub const IpAddressList = struct {
     }
 };
 
+pub const GetAddressListError = error{
+    HostLacksNetworkAddresses,
+    TemporaryNameServerFailure,
+    NameServerFailure,
+    AddressFamilyNotSupported,
+    OutOfMemory,
+    UnknownHostName,
+    ServiceUnavailable,
+    Unexpected,
+    RuntimeShutdown,
+    Closed,
+    NoThreadPool,
+} || posix.UnexpectedError;
+
 /// Async DNS resolution using the runtime's thread pool.
 /// Performs DNS lookup in a blocking task to avoid blocking the event loop.
-/// Call `AddressList.deinit()` on the result when done.
+/// Call `IpAddressList.deinit()` on the result when done.
 pub fn getAddressList(
     runtime: *Runtime,
     allocator: std.mem.Allocator,
     name: []const u8,
     port: u16,
-) !*std.net.AddressList {
+) GetAddressListError!*IpAddressList {
     var task = try runtime.spawnBlocking(
-        std.net.getAddressList,
+        getAddressListBlocking,
         .{ allocator, name, port },
     );
     defer task.cancel(runtime);
 
     return try task.join(runtime);
+}
+
+fn getAddressListBlocking(
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    port: u16,
+) GetAddressListError!*IpAddressList {
+    const result = blk: {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena.deinit();
+
+        const result = try arena.allocator().create(IpAddressList);
+        result.* = IpAddressList{
+            .arena = arena,
+            .addrs = undefined,
+        };
+        break :blk result;
+    };
+    const arena = result.arena.allocator();
+    errdefer result.deinit();
+
+    const name_c = try gpa.dupeZ(u8, name);
+    defer gpa.free(name_c);
+
+    const port_c = try std.fmt.allocPrintSentinel(gpa, "{d}", .{port}, 0);
+    defer gpa.free(port_c);
+
+    const hints: posix.addrinfo = .{
+        .flags = .{ .NUMERICSERV = true },
+        .family = posix.AF.UNSPEC,
+        .socktype = posix.SOCK.STREAM,
+        .protocol = posix.IPPROTO.TCP,
+        .canonname = null,
+        .addr = null,
+        .addrlen = 0,
+        .next = null,
+    };
+
+    var res: ?*posix.addrinfo = null;
+
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        const ws2_32 = windows.ws2_32;
+        var first = true;
+        while (true) {
+            const rc = ws2_32.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res);
+            switch (@as(windows.ws2_32.WinsockError, @enumFromInt(@as(u16, @intCast(rc))))) {
+                @as(windows.ws2_32.WinsockError, @enumFromInt(0)) => break,
+                .WSATRY_AGAIN => return error.TemporaryNameServerFailure,
+                .WSANO_RECOVERY => return error.NameServerFailure,
+                .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,
+                .WSA_NOT_ENOUGH_MEMORY => return error.OutOfMemory,
+                .WSAHOST_NOT_FOUND => return error.UnknownHostName,
+                .WSATYPE_NOT_FOUND => return error.ServiceUnavailable,
+                .WSAEINVAL => unreachable,
+                .WSAESOCKTNOSUPPORT => unreachable,
+                .WSANOTINITIALISED => {
+                    if (!first) return error.Unexpected;
+                    first = false;
+                    try windows.callWSAStartup();
+                    continue;
+                },
+                else => |err| return windows.unexpectedWSAError(err),
+            }
+        }
+        defer ws2_32.freeaddrinfo(res);
+    } else {
+        switch (posix.system.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res)) {
+            @as(posix.system.EAI, @enumFromInt(0)) => {},
+            .ADDRFAMILY => return error.HostLacksNetworkAddresses,
+            .AGAIN => return error.TemporaryNameServerFailure,
+            .BADFLAGS => unreachable, // Invalid hints
+            .FAIL => return error.NameServerFailure,
+            .FAMILY => return error.AddressFamilyNotSupported,
+            .MEMORY => return error.OutOfMemory,
+            .NODATA => return error.HostLacksNetworkAddresses,
+            .NONAME => return error.UnknownHostName,
+            .SERVICE => return error.ServiceUnavailable,
+            .SOCKTYPE => unreachable, // Invalid socket type requested in hints
+            .SYSTEM => switch (posix.errno(-1)) {
+                else => |e| return posix.unexpectedErrno(e),
+            },
+            else => unreachable,
+        }
+        defer if (res) |some| posix.system.freeaddrinfo(some);
+    }
+
+    const addr_count = blk: {
+        var count: usize = 0;
+        var it = res;
+        while (it) |info| : (it = info.next) {
+            if (info.addr != null) {
+                count += 1;
+            }
+        }
+        break :blk count;
+    };
+    result.addrs = try arena.alloc(IpAddress, addr_count);
+
+    var it = res;
+    var i: usize = 0;
+    while (it) |info| : (it = info.next) {
+        const addr = info.addr orelse continue;
+        // Skip unsupported address families
+        if (addr.family != posix.AF.INET and addr.family != posix.AF.INET6) continue;
+        result.addrs[i] = IpAddress.initPosix(addr, info.addrlen);
+        i += 1;
+    }
+
+    return result;
 }
 
 pub fn tcpConnectToHost(
@@ -59,7 +183,7 @@ pub fn tcpConnectToHost(
 
     var last_err: ?anyerror = null;
     for (list.addrs) |addr| {
-        return IpAddress.fromStd(addr).connect(rt) catch |err| {
+        return addr.connect(rt) catch |err| {
             last_err = err;
             continue;
         };
