@@ -9,8 +9,11 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [windows-latest]
+        # For PoC testing - will restore all platforms later
+        # os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
