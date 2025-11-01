@@ -458,7 +458,7 @@ pub const Loop = struct {
                     @bitCast(@as(i64, -1)),
                 ),
 
-                .vectors => |vecs| sqe.prep_readv(
+                .vectors => |*vecs| sqe.prep_readv(
                     v.fd,
                     vecs.data[0..vecs.len],
                     @bitCast(@as(i64, -1)),
@@ -478,7 +478,7 @@ pub const Loop = struct {
                     v.offset,
                 ),
 
-                .vectors => |vecs| sqe.prep_readv(
+                .vectors => |*vecs| sqe.prep_readv(
                     v.fd,
                     vecs.data[0..vecs.len],
                     v.offset,
@@ -608,7 +608,7 @@ pub const Loop = struct {
                     @bitCast(@as(i64, -1)),
                 ),
 
-                .vectors => |vecs| sqe.prep_writev(
+                .vectors => |*vecs| sqe.prep_writev(
                     v.fd,
                     vecs.data[0..vecs.len],
                     @bitCast(@as(i64, -1)),
@@ -628,7 +628,7 @@ pub const Loop = struct {
                     v.offset,
                 ),
 
-                .vectors => |vecs| sqe.prep_writev(
+                .vectors => |*vecs| sqe.prep_writev(
                     v.fd,
                     vecs.data[0..vecs.len],
                     v.offset,
