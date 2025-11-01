@@ -43,6 +43,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
         .{ .name = "signal-demo", .file = "examples/signal_demo.zig" },
         .{ .name = "rtl-user-stack-poc", .file = "rtl_user_stack_example.zig" },
+        .{ .name = "windows-stack-growth-poc", .file = "windows_stack_growth_recursive_poc.zig" },
         //.{ .name = "udp-echo", .file = "examples/udp_echo.zig" },
     };
 
