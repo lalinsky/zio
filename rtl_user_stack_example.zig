@@ -34,18 +34,20 @@ pub fn main() !void {
     std.debug.print("===========================\n\n", .{});
 
     const PAGE_SIZE = 4096;
+    const ALLOCATION_GRANULARITY = 65536; // 64 KB on Windows
     const STACK_RESERVE = 8 * 1024 * 1024; // 8 MB
     const STACK_COMMIT = 256 * 1024;       // 256 KB initial commit
 
     var initial_teb: INITIAL_TEB = undefined;
 
     // Create a user stack using Windows' native API
+    // PageSize and ReserveAlignment must be non-zero (ReactOS checks this)
     const status = RtlCreateUserStack(
         STACK_COMMIT,
         STACK_RESERVE,
         0, // ZeroBits
         PAGE_SIZE,
-        1, // ReserveAlignment
+        ALLOCATION_GRANULARITY, // ReserveAlignment (must match allocation granularity)
         &initial_teb,
     );
 

@@ -44,6 +44,7 @@ pub const WindowsStack = struct {
     /// This automatically sets up guard pages and enables kernel-managed stack growth
     pub fn create(reserved_size: usize, initial_commit: usize) !WindowsStack {
         const PAGE_SIZE = std.mem.page_size;
+        const ALLOCATION_GRANULARITY = 65536; // 64 KB on Windows
 
         var initial_teb: INITIAL_TEB = undefined;
 
@@ -52,7 +53,7 @@ pub const WindowsStack = struct {
             reserved_size,
             0, // ZeroBits
             PAGE_SIZE,
-            1, // ReserveAlignment
+            ALLOCATION_GRANULARITY, // ReserveAlignment
             &initial_teb,
         );
 
