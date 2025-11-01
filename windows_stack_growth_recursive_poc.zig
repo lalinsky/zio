@@ -53,6 +53,20 @@ const CoroutineData = struct {
     initial_teb: *INITIAL_TEB,
 };
 
+// Update TIB (Thread Information Block) fields for Windows stack management
+// TIB is accessed via gs segment register on x64
+fn updateTIBFields(stack_limit: u64, stack_base: u64, deallocation_stack: u64) void {
+    asm volatile (
+        \\ movq %[stack_base], %%gs:0x08
+        \\ movq %[stack_limit], %%gs:0x10
+        \\ movq %[deallocation_stack], %%gs:0x1478
+        :
+        : [stack_base] "r" (stack_base),
+          [stack_limit] "r" (stack_limit),
+          [deallocation_stack] "r" (deallocation_stack),
+    );
+}
+
 // Context switch implementation
 fn switchContext(
     noalias current_context: *Context,
@@ -252,6 +266,10 @@ pub fn main() !void {
 
     // Save main thread context
     var main_context: Context = undefined;
+
+    // Update TIB fields so Windows kernel knows about our custom stack
+    // This is critical for automatic stack growth via PAGE_GUARD
+    updateTIBFields(stack_limit, stack_base, alloc_base);
 
     // Switch to coroutine - Windows will handle stack growth automatically
     switchContext(&main_context, &coro_context);
