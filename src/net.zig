@@ -24,7 +24,7 @@ pub const IpAddressIterator = struct {
             const addr = info.addr orelse continue;
             // Skip unsupported address families
             if (addr.family != std.posix.AF.INET and addr.family != std.posix.AF.INET6) continue;
-            return IpAddress.initPosix(addr, info.addrlen);
+            return IpAddress.initPosix(addr, @intCast(info.addrlen));
         }
         return null;
     }
@@ -52,6 +52,8 @@ pub const LookupHostError = error{
     RuntimeShutdown,
     Closed,
     NoThreadPool,
+    ProcessFdQuotaExceeded,
+    SystemResources,
 } || std.posix.UnexpectedError;
 
 /// Async DNS resolution using the runtime's thread pool.
