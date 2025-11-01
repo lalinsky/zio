@@ -756,7 +756,7 @@ pub const Loop = struct {
 
             .connect => |*v| action: {
                 while (true) {
-                    const result = posix.system.connect(v.socket, &v.addr.any, v.addr.getOsSockLen());
+                    const result = posix.system.connect(v.socket, @ptrCast(&v.addr), posix_ext.getSockAddrLen(@ptrCast(&v.addr)));
                     switch (posix.errno(result)) {
                         // Interrupt, try again
                         .INTR => continue,
@@ -1648,7 +1648,7 @@ pub const Operation = union(OperationType) {
 
     connect: struct {
         socket: posix.socket_t,
-        addr: std.net.Address,
+        addr: posix.sockaddr.storage,
     },
 
     read: struct {

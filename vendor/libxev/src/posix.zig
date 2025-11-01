@@ -8,6 +8,25 @@ const native_os = builtin.target.os.tag;
 pub const msghdr = posix.msghdr;
 pub const msghdr_const = posix.msghdr_const;
 
+/// Get the socket address length for a given sockaddr.
+/// Determines the appropriate length based on the address family.
+pub fn getSockAddrLen(addr: *const posix.sockaddr) posix.socklen_t {
+    return switch (addr.family) {
+        posix.AF.INET => @sizeOf(posix.sockaddr.in),
+        posix.AF.INET6 => @sizeOf(posix.sockaddr.in6),
+        posix.AF.UNIX => @sizeOf(posix.sockaddr.un),
+        else => @sizeOf(posix.sockaddr.storage),
+    };
+}
+
+/// Convert std.net.Address to posix.sockaddr.storage.
+/// This allows storing any socket address type in a fixed-size buffer.
+pub fn addressToStorage(addr: std.net.Address) posix.sockaddr.storage {
+    var storage: posix.sockaddr.storage = undefined;
+    @memcpy(@as([*]u8, @ptrCast(&storage))[0..@sizeOf(std.net.Address)], @as([*]const u8, @ptrCast(&addr))[0..@sizeOf(std.net.Address)]);
+    return storage;
+}
+
 pub const RecvMsgError = error{
     /// The socket is marked nonblocking and the requested operation would block, and
     /// there is no global event loop configured.
