@@ -6,6 +6,7 @@ const windows = @import("../windows.zig");
 const queue = @import("../queue.zig");
 const heap = @import("../heap.zig");
 const posix = std.posix;
+const posix_utils = @import("../posix.zig");
 
 const looppkg = @import("../loop.zig");
 const Options = looppkg.Options;
@@ -550,7 +551,7 @@ pub const Loop = struct {
             .close => |v| .{ .result = .{ .close = windows.CloseHandle(v.fd) } },
 
             .connect => |*v| action: {
-                const result = windows.ws2_32.connect(asSocket(v.socket), &v.addr.any, @as(i32, @intCast(v.addr.getOsSockLen())));
+                const result = windows.ws2_32.connect(asSocket(v.socket), @ptrCast(&v.addr), @as(i32, @intCast(posix_utils.getSockAddrLen(@ptrCast(&v.addr)))));
                 if (result != 0) {
                     const err = windows.ws2_32.WSAGetLastError();
                     break :action switch (err) {
@@ -1322,7 +1323,7 @@ pub const Operation = union(OperationType) {
 
     connect: struct {
         socket: windows.HANDLE,
-        addr: std.net.Address,
+        addr: posix.sockaddr.storage,
     },
 
     read: struct {
