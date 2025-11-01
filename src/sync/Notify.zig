@@ -180,8 +180,7 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
         }
 
         // Check if this timeout triggered, otherwise it was user cancellation
-        try runtime.checkTimeout(&timeout);
-        return err;
+        return runtime.checkTimeout(&timeout, err);
     };
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake

@@ -198,8 +198,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         try runtime.checkCanceled();
 
         // Check if this timeout triggered, otherwise it was user cancellation
-        try runtime.checkTimeout(&timeout);
-        return err;
+        return runtime.checkTimeout(&timeout, err);
     };
 
     // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait

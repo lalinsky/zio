@@ -198,8 +198,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
         _ = self.wait_queue.remove(&task.awaitable.wait_node);
 
         // Check if this timeout triggered, otherwise it was user cancellation
-        try runtime.checkTimeout(&timeout);
-        return err;
+        return runtime.checkTimeout(&timeout, err);
     };
 
     // Acquire fence: synchronize-with set()'s .release in popAll

@@ -75,8 +75,7 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         timeout.clear(rt);
         cancelIo(rt, completion);
-        try rt.checkTimeout(&timeout);
-        return err;
+        return rt.checkTimeout(&timeout, err);
     };
 
     std.debug.assert(completion.state() == .dead);

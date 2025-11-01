@@ -12,6 +12,8 @@ const Coroutine = @import("../coroutines.zig").Coroutine;
 const coroutines = @import("../coroutines.zig");
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
+const Cancelable = @import("../common.zig").Cancelable;
+const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("timeout.zig").Timeout;
 const TimeoutHeap = @import("timeout.zig").TimeoutHeap;
 
@@ -162,22 +164,22 @@ pub const AnyTask = struct {
         }
     }
 
-    /// Check if the given timeout triggered cancellation.
-    /// If the timeout counter is > 0 and the timeout matches (was triggered),
-    /// decrements the timeout counter and returns error.Timeout.
-    /// Otherwise returns void (no error).
+    /// Check if the given timeout triggered the cancellation.
+    /// This should be called in a catch block after receiving error.Canceled.
+    /// If the timeout was triggered, decrements the timeout counter and returns error.Timeout.
+    /// Otherwise, returns the original error (error.Canceled from user cancellation).
     /// Note: Does NOT decrement pending_errors - that counter is only for error.Canceled.
-    pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout) error{Timeout}!void {
+    pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout, err: Cancelable) (Cancelable || Timeoutable)!void {
         // First check if this timeout was triggered (fast path)
-        if (!timeout.triggered) return;
+        if (!timeout.triggered) return err;
 
         // CAS loop to decrement timeout counter
         var current = self.awaitable.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
 
-            // If timeout counter is 0, nothing to do
-            if (status.timeout == 0) return;
+            // If timeout counter is 0, this wasn't a timeout - return original error
+            if (status.timeout == 0) return err;
 
             // Decrement timeout counter (but keep pending_errors unchanged)
             status.timeout -= 1;

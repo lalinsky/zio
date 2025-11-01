@@ -628,13 +628,14 @@ pub const Executor = struct {
         // Yield with atomic state transition (.ready -> .waiting)
         self.yield(.ready, .waiting, .allow_cancel) catch |err| {
             // Check if this timeout triggered (expected for sleep), otherwise it was user cancellation
-            self.runtime.checkTimeout(&timeout) catch return;
-            return err;
+            self.runtime.checkTimeout(&timeout, err) catch |check_err| switch (check_err) {
+                error.Timeout => return, // Timeout is expected for sleep - return successfully
+                error.Canceled => return error.Canceled, // User cancellation - propagate
+            };
+            unreachable;
         };
 
-        // Yield returned successfully - check if timeout fired (expected for sleep)
-        self.runtime.checkTimeout(&timeout) catch return;
-        unreachable; // Should always timeout or be canceled
+        unreachable; // Should always be canceled (by timeout or user)
     }
 
     /// Run the executor event loop.
@@ -1168,14 +1169,16 @@ pub const Runtime = struct {
         executor.endShield();
     }
 
-    /// Check if the given timeout triggered cancellation.
-    /// Returns error.Timeout if the timeout flag is set and the timeout matches.
+    /// Check if the given timeout triggered the cancellation.
+    /// This should be called in a catch block after receiving error.Canceled.
+    /// If the timeout was triggered, returns error.Timeout.
+    /// Otherwise, returns the original error (error.Canceled from user cancellation).
     /// No-op (returns void) if not called from within a coroutine.
-    pub fn checkTimeout(self: *Runtime, timeout: *Timeout) error{Timeout}!void {
+    pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: Cancelable) (Cancelable || Timeoutable)!void {
         const executor = Runtime.current_executor orelse return;
         const current_coro = executor.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
-        try current_task.checkTimeout(self, timeout);
+        try current_task.checkTimeout(self, timeout, err);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).
