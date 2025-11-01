@@ -54,16 +54,16 @@ const CoroutineData = struct {
 };
 
 // Update TIB (Thread Information Block) fields for Windows stack management
-// TIB is accessed via gs segment register on x64
 fn updateTIBFields(stack_limit: u64, stack_base: u64, deallocation_stack: u64) void {
+    const teb = windows.teb();
+    teb.NtTib.StackBase = @ptrFromInt(stack_base);
+    teb.NtTib.StackLimit = @ptrFromInt(stack_limit);
+
+    // DeallocationStack is not exposed in Zig's TEB struct, use inline asm
     asm volatile (
-        \\ movq %[stack_base], %%gs:0x08
-        \\ movq %[stack_limit], %%gs:0x10
         \\ movq %[deallocation_stack], %%gs:0x1478
         :
-        : [stack_base] "r" (stack_base),
-          [stack_limit] "r" (stack_limit),
-          [deallocation_stack] "r" (deallocation_stack),
+        : [deallocation_stack] "r" (deallocation_stack),
     );
 }
 
@@ -176,16 +176,10 @@ fn recursiveTask(data: *CoroutineData) callconv(.c) noreturn {
 
     const stack_used = data.stack_base - rsp;
 
-    // Query current memory state at StackLimit to see if it changed
-    var mem_info: windows.MEMORY_BASIC_INFORMATION = undefined;
-    const stack_limit_addr = @intFromPtr(data.initial_teb.StackLimit.?);
-    _ = windows.VirtualQuery(
-        data.initial_teb.StackLimit,
-        &mem_info,
-        @sizeOf(windows.MEMORY_BASIC_INFORMATION),
-    ) catch 0;
-
-    const committed = data.stack_base - stack_limit_addr;
+    // Read current StackLimit from TIB (updated by Windows when stack grows)
+    const teb = windows.teb();
+    const current_stack_limit = @intFromPtr(teb.NtTib.StackLimit);
+    const committed = data.stack_base - current_stack_limit;
 
     std.debug.print("Depth {d:3}: RSP=0x{x:0>16} Used={d:6} bytes Committed={d:6} bytes\n", .{
         depth,
