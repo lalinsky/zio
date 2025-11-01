@@ -12,19 +12,6 @@ const FutureResult = @import("future_result.zig").FutureResult;
 
 pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
-pub const CoroutineState = enum(u8) {
-    ready = 0b0000,
-    preparing_to_wait = 0b0001,
-    waiting_io = 0b0100,
-    waiting_sync = 0b0101,
-    waiting_completion = 0b0110,
-    dead = 0b1000_0000,
-
-    pub fn isWaiting(self: CoroutineState) bool {
-        return (@intFromEnum(self) & 0b0100) != 0;
-    }
-};
-
 pub const stack_alignment = 16;
 pub const Stack = []align(stack_alignment) u8;
 pub const StackPtr = [*]align(stack_alignment) u8;

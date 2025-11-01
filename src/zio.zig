@@ -6,7 +6,6 @@ const std = @import("std");
 // Re-export coroutine functionality
 pub const coroutines = @import("coroutines.zig");
 pub const Coroutine = coroutines.Coroutine;
-pub const CoroutineState = coroutines.CoroutineState;
 
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
