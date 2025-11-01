@@ -48,9 +48,6 @@ pub const WaitResult = @import("select.zig").WaitResult;
 // Re-export low-level utilities
 pub const util = @import("utils.zig");
 
-// Re-export Io emulation
-pub const Io = @import("io.zig").Io;
-
 test {
     std.testing.refAllDecls(@This());
 }

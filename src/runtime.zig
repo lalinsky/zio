@@ -30,8 +30,6 @@ const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
 
 const select = @import("select.zig");
 
-const Io = @import("io.zig").Io;
-
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
     return @hasField(xev.Loop, "thread_pool");
@@ -1492,14 +1490,6 @@ pub const Runtime = struct {
         if (done) {
             self.maybeShutdown();
         }
-    }
-
-    pub fn io(self: *Runtime) Io {
-        return .{ .userdata = self };
-    }
-
-    pub fn fromIo(io_: Io) *Runtime {
-        return @ptrCast(@alignCast(io_.userdata));
     }
 };
 
