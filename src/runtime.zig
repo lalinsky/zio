@@ -520,11 +520,7 @@ pub const Executor = struct {
 
         // Check and consume cancellation flag before yielding (unless shielded or no_cancel)
         if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
-            // cmpxchgStrong returns null on success, current value on failure
-            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-                // CAS succeeded: we consumed true, return canceled
-                return error.Canceled;
-            }
+            try current_task.checkCanceled(self.runtime);
         }
 
         // Atomically transition state - if this fails, someone changed our state
@@ -562,9 +558,7 @@ pub const Executor = struct {
 
         // Check again after resuming in case we were canceled while suspended (unless shielded or no_cancel)
         if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
-            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-                return error.Canceled;
-            }
+            try current_task.checkCanceled(resumed_executor.runtime);
         }
     }
 
@@ -589,15 +583,12 @@ pub const Executor = struct {
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
-    /// This consumes the cancellation flag.
+    /// This consumes one pending error if available.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
     pub fn checkCanceled(self: *Executor) Cancelable!void {
         const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
-        // Check and consume cancellation flag
-        if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-            return error.Canceled;
-        }
+        try current_task.checkCanceled(self.runtime);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).
@@ -635,14 +626,14 @@ pub const Executor = struct {
         timeout.set(self.runtime, milliseconds * std.time.ns_per_ms);
 
         // Yield with atomic state transition (.ready -> .waiting)
-        self.yield(.ready, .waiting, .allow_cancel) catch {
-            // Check if timeout or explicit cancel
-            if (timeout.triggered) return; // Expected for sleep
-            return error.Canceled;
+        self.yield(.ready, .waiting, .allow_cancel) catch |err| {
+            // Check if this timeout triggered (expected for sleep), otherwise it was user cancellation
+            self.runtime.checkTimeout(&timeout) catch return;
+            return err;
         };
 
-        // Yield returned successfully - check if timeout fired
-        if (timeout.triggered) return; // Expected for sleep
+        // Yield returned successfully - check if timeout fired (expected for sleep)
+        self.runtime.checkTimeout(&timeout) catch return;
         unreachable; // Should always timeout or be canceled
     }
 
@@ -1175,6 +1166,16 @@ pub const Runtime = struct {
         const executor = Runtime.current_executor orelse return;
         if (executor.current_coroutine == null) return;
         executor.endShield();
+    }
+
+    /// Check if the given timeout triggered cancellation.
+    /// Returns error.Timeout if the timeout flag is set and the timeout matches.
+    /// No-op (returns void) if not called from within a coroutine.
+    pub fn checkTimeout(self: *Runtime, timeout: *Timeout) error{Timeout}!void {
+        const executor = Runtime.current_executor orelse return;
+        const current_coro = executor.current_coroutine orelse return;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        try current_task.checkTimeout(self, timeout);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).

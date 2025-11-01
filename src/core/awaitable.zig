@@ -21,6 +21,13 @@ pub const AwaitableKind = enum {
     blocking_task,
 };
 
+// Cancellation status - tracks both user and timeout cancellation
+pub const CanceledStatus = packed struct(u32) {
+    user_canceled: u8 = 0,
+    timeout: u8 = 0,
+    pending_errors: u16 = 0,
+};
+
 // Awaitable - base type for anything that can be waited on
 pub const Awaitable = struct {
     kind: AwaitableKind,
@@ -32,8 +39,8 @@ pub const Awaitable = struct {
     // Completion status - true when awaitable has completed
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    // Cancellation flag - set to request cancellation, consumed by yield()
-    canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    // Cancellation status - tracks user cancel, timeout, and pending errors
+    canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     // WaitNodes waiting for the completion of this awaitable
     // Use WaitQueue sentinel states:
@@ -55,12 +62,32 @@ pub const Awaitable = struct {
     pub const complete = State.sentinel1;
 
     /// Request cancellation of this awaitable.
-    /// This will set a flag that will be read at the next yield point.
+    /// This will increment user_canceled and pending_errors.
     /// If the task is currently suspended, we will wake it up,
     /// so that it can handle the cancelation (e.g. cancel the underlaying I/O operation).
     /// If the task is already running/dead, the wake is a noop.
     pub fn cancel(self: *Awaitable) void {
-        self.canceled.store(true, .release);
+        // CAS loop to increment user_canceled and pending_errors
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+
+            // Increment user_canceled
+            status.user_canceled += 1;
+
+            // Increment pending_errors
+            status.pending_errors += 1;
+
+            const new: u32 = @bitCast(status);
+            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                // CAS failed, use returned previous value and retry
+                current = prev;
+                continue;
+            }
+            // CAS succeeded
+            break;
+        }
+
         self.wait_node.wake();
     }
 

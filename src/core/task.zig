@@ -6,6 +6,7 @@ const xev = @import("xev");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("awaitable.zig").Awaitable;
+const CanceledStatus = @import("awaitable.zig").CanceledStatus;
 const FutureImpl = @import("awaitable.zig").FutureImpl;
 const Coroutine = @import("../coroutines.zig").Coroutine;
 const coroutines = @import("../coroutines.zig");
@@ -76,7 +77,7 @@ pub const AnyTask = struct {
     /// Returns false if the task is pinned or canceled, true otherwise.
     pub inline fn canMigrate(self: *const AnyTask) bool {
         if (self.pin_count > 0) return false;
-        if (self.awaitable.canceled.load(.acquire)) return false;
+        if (self.awaitable.canceled_status.load(.acquire) != 0) return false;
         // TODO: Enable migration once we have work-stealing
         return false;
     }
@@ -158,6 +159,63 @@ pub const AnyTask = struct {
         if (@as(?*anyopaque, @ptrCast(next.timeout)) != self.timer_c.userdata) {
             self.setTimer(&executor.loop, next.timeout, next.delay_ms);
             return;
+        }
+    }
+
+    /// Check if the given timeout triggered cancellation.
+    /// If the timeout counter is > 0 and the timeout matches (was triggered),
+    /// decrements the timeout counter and returns error.Timeout.
+    /// Otherwise returns void (no error).
+    /// Note: Does NOT decrement pending_errors - that counter is only for error.Canceled.
+    pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout) error{Timeout}!void {
+        // First check if this timeout was triggered (fast path)
+        if (!timeout.triggered) return;
+
+        // CAS loop to decrement timeout counter
+        var current = self.awaitable.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+
+            // If timeout counter is 0, nothing to do
+            if (status.timeout == 0) return;
+
+            // Decrement timeout counter (but keep pending_errors unchanged)
+            status.timeout -= 1;
+
+            const new: u32 = @bitCast(status);
+            if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                // CAS failed, use returned previous value and retry
+                current = prev;
+                continue;
+            }
+            // CAS succeeded - return error.Timeout
+            return error.Timeout;
+        }
+    }
+
+    /// Check if there are pending cancellation errors to consume.
+    /// If pending_errors > 0, decrements the count and returns error.Canceled.
+    /// Otherwise returns void (no error).
+    pub fn checkCanceled(self: *AnyTask, _: *Runtime) error{Canceled}!void {
+        // CAS loop to decrement pending_errors
+        var current = self.awaitable.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+
+            // If no pending errors, nothing to consume
+            if (status.pending_errors == 0) return;
+
+            // Decrement pending_errors
+            status.pending_errors -= 1;
+
+            const new: u32 = @bitCast(status);
+            if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                // CAS failed, use returned previous value and retry
+                current = prev;
+                continue;
+            }
+            // CAS succeeded - return error.Canceled
+            return error.Canceled;
         }
     }
 };
@@ -272,14 +330,30 @@ fn timeoutCallback(
     // Configure the next timer
     task.updateTimer(loop);
 
-    // Cancel the task (sets canceled flag and resumes it)
-    const was_canceled = task.awaitable.canceled.swap(true, .acq_rel);
-    if (!was_canceled) {
-        // Mark this one as triggered (user can convert error.Canceled to error.Timeout)
-        timeout.triggered = true;
-        // Wake the task (it will see the canceled flag)
-        resumeTask(task, .local);
+    // Cancel the task (increments timeout and pending_errors)
+    var current = task.awaitable.canceled_status.load(.acquire);
+    while (true) {
+        var status: CanceledStatus = @bitCast(current);
+
+        // Increment timeout
+        status.timeout += 1;
+
+        // Increment pending_errors
+        status.pending_errors += 1;
+
+        const new: u32 = @bitCast(status);
+        if (task.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+            // CAS failed, use returned previous value and retry
+            current = prev;
+            continue;
+        }
+        // CAS succeeded
+        break;
     }
+
+    // Mark as triggered and wake the task
+    timeout.triggered = true;
+    resumeTask(task, .local);
 
     return .disarm;
 }

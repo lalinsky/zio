@@ -177,7 +177,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Try to remove from queue
         const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
         if (!was_in_queue) {
@@ -197,8 +197,9 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         // Cancellation during lock has priority over timeout
         try runtime.checkCanceled();
 
-        // Check if timeout or explicit cancel
-        return if (timeout.triggered) error.Timeout else error.Canceled;
+        // Check if this timeout triggered, otherwise it was user cancellation
+        try runtime.checkTimeout(&timeout);
+        return err;
     };
 
     // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait

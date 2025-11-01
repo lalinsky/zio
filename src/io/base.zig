@@ -59,7 +59,10 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64
 
     // Now wait for I/O
     waitForIo(rt, completion) catch |err| {
-        return if (timeout.triggered) error.Timeout else err;
+        // Check if this specific timeout triggered
+        try rt.checkTimeout(&timeout);
+        // Not this timeout, return original error
+        return err;
     };
 }
 
