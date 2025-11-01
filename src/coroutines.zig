@@ -198,14 +198,11 @@ pub fn switchContext(
             \\
             ++ if (is_windows)
                 \\ // Save TIB fields (x18 points to TEB on ARM64 Windows)
-                \\ ldr x11, [x18, #0x20]
-                \\ str x11, [x0, #24]
+                \\ ldr x10, [x18, #0x20]
                 \\ ldr x11, [x18, #0x1478]
-                \\ str x11, [x0, #32]
-                \\ ldr x11, [x18, #0x10]
-                \\ str x11, [x0, #40]
-                \\ ldr x11, [x18, #0x08]
-                \\ str x11, [x0, #48]
+                \\ stp x10, x11, [x0, #24]
+                \\ ldp x11, x10, [x18, #0x08]
+                \\ stp x10, x11, [x0, #40]
                 \\
             else
                 ""
@@ -217,14 +214,11 @@ pub fn switchContext(
             \\
             ++ if (is_windows)
                 \\ // Restore TIB fields
-                \\ ldr x11, [x1, #24]
-                \\ str x11, [x18, #0x20]
-                \\ ldr x11, [x1, #32]
+                \\ ldp x10, x11, [x1, #24]
+                \\ str x10, [x18, #0x20]
                 \\ str x11, [x18, #0x1478]
-                \\ ldr x11, [x1, #40]
-                \\ str x11, [x18, #0x10]
-                \\ ldr x11, [x1, #48]
-                \\ str x11, [x18, #0x08]
+                \\ ldp x10, x11, [x1, #40]
+                \\ stp x11, x10, [x18, #0x08]
                 \\
             else
                 ""
