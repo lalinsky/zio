@@ -166,32 +166,37 @@ pub const AnyTask = struct {
 
     /// Check if the given timeout triggered the cancellation.
     /// This should be called in a catch block after receiving error.Canceled.
-    /// If the timeout was triggered, decrements the timeout counter and returns error.Timeout.
-    /// Otherwise, returns the original error (error.Canceled from user cancellation).
-    /// Note: Does NOT decrement pending_errors - that counter is only for error.Canceled.
+    /// User cancellation has priority - if user_canceled > 0, returns error.Canceled.
+    /// Otherwise, if the timeout was triggered, decrements the timeout counter and returns error.Timeout.
+    /// Otherwise, returns the original error.
+    /// Note: user_canceled is NEVER decremented - once > 0, task is condemned.
+    /// Note: Does NOT decrement pending_errors - that counter is only consumed by checkCanceled.
     pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout, err: Cancelable) (Cancelable || Timeoutable)!void {
-        // First check if this timeout was triggered (fast path)
-        if (!timeout.triggered) return err;
+        std.debug.assert(err == error.Canceled);
 
-        // CAS loop to decrement timeout counter
         var current = self.awaitable.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
 
-            // If timeout counter is 0, this wasn't a timeout - return original error
-            if (status.timeout == 0) return err;
-
-            // Decrement timeout counter (but keep pending_errors unchanged)
-            status.timeout -= 1;
-
-            const new: u32 = @bitCast(status);
-            if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                // CAS failed, use returned previous value and retry
-                current = prev;
-                continue;
+            // User cancellation has priority - once condemned (user_canceled > 0), always return error.Canceled
+            if (status.user_canceled > 0) {
+                return error.Canceled;
             }
-            // CAS succeeded - return error.Timeout
-            return error.Timeout;
+
+            // No user cancellation - check if this timeout triggered
+            if (timeout.triggered and status.timeout > 0) {
+                // Decrement timeout counter
+                status.timeout -= 1;
+                const new: u32 = @bitCast(status);
+                if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                    current = prev;
+                    continue;
+                }
+                return error.Timeout;
+            }
+
+            // Timeout didn't trigger or already consumed
+            return err;
         }
     }
 
@@ -335,16 +340,25 @@ fn timeoutCallback(
     // Configure the next timer
     task.updateTimer(loop);
 
-    // Cancel the task (increments timeout and pending_errors)
+    // Cancel the task - behavior depends on whether already user-canceled
+    var mark_as_triggered = false;
     var current = task.awaitable.canceled_status.load(.acquire);
     while (true) {
         var status: CanceledStatus = @bitCast(current);
 
-        // Increment timeout
-        status.timeout += 1;
-
-        // Increment pending_errors
-        status.pending_errors += 1;
+        if (status.user_canceled > 0) {
+            // Task is already condemned by user cancellation
+            // Just increment pending_errors to add another error
+            // Don't increment timeout counter or set triggered flag
+            mark_as_triggered = false;
+            status.pending_errors += 1;
+        } else {
+            // This timeout is causing the cancellation
+            // Increment timeout counter and pending_errors, will set triggered flag
+            mark_as_triggered = true;
+            status.timeout += 1;
+            status.pending_errors += 1;
+        }
 
         const new: u32 = @bitCast(status);
         if (task.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
@@ -356,8 +370,12 @@ fn timeoutCallback(
         break;
     }
 
-    // Mark as triggered and wake the task
-    timeout.triggered = true;
+    // Only mark as triggered if this timeout caused the cancellation
+    if (mark_as_triggered) {
+        timeout.triggered = true;
+    }
+
+    // Always wake the task
     resumeTask(task, .local);
 
     return .disarm;
