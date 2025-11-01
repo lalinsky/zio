@@ -166,10 +166,10 @@ pub const AnyTask = struct {
 
     /// Check if the given timeout triggered the cancellation.
     /// This should be called in a catch block after receiving error.Canceled.
-    /// User cancellation has priority - if user_canceled > 0, returns error.Canceled.
+    /// User cancellation has priority - if user_canceled is set, returns error.Canceled.
     /// Otherwise, if the timeout was triggered, decrements the timeout counter and returns error.Timeout.
     /// Otherwise, returns the original error.
-    /// Note: user_canceled is NEVER decremented - once > 0, task is condemned.
+    /// Note: user_canceled is NEVER cleared - once set, task is condemned.
     /// Note: Does NOT decrement pending_errors - that counter is only consumed by checkCanceled.
     pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout, err: Cancelable) (Cancelable || Timeoutable)!void {
         std.debug.assert(err == error.Canceled);
@@ -178,8 +178,8 @@ pub const AnyTask = struct {
         while (true) {
             var status: CanceledStatus = @bitCast(current);
 
-            // User cancellation has priority - once condemned (user_canceled > 0), always return error.Canceled
-            if (status.user_canceled > 0) {
+            // User cancellation has priority - once condemned (user_canceled set), always return error.Canceled
+            if (status.user_canceled) {
                 return error.Canceled;
             }
 
@@ -346,7 +346,7 @@ fn timeoutCallback(
     while (true) {
         var status: CanceledStatus = @bitCast(current);
 
-        if (status.user_canceled > 0) {
+        if (status.user_canceled) {
             // Task is already condemned by user cancellation
             // Just increment pending_errors to add another error
             // Don't increment timeout counter or set triggered flag

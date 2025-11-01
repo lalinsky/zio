@@ -23,9 +23,10 @@ pub const AwaitableKind = enum {
 
 // Cancellation status - tracks both user and timeout cancellation
 pub const CanceledStatus = packed struct(u32) {
-    user_canceled: u8 = 0,
+    user_canceled: bool = false,
     timeout: u8 = 0,
     pending_errors: u16 = 0,
+    _padding: u7 = 0,
 };
 
 // Awaitable - base type for anything that can be waited on
@@ -62,18 +63,18 @@ pub const Awaitable = struct {
     pub const complete = State.sentinel1;
 
     /// Request cancellation of this awaitable.
-    /// This will increment user_canceled and pending_errors.
+    /// This will set user_canceled flag and increment pending_errors.
     /// If the task is currently suspended, we will wake it up,
     /// so that it can handle the cancelation (e.g. cancel the underlaying I/O operation).
     /// If the task is already running/dead, the wake is a noop.
     pub fn cancel(self: *Awaitable) void {
-        // CAS loop to increment user_canceled and pending_errors
+        // CAS loop to set user_canceled and increment pending_errors
         var current = self.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
 
-            // Increment user_canceled
-            status.user_canceled += 1;
+            // Set user_canceled flag
+            status.user_canceled = true;
 
             // Increment pending_errors
             status.pending_errors += 1;
