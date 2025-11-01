@@ -192,9 +192,8 @@ pub fn switchContext(
             \\ adr x9, 0f
             \\ str x9, [x0, #16]
             \\ mov x9, sp
-            \\ str x9, [x0, #0]
-            \\ mov x9, fp
-            \\ str x9, [x0, #8]
+            \\ mov x10, fp
+            \\ stp x9, x10, [x0, #0]
             \\
             ++ if (is_windows)
                 \\ // Save TIB fields (x18 points to TEB on ARM64 Windows)
@@ -207,10 +206,9 @@ pub fn switchContext(
             else
                 ""
             ++
-            \\ ldr x9, [x1, #0]
+            \\ ldp x9, x10, [x1, #0]
             \\ mov sp, x9
-            \\ ldr x9, [x1, #8]
-            \\ mov fp, x9
+            \\ mov fp, x10
             \\
             ++ if (is_windows)
                 \\ // Restore TIB fields
