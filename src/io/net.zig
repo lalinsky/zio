@@ -10,54 +10,161 @@ const runIo = @import("base.zig").runIo;
 const Handle = if (xev.backend == .iocp) std.os.windows.HANDLE else std.posix.socket_t;
 
 pub const default_kernel_backlog = 256;
+const has_unix_sockets = std.net.has_unix_sockets;
 
 pub const ShutdownHow = std.posix.ShutdownHow;
 
+/// Get the socket address length for a given sockaddr.
+/// Determines the appropriate length based on the address family.
+fn getSockAddrLen(addr: *const std.posix.sockaddr) usize {
+    return switch (addr.family) {
+        std.posix.AF.INET => @sizeOf(std.posix.sockaddr.in),
+        std.posix.AF.INET6 => @sizeOf(std.posix.sockaddr.in6),
+        std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
+        else => unreachable,
+    };
+}
+
 pub const IpAddress = extern union {
     any: std.posix.sockaddr,
-    in: std.net.Ip4Address,
-    in6: std.net.Ip6Address,
+    in: std.posix.sockaddr.in,
+    in6: std.posix.sockaddr.in6,
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
-        return .{ .in = std.net.Ip4Address.init(addr, port) };
+        return .{ .in = .{
+            .family = std.posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, port),
+            .addr = @as(*align(1) const u32, @ptrCast(&addr)).*,
+        } };
     }
 
-    pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
-        return .{ .in6 = std.net.Ip6Address.init(addr, port, flowinfo, scope_id) };
+    pub fn unspecified(port: u16) IpAddress {
+        return initIp4([4]u8{ 0, 0, 0, 0 }, port);
     }
 
     pub fn fromStd(addr: std.net.Address) IpAddress {
         switch (addr.any.family) {
-            std.posix.AF.INET => return .{ .in = addr.in },
-            std.posix.AF.INET6 => return .{ .in6 = addr.in6 },
+            std.posix.AF.INET => return .{ .in = addr.in.sa },
+            std.posix.AF.INET6 => return .{ .in6 = addr.in6.sa },
             else => unreachable,
         }
     }
 
-    pub fn parseIpAndPort(name: []const u8) !IpAddress {
-        const addr = try std.net.Address.parseIpAndPort(name);
-        return fromStd(addr);
-    }
-
-    pub fn parseIp(name: []const u8, port: u16) !IpAddress {
-        const addr = try std.net.Address.parseIp(name, port);
-        return fromStd(addr);
+    pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
+        return .{ .in6 = .{
+            .family = std.posix.AF.INET6,
+            .port = std.mem.nativeToBig(u16, port),
+            .flowinfo = flowinfo,
+            .addr = addr,
+            .scope_id = scope_id,
+        } };
     }
 
     pub fn parseIp4(buf: []const u8, port: u16) !IpAddress {
-        return .{ .in = try std.net.Ip4Address.parse(buf, port) };
+        var addr: [4]u8 = undefined;
+        var octets = std.mem.splitScalar(u8, buf, '.');
+        var i: usize = 0;
+        while (octets.next()) |octet| : (i += 1) {
+            if (i >= 4) return error.InvalidIpAddress;
+            addr[i] = std.fmt.parseInt(u8, octet, 10) catch return error.InvalidIpAddress;
+        }
+        if (i != 4) return error.InvalidIpAddress;
+        return initIp4(addr, port);
     }
 
     pub fn parseIp6(buf: []const u8, port: u16) !IpAddress {
-        return .{ .in6 = try std.net.Ip6Address.parse(buf, port) };
+        var addr: [16]u8 = undefined;
+        var tail: [16]u8 = undefined;
+        var ip_slice: []u8 = addr[0..];
+
+        var x: u16 = 0;
+        var saw_any_digits = false;
+        var index: usize = 0;
+        var abbrv = false;
+
+        for (buf, 0..) |c, i| {
+            if (c == ':') {
+                if (!saw_any_digits) {
+                    if (abbrv) return error.InvalidIpAddress; // ':::'
+                    if (i != 0) abbrv = true;
+                    @memset(ip_slice[index..], 0);
+                    ip_slice = tail[0..];
+                    index = 0;
+                    continue;
+                }
+                if (index == 14) return error.InvalidIpAddress;
+                ip_slice[index] = @as(u8, @truncate(x >> 8));
+                index += 1;
+                ip_slice[index] = @as(u8, @truncate(x));
+                index += 1;
+
+                x = 0;
+                saw_any_digits = false;
+            } else {
+                const digit = std.fmt.charToDigit(c, 16) catch return error.InvalidIpAddress;
+                const ov = @mulWithOverflow(x, 16);
+                if (ov[1] != 0) return error.InvalidIpAddress;
+                x = ov[0];
+                const ov2 = @addWithOverflow(x, digit);
+                if (ov2[1] != 0) return error.InvalidIpAddress;
+                x = ov2[0];
+                saw_any_digits = true;
+            }
+        }
+
+        if (!saw_any_digits and !abbrv) return error.InvalidIpAddress;
+        if (!abbrv and index < 14) return error.InvalidIpAddress;
+
+        if (index == 14) {
+            ip_slice[14] = @as(u8, @truncate(x >> 8));
+            ip_slice[15] = @as(u8, @truncate(x));
+        } else {
+            ip_slice[index] = @as(u8, @truncate(x >> 8));
+            index += 1;
+            ip_slice[index] = @as(u8, @truncate(x));
+            index += 1;
+            if (abbrv) {
+                @memcpy(addr[16 - index ..][0..index], ip_slice[0..index]);
+            }
+        }
+
+        return initIp6(addr, port, 0, 0);
+    }
+
+    pub fn parseIp(name: []const u8, port: u16) !IpAddress {
+        // Try IPv4 first
+        return parseIp4(name, port) catch {
+            // Try IPv6
+            return parseIp6(name, port);
+        };
+    }
+
+    pub fn parseIpAndPort(name: []const u8) !IpAddress {
+        // For IPv6: [addr]:port
+        if (std.mem.indexOf(u8, name, "[")) |_| {
+            const start = std.mem.indexOf(u8, name, "[") orelse return error.InvalidFormat;
+            const end = std.mem.indexOf(u8, name, "]") orelse return error.InvalidFormat;
+            const colon = std.mem.lastIndexOf(u8, name, ":") orelse return error.InvalidFormat;
+            if (colon <= end) return error.InvalidFormat;
+            const addr_str = name[start + 1 .. end];
+            const port_str = name[colon + 1 ..];
+            const port = try std.fmt.parseInt(u16, port_str, 10);
+            return parseIp6(addr_str, port);
+        }
+        // For IPv4: addr:port
+        const colon = std.mem.lastIndexOf(u8, name, ":") orelse return error.InvalidFormat;
+        const addr_str = name[0..colon];
+        const port_str = name[colon + 1 ..];
+        const port = try std.fmt.parseInt(u16, port_str, 10);
+        return parseIp4(addr_str, port);
     }
 
     /// Returns the port in native endian.
     /// Asserts that the address is ip4 or ip6.
     pub fn getPort(self: IpAddress) u16 {
         return switch (self.any.family) {
-            std.posix.AF.INET => self.in.getPort(),
-            std.posix.AF.INET6 => self.in6.getPort(),
+            std.posix.AF.INET => std.mem.bigToNative(u16, self.in.port),
+            std.posix.AF.INET6 => std.mem.bigToNative(u16, self.in6.port),
             else => unreachable,
         };
     }
@@ -66,16 +173,91 @@ pub const IpAddress = extern union {
     /// Asserts that the address is ip4 or ip6.
     pub fn setPort(self: *IpAddress, port: u16) void {
         switch (self.any.family) {
-            std.posix.AF.INET => self.in.setPort(port),
-            std.posix.AF.INET6 => self.in6.setPort(port),
+            std.posix.AF.INET => self.in.port = std.mem.nativeToBig(u16, port),
+            std.posix.AF.INET6 => self.in6.port = std.mem.nativeToBig(u16, port),
             else => unreachable,
         }
     }
 
     pub fn format(self: IpAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
-            std.posix.AF.INET => try self.in.format(w),
-            std.posix.AF.INET6 => try self.in6.format(w),
+            std.posix.AF.INET => {
+                const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
+                try w.print("{d}.{d}.{d}.{d}:{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3], self.getPort() });
+            },
+            std.posix.AF.INET6 => {
+                const port = self.getPort();
+                const addr = self.in6.addr;
+
+                // Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+                if (std.mem.eql(u8, addr[0..12], &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
+                    try w.print("[::ffff:{d}.{d}.{d}.{d}]:{d}", .{
+                        addr[12],
+                        addr[13],
+                        addr[14],
+                        addr[15],
+                        port,
+                    });
+                    return;
+                }
+
+                // Convert to native endian for compression detection
+                const big_endian_parts: *align(1) const [8]u16 = @ptrCast(&addr);
+                var native_endian_parts: [8]u16 = undefined;
+                for (big_endian_parts, 0..) |part, i| {
+                    native_endian_parts[i] = std.mem.bigToNative(u16, part);
+                }
+
+                // Find the longest zero run
+                var longest_start: usize = 8;
+                var longest_len: usize = 0;
+                var current_start: usize = 0;
+                var current_len: usize = 0;
+
+                for (native_endian_parts, 0..) |part, i| {
+                    if (part == 0) {
+                        if (current_len == 0) {
+                            current_start = i;
+                        }
+                        current_len += 1;
+                        if (current_len > longest_len) {
+                            longest_start = current_start;
+                            longest_len = current_len;
+                        }
+                    } else {
+                        current_len = 0;
+                    }
+                }
+
+                // Only compress if the longest zero run is 2 or more
+                if (longest_len < 2) {
+                    longest_start = 8;
+                    longest_len = 0;
+                }
+
+                try w.writeAll("[");
+                var i: usize = 0;
+                var abbrv = false;
+                while (i < native_endian_parts.len) : (i += 1) {
+                    if (i == longest_start) {
+                        // Emit "::" for the longest zero run
+                        if (!abbrv) {
+                            try w.writeAll(if (i == 0) "::" else ":");
+                            abbrv = true;
+                        }
+                        i += longest_len - 1; // Skip the compressed range
+                        continue;
+                    }
+                    if (abbrv) {
+                        abbrv = false;
+                    }
+                    try w.print("{x}", .{native_endian_parts[i]});
+                    if (i != native_endian_parts.len - 1) {
+                        try w.writeAll(":");
+                    }
+                }
+                try w.print("]:{d}", .{port});
+            },
             else => unreachable,
         }
     }
@@ -100,12 +282,12 @@ pub const IpAddress = extern union {
 
 pub const UnixAddress = extern union {
     any: std.posix.sockaddr,
-    un: if (std.net.has_unix_sockets) std.posix.sockaddr.un else void,
+    un: if (has_unix_sockets) std.posix.sockaddr.un else void,
 
     pub const max_len = 108;
 
     pub fn init(path: []const u8) !UnixAddress {
-        if (!std.net.has_unix_sockets) unreachable;
+        if (!has_unix_sockets) unreachable;
         var un = std.posix.sockaddr.un{ .family = std.posix.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
         @memcpy(un.path[0..path.len], path);
@@ -118,7 +300,7 @@ pub const UnixAddress = extern union {
     };
 
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        if (!std.net.has_unix_sockets) unreachable;
+        if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
             std.posix.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
             else => unreachable,
@@ -146,8 +328,9 @@ pub const Address = extern union {
     /// Convert to std.net.Address
     pub fn toStd(self: *const Address) std.net.Address {
         return switch (self.any.family) {
-            std.posix.AF.INET, std.posix.AF.INET6 => std.net.Address.initPosix(@ptrCast(self)),
-            std.posix.AF.UNIX => if (std.net.has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            std.posix.AF.INET => std.net.Address{ .in = .{ .sa = self.ip.in } },
+            std.posix.AF.INET6 => std.net.Address{ .in6 = .{ .sa = self.ip.in6 } },
+            std.posix.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
             else => unreachable,
         };
     }
@@ -155,9 +338,9 @@ pub const Address = extern union {
     /// Convert from std.net.Address
     pub fn fromStd(addr: std.net.Address) Address {
         return switch (addr.any.family) {
-            std.posix.AF.INET => Address{ .ip = .{ .in = addr.in } },
-            std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6 } },
-            std.posix.AF.UNIX => if (std.net.has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            std.posix.AF.INET => Address{ .ip = .{ .in = addr.in.sa } },
+            std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6.sa } },
+            std.posix.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
             else => unreachable,
         };
     }
@@ -243,12 +426,7 @@ pub const Socket = struct {
         else
             self.handle;
 
-        const addr_len = switch (addr.any.family) {
-            std.posix.AF.INET => addr.ip.in.getOsSockLen(),
-            std.posix.AF.INET6 => addr.ip.in6.getOsSockLen(),
-            std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
-            else => unreachable,
-        };
+        const addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&addr.any));
 
         try std.posix.bind(sock, &addr.any, addr_len);
 
@@ -270,7 +448,7 @@ pub const Socket = struct {
 
     /// Connect the socket to a remote address
     pub fn connect(self: Socket, rt: *Runtime, addr: Address) !void {
-        try netConnect(rt, self.handle, addr.toStd());
+        try netConnect(rt, self.handle, addr);
     }
 
     /// Receives data from the socket into the provided buffer.
@@ -377,10 +555,13 @@ pub const Socket = struct {
                 .sendto = .{
                     .fd = self.handle,
                     .buffer = .{ .slice = data },
-                    .addr = addr.toStd(),
+                    .addr = undefined,
                 },
             },
         };
+
+        const addr_len = getSockAddrLen(&addr.any);
+        @memcpy(std.mem.asBytes(&completion.op.sendto.addr)[0..addr_len], std.mem.asBytes(&addr)[0..addr_len]);
 
         return try runIo(rt, &completion, "sendto");
     }
@@ -391,10 +572,9 @@ pub const Socket = struct {
             .len = data.len,
         }};
 
-        const std_addr = addr.toStd();
         var msg: std.posix.msghdr_const = .{
-            .name = @ptrCast(&std_addr.any),
-            .namelen = std_addr.getOsSockLen(),
+            .name = @ptrCast(@constCast(&addr.any)),
+            .namelen = @intCast(getSockAddrLen(&addr.any)),
             .iov = &iov,
             .iovlen = 1,
             .control = null,
@@ -641,17 +821,17 @@ pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    try netConnect(rt, fd, .initPosix(@ptrCast(&addr)));
+    try netConnect(rt, fd, .{ .ip = addr });
     return .{ .socket = .{ .handle = fd, .address = .{ .ip = addr } } };
 }
 
 pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
 
-    try netConnect(rt, fd, .{ .un = addr.un });
+    try netConnect(rt, fd, .{ .unix = addr });
     return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
 }
 
@@ -793,20 +973,23 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
         },
         .wasi_poll => blk: {
             // WASI doesn't provide peer address info
-            break :blk Address{ .ip = .{ .in = std.net.Ip4Address.unspecified(0) } };
+            break :blk Address{ .ip = IpAddress.unspecified(0) };
         },
     };
 
     return .{ .socket = .{ .handle = handle, .address = addr } };
 }
 
-pub fn netConnect(rt: *Runtime, fd: Handle, addr: std.net.Address) !void {
+pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
     var completion: xev.Completion = .{ .op = .{
         .connect = .{
             .socket = fd,
-            .addr = addr,
+            .addr = undefined,
         },
     } };
+
+    const addr_len = getSockAddrLen(&addr.any);
+    @memcpy(std.mem.asBytes(&completion.op.connect.addr)[0..addr_len], std.mem.asBytes(&addr)[0..addr_len]);
 
     return runIo(rt, &completion, "connect");
 }
