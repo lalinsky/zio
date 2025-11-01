@@ -42,11 +42,6 @@ jobs:
       run: zig-out/bin/rtl-user-stack-poc.exe
       timeout-minutes: 1
 
-    - name: Run Linux stack growth PoC (Linux only)
-      if: runner.os == 'Linux'
-      run: zig-out/bin/linux-stack-growth-poc
-      timeout-minutes: 1
-
     - name: Run tests
       run: zig build test
       timeout-minutes: 5
