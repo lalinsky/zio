@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
@@ -28,13 +31,23 @@ pub const IpAddress = extern union {
     in6: std.posix.sockaddr.in6,
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
-        const addr_int = std.mem.readInt(u32, &addr, .big);
         return .{ .in = .{
             .family = std.posix.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
-            .addr = addr_int,
-            .zero = [8]u8{ 0, 0, 0, 0, 0, 0, 0, 0 },
+            .addr = @as(*align(1) const u32, @ptrCast(&addr)).*,
         } };
+    }
+
+    pub fn unspecified(port: u16) IpAddress {
+        return initIp4([4]u8{ 0, 0, 0, 0 }, port);
+    }
+
+    pub fn fromStd(addr: std.net.Address) IpAddress {
+        switch (addr.any.family) {
+            std.posix.AF.INET => return .{ .in = addr.in.sa },
+            std.posix.AF.INET6 => return .{ .in6 = addr.in6.sa },
+            else => unreachable,
+        }
     }
 
     pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
@@ -61,19 +74,60 @@ pub const IpAddress = extern union {
 
     pub fn parseIp6(buf: []const u8, port: u16) !IpAddress {
         var addr: [16]u8 = undefined;
-        // Simple IPv6 parser - handles full notation
-        var parts = std.mem.splitScalar(u8, buf, ':');
-        var i: usize = 0;
-        while (parts.next()) |part| : (i += 2) {
-            if (i >= 16) return error.InvalidIpAddress;
-            if (part.len == 0) {
-                // Handle :: compression
-                @memset(addr[i..], 0);
-                break;
+        var tail: [16]u8 = undefined;
+        var ip_slice: []u8 = addr[0..];
+
+        var x: u16 = 0;
+        var saw_any_digits = false;
+        var index: usize = 0;
+        var abbrv = false;
+
+        for (buf, 0..) |c, i| {
+            if (c == ':') {
+                if (!saw_any_digits) {
+                    if (abbrv) return error.InvalidIpAddress; // ':::'
+                    if (i != 0) abbrv = true;
+                    @memset(ip_slice[index..], 0);
+                    ip_slice = tail[0..];
+                    index = 0;
+                    continue;
+                }
+                if (index == 14) return error.InvalidIpAddress;
+                ip_slice[index] = @as(u8, @truncate(x >> 8));
+                index += 1;
+                ip_slice[index] = @as(u8, @truncate(x));
+                index += 1;
+
+                x = 0;
+                saw_any_digits = false;
+            } else {
+                const digit = std.fmt.charToDigit(c, 16) catch return error.InvalidIpAddress;
+                const ov = @mulWithOverflow(x, 16);
+                if (ov[1] != 0) return error.InvalidIpAddress;
+                x = ov[0];
+                const ov2 = @addWithOverflow(x, digit);
+                if (ov2[1] != 0) return error.InvalidIpAddress;
+                x = ov2[0];
+                saw_any_digits = true;
             }
-            const value = std.fmt.parseInt(u16, part, 16) catch return error.InvalidIpAddress;
-            std.mem.writeInt(u16, addr[i..][0..2], value, .big);
         }
+
+        if (!saw_any_digits and !abbrv) return error.InvalidIpAddress;
+        if (!abbrv and index < 14) return error.InvalidIpAddress;
+
+        if (index == 14) {
+            ip_slice[14] = @as(u8, @truncate(x >> 8));
+            ip_slice[15] = @as(u8, @truncate(x));
+        } else {
+            ip_slice[index] = @as(u8, @truncate(x >> 8));
+            index += 1;
+            ip_slice[index] = @as(u8, @truncate(x));
+            index += 1;
+            if (abbrv) {
+                @memcpy(addr[16 - index ..][0..index], ip_slice[0..index]);
+            }
+        }
+
         return initIp6(addr, port, 0, 0);
     }
 
@@ -128,24 +182,81 @@ pub const IpAddress = extern union {
     pub fn format(self: IpAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
             std.posix.AF.INET => {
-                const addr_bytes = std.mem.toBytes(self.in.addr);
-                try w.print("{}.{}.{}.{}:{}", .{
-                    addr_bytes[0],
-                    addr_bytes[1],
-                    addr_bytes[2],
-                    addr_bytes[3],
-                    std.mem.bigToNative(u16, self.in.port),
-                });
+                const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
+                try w.print("{d}.{d}.{d}.{d}:{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3], self.getPort() });
             },
             std.posix.AF.INET6 => {
+                const port = self.getPort();
                 const addr = self.in6.addr;
+
+                // Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+                if (std.mem.eql(u8, addr[0..12], &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
+                    try w.print("[::ffff:{d}.{d}.{d}.{d}]:{d}", .{
+                        addr[12],
+                        addr[13],
+                        addr[14],
+                        addr[15],
+                        port,
+                    });
+                    return;
+                }
+
+                // Convert to native endian for compression detection
+                const big_endian_parts: *align(1) const [8]u16 = @ptrCast(&addr);
+                var native_endian_parts: [8]u16 = undefined;
+                for (big_endian_parts, 0..) |part, i| {
+                    native_endian_parts[i] = std.mem.bigToNative(u16, part);
+                }
+
+                // Find the longest zero run
+                var longest_start: usize = 8;
+                var longest_len: usize = 0;
+                var current_start: usize = 0;
+                var current_len: usize = 0;
+
+                for (native_endian_parts, 0..) |part, i| {
+                    if (part == 0) {
+                        if (current_len == 0) {
+                            current_start = i;
+                        }
+                        current_len += 1;
+                        if (current_len > longest_len) {
+                            longest_start = current_start;
+                            longest_len = current_len;
+                        }
+                    } else {
+                        current_len = 0;
+                    }
+                }
+
+                // Only compress if the longest zero run is 2 or more
+                if (longest_len < 2) {
+                    longest_start = 8;
+                    longest_len = 0;
+                }
+
                 try w.writeAll("[");
                 var i: usize = 0;
-                while (i < 8) : (i += 1) {
-                    if (i > 0) try w.writeAll(":");
-                    try w.print("{x}", .{std.mem.readInt(u16, addr[i * 2 ..][0..2], .big)});
+                var abbrv = false;
+                while (i < native_endian_parts.len) : (i += 1) {
+                    if (i == longest_start) {
+                        // Emit "::" for the longest zero run
+                        if (!abbrv) {
+                            try w.writeAll(if (i == 0) "::" else ":");
+                            abbrv = true;
+                        }
+                        i += longest_len - 1; // Skip the compressed range
+                        continue;
+                    }
+                    if (abbrv) {
+                        abbrv = false;
+                    }
+                    try w.print("{x}", .{native_endian_parts[i]});
+                    if (i != native_endian_parts.len - 1) {
+                        try w.writeAll(":");
+                    }
                 }
-                try w.print("]:{}", .{std.mem.bigToNative(u16, self.in6.port)});
+                try w.print("]:{d}", .{port});
             },
             else => unreachable,
         }
@@ -213,6 +324,26 @@ pub const Address = extern union {
     any: std.posix.sockaddr,
     ip: IpAddress,
     unix: UnixAddress,
+
+    /// Convert to std.net.Address
+    pub fn toStd(self: *const Address) std.net.Address {
+        return switch (self.any.family) {
+            std.posix.AF.INET => std.net.Address{ .in = .{ .sa = self.ip.in } },
+            std.posix.AF.INET6 => std.net.Address{ .in6 = .{ .sa = self.ip.in6 } },
+            std.posix.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            else => unreachable,
+        };
+    }
+
+    /// Convert from std.net.Address
+    pub fn fromStd(addr: std.net.Address) Address {
+        return switch (addr.any.family) {
+            std.posix.AF.INET => Address{ .ip = .{ .in = addr.in.sa } },
+            std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6.sa } },
+            std.posix.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            else => unreachable,
+        };
+    }
 
     /// Convert sockaddr to IpAddress from raw bytes.
     /// This properly handles IPv4 and IPv6 addresses without alignment issues.
@@ -842,7 +973,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
         },
         .wasi_poll => blk: {
             // WASI doesn't provide peer address info
-            break :blk Address{ .ip = .{ .in = std.net.Ip4Address.unspecified(0) } };
+            break :blk Address{ .ip = IpAddress.unspecified(0) };
         },
     };
 

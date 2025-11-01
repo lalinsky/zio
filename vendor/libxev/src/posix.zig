@@ -19,6 +19,14 @@ pub fn getSockAddrLen(addr: *const posix.sockaddr) posix.socklen_t {
     };
 }
 
+/// Convert std.net.Address to posix.sockaddr.storage.
+/// This allows storing any socket address type in a fixed-size buffer.
+pub fn addressToStorage(addr: std.net.Address) posix.sockaddr.storage {
+    var storage: posix.sockaddr.storage = undefined;
+    @memcpy(@as([*]u8, @ptrCast(&storage))[0..@sizeOf(std.net.Address)], @as([*]const u8, @ptrCast(&addr))[0..@sizeOf(std.net.Address)]);
+    return storage;
+}
+
 pub const RecvMsgError = error{
     /// The socket is marked nonblocking and the requested operation would block, and
     /// there is no global event loop configured.

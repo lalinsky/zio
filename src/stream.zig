@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const xev = @import("xev");
@@ -500,9 +503,8 @@ test "StreamReader: takeByte reads first byte correctly" {
     // Read rest of first line
     const line1 = try reader.interface.takeDelimiterExclusive('\r');
     try testing.expectEqualStrings("1", line1);
-    _ = try reader.interface.takeByte(); // Skip '\r'
-    _ = try reader.interface.takeDelimiterExclusive('\n');
-    _ = try reader.interface.takeByte(); // Skip '\n'
+    _ = try reader.interface.takeByte(); // consume '\r'
+    _ = try reader.interface.takeByte(); // consume '\n'
 
     // Read second line
     const line2 = try reader.interface.takeDelimiterExclusive('\r');

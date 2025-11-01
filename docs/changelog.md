@@ -9,12 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `Channel.asyncSend()`, `Channel.asyncReceive()` and `BroadcastChannel.asyncReceive()` methods for using channels with `select()`
+- Added `Channel.asyncSend()`, `Channel.asyncReceive()` and `BroadcastChannel.asyncReceive()` methods for using channels in `select()`
+- Added support for `Signal` to be used in `select()`
 
 ### Changed
 
-- **BREAKING**: `select()` and `wait()` now require futures to be passed as pointers (use `&future` instead of `future`)
-- **BREAKING**: Channel methods `isEmpty()`, `isFull()`, `tryReceive()`, `trySend()`, and `close()` no longer require a Runtime parameter
+- Updated to Zig 0.15.2 (minimum required version)
+- `select()` and `wait()` now require futures to be passed as pointers (use `&future` instead of `future`)
+- Channel methods `isEmpty()`, `isFull()`, `tryReceive()`, `trySend()`, and `close()` no longer require a `*Runtime` parameter
+- `JoinHandle.deinit()` is now `JoinHandle.detach()`
+- `JoinHandle.cancel()` now waits for the task to complete, after requesting cancelation
+- `JoinHandle` methods `join()`, `cancel()`, and `detach()` now all requires a `*Runtime` parameter
+
+### Fixed
+
+- Fixed EOF handling in socket read that got broken after refactoring in 0.4.0
 
 ## [0.4.0] - 2025-10-25
 

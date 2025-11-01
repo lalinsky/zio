@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! Work-stealing queue for task scheduling.
 //!
 //! This is a lock-free FIFO queue optimized for work-stealing schedulers,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -57,8 +60,8 @@ const Bucket = struct {
         return try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(alignment), size);
     }
 
-    fn release(self: *Bucket, stack: Stack, returned_at: std.time.Instant) void {
-        const node = FreeListNode.fromStack(stack, returned_at);
+    fn release(self: *Bucket, stack: Stack) void {
+        const node = FreeListNode.fromStack(stack, std.time.Instant.now() catch unreachable);
         self.queue.push(node);
     }
 
@@ -69,7 +72,7 @@ const Bucket = struct {
         while (self.queue.pop()) |node| {
             const age_ns = now.since(node.returned_at);
             // Check if stack is too old
-            if (age_ns > retention_ns and kept_count >= min_warm) {
+            if (age_ns >= retention_ns and kept_count >= min_warm) {
                 // Too old and we have enough warm stacks - free it
                 allocator.free(node.toStack(size));
             } else {
@@ -93,8 +96,8 @@ const Bucket = struct {
 };
 
 pub const StackPoolOptions = struct {
-    retention_ms: i64 = 60 * std.time.ms_per_s, // 60 seconds
-    cleanup_interval_ms: i64 = 10 * std.time.ms_per_s, // 10 seconds
+    retention_ns: u64 = 60 * std.time.ns_per_s, // 60 seconds
+    cleanup_interval_ns: u64 = 10 * std.time.ns_per_s, // 10 seconds
     min_warm_count: usize = 4,
 };
 
@@ -108,7 +111,7 @@ pub const StackPool = struct {
         return .{
             .buckets = [_]Bucket{.{}} ** NUM_BUCKETS,
             .allocator = allocator,
-            .retention_ns = @as(u64, @intCast(options.retention_ms)) * std.time.ns_per_ms,
+            .retention_ns = options.retention_ns,
             .min_warm_count = options.min_warm_count,
         };
     }
@@ -155,16 +158,14 @@ pub const StackPool = struct {
         assert(stack.len >= MIN_STACK_SIZE);
 
         if (selectBucket(stack.len)) |bucket_idx| {
-            const now = std.time.Instant.now() catch unreachable;
-            self.buckets[bucket_idx].release(stack, now);
+            self.buckets[bucket_idx].release(stack);
         } else {
             // Too large for pool, free directly
             self.allocator.free(stack);
         }
     }
 
-    pub fn cleanup(self: *StackPool) void {
-        const now = std.time.Instant.now() catch unreachable;
+    pub fn cleanup(self: *StackPool, now: std.time.Instant) void {
         for (&self.buckets, 0..) |*bucket, i| {
             bucket.cleanupOld(bucketSize(i), self.allocator, now, self.retention_ns, self.min_warm_count);
         }

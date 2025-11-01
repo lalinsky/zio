@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A mutual exclusion primitive for protecting shared data in async contexts.
 //!
 //! This mutex is designed for use with the zio async runtime and provides

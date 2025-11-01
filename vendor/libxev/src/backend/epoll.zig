@@ -1820,7 +1820,7 @@ test "epoll: socket accept/connect/send/recv/close" {
         .op = .{
             .connect = .{
                 .socket = client_conn,
-                .addr = address,
+                .addr = posix_ext.addressToStorage(address),
             },
         },
 

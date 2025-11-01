@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A manual-reset synchronization event for async tasks.
 //!
 //! ResetEvent is a boolean flag that tasks can wait on. It can be in one of two

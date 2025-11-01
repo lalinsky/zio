@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! A synchronization barrier for coordinating multiple async tasks.
 //!
 //! A barrier allows a fixed number of tasks to wait at a synchronization point

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const meta = @import("../../meta.zig");
@@ -21,12 +24,20 @@ test "IpAddress: parseIp4" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
+
+    var buf: [32]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&buf, "{f}", .{addr});
+    try std.testing.expectEqualStrings("127.0.0.1:8080", formatted);
 }
 
 test "IpAddress: parseIp6" {
     const addr = try IpAddress.parseIp6("::1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET6, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
+
+    var buf: [64]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&buf, "{f}", .{addr});
+    try std.testing.expectEqualStrings("[::1]:8080", formatted);
 }
 
 test "IpAddress: parseIp" {
@@ -44,9 +55,17 @@ test "IpAddress: parseIpAndPort" {
     try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.getPort());
 
+    var buf1: [32]u8 = undefined;
+    const formatted1 = try std.fmt.bufPrint(&buf1, "{f}", .{addr1});
+    try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
+
     const addr2 = try IpAddress.parseIpAndPort("[::1]:8080");
     try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.getPort());
+
+    var buf2: [64]u8 = undefined;
+    const formatted2 = try std.fmt.bufPrint(&buf2, "{f}", .{addr2});
+    try std.testing.expectEqualStrings("[::1]:8080", formatted2);
 }
 
 test "UnixAddress: init" {

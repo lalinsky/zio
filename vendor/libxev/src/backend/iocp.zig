@@ -2163,7 +2163,7 @@ test "iocp: socket accept/connect/send/recv/close" {
         .op = .{
             .connect = .{
                 .socket = client_conn,
-                .addr = address,
+                .addr = posix_utils.addressToStorage(address),
             },
         },
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: Apache-2.0
+
 //! Generic simple singly-linked stack (LIFO) for single-threaded use.
 //!
 //! Provides O(1) push and pop operations.
