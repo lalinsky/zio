@@ -55,6 +55,24 @@ pub const IpAddress = extern union {
         }
     }
 
+    pub fn initPosix(addr: *const std.posix.sockaddr, len: std.posix.socklen_t) IpAddress {
+        return switch (addr.family) {
+            std.posix.AF.INET => blk: {
+                std.debug.assert(len >= @sizeOf(std.posix.sockaddr.in));
+                var result: IpAddress = .{ .in = undefined };
+                @memcpy(std.mem.asBytes(&result.in), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(std.posix.sockaddr.in)]);
+                break :blk result;
+            },
+            std.posix.AF.INET6 => blk: {
+                std.debug.assert(len >= @sizeOf(std.posix.sockaddr.in6));
+                var result: IpAddress = .{ .in6 = undefined };
+                @memcpy(std.mem.asBytes(&result.in6), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(std.posix.sockaddr.in6)]);
+                break :blk result;
+            },
+            else => unreachable,
+        };
+    }
+
     pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
         return .{ .in6 = .{
             .family = std.posix.AF.INET6,
