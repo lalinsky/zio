@@ -9,6 +9,7 @@ const Server = @import("../net.zig").Server;
 const Socket = @import("../net.zig").Socket;
 const IpAddress = @import("../net.zig").IpAddress;
 const UnixAddress = @import("../net.zig").UnixAddress;
+const has_unix_sockets = @import("../net.zig").has_unix_sockets;
 
 test "IpAddress: initIp4" {
     const addr = IpAddress.initIp4(.{0} ** 4, 8080);
@@ -69,7 +70,7 @@ test "IpAddress: parseIpAndPort" {
 }
 
 test "UnixAddress: init" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -218,7 +219,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -244,7 +245,7 @@ test "IpAddress: listen/accept/connect/read/write IPv6" {
 }
 
 test "UnixAddress: listen/accept/connect/read/write unbuffered" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -280,7 +281,7 @@ test "IpAddress: bind/sendTo/receiveFrom IPv6" {
 }
 
 test "UnixAddress: bind/sendTo/receiveFrom" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
     // Windows doesn't support UDP Unix sockets
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
@@ -296,7 +297,7 @@ test "UnixAddress: bind/sendTo/receiveFrom" {
 }
 
 test "UnixAddress: listen/accept/connect/read/EOF" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};

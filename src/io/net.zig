@@ -9,8 +9,13 @@ const runIo = @import("base.zig").runIo;
 
 const Handle = if (xev.backend == .iocp) std.os.windows.HANDLE else std.posix.socket_t;
 
-pub const default_kernel_backlog = 256;
-const has_unix_sockets = std.net.has_unix_sockets;
+pub const has_unix_sockets = switch (builtin.os.tag) {
+    .windows => builtin.os.version_range.windows.isAtLeast(.win10_rs4) orelse false,
+    .wasi => false,
+    else => true,
+};
+
+pub const default_kernel_backlog = 128;
 
 pub const ShutdownHow = std.posix.ShutdownHow;
 
@@ -371,7 +376,7 @@ pub const Address = extern union {
         return switch (sockaddr.family) {
             std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(data) },
             std.posix.AF.UNIX => blk: {
-                if (!std.net.has_unix_sockets) unreachable;
+                if (!has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
                 const copy_len = @min(data.len, @sizeOf(std.posix.sockaddr.un));
                 @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
@@ -801,7 +806,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
 }
 
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createStreamSocket(addr.any.family);
     errdefer netClose(rt, fd);
@@ -850,7 +855,7 @@ pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
 }
 
 pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
-    if (!std.net.has_unix_sockets) unreachable;
+    if (!has_unix_sockets) unreachable;
 
     const fd = try createDatagramSocket(addr.any.family);
     errdefer netClose(rt, fd);
