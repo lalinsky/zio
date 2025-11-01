@@ -87,7 +87,7 @@ pub fn switchContext(
             \\ movq %%rbp, 8(%%rax)
             \\ movq %%rdx, 16(%%rax)
             \\
-            ++ if (is_windows)
+            ++ (if (is_windows)
                 \\ // Load TEB pointer and save TIB fields
                 \\ movq %%gs:0x30, %%r10
                 \\ movq 0x20(%%r10), %%r11
@@ -100,13 +100,13 @@ pub fn switchContext(
                 \\ movq %%r11, 48(%%rax)
                 \\
             else
-                ""
+                "")
             ++
             \\ // Restore stack pointer and base pointer
             \\ movq 0(%%rcx), %%rsp
             \\ movq 8(%%rcx), %%rbp
             \\
-            ++ if (is_windows)
+            ++ (if (is_windows)
                 \\ // Load TEB pointer and restore TIB fields
                 \\ movq %%gs:0x30, %%r10
                 \\ movq 24(%%rcx), %%r11
@@ -119,7 +119,7 @@ pub fn switchContext(
                 \\ movq %%r11, 0x08(%%r10)
                 \\
             else
-                ""
+                "")
             ++
             \\ jmpq *16(%%rcx)
             \\0:
@@ -195,7 +195,7 @@ pub fn switchContext(
             \\ mov x10, fp
             \\ stp x9, x10, [x0, #0]
             \\
-            ++ if (is_windows)
+            ++ (if (is_windows)
                 \\ // Save TIB fields (x18 points to TEB on ARM64 Windows)
                 \\ ldr x10, [x18, #0x20]
                 \\ ldr x11, [x18, #0x1478]
@@ -204,13 +204,13 @@ pub fn switchContext(
                 \\ stp x10, x11, [x0, #40]
                 \\
             else
-                ""
+                "")
             ++
             \\ ldp x9, x10, [x1, #0]
             \\ mov sp, x9
             \\ mov fp, x10
             \\
-            ++ if (is_windows)
+            ++ (if (is_windows)
                 \\ // Restore TIB fields
                 \\ ldp x10, x11, [x1, #24]
                 \\ str x10, [x18, #0x20]
@@ -219,7 +219,7 @@ pub fn switchContext(
                 \\ stp x11, x10, [x18, #0x08]
                 \\
             else
-                ""
+                "")
             ++
             \\ ldr x9, [x1, #16]
             \\ br x9
