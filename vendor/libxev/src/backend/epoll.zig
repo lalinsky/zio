@@ -581,7 +581,7 @@ pub const Loop = struct {
             .connect => |*v| res: {
                 const fd = completion.fd_maybe_dup() catch |err| break :res .{ .connect = err };
 
-                if (posix.connect(fd, &v.addr.any, v.addr.getOsSockLen())) {
+                if (posix.connect(fd, @ptrCast(&v.addr), posix_ext.getSockAddrLen(@ptrCast(&v.addr)))) {
                     break :res .{ .connect = {} };
                 } else |err| switch (err) {
                     // If we would block then we register with epoll
@@ -1209,7 +1209,7 @@ pub const Operation = union(OperationType) {
 
     connect: struct {
         socket: posix.socket_t,
-        addr: std.net.Address,
+        addr: posix.sockaddr.storage,
     },
 
     /// Poll for events but do not perform any operations on them being
@@ -1820,7 +1820,7 @@ test "epoll: socket accept/connect/send/recv/close" {
         .op = .{
             .connect = .{
                 .socket = client_conn,
-                .addr = address,
+                .addr = posix_ext.addressToStorage(address),
             },
         },
 

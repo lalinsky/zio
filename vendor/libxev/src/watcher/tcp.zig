@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const posix = std.posix;
+const posix_utils = @import("../posix.zig");
 const stream = @import("stream.zig");
 const common = @import("common.zig");
 const ThreadPool = @import("../ThreadPool.zig");
@@ -165,7 +166,7 @@ fn TCPStream(comptime xev: type) type {
                 .op = .{
                     .connect = .{
                         .socket = self.fd,
-                        .addr = addr,
+                        .addr = posix_utils.addressToStorage(addr),
                     },
                 },
 

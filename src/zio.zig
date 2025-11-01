@@ -6,7 +6,6 @@ const std = @import("std");
 // Re-export coroutine functionality
 pub const coroutines = @import("coroutines.zig");
 pub const Coroutine = coroutines.Coroutine;
-pub const CoroutineState = coroutines.CoroutineState;
 
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
@@ -50,9 +49,6 @@ pub const WaitResult = @import("select.zig").WaitResult;
 
 // Re-export low-level utilities
 pub const util = @import("utils.zig");
-
-// Re-export Io emulation
-pub const Io = @import("io.zig").Io;
 
 test {
     std.testing.refAllDecls(@This());

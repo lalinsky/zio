@@ -9,6 +9,7 @@ const Server = @import("../net.zig").Server;
 const Socket = @import("../net.zig").Socket;
 const IpAddress = @import("../net.zig").IpAddress;
 const UnixAddress = @import("../net.zig").UnixAddress;
+const has_unix_sockets = @import("../net.zig").has_unix_sockets;
 
 test "IpAddress: initIp4" {
     const addr = IpAddress.initIp4(.{0} ** 4, 8080);
@@ -24,12 +25,20 @@ test "IpAddress: parseIp4" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
+
+    var buf: [32]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&buf, "{f}", .{addr});
+    try std.testing.expectEqualStrings("127.0.0.1:8080", formatted);
 }
 
 test "IpAddress: parseIp6" {
     const addr = try IpAddress.parseIp6("::1", 8080);
     try std.testing.expectEqual(std.posix.AF.INET6, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
+
+    var buf: [64]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&buf, "{f}", .{addr});
+    try std.testing.expectEqualStrings("[::1]:8080", formatted);
 }
 
 test "IpAddress: parseIp" {
@@ -47,13 +56,21 @@ test "IpAddress: parseIpAndPort" {
     try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.getPort());
 
+    var buf1: [32]u8 = undefined;
+    const formatted1 = try std.fmt.bufPrint(&buf1, "{f}", .{addr1});
+    try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
+
     const addr2 = try IpAddress.parseIpAndPort("[::1]:8080");
     try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.getPort());
+
+    var buf2: [64]u8 = undefined;
+    const formatted2 = try std.fmt.bufPrint(&buf2, "{f}", .{addr2});
+    try std.testing.expectEqualStrings("[::1]:8080", formatted2);
 }
 
 test "UnixAddress: init" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -202,7 +219,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -228,7 +245,7 @@ test "IpAddress: listen/accept/connect/read/write IPv6" {
 }
 
 test "UnixAddress: listen/accept/connect/read/write unbuffered" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};
@@ -264,7 +281,7 @@ test "IpAddress: bind/sendTo/receiveFrom IPv6" {
 }
 
 test "UnixAddress: bind/sendTo/receiveFrom" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
     // Windows doesn't support UDP Unix sockets
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
@@ -280,7 +297,7 @@ test "UnixAddress: bind/sendTo/receiveFrom" {
 }
 
 test "UnixAddress: listen/accept/connect/read/EOF" {
-    if (!std.net.has_unix_sockets) return error.SkipZigTest;
+    if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
     defer std.fs.cwd().deleteFile(path) catch {};

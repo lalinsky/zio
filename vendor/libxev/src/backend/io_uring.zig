@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const linux = std.os.linux;
 const posix = std.posix;
+const posix_utils = @import("../posix.zig");
 const queue = @import("../queue.zig");
 const looppkg = @import("../loop.zig");
 const Callback = looppkg.Callback(@This());
@@ -432,8 +433,8 @@ pub const Loop = struct {
 
             .connect => |*v| sqe.prep_connect(
                 v.socket,
-                &v.addr.any,
-                v.addr.getOsSockLen(),
+                @ptrCast(&v.addr),
+                posix_utils.getSockAddrLen(@ptrCast(&v.addr)),
             ),
 
             .poll => |v| sqe.prep_poll_add(v.fd, v.events),
@@ -457,7 +458,7 @@ pub const Loop = struct {
                     @bitCast(@as(i64, -1)),
                 ),
 
-                .vectors => |vecs| sqe.prep_readv(
+                .vectors => |*vecs| sqe.prep_readv(
                     v.fd,
                     vecs.data[0..vecs.len],
                     @bitCast(@as(i64, -1)),
@@ -477,7 +478,7 @@ pub const Loop = struct {
                     v.offset,
                 ),
 
-                .vectors => |vecs| sqe.prep_readv(
+                .vectors => |*vecs| sqe.prep_readv(
                     v.fd,
                     vecs.data[0..vecs.len],
                     v.offset,
@@ -607,7 +608,7 @@ pub const Loop = struct {
                     @bitCast(@as(i64, -1)),
                 ),
 
-                .vectors => |vecs| sqe.prep_writev(
+                .vectors => |*vecs| sqe.prep_writev(
                     v.fd,
                     vecs.data[0..vecs.len],
                     @bitCast(@as(i64, -1)),
@@ -627,7 +628,7 @@ pub const Loop = struct {
                     v.offset,
                 ),
 
-                .vectors => |vecs| sqe.prep_writev(
+                .vectors => |*vecs| sqe.prep_writev(
                     v.fd,
                     vecs.data[0..vecs.len],
                     v.offset,
@@ -1013,7 +1014,7 @@ pub const Operation = union(OperationType) {
 
     connect: struct {
         socket: posix.socket_t,
-        addr: std.net.Address,
+        addr: posix.sockaddr.storage,
     },
 
     poll: struct {
@@ -1584,7 +1585,7 @@ test "io_uring: socket accept/connect/send/recv/close" {
         .op = .{
             .connect = .{
                 .socket = client_conn,
-                .addr = address,
+                .addr = posix_utils.addressToStorage(address),
             },
         },
 
