@@ -34,6 +34,11 @@ jobs:
       run: zig build benchmarks
       timeout-minutes: 5
 
+    - name: Run RtlCreateUserStack PoC (Windows only)
+      if: runner.os == 'Windows'
+      run: zig-out/bin/rtl-user-stack-poc.exe
+      timeout-minutes: 1
+
     - name: Run tests
       run: zig build test
       timeout-minutes: 5
