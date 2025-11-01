@@ -60,6 +60,7 @@ const resumeTask = @import("../core/task.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
+const Timeout = @import("../core/timeout.zig").Timeout;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
 
@@ -166,56 +167,49 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
 
     self.wait_queue.push(&task.awaitable.wait_node);
 
-    const TimeoutContext = struct {
-        wait_queue: *WaitQueue(WaitNode),
-        wait_node: *WaitNode,
-    };
-
-    var timeout_ctx = TimeoutContext{
-        .wait_queue = &self.wait_queue,
-        .wait_node = &task.awaitable.wait_node,
-    };
+    // Set up timeout
+    var timeout = Timeout.init;
+    defer timeout.clear(runtime);
+    timeout.set(runtime, timeout_ns);
 
     // Atomically release mutex
     mutex.unlock(runtime);
 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.timedWaitForReadyWithCallback(
-        .preparing_to_wait,
-        .waiting,
-        timeout_ns,
-        TimeoutContext,
-        &timeout_ctx,
-        struct {
-            fn onTimeout(ctx: *TimeoutContext) bool {
-                // Try to remove from wait queue - if successful, we timed out
-                // If failed, we were already signaled
-                return ctx.wait_queue.remove(ctx.wait_node);
-            }
-        }.onTimeout,
-    ) catch |err| {
-        // Remove from queue if canceled (timeout already handled by callback)
-        if (err == error.Canceled) {
-            const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
-            if (!was_in_queue) {
-                // Already removed by signal(); we won't process it due to cancel,
-                // so wake another waiter to consume the signal.
-                if (self.wait_queue.pop()) |next_waiter| {
-                    next_waiter.wake();
-                }
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+        // Try to remove from queue
+        const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+        if (!was_in_queue) {
+            // We were already removed by signal() which will wake us.
+            // Since we're being cancelled and won't process the signal,
+            // wake another waiter to receive the signal instead.
+            if (self.wait_queue.pop()) |next_waiter| {
+                next_waiter.wake();
             }
         }
+
+        // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait
+        timeout.clear(runtime);
+
         // Must reacquire mutex before returning
         mutex.lockUncancelable(runtime);
         // Cancellation during lock has priority over timeout
         try runtime.checkCanceled();
-        return err;
+
+        // Check if this timeout triggered, otherwise it was user cancellation
+        return runtime.checkTimeout(&timeout, err);
     };
+
+    // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait
+    timeout.clear(runtime);
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable(runtime);
     try runtime.checkCanceled();
+
+    // If timeout fired, we should have received error.Canceled from yield or checkCanceled
+    std.debug.assert(!timeout.triggered);
 }
 
 /// Wakes one task waiting on this condition variable.

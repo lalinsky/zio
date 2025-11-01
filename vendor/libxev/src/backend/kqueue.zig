@@ -283,7 +283,18 @@ pub const Loop = struct {
 
                 // If they are in the submission queue, mark them as dead
                 // so they will never be submitted.
-                .adding => target.flags.state = .dead,
+                .adding => {
+                    target.flags.state = .dead;
+
+                    // If this is a timer with a reset value, re-add it with the new time
+                    if (target.op == .timer) {
+                        if (target.op.timer.reset) |r| {
+                            target.op.timer.next = r;
+                            target.op.timer.reset = null;
+                            self.add(target);
+                        }
+                    }
+                },
 
                 // If it is active we need to schedule the deletion.
                 .active => self.stop_completion(target),
@@ -641,9 +652,16 @@ pub const Loop = struct {
             // Adding state we can just modify the metadata and return
             // since the timer isn't in the heap yet.
             .adding => {
-                c.op.timer.next = self.timer_next(next_ms);
+                const next = self.timer_next(next_ms);
+                c.op.timer.next = next;
                 c.userdata = userdata;
                 c.callback = cb;
+
+                // If a cancellation is in flight, set reset so the cancel handler
+                // can re-add the timer with the new time
+                if (c_cancel.state() == .active) {
+                    c.op.timer.reset = next;
+                }
                 return;
             },
 

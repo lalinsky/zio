@@ -27,6 +27,7 @@ const Task = @import("core/task.zig").Task;
 const ResumeMode = @import("core/task.zig").ResumeMode;
 const resumeTask = @import("core/task.zig").resumeTask;
 const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
+const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
 
@@ -137,83 +138,6 @@ const awaitable_module = @import("core/awaitable.zig");
 const Awaitable = awaitable_module.Awaitable;
 const AwaitableKind = awaitable_module.AwaitableKind;
 const AwaitableList = awaitable_module.AwaitableList;
-
-/// Wait for an awaitable to complete with a timeout. Works from both coroutines and threads.
-/// Returns error.Timeout if the timeout expires before completion.
-/// Returns error.Canceled if the coroutine was canceled during the wait.
-/// For coroutines, uses runtime timer infrastructure.
-/// For threads, uses futex timedWait directly.
-pub fn timedWaitForComplete(awaitable: *Awaitable, runtime: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
-    // Fast path: check if already complete
-    if (awaitable.done.load(.acquire)) return;
-
-    if (runtime.getCurrentTask()) |task| {
-        // Coroutine path: get executor and use timer infrastructure
-        const executor = task.getExecutor();
-
-        awaitable.waiting_list.push(&task.awaitable.wait_node);
-
-        if (awaitable.done.load(.acquire)) {
-            _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
-            return;
-        }
-
-        const TimeoutContext = struct {
-            wait_queue: *WaitQueue(WaitNode),
-            wait_node: *WaitNode,
-        };
-
-        var timeout_ctx = TimeoutContext{
-            .wait_queue = &awaitable.waiting_list,
-            .wait_node = &task.awaitable.wait_node,
-        };
-
-        executor.timedWaitForReadyWithCallback(
-            .ready,
-            .waiting,
-            timeout_ns,
-            TimeoutContext,
-            &timeout_ctx,
-            struct {
-                fn onTimeout(ctx: *TimeoutContext) bool {
-                    return ctx.wait_queue.remove(ctx.wait_node);
-                }
-            }.onTimeout,
-        ) catch |err| {
-            // Handle both timeout and cancellation from yield
-            if (err == error.Canceled) {
-                _ = awaitable.waiting_list.remove(&task.awaitable.wait_node);
-            }
-            return err;
-        };
-
-        // Pair with markComplete()'s .release
-        _ = awaitable.done.load(.acquire);
-        // Yield returned successfully, awaitable must be complete
-    } else {
-        // Thread path: use ThreadWaiter with futex timedWait
-        var thread_waiter = ThreadWaiter.init();
-        awaitable.waiting_list.push(&thread_waiter.wait_node);
-        defer {
-            _ = awaitable.waiting_list.remove(&thread_waiter.wait_node);
-        }
-
-        // Double-check before parking (avoid lost wakeup)
-        if (awaitable.done.load(.acquire)) {
-            return;
-        }
-
-        // Wait loop with timeout - check done flag and park on thread_waiter futex
-        var timer = std.time.Timer.start() catch unreachable;
-        while (!awaitable.done.load(.acquire)) {
-            const elapsed_ns = timer.read();
-            if (elapsed_ns >= timeout_ns) {
-                return error.Timeout;
-            }
-            try std.Thread.Futex.timedWait(&thread_waiter.futex_state, 0, timeout_ns - elapsed_ns);
-        }
-    }
-}
 
 // Public handle for spawned tasks and futures
 pub fn JoinHandle(comptime T: type) type {
@@ -594,13 +518,9 @@ pub const Executor = struct {
         // Track yield
         self.metrics.yields += 1;
 
-        // Check and consume cancellation flag before yielding (unless shielded or no_cancel)
-        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
-            // cmpxchgStrong returns null on success, current value on failure
-            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-                // CAS succeeded: we consumed true, return canceled
-                return error.Canceled;
-            }
+        // Check and consume cancellation flag before yielding (unless no_cancel)
+        if (cancel_mode == .allow_cancel) {
+            try current_task.checkCanceled(self.runtime);
         }
 
         // Atomically transition state - if this fails, someone changed our state
@@ -636,11 +556,9 @@ pub const Executor = struct {
         const resumed_executor = Runtime.current_executor orelse unreachable;
         std.debug.assert(resumed_executor.current_coroutine == current_coro);
 
-        // Check again after resuming in case we were canceled while suspended (unless shielded or no_cancel)
-        if (cancel_mode == .allow_cancel and current_task.shield_count == 0) {
-            if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-                return error.Canceled;
-            }
+        // Check again after resuming in case we were canceled while suspended (unless no_cancel)
+        if (cancel_mode == .allow_cancel) {
+            try current_task.checkCanceled(resumed_executor.runtime);
         }
     }
 
@@ -665,15 +583,12 @@ pub const Executor = struct {
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
-    /// This consumes the cancellation flag.
+    /// This consumes one pending error if available.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
     pub fn checkCanceled(self: *Executor) Cancelable!void {
         const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
-        // Check and consume cancellation flag
-        if (current_task.awaitable.canceled.cmpxchgStrong(true, false, .acquire, .acquire) == null) {
-            return error.Canceled;
-        }
+        try current_task.checkCanceled(self.runtime);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).
@@ -705,11 +620,22 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        self.timedWaitForReady(.ready, .waiting, milliseconds * 1_000_000) catch |err| switch (err) {
-            error.Timeout => return, // Expected for sleep - not an error
-            error.Canceled => return error.Canceled, // Propagate cancellation
+        // Set up timeout
+        var timeout = Timeout.init;
+        defer timeout.clear(self.runtime);
+        timeout.set(self.runtime, milliseconds * std.time.ns_per_ms);
+
+        // Yield with atomic state transition (.ready -> .waiting)
+        self.yield(.ready, .waiting, .allow_cancel) catch |err| {
+            // Check if this timeout triggered (expected for sleep), otherwise it was user cancellation
+            self.runtime.checkTimeout(&timeout, err) catch |check_err| switch (check_err) {
+                error.Timeout => return, // Timeout is expected for sleep - return successfully
+                error.Canceled => return error.Canceled, // User cancellation - propagate
+            };
+            unreachable;
         };
-        unreachable; // Should always timeout or be canceled
+
+        unreachable; // Should always be canceled (by timeout or user)
     }
 
     /// Run the executor event loop.
@@ -957,157 +883,6 @@ pub const Executor = struct {
     /// Reset all metrics to zero
     pub fn resetMetrics(self: *Executor) void {
         self.metrics = .{};
-    }
-
-    /// Pack a pointer and 2-bit generation into a tagged pointer for userdata.
-    /// Uses lower 2 bits for generation (pointers are aligned).
-    inline fn packTimerUserdata(comptime T: type, ptr: *T, generation: u2) ?*anyopaque {
-        comptime {
-            if (@alignOf(T) < 4) @compileError("Timer userdata T must be at least 4-byte aligned");
-        }
-        const addr = @intFromPtr(ptr);
-        const tagged = addr | @as(usize, generation);
-        return @ptrFromInt(tagged);
-    }
-
-    /// Unpack a tagged pointer into the original pointer and generation.
-    inline fn unpackTimerUserdata(comptime T: type, userdata: ?*anyopaque) struct { ptr: *T, generation: u2 } {
-        comptime {
-            if (@alignOf(T) < 4) @compileError("Timer userdata T must be at least 4-byte aligned");
-        }
-        const addr = @intFromPtr(userdata);
-        const generation: u2 = @truncate(addr & 0x3);
-        const ptr_addr = addr & ~@as(usize, 0x3);
-        return .{
-            .ptr = @ptrFromInt(ptr_addr),
-            .generation = generation,
-        };
-    }
-
-    /// Wait for the current coroutine to be marked ready, with a timeout and custom timeout handler.
-    /// The onTimeout callback is called when the timer fires, and should return true if the
-    /// coroutine should be woken with error.Timeout, or false if it was already signaled by
-    /// another source (in which case the timeout is ignored).
-    pub fn timedWaitForReadyWithCallback(
-        self: *Executor,
-        expected_state: AnyTask.State,
-        desired_state: AnyTask.State,
-        timeout_ns: u64,
-        comptime TimeoutContext: type,
-        timeout_ctx: *TimeoutContext,
-        comptime onTimeout: fn (ctx: *TimeoutContext) bool,
-    ) (Timeoutable || Cancelable)!void {
-        const current = self.current_coroutine orelse unreachable;
-        const task = AnyTask.fromCoroutine(current);
-
-        const CallbackContext = struct {
-            user_ctx: *TimeoutContext,
-            timed_out: bool,
-        };
-
-        var ctx = CallbackContext{
-            .user_ctx = timeout_ctx,
-            .timed_out = false,
-        };
-
-        var timer = xev.Timer.init() catch unreachable;
-        defer timer.deinit();
-
-        // Use timer reset which handles both initial start and restart after cancel
-        // Pack context pointer with generation in lower 2 bits
-        const tagged_userdata = packTimerUserdata(CallbackContext, &ctx, task.timer_generation);
-        timer.reset(
-            &self.loop,
-            &task.timer_c,
-            &task.timer_cancel_c,
-            timeout_ns / 1_000_000,
-            anyopaque,
-            tagged_userdata,
-            struct {
-                fn callback(
-                    userdata: ?*anyopaque,
-                    l: *xev.Loop,
-                    c: *xev.Completion,
-                    r: xev.Timer.RunError!void,
-                ) xev.CallbackAction {
-                    _ = l;
-                    _ = r catch {};
-
-                    // Get task safely from completion (always valid)
-                    const t: *AnyTask = @fieldParentPtr("timer_c", c);
-
-                    // Unpack generation from tagged pointer (no deref yet!)
-                    const unpacked = unpackTimerUserdata(CallbackContext, userdata);
-
-                    // Check if this callback is from a stale timer
-                    if (t.timer_generation != unpacked.generation) {
-                        // Stale callback - context is freed, don't touch it!
-                        return .disarm;
-                    }
-
-                    // Generation matches - safe to dereference context
-                    const ctx_ptr = unpacked.ptr;
-                    if (onTimeout(ctx_ptr.user_ctx)) {
-                        ctx_ptr.timed_out = true;
-                        resumeTask(&t.coro, .local);
-                    }
-                    return .disarm;
-                }
-            }.callback,
-        );
-
-        // Wait for either timeout or external markReady
-        self.yield(expected_state, desired_state, .allow_cancel) catch |err| {
-            // Invalidate pending callbacks before unwinding so they ignore this stack frame.
-            task.timer_generation +%= 1;
-            timer.cancel(
-                &self.loop,
-                &task.timer_c,
-                &task.timer_cancel_c,
-                void,
-                null,
-                noopTimerCancelCallback,
-            );
-            return err;
-        };
-
-        if (ctx.timed_out) {
-            return error.Timeout;
-        }
-
-        // Timer already completed, no need to cancel
-        if (task.timer_c.state() == .dead) {
-            return;
-        }
-
-        // Was awakened by external markReady → increment generation to invalidate
-        // any pending timer callback, then cancel async
-        task.timer_generation +%= 1;
-        timer.cancel(
-            &self.loop,
-            &task.timer_c,
-            &task.timer_cancel_c,
-            void,
-            null,
-            noopTimerCancelCallback,
-        );
-    }
-
-    pub fn timedWaitForReady(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, timeout_ns: u64) (Timeoutable || Cancelable)!void {
-        const DummyContext = struct {};
-        var dummy: DummyContext = .{};
-        return self.timedWaitForReadyWithCallback(
-            expected_state,
-            desired_state,
-            timeout_ns,
-            DummyContext,
-            &dummy,
-            struct {
-                fn onTimeout(_: *DummyContext) bool {
-                    return true;
-                }
-            }.onTimeout,
-        );
     }
 };
 
@@ -1392,6 +1167,18 @@ pub const Runtime = struct {
         const executor = Runtime.current_executor orelse return;
         if (executor.current_coroutine == null) return;
         executor.endShield();
+    }
+
+    /// Check if the given timeout triggered the cancellation.
+    /// This should be called in a catch block after receiving error.Canceled.
+    /// If the timeout was triggered, returns error.Timeout.
+    /// Otherwise, returns the original error (error.Canceled from user cancellation).
+    /// No-op (returns void) if not called from within a coroutine.
+    pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: Cancelable) (Cancelable || Timeoutable)!void {
+        const executor = Runtime.current_executor orelse return;
+        const current_coro = executor.current_coroutine orelse return;
+        const current_task = AnyTask.fromCoroutine(current_coro);
+        try current_task.checkTimeout(self, timeout, err);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).

@@ -13,6 +13,9 @@ pub const Runtime = runtime.Runtime;
 pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
 
+// Re-export timeout functionality
+pub const Timeout = @import("core/timeout.zig").Timeout;
+
 // Re-export common error sets
 const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
