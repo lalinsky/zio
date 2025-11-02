@@ -818,6 +818,8 @@ pub const Completion = struct {
             .shutdown => .{
                 .shutdown = if (res >= 0) {} else switch (@as(posix.E, @enumFromInt(-res))) {
                     .CANCELED => error.Canceled,
+                    .NOTCONN => return error.SocketUnconnected,
+                    .NOBUFS => return error.SystemResources,
                     else => |errno| posix.unexpectedErrno(errno),
                 },
             },
