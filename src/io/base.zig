@@ -73,9 +73,11 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If IO completes before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+        // Classify the error before clearing timeout state
+        const classified_err = rt.checkTimeout(&timeout, err);
         timeout.clear(rt);
         cancelIo(rt, completion);
-        return rt.checkTimeout(&timeout, err);
+        return classified_err;
     };
 
     std.debug.assert(completion.state() == .dead);
