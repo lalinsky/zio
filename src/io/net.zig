@@ -419,6 +419,20 @@ pub const Address = extern union {
             else => unreachable,
         }
     }
+
+    /// Parse an IP address string with a separate port parameter.
+    /// Supports both IPv4 and IPv6 addresses.
+    /// Examples: parseIp("127.0.0.1", 8080), parseIp("::1", 8080)
+    pub fn parseIp(ip: []const u8, port: u16) !Address {
+        return .{ .ip = try IpAddress.parseIp(ip, port) };
+    }
+
+    /// Parse an IP address with port from a single string.
+    /// IPv4 format: "127.0.0.1:8080"
+    /// IPv6 format: "[::1]:8080"
+    pub fn parseIpAndHost(addr: []const u8) !Address {
+        return .{ .ip = try IpAddress.parseIpAndPort(addr) };
+    }
 };
 
 pub const ReceiveFromResult = struct {
