@@ -32,7 +32,7 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
 
     // Check if the task was canceled before it started executing
-    if (!any_blocking_task.awaitable.canceled.load(.acquire)) {
+    if (any_blocking_task.awaitable.canceled_status.load(.acquire) == 0) {
         // Execute the user's blocking function only if not canceled
         any_blocking_task.execute_fn(any_blocking_task);
     }
