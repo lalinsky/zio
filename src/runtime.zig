@@ -1170,11 +1170,12 @@ pub const Runtime = struct {
     }
 
     /// Check if the given timeout triggered the cancellation.
-    /// This should be called in a catch block after receiving error.Canceled.
+    /// This should be called in a catch block after receiving an error.
+    /// If the error is not error.Canceled, returns the original error unchanged.
     /// If the timeout was triggered, returns error.Timeout.
     /// Otherwise, returns the original error (error.Canceled from user cancellation).
     /// No-op (returns void) if not called from within a coroutine.
-    pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: Cancelable) (Cancelable || Timeoutable)!void {
+    pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: anytype) !void {
         const executor = Runtime.current_executor orelse return;
         const current_coro = executor.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);

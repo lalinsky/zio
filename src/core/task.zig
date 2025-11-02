@@ -165,14 +165,18 @@ pub const AnyTask = struct {
     }
 
     /// Check if the given timeout triggered the cancellation.
-    /// This should be called in a catch block after receiving error.Canceled.
+    /// This should be called in a catch block after receiving an error.
+    /// If the error is not error.Canceled, returns the original error unchanged.
     /// User cancellation has priority - if user_canceled is set, returns error.Canceled.
     /// Otherwise, if the timeout was triggered, decrements the timeout counter and returns error.Timeout.
     /// Otherwise, returns the original error.
     /// Note: user_canceled is NEVER cleared - once set, task is condemned.
     /// Note: Does NOT decrement pending_errors - that counter is only consumed by checkCanceled.
-    pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout, err: Cancelable) (Cancelable || Timeoutable)!void {
-        std.debug.assert(err == error.Canceled);
+    pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout, err: anytype) !void {
+        // If not error.Canceled, just return the original error
+        if (err != error.Canceled) {
+            return err;
+        }
 
         var current = self.awaitable.canceled_status.load(.acquire);
         while (true) {
