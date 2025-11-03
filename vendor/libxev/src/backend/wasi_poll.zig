@@ -534,9 +534,16 @@ pub const Loop = struct {
             // Adding state we can just modify the metadata and return
             // since the timer isn't in the heap yet.
             .adding => {
-                c.op.timer.next = timer_next(next_ms);
+                const next = timer_next(next_ms);
+                c.op.timer.next = next;
                 c.userdata = userdata;
                 c.callback = cb;
+
+                // If a cancellation is in flight, set reset so the cancel handler
+                // can re-add the timer with the new time
+                if (c_cancel.state() == .active) {
+                    c.op.timer.reset = next;
+                }
                 return;
             },
 

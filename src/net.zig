@@ -14,127 +14,157 @@ pub const Socket = io_net.Socket;
 pub const Server = io_net.Server;
 pub const Stream = io_net.Stream;
 
-pub const IpAddressList = struct {
-    arena: std.heap.ArenaAllocator,
-    addrs: []IpAddress,
-    canon_name: ?[]u8,
+pub const IpAddressIterator = struct {
+    head: ?*std.posix.addrinfo,
+    current: ?*std.posix.addrinfo,
 
-    pub fn deinit(self: *IpAddressList) void {
-        // Save the child allocator before destroying the arena
-        const child_allocator = self.arena.child_allocator;
-        // Copy the arena allocator into stack memory, because
-        // otherwise it would destroy itself while it was still working.
-        var arena = self.arena;
-        arena.deinit();
-        // Now destroy the struct itself
-        child_allocator.destroy(self);
+    pub fn next(self: *IpAddressIterator) ?IpAddress {
+        while (self.current) |info| {
+            self.current = info.next;
+            const addr = info.addr orelse continue;
+            // Skip unsupported address families
+            if (addr.family != std.posix.AF.INET and addr.family != std.posix.AF.INET6) continue;
+            return IpAddress.initPosix(addr, @intCast(info.addrlen));
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *IpAddressIterator) void {
+        if (self.head) |head| {
+            if (builtin.os.tag == .windows) {
+                std.os.windows.ws2_32.freeaddrinfo(head);
+            } else {
+                std.posix.system.freeaddrinfo(head);
+            }
+        }
     }
 };
 
+pub const LookupHostError = error{
+    HostLacksNetworkAddresses,
+    TemporaryNameServerFailure,
+    NameServerFailure,
+    AddressFamilyNotSupported,
+    OutOfMemory,
+    UnknownHostName,
+    ServiceUnavailable,
+    Unexpected,
+    RuntimeShutdown,
+    Closed,
+    NoThreadPool,
+    ProcessFdQuotaExceeded,
+    SystemResources,
+} || std.posix.UnexpectedError;
+
 /// Async DNS resolution using the runtime's thread pool.
 /// Performs DNS lookup in a blocking task to avoid blocking the event loop.
-/// Call `IpAddressList.deinit()` on the result when done.
-pub fn getAddressList(
+/// Call `IpAddressIterator.deinit()` on the result when done.
+pub fn lookupHost(
     runtime: *Runtime,
-    allocator: std.mem.Allocator,
     name: []const u8,
     port: u16,
-) !*IpAddressList {
+) LookupHostError!IpAddressIterator {
     var task = try runtime.spawnBlocking(
-        getAddressListBlocking,
-        .{ allocator, name, port },
+        lookupHostBlocking,
+        .{ name, port },
     );
     defer task.cancel(runtime);
 
     return try task.join(runtime);
 }
 
-fn getAddressListBlocking(
-    allocator: std.mem.Allocator,
+fn lookupHostBlocking(
     name: []const u8,
     port: u16,
-) !*IpAddressList {
-    const result = try allocator.create(IpAddressList);
-    errdefer allocator.destroy(result);
+) LookupHostError!IpAddressIterator {
+    // Use stack buffer for temporary allocations
+    var buf: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = fba.allocator();
 
-    result.* = .{
-        .arena = std.heap.ArenaAllocator.init(allocator),
-        .addrs = &.{},
-        .canon_name = null,
-    };
-    errdefer result.arena.deinit();
+    const name_c = try allocator.dupeZ(u8, name);
+    const port_c = try std.fmt.allocPrintSentinel(allocator, "{d}", .{port}, 0);
 
-    const arena_allocator = result.arena.allocator();
-
-    const name_c = try arena_allocator.dupeZ(u8, name);
-    var port_buf: [6]u8 = undefined;
-    const port_str = std.fmt.bufPrint(&port_buf, "{}", .{port}) catch unreachable;
-    const port_c = try arena_allocator.dupeZ(u8, port_str);
-
-    const hints = std.c.addrinfo{
+    const hints: std.posix.addrinfo = .{
         .flags = .{ .NUMERICSERV = true },
         .family = std.posix.AF.UNSPEC,
         .socktype = std.posix.SOCK.STREAM,
         .protocol = std.posix.IPPROTO.TCP,
-        .addrlen = 0,
-        .addr = null,
         .canonname = null,
+        .addr = null,
+        .addrlen = 0,
         .next = null,
     };
 
-    var res: ?*std.c.addrinfo = null;
-    const rc = std.c.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res);
-    if (@intFromEnum(rc) != 0) return error.UnknownHostName;
-    defer std.c.freeaddrinfo(res.?);
+    var res: ?*std.posix.addrinfo = null;
 
-    // Count results
-    var count: usize = 0;
-    var it = res;
-    while (it) |info| : (it = info.next) {
-        if (info.family == std.posix.AF.INET or info.family == std.posix.AF.INET6) {
-            count += 1;
+    if (builtin.os.tag == .windows) {
+        var first = true;
+        while (true) {
+            const rc = std.os.windows.ws2_32.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res);
+            switch (@as(std.os.windows.ws2_32.WinsockError, @enumFromInt(@as(u16, @intCast(rc))))) {
+                @as(std.os.windows.ws2_32.WinsockError, @enumFromInt(0)) => break,
+                .WSATRY_AGAIN => return error.TemporaryNameServerFailure,
+                .WSANO_RECOVERY => return error.NameServerFailure,
+                .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,
+                .WSA_NOT_ENOUGH_MEMORY => return error.OutOfMemory,
+                .WSAHOST_NOT_FOUND => return error.UnknownHostName,
+                .WSATYPE_NOT_FOUND => return error.ServiceUnavailable,
+                .WSANO_DATA => return error.HostLacksNetworkAddresses,
+                .WSAEINVAL => unreachable,
+                .WSAESOCKTNOSUPPORT => unreachable,
+                .WSANOTINITIALISED => {
+                    if (!first) return error.Unexpected;
+                    first = false;
+                    try std.os.windows.callWSAStartup();
+                    continue;
+                },
+                else => |err| return std.os.windows.unexpectedWSAError(err),
+            }
+        }
+    } else {
+        switch (std.posix.system.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res)) {
+            @as(std.posix.system.EAI, @enumFromInt(0)) => {},
+            .ADDRFAMILY => return error.HostLacksNetworkAddresses,
+            .AGAIN => return error.TemporaryNameServerFailure,
+            .BADFLAGS => unreachable, // Invalid hints
+            .FAIL => return error.NameServerFailure,
+            .FAMILY => return error.AddressFamilyNotSupported,
+            .MEMORY => return error.OutOfMemory,
+            .NODATA => return error.HostLacksNetworkAddresses,
+            .NONAME => return error.UnknownHostName,
+            .SERVICE => return error.ServiceUnavailable,
+            .SOCKTYPE => unreachable, // Invalid socket type requested in hints
+            .SYSTEM => switch (std.posix.errno(-1)) {
+                else => |e| return std.posix.unexpectedErrno(e),
+            },
+            else => unreachable,
         }
     }
 
-    const addrs = try arena_allocator.alloc(IpAddress, count);
-    var i: usize = 0;
-    it = res;
-    while (it) |info| : (it = info.next) {
-        if (info.family == std.posix.AF.INET) {
-            const addr_in: *const std.posix.sockaddr.in = @ptrCast(@alignCast(info.addr));
-            addrs[i] = .{ .in = addr_in.* };
-            i += 1;
-        } else if (info.family == std.posix.AF.INET6) {
-            const addr_in6: *const std.posix.sockaddr.in6 = @ptrCast(@alignCast(info.addr));
-            addrs[i] = .{ .in6 = addr_in6.* };
-            i += 1;
-        }
-    }
-
-    result.addrs = addrs;
-    return result;
+    return .{
+        .head = res,
+        .current = res,
+    };
 }
 
 pub fn tcpConnectToHost(
     rt: *Runtime,
-    allocator: std.mem.Allocator,
     name: []const u8,
     port: u16,
 ) !Stream {
-    const list = try getAddressList(rt, allocator, name, port);
-    defer list.deinit();
-
-    if (list.addrs.len == 0) return error.UnknownHostName;
+    var iter = try lookupHost(rt, name, port);
+    defer iter.deinit();
 
     var last_err: ?anyerror = null;
-    for (list.addrs) |addr| {
+    while (iter.next()) |addr| {
         return addr.connect(rt) catch |err| {
             last_err = err;
             continue;
         };
     }
     if (last_err) |err| return err;
-    return error.ConnectionRefused;
+    return error.UnknownHostName;
 }
 
 pub fn tcpConnectToAddress(rt: *Runtime, addr: IpAddress) !Stream {
@@ -145,43 +175,53 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-test "getAddressList: localhost" {
+test "lookupHost: localhost" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
     const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
-    const GetAddressListTask = struct {
-        fn run(rt: *Runtime, alloc: std.mem.Allocator) !void {
-            const list = try getAddressList(rt, alloc, "localhost", 80);
-            defer list.deinit();
+    const LookupHostTask = struct {
+        fn run(rt: *Runtime) !void {
+            var iter = try lookupHost(rt, "localhost", 80);
+            defer iter.deinit();
 
-            try testing.expect(list.addrs.len > 0);
+            var count: usize = 0;
+            while (iter.next()) |_| {
+                count += 1;
+            }
+            try testing.expect(count > 0);
         }
     };
 
-    try runtime.runUntilComplete(GetAddressListTask.run, .{ runtime, allocator }, .{});
+    try runtime.runUntilComplete(LookupHostTask.run, .{runtime}, .{});
 }
 
-test "getAddressList: numeric IP" {
+test "lookupHost: numeric IP" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
     const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
     defer runtime.deinit();
 
-    const GetAddressListTask = struct {
-        fn run(rt: *Runtime, alloc: std.mem.Allocator) !void {
-            const list = try getAddressList(rt, alloc, "127.0.0.1", 8080);
-            defer list.deinit();
+    const LookupHostTask = struct {
+        fn run(rt: *Runtime) !void {
+            var iter = try lookupHost(rt, "127.0.0.1", 8080);
+            defer iter.deinit();
 
-            try testing.expectEqual(@as(usize, 1), list.addrs.len);
-            try testing.expectEqual(@as(u16, 8080), list.addrs[0].getPort());
+            var count: usize = 0;
+            var first_addr: ?IpAddress = null;
+            while (iter.next()) |addr| {
+                if (first_addr == null) first_addr = addr;
+                count += 1;
+            }
+            try testing.expectEqual(1, count);
+            try testing.expectEqual(8080, first_addr.?.getPort());
         }
     };
 
-    try runtime.runUntilComplete(GetAddressListTask.run, .{ runtime, allocator }, .{});
+    try runtime.runUntilComplete(LookupHostTask.run, .{runtime}, .{});
 }
 
 test "tcpConnectToAddress: basic" {
@@ -269,7 +309,7 @@ test "tcpConnectToHost: basic" {
             const port = try server_port.receive(rt);
             std.debug.print("Client connecting to port {}\n", .{port});
 
-            var stream = try tcpConnectToHost(rt, std.testing.allocator, "localhost", port);
+            var stream = try tcpConnectToHost(rt, "localhost", port);
             defer stream.close(rt);
 
             var write_buffer: [256]u8 = undefined;

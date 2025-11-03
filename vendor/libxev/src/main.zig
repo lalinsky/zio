@@ -83,6 +83,9 @@ pub const IOCP = Xev(.iocp, @import("backend/iocp.zig"));
 /// Generic thread pool implementation.
 pub const ThreadPool = @import("ThreadPool.zig");
 
+/// Intrusive heap implementation (pairing heap).
+pub const heap = @import("heap.zig");
+
 /// This stream (lowercase s) can be used as a namespace to access
 /// Closeable, Writeable, Readable, etc. so that custom streams
 /// can be constructed.

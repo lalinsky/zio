@@ -9,8 +9,13 @@ const runIo = @import("base.zig").runIo;
 
 const Handle = if (xev.backend == .iocp) std.os.windows.HANDLE else std.posix.socket_t;
 
-pub const default_kernel_backlog = 256;
-const has_unix_sockets = std.Io.net.has_unix_sockets;
+pub const has_unix_sockets = switch (builtin.os.tag) {
+    .windows => builtin.os.version_range.windows.isAtLeast(.win10_rs4) orelse false,
+    .wasi => false,
+    else => true,
+};
+
+pub const default_kernel_backlog = 128;
 
 pub const ShutdownHow = std.posix.ShutdownHow;
 
@@ -48,6 +53,24 @@ pub const IpAddress = extern union {
             std.posix.AF.INET6 => return .{ .in6 = addr.in6.sa },
             else => unreachable,
         }
+    }
+
+    pub fn initPosix(addr: *const std.posix.sockaddr, len: std.posix.socklen_t) IpAddress {
+        return switch (addr.family) {
+            std.posix.AF.INET => blk: {
+                std.debug.assert(len >= @sizeOf(std.posix.sockaddr.in));
+                var result: IpAddress = .{ .in = undefined };
+                @memcpy(std.mem.asBytes(&result.in), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(std.posix.sockaddr.in)]);
+                break :blk result;
+            },
+            std.posix.AF.INET6 => blk: {
+                std.debug.assert(len >= @sizeOf(std.posix.sockaddr.in6));
+                var result: IpAddress = .{ .in6 = undefined };
+                @memcpy(std.mem.asBytes(&result.in6), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(std.posix.sockaddr.in6)]);
+                break :blk result;
+            },
+            else => unreachable,
+        };
     }
 
     pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
@@ -395,6 +418,20 @@ pub const Address = extern union {
             std.posix.AF.UNIX => return self.unix.connect(rt),
             else => unreachable,
         }
+    }
+
+    /// Parse an IP address string with a separate port parameter.
+    /// Supports both IPv4 and IPv6 addresses.
+    /// Examples: parseIp("127.0.0.1", 8080), parseIp("::1", 8080)
+    pub fn parseIp(ip: []const u8, port: u16) !Address {
+        return .{ .ip = try IpAddress.parseIp(ip, port) };
+    }
+
+    /// Parse an IP address with port from a single string.
+    /// IPv4 format: "127.0.0.1:8080"
+    /// IPv6 format: "[::1]:8080"
+    pub fn parseIpAndHost(addr: []const u8) !Address {
+        return .{ .ip = try IpAddress.parseIpAndPort(addr) };
     }
 };
 

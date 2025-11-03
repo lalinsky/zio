@@ -6,13 +6,15 @@ const std = @import("std");
 // Re-export coroutine functionality
 pub const coroutines = @import("coroutines.zig");
 pub const Coroutine = coroutines.Coroutine;
-pub const CoroutineState = coroutines.CoroutineState;
 
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
+
+// Re-export timeout functionality
+pub const Timeout = @import("core/timeout.zig").Timeout;
 
 // Re-export common error sets
 const common = @import("common.zig");
@@ -30,6 +32,7 @@ pub const net = @import("net.zig");
 pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
 pub const ResetEvent = @import("sync.zig").ResetEvent;
+pub const Notify = @import("sync.zig").Notify;
 pub const Semaphore = @import("sync.zig").Semaphore;
 pub const Barrier = @import("sync.zig").Barrier;
 pub const Channel = @import("sync.zig").Channel;
@@ -47,9 +50,6 @@ pub const WaitResult = @import("select.zig").WaitResult;
 
 // Re-export low-level utilities
 pub const util = @import("utils.zig");
-
-// Re-export Io emulation
-pub const Io = @import("io.zig").Io;
 
 test {
     std.testing.refAllDecls(@This());
