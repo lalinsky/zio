@@ -950,3 +950,47 @@ test "wait: already complete (fast path)" {
 
     try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
 }
+
+test "select: wait on JoinHandle from spawned task" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn workerTask(rt: *Runtime, value: i32) !i32 {
+            try rt.sleep(10);
+            return value * 2;
+        }
+
+        fn asyncTask(rt: *Runtime) !void {
+            // Spawn a task and get a JoinHandle
+            var handle1 = try rt.spawn(workerTask, .{ rt, 21 }, .{});
+            defer handle1.cancel(rt);
+
+            var handle2 = try rt.spawn(workerTask, .{ rt, 100 }, .{});
+            defer handle2.cancel(rt);
+
+            // Wait on JoinHandles using select
+            const result = try select(rt, .{
+                .first = &handle1,
+                .second = &handle2,
+            });
+
+            // Verify we got a result
+            switch (result) {
+                .first => |val| {
+                    try testing.expectEqual(@as(i32, 42), val);
+                },
+                .second => |val| {
+                    try testing.expectEqual(@as(i32, 200), val);
+                },
+            }
+
+            // Both should be valid results, though timing determines which completes first
+            try testing.expect(std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
+        }
+    };
+
+    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+}
