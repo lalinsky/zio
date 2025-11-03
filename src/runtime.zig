@@ -539,10 +539,10 @@ pub const Executor = struct {
             const next_task = AnyTask.fromWaitNode(next_wait_node);
 
             self.current_coroutine = &next_task.coro;
-            coroutines.switchContext(&current_coro.context, &next_task.coro.context);
+            current_coro.yieldTo(&next_task.coro);
         } else {
             // No ready tasks - return to scheduler
-            coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
+            current_coro.yield();
         }
 
         // After resuming, the task may have migrated to a different executor.
@@ -676,7 +676,8 @@ pub const Executor = struct {
 
                 self.current_coroutine = &task.coro;
                 defer self.current_coroutine = null;
-                coroutines.switchContext(&self.main_context, &task.coro.context);
+
+                task.coro.step();
 
                 // Handle finished coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
                 if (self.current_coroutine) |current_coro| {

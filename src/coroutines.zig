@@ -7,7 +7,6 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const meta = @import("meta.zig");
 
 pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
@@ -354,24 +353,46 @@ pub const Coroutine = struct {
     stack: ?Stack,
     finished: bool = false,
 
-    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *meta.ReturnType(func)) void {
-        const Result = meta.ReturnType(func);
-        const Args = @TypeOf(args);
+    /// Step into the coroutine
+    pub fn step(self: *Coroutine) void {
+        switchContext(self.parent_context_ptr, &self.context);
+    }
 
+    /// Yield control back to the caller
+    pub fn yield(self: *Coroutine) void {
+        switchContext(&self.context, self.parent_context_ptr);
+    }
+
+    /// Yield control to another coroutine
+    pub fn yieldTo(self: *Coroutine, other: *Coroutine) void {
+        switchContext(&self.context, &other.context);
+    }
+
+    pub fn easySetup(self: *Coroutine, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) void {
+        const Wrapper = struct {
+            fn wrapper(_: *Coroutine, context_ptr: *anyopaque) void {
+                const context: *@TypeOf(args) = @ptrCast(@alignCast(context_ptr));
+                @call(.auto, func, context.*);
+            }
+        };
+        self.setup(&Wrapper.wrapper, std.mem.asBytes(&args), .fromByteUnits(@alignOf(@TypeOf(args))));
+    }
+
+    pub fn setup(self: *Coroutine, func: *const fn (*Coroutine, *anyopaque) void, context: []const u8, context_align: std.mem.Alignment) void {
         const CoroutineData = struct {
-            func: *const fn (*anyopaque) callconv(.c) noreturn,
-            args: Args,
-            result_ptr: *Result,
+            entrypoint: *const fn (*anyopaque) callconv(.c) noreturn,
             coro: *Coroutine,
+            func: *const fn (*Coroutine, *anyopaque) void,
+            ctx: *anyopaque,
 
             fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
                 const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
                 const coro = coro_data.coro;
 
-                coro_data.result_ptr.* = @call(.always_inline, func, coro_data.args);
+                coro_data.func(coro, coro_data.ctx);
 
                 coro.finished = true;
-                switchContext(&coro.context, coro.parent_context_ptr);
+                coro.yield();
                 unreachable;
             }
         };
@@ -381,15 +402,17 @@ pub const Coroutine = struct {
         const stack_base = @intFromPtr(stack.ptr);
         const stack_end = stack_base + stack.len;
 
-        // Store function pointer, args, and result space as a contiguous block at the end of stack
-        const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
+        // Copy context to stack
+        const context_ptr = std.mem.alignBackward(usize, stack_end - context.len, context_align.toByteUnits());
+        @memcpy(@as([*]u8, @ptrFromInt(context_ptr))[0..context.len], context);
 
-        // Set up function pointer, args, result_ptr, and coro pointer
+        // Copy our wrapper to stack
+        const data_ptr = std.mem.alignBackward(usize, context_ptr - @sizeOf(CoroutineData), stack_alignment);
         const data: *CoroutineData = @ptrFromInt(data_ptr);
-        data.func = &CoroutineData.wrapper;
-        data.args = args;
-        data.result_ptr = result_ptr;
+        data.entrypoint = &CoroutineData.wrapper;
         data.coro = self;
+        data.func = func;
+        data.ctx = @ptrFromInt(context_ptr);
 
         // Initialize the context with the entry point
         self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);
@@ -403,3 +426,29 @@ pub const Coroutine = struct {
         }
     }
 };
+
+test "Coroutine: basic" {
+    const stack = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack);
+
+    var parent_context: Context = undefined;
+    var coro: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .stack = stack,
+    };
+
+    const Fn = struct {
+        fn sum(a: u32, b: u32, c: *u32) void {
+            c.* = a + b;
+        }
+    };
+
+    var result: u32 = 0;
+    coro.easySetup(Fn.sum, .{1, 2, &result});
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    try std.testing.expectEqual(3, result);
+}

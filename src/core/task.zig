@@ -292,7 +292,15 @@ pub fn Task(comptime T: type) type {
                 },
             };
 
-            task.impl.base.coro.setup(func, args, &task.impl.result);
+            const Wrapper = struct {
+                fn call(coro: *Coroutine, ctx: *anyopaque) void {
+                    const t = Self.fromAny(AnyTask.fromCoroutine(coro));
+                    const a: *@TypeOf(args) = @ptrCast(@alignCast(ctx));
+                    t.impl.result = @call(.auto, func, a.*);
+                }
+            };
+
+            task.impl.base.coro.setup(&Wrapper.call, std.mem.asBytes(&args), .fromByteUnits(@alignOf(@TypeOf(args))));
 
             // Set pin count if task is pinned
             if (options.pinned) {
