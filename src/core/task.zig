@@ -264,14 +264,15 @@ pub fn Task(comptime T: type) type {
             args: meta.ArgsType(func),
             options: CreateOptions,
         ) !*Self {
-            // Allocate task struct
-            const task = try executor.allocator.create(Self);
-            errdefer executor.allocator.destroy(executor.runtime);
+            // Allocate task context
+            const allocation = try executor.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(Self)), @sizeOf(Self));
+            errdefer executor.allocator.free(allocation);
 
             // Acquire stack from pool
             const stack = try executor.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
             errdefer executor.stack_pool.release(stack);
 
+            const task: *Self = @ptrCast(allocation);
             task.* = .{
                 .impl = .{
                     .base = .{
@@ -324,7 +325,8 @@ pub fn Task(comptime T: type) type {
                 executor.stack_pool.release(stack);
             }
 
-            runtime.allocator.destroy(self);
+            const allocation: []align(@alignOf(Self)) u8 = @ptrCast(self);
+            runtime.allocator.free(allocation);
         }
     };
 }
