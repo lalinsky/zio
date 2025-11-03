@@ -262,7 +262,7 @@ pub fn Task(comptime T: type) type {
             };
         }
 
-        fn resultOffset() usize {
+        fn getResultOffset() usize {
             return comptime blk: {
                 var s = @sizeOf(Self);
                 s = std.mem.alignForward(usize, s, @alignOf(T));
@@ -271,7 +271,7 @@ pub fn Task(comptime T: type) type {
         }
 
         fn getResultPtr(self: *Self) *T {
-            return @ptrFromInt(@intFromPtr(self) + @sizeOf(Self));
+            return @ptrFromInt(@intFromPtr(self) + getResultOffset());
         }
 
         pub fn getResult(self: *Self) T {
@@ -292,7 +292,7 @@ pub fn Task(comptime T: type) type {
             const stack = try executor.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
             errdefer executor.stack_pool.release(stack);
 
-            const task: *Self = @ptrCast(allocation);
+            const task: *Self = @ptrCast(allocation.ptr);
             task.* = .{
                 .base = .{
                     .awaitable = .{
