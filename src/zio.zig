@@ -32,6 +32,7 @@ pub const net = @import("net.zig");
 pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
 pub const ResetEvent = @import("sync.zig").ResetEvent;
+pub const Notify = @import("sync.zig").Notify;
 pub const Semaphore = @import("sync.zig").Semaphore;
 pub const Barrier = @import("sync.zig").Barrier;
 pub const Channel = @import("sync.zig").Channel;
