@@ -30,6 +30,7 @@ const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
 const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
+const stdio = @import("stdio.zig");
 
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
@@ -1280,7 +1281,19 @@ pub const Runtime = struct {
             self.maybeShutdown();
         }
     }
+
+    pub fn io(self: *Runtime) std.Io {
+        return stdio.fromRuntime(self);
+    }
+
+    pub fn fromIo(io_: std.Io) *Runtime {
+        return stdio.toRuntime(io_);
+    }
 };
+
+test {
+    _ = stdio;
+}
 
 test "runtime with thread pool smoke test" {
     const testing = std.testing;
