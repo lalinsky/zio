@@ -452,7 +452,11 @@ pub const Socket = struct {
 
     /// Enable or disable port reuse (SO_REUSEPORT)
     /// Allows multiple sockets to bind to the same port for load balancing
+    /// Note: Not supported on Windows
     pub fn setReusePort(self: Socket, enabled: bool) !void {
+        if (builtin.os.tag == .windows) {
+            return error.Unsupported;
+        }
         try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, enabled);
     }
 
