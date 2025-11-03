@@ -15,7 +15,6 @@ const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("timeout.zig").Timeout;
-const TimeoutHeap = @import("timeout.zig").TimeoutHeap;
 
 /// Options for creating a task
 pub const CreateOptions = struct {
@@ -27,11 +26,6 @@ pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
     state: std.atomic.Value(State),
-
-    // Shared xev timer for timeout handling
-    timer_c: xev.Completion = .{},
-    timer_cancel_c: xev.Completion = .{},
-    timeouts: TimeoutHeap = .{ .context = {} },
 
     // Number of active cancelation sheilds
     shield_count: u8 = 0,
@@ -84,89 +78,43 @@ pub const AnyTask = struct {
         return false;
     }
 
-    fn getNextTimeout(self: *AnyTask, now: i64) ?struct { timeout: *Timeout, delay_ms: u64 } {
-        while (true) {
-            var timeout = self.timeouts.peek() orelse return null;
-            if (timeout.deadline_ms < now) {
-                std.debug.assert(timeout.task != null);
-                const removed = self.timeouts.deleteMin();
-                std.debug.assert(timeout == removed);
-                timeout.task = null;
-                continue;
-            }
-            return .{
-                .timeout = timeout,
-                .delay_ms = @intCast(timeout.deadline_ms - now),
-            };
-        }
-        unreachable;
-    }
-
-    pub fn cancelTimer(self: *AnyTask, loop: *xev.Loop) void {
-        if (self.timer_c.state() == .dead) {
-            return;
-        }
-
-        if (self.timer_c.userdata == null) {
-            return;
-        }
-
-        // Even if the cancel fails for some reason, and the callback will get triggered
-        // it will see null and do nothing.
-        self.timer_c.userdata = null;
-
-        var timer = xev.Timer.init() catch unreachable;
-        defer timer.deinit();
-
-        // Cancel the timer, but don't want for the cancelation to be finished.
-        timer.cancel(
-            loop,
-            &self.timer_c,
-            &self.timer_cancel_c,
-            void,
-            null,
-            noopTimerCancelCallback,
-        );
-    }
-
-    pub fn setTimer(self: *AnyTask, loop: *xev.Loop, timeout: *Timeout, delay_ms: u64) void {
-        var timer = xev.Timer.init() catch unreachable;
-        defer timer.deinit();
-
-        timer.reset(
-            loop,
-            &self.timer_c,
-            &self.timer_cancel_c,
-            delay_ms,
-            Timeout,
-            timeout,
-            timeoutCallback,
-        );
-    }
-
-    pub fn updateTimer(self: *AnyTask, loop: *xev.Loop) void {
-        const next = self.getNextTimeout(loop.now()) orelse {
-            self.cancelTimer(loop);
-            return;
-        };
-        self.setTimer(loop, next.timeout, next.delay_ms);
-    }
-
-    pub fn maybeUpdateTimer(self: *AnyTask) void {
-        const executor = self.getExecutor();
-        const next = self.getNextTimeout(executor.loop.now()) orelse {
-            self.cancelTimer(&executor.loop);
-            return;
-        };
-        if (@as(?*anyopaque, @ptrCast(next.timeout)) != self.timer_c.userdata) {
-            self.setTimer(&executor.loop, next.timeout, next.delay_ms);
-            return;
-        }
-    }
-
     /// Check if the given timeout triggered the cancellation.
     /// This should be called in a catch block after receiving an error.
     /// If the error is not error.Canceled, returns the original error unchanged.
+    /// Marks a timeout as triggered and updates the task's cancellation status.
+    /// If the task is already user-canceled, only increments pending_errors.
+    /// Otherwise, increments both timeout counter and pending_errors, and sets timeout.triggered.
+    pub fn setTimeout(self: *AnyTask) bool {
+        var triggered = false;
+        var current = self.awaitable.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+
+            if (status.user_canceled) {
+                // Task is already condemned by user cancellation
+                // Just increment pending_errors to add another error
+                triggered = false;
+                status.pending_errors += 1;
+            } else {
+                // This timeout is causing the cancellation
+                // Increment timeout counter and pending_errors
+                triggered = true;
+                status.timeout += 1;
+                status.pending_errors += 1;
+            }
+
+            const new: u32 = @bitCast(status);
+            if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                current = prev;
+                continue;
+            }
+            // CAS succeeded
+            break;
+        }
+
+        return triggered;
+    }
+
     /// User cancellation has priority - if user_canceled is set, returns error.Canceled.
     /// Otherwise, if the timeout was triggered, decrements the timeout counter and returns error.Timeout.
     /// Otherwise, returns the original error.
@@ -319,84 +267,6 @@ pub fn Task(comptime T: type) type {
             runtime.allocator.destroy(self);
         }
     };
-}
-
-// Callback for timeout timer
-fn timeoutCallback(
-    userdata: ?*Timeout,
-    loop: *xev.Loop,
-    completion: *xev.Completion,
-    result: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    result catch return .disarm;
-    const timeout = userdata orelse return .disarm;
-
-    const task = timeout.task orelse return .disarm;
-    std.debug.assert(task == @as(*AnyTask, @fieldParentPtr("timer_c", completion)));
-
-    // Remove this timeout from the heap
-    task.timeouts.remove(timeout);
-    timeout.task = null;
-
-    // Clear the timer's userdata so maybeUpdateTimer knows the timer is not set
-    completion.userdata = null;
-
-    // Configure the next timer
-    task.updateTimer(loop);
-
-    // Cancel the task - behavior depends on whether already user-canceled
-    var mark_as_triggered = false;
-    var current = task.awaitable.canceled_status.load(.acquire);
-    while (true) {
-        var status: CanceledStatus = @bitCast(current);
-
-        if (status.user_canceled) {
-            // Task is already condemned by user cancellation
-            // Just increment pending_errors to add another error
-            // Don't increment timeout counter or set triggered flag
-            mark_as_triggered = false;
-            status.pending_errors += 1;
-        } else {
-            // This timeout is causing the cancellation
-            // Increment timeout counter and pending_errors, will set triggered flag
-            mark_as_triggered = true;
-            status.timeout += 1;
-            status.pending_errors += 1;
-        }
-
-        const new: u32 = @bitCast(status);
-        if (task.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-            // CAS failed, use returned previous value and retry
-            current = prev;
-            continue;
-        }
-        // CAS succeeded
-        break;
-    }
-
-    // Only mark as triggered if this timeout caused the cancellation
-    if (mark_as_triggered) {
-        timeout.triggered = true;
-    }
-
-    // Always wake the task
-    resumeTask(task, .local);
-
-    return .disarm;
-}
-
-// Noop callback for timeout timer cancellation
-fn noopTimerCancelCallback(
-    ud: ?*void,
-    l: *xev.Loop,
-    c: *xev.Completion,
-    r: xev.CancelError!void,
-) xev.CallbackAction {
-    _ = ud;
-    _ = l;
-    _ = c;
-    _ = r catch {};
-    return .disarm;
 }
 
 /// Resume mode - controls cross-thread checking
