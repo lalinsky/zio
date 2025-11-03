@@ -288,11 +288,11 @@ pub fn Task(comptime T: type) type {
                         },
                         .state = .init(.new),
                     },
-                    .future_result = .{},
+                    .result = undefined,
                 },
             };
 
-            task.impl.base.coro.setup(func, args, &task.impl.future_result);
+            task.impl.base.coro.setup(func, args, &task.impl.result);
 
             // Set pin count if task is pinned
             if (options.pinned) {

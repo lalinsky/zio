@@ -9,7 +9,6 @@ const WaitNode = @import("WaitNode.zig");
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitResult = @import("../select.zig").WaitResult;
 const Cancelable = @import("../common.zig").Cancelable;
-const FutureResult = @import("../future_result.zig").FutureResult;
 const select = @import("../select.zig");
 
 // Forward declaration - Runtime is defined in runtime.zig
@@ -142,21 +141,10 @@ pub const Awaitable = struct {
 pub fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type {
     return struct {
         base: Base,
-        future_result: FutureResult(T),
+        result: T = undefined,
 
         // Future protocol - Result type
         pub const Result = T;
-
-        pub fn wait(parent: *Parent) Cancelable!WaitResult(T) {
-            // Check if already completed
-            if (parent.impl.future_result.get()) |res| {
-                return .{ .value = res };
-            }
-
-            // Wait for completion using select.wait()
-            const runtime = Parent.getRuntime(parent);
-            return try select.wait(runtime, parent);
-        }
 
         pub fn cancel(parent: *Parent) void {
             parent.impl.base.awaitable.cancel();
@@ -196,13 +184,6 @@ pub fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) 
         /// This is part of the Future protocol for select().
         pub fn asyncCancelWait(parent: *const Parent, _: *Runtime, wait_node: *WaitNode) void {
             parent.impl.base.awaitable.asyncCancelWait(wait_node);
-        }
-
-        /// Gets the result value.
-        /// This is part of the Future protocol for select().
-        /// Asserts that the task has completed.
-        pub fn getResult(parent: *Parent) T {
-            return parent.impl.future_result.get().?;
         }
     };
 }

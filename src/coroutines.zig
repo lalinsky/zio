@@ -8,7 +8,6 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const meta = @import("meta.zig");
-const FutureResult = @import("future_result.zig").FutureResult;
 
 pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
@@ -355,22 +354,21 @@ pub const Coroutine = struct {
     stack: ?Stack,
     finished: bool = false,
 
-    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.ReturnType(func))) void {
+    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *meta.ReturnType(func)) void {
         const Result = meta.ReturnType(func);
         const Args = @TypeOf(args);
 
         const CoroutineData = struct {
             func: *const fn (*anyopaque) callconv(.c) noreturn,
             args: Args,
-            result_ptr: *FutureResult(Result),
+            result_ptr: *Result,
             coro: *Coroutine,
 
             fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
                 const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
                 const coro = coro_data.coro;
 
-                const result = @call(.always_inline, func, coro_data.args);
-                _ = coro_data.result_ptr.set(result);
+                coro_data.result_ptr.* = @call(.always_inline, func, coro_data.args);
 
                 coro.finished = true;
                 switchContext(&coro.context, coro.parent_context_ptr);

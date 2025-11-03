@@ -7,7 +7,6 @@ const xev = @import("xev");
 const Runtime = @import("../runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const FutureImpl = @import("awaitable.zig").FutureImpl;
-const FutureResult = @import("../future_result.zig").FutureResult;
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 
@@ -84,8 +83,7 @@ pub fn BlockingTask(comptime T: type) type {
                     const blocking_task = Self.fromAny(any_blocking_task);
                     const self: *@This() = @fieldParentPtr("blocking_task", blocking_task);
 
-                    const res = @call(.always_inline, func, self.args);
-                    _ = self.blocking_task.impl.future_result.set(res);
+                    self.blocking_task.impl.result = @call(.always_inline, func, self.args);
                 }
 
                 fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
@@ -114,7 +112,7 @@ pub fn BlockingTask(comptime T: type) type {
                             .runtime = runtime,
                             .execute_fn = &TaskData.execute,
                         },
-                        .future_result = .{},
+                        .result = undefined,
                     },
                 },
                 .args = args,

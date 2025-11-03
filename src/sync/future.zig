@@ -7,9 +7,65 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
-const FutureResult = @import("../future_result.zig").FutureResult;
 const meta = @import("../meta.zig");
 const select = @import("../select.zig");
+
+fn FutureResult(comptime T: type) type {
+    const E = meta.ErrorSet(T);
+    const P = meta.Payload(T);
+
+    return struct {
+        const Self = @This();
+        const State = enum(u8) { not_set, setting, ok, err };
+
+        state: std.atomic.Value(State) = std.atomic.Value(State).init(.not_set),
+        err_value: E = undefined,
+        ok_value: P = undefined,
+
+        pub fn set(self: *Self, value: T) bool {
+            const prev = self.state.cmpxchgStrong(.not_set, .setting, .release, .monotonic);
+            if (prev == null) {
+                const is_error_union = @typeInfo(T) == .error_union;
+                if (is_error_union) {
+                    if (value) |ok| {
+                        self.ok_value = ok;
+                        self.state.store(.ok, .release);
+                    } else |err| {
+                        self.err_value = err;
+                        self.state.store(.err, .release);
+                    }
+                } else {
+                    self.ok_value = value;
+                    self.state.store(.ok, .release);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        pub fn isSet(self: *const Self) bool {
+            const state = self.state.load(.acquire);
+            return state == .ok or state == .err;
+        }
+
+        pub fn get(self: *const Self) ?T {
+            const state = self.state.load(.acquire);
+            const is_error_union = @typeInfo(T) == .error_union;
+            if (is_error_union) {
+                return switch (state) {
+                    .ok => self.ok_value,
+                    .err => self.err_value,
+                    else => null,
+                };
+            } else {
+                if (state == .ok) {
+                    return self.ok_value;
+                }
+                return null;
+            }
+        }
+    };
+}
 
 pub fn Future(comptime T: type) type {
     return struct {

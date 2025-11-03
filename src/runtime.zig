@@ -17,7 +17,6 @@ const Coroutine = coroutines.Coroutine;
 
 // const Error = coroutines.Error;
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
-const FutureResult = @import("future_result.zig").FutureResult;
 const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
@@ -150,11 +149,10 @@ pub fn JoinHandle(comptime T: type) type {
 
         /// Helper to get result from awaitable and release it
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
-            const result = switch (awaitable.kind) {
-                .task => Task(T).fromAwaitable(awaitable).impl.future_result.get().?,
-                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.future_result.get().?,
+            self.result = switch (awaitable.kind) {
+                .task => Task(T).fromAwaitable(awaitable).impl.result,
+                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.result,
             };
-            self.result = result;
             rt.releaseAwaitable(awaitable, false);
             self.awaitable = null;
         }
@@ -193,18 +191,14 @@ pub fn JoinHandle(comptime T: type) type {
         /// This is used internally by select() to preserve error union types.
         pub fn getResult(self: *Self) T {
             assert(self.hasResult());
-
-            // If awaitable is null, return cached result
-            if (self.awaitable == null) {
+            if (self.awaitable) |awaitable| {
+                return switch (awaitable.kind) {
+                    .task => Task(T).fromAwaitable(awaitable).impl.result,
+                    .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.result,
+                };
+            } else {
                 return self.result;
             }
-
-            // Get the stored result of type T from awaitable
-            const awaitable = self.awaitable.?;
-            return switch (awaitable.kind) {
-                .task => Task(T).fromAwaitable(awaitable).impl.future_result.get().?,
-                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.future_result.get().?,
-            };
         }
 
         /// Registers a wait node to be notified when the task completes.
