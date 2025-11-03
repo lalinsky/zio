@@ -444,13 +444,38 @@ pub const Socket = struct {
     handle: Handle,
     address: Address,
 
-    /// Set a socket option
-    pub fn setOption(self: Socket, level: i32, optname: u32, value: anytype) !void {
+    /// Enable or disable address reuse (SO_REUSEADDR)
+    /// Allows binding to an address in TIME_WAIT state
+    pub fn setReuseAddress(self: Socket, enabled: bool) !void {
+        try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, enabled);
+    }
+
+    /// Enable or disable port reuse (SO_REUSEPORT)
+    /// Allows multiple sockets to bind to the same port for load balancing
+    pub fn setReusePort(self: Socket, enabled: bool) !void {
+        try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, enabled);
+    }
+
+    /// Enable or disable TCP keepalive (SO_KEEPALIVE)
+    /// Periodically sends keepalive probes to detect dead connections
+    pub fn setKeepAlive(self: Socket, enabled: bool) !void {
+        try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, enabled);
+    }
+
+    /// Enable or disable Nagle's algorithm (TCP_NODELAY)
+    /// When enabled (true), disables buffering for low-latency communication
+    pub fn setNoDelay(self: Socket, enabled: bool) !void {
+        try self.setBoolOption(std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, enabled);
+    }
+
+    /// Helper function to set a boolean socket option
+    fn setBoolOption(self: Socket, level: i32, optname: u32, enabled: bool) !void {
         const sock = if (xev.backend == .iocp)
             @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
         else
             self.handle;
 
+        const value: c_int = if (enabled) 1 else 0;
         const bytes = std.mem.asBytes(&value);
         try std.posix.setsockopt(sock, level, optname, bytes);
     }
@@ -828,7 +853,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
     };
 
     if (options.reuse_address) {
-        try socket.setOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, @as(c_int, 1));
+        try socket.setReuseAddress(true);
     }
 
     try socket.bind(rt, .{ .ip = addr });
