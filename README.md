@@ -89,7 +89,7 @@ fn serverTask(rt: *zio.Runtime) !void {
         errdefer stream.close(rt);
 
         var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
-        task.deinit();
+        task.detach(rt);
     }
 }
 
