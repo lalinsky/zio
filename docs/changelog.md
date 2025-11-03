@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `JoinHandle.deinit()` is now `JoinHandle.detach()`
 - `JoinHandle.cancel()` now waits for the task to complete, after requesting cancelation
 - `JoinHandle` methods `join()`, `cancel()`, and `detach()` now all requires a `*Runtime` parameter
+- Replaced `Socket.setOption()` with specific methods: `setReuseAddress()`, `setReusePort()`, `setKeepAlive()`, and `setNoDelay()`
 
 ### Fixed
 
