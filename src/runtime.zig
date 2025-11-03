@@ -150,7 +150,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// Helper to get result from awaitable and release it
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
             self.result = switch (awaitable.kind) {
-                .task => Task(T).fromAwaitable(awaitable).impl.result,
+                .task => Task(T).fromAwaitable(awaitable).getResult(),
                 .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.result,
             };
             rt.releaseAwaitable(awaitable, false);
@@ -193,7 +193,7 @@ pub fn JoinHandle(comptime T: type) type {
             assert(self.hasResult());
             if (self.awaitable) |awaitable| {
                 return switch (awaitable.kind) {
-                    .task => Task(T).fromAwaitable(awaitable).impl.result,
+                    .task => Task(T).fromAwaitable(awaitable).getResult(),
                     .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.result,
                 };
             } else {
@@ -277,7 +277,7 @@ pub fn JoinHandle(comptime T: type) type {
             return switch (awaitable.kind) {
                 .task => {
                     const task = Task(T).fromAwaitable(awaitable);
-                    const executor = task.impl.base.getExecutor();
+                    const executor = task.base.getExecutor();
                     return executor.id;
                 },
                 .blocking_task => null,
@@ -461,22 +461,22 @@ pub const Executor = struct {
         errdefer task.destroy(self);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.runtime.tasks.add(&task.impl.base.awaitable);
-        errdefer _ = self.runtime.tasks.remove(&task.impl.base.awaitable);
+        try self.runtime.tasks.add(&task.base.awaitable);
+        errdefer _ = self.runtime.tasks.remove(&task.base.awaitable);
 
         // Increment ref count for JoinHandle BEFORE scheduling
         // This prevents race where task completes before we create the handle
-        task.impl.base.awaitable.ref_count.incr();
-        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+        task.base.awaitable.ref_count.incr();
+        errdefer _ = task.base.awaitable.ref_count.decr();
 
         // Schedule the task to run (handles cross-thread notification)
-        self.scheduleTask(&task.impl.base, .maybe_remote);
+        self.scheduleTask(&task.base, .maybe_remote);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
 
         return JoinHandle(Result){
-            .awaitable = &task.impl.base.awaitable,
+            .awaitable = &task.base.awaitable,
             .result = undefined,
         };
     }

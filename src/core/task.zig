@@ -238,24 +238,44 @@ pub const AnyTask = struct {
 pub fn Task(comptime T: type) type {
     return struct {
         const Self = @This();
-        const Impl = FutureImpl(T, AnyTask, Self);
 
-        impl: Impl,
+        base: AnyTask,
 
-        pub const Result = Impl.Result;
-        pub const deinit = Impl.deinit;
-        pub const wait = Impl.wait;
-        pub const cancel = Impl.cancel;
-        pub const fromAny = Impl.fromAny;
-        pub const fromAwaitable = Impl.fromAwaitable;
-        pub const asyncWait = Impl.asyncWait;
-        pub const asyncCancelWait = Impl.asyncCancelWait;
-        pub const toAwaitable = Impl.toAwaitable;
-        pub const getResult = Impl.getResult;
+        pub fn fromAwaitable(awaitable: *Awaitable) *Self {
+            return fromAny(.fromAwaitable(awaitable));
+        }
+
+        pub fn fromAny(task: *AnyTask) *Self {
+            return @fieldParentPtr("base", task);
+        }
 
         pub fn getRuntime(self: *Self) *Runtime {
-            const executor = Executor.fromCoroutine(&self.impl.base.coro);
+            const executor = Executor.fromCoroutine(&self.base.coro);
             return executor.runtime;
+        }
+
+        fn allocationSize() usize {
+            return comptime blk: {
+                var s = @sizeOf(Self);
+                s = std.mem.alignForward(usize, s, @alignOf(T)) + @sizeOf(T);
+                break :blk s;
+            };
+        }
+
+        fn resultOffset() usize {
+            return comptime blk: {
+                var s = @sizeOf(Self);
+                s = std.mem.alignForward(usize, s, @alignOf(T));
+                break :blk s;
+            };
+        }
+
+        fn getResultPtr(self: *Self) *T {
+            return @ptrFromInt(@intFromPtr(self) + @sizeOf(Self));
+        }
+
+        pub fn getResult(self: *Self) T {
+            return self.getResultPtr().*;
         }
 
         pub fn create(
@@ -265,7 +285,7 @@ pub fn Task(comptime T: type) type {
             options: CreateOptions,
         ) !*Self {
             // Allocate task context
-            const allocation = try executor.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(Self)), @sizeOf(Self));
+            const allocation = try executor.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(Self)), allocationSize());
             errdefer executor.allocator.free(allocation);
 
             // Acquire stack from pool
@@ -274,22 +294,19 @@ pub fn Task(comptime T: type) type {
 
             const task: *Self = @ptrCast(allocation);
             task.* = .{
-                .impl = .{
-                    .base = .{
-                        .awaitable = .{
-                            .kind = .task,
-                            .destroy_fn = &Self.destroyFn,
-                            .wait_node = .{
-                                .vtable = &AnyTask.wait_node_vtable,
-                            },
+                .base = .{
+                    .awaitable = .{
+                        .kind = .task,
+                        .destroy_fn = &Self.destroyFn,
+                        .wait_node = .{
+                            .vtable = &AnyTask.wait_node_vtable,
                         },
-                        .coro = .{
-                            .stack = stack,
-                            .parent_context_ptr = &executor.main_context,
-                        },
-                        .state = .init(.new),
                     },
-                    .result = undefined,
+                    .coro = .{
+                        .stack = stack,
+                        .parent_context_ptr = &executor.main_context,
+                    },
+                    .state = .init(.new),
                 },
             };
 
@@ -297,22 +314,22 @@ pub fn Task(comptime T: type) type {
                 fn call(coro: *Coroutine, ctx: *anyopaque) void {
                     const t = Self.fromAny(AnyTask.fromCoroutine(coro));
                     const a: *@TypeOf(args) = @ptrCast(@alignCast(ctx));
-                    t.impl.result = @call(.auto, func, a.*);
+                    t.getResultPtr().* = @call(.auto, func, a.*);
                 }
             };
 
-            task.impl.base.coro.setup(&Wrapper.call, std.mem.asBytes(&args), .fromByteUnits(@alignOf(@TypeOf(args))));
+            task.base.coro.setup(&Wrapper.call, std.mem.asBytes(&args), .fromByteUnits(@alignOf(@TypeOf(args))));
 
             // Set pin count if task is pinned
             if (options.pinned) {
-                task.impl.base.pin_count = 1;
+                task.base.pin_count = 1;
             }
 
             return task;
         }
 
         pub fn destroy(self: *Self, executor: *Executor) void {
-            self.impl.base.awaitable.destroy_fn(executor.runtime, &self.impl.base.awaitable);
+            self.base.awaitable.destroy_fn(executor.runtime, &self.base.awaitable);
         }
 
         pub fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
@@ -325,7 +342,7 @@ pub fn Task(comptime T: type) type {
                 executor.stack_pool.release(stack);
             }
 
-            const allocation: []align(@alignOf(Self)) u8 = @ptrCast(self);
+            const allocation = @as([*]align(@alignOf(Self)) u8, @ptrCast(self))[0..allocationSize()];
             runtime.allocator.free(allocation);
         }
     };
