@@ -25,6 +25,12 @@ pub const Timeout = struct {
         task.timeouts.remove(self);
         task.maybeUpdateTimer();
         self.task = null;
+
+        // TODO: HUGE HACK: this needs proper waiting
+        // If we are the active timeout, we need to wait until it's cleared!!!
+        while (task.timer_cancel_c.state() != .dead) {
+            executor.yield(.ready, .ready, .no_cancel);
+        }
     }
 
     pub fn set(self: *Timeout, rt: *Runtime, timeout_ns: u64) void {
