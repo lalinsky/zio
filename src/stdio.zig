@@ -4,6 +4,7 @@ const AnyTask = @import("core/task.zig").AnyTask;
 const CreateOptions = @import("core/task.zig").CreateOptions;
 const Awaitable = @import("core/awaitable.zig").Awaitable;
 const select = @import("select.zig");
+const zio_net = @import("io/net.zig");
 
 fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*std.Io.AnyFuture {
     return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
@@ -318,31 +319,90 @@ fn sleepImpl(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.SleepError!v
     try rt.sleep(ms);
 }
 
+fn stdIoIpToZio(addr: std.Io.net.IpAddress) zio_net.IpAddress {
+    return switch (addr) {
+        .ip4 => |ip4| zio_net.IpAddress.initIp4(ip4.bytes, ip4.port),
+        .ip6 => |ip6| zio_net.IpAddress.initIp6(ip6.bytes, ip6.port, ip6.flow, ip6.interface.index),
+    };
+}
+
+fn zioIpToStdIo(addr: zio_net.IpAddress) std.Io.net.IpAddress {
+    return switch (addr.any.family) {
+        std.posix.AF.INET => .{ .ip4 = .{
+            .bytes = @bitCast(addr.in.addr),
+            .port = std.mem.bigToNative(u16, addr.in.port),
+        } },
+        std.posix.AF.INET6 => .{ .ip6 = .{
+            .bytes = addr.in6.addr,
+            .port = std.mem.bigToNative(u16, addr.in6.port),
+            .flow = addr.in6.flowinfo,
+            .interface = .{ .index = addr.in6.scope_id },
+        } },
+        else => unreachable,
+    };
+}
+
 fn netListenIpImpl(userdata: ?*anyopaque, address: std.Io.net.IpAddress, options: std.Io.net.IpAddress.ListenOptions) std.Io.net.IpAddress.ListenError!std.Io.net.Server {
-    _ = userdata;
-    _ = address;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_addr = stdIoIpToZio(address);
+    const zio_options: zio_net.IpAddress.ListenOptions = .{
+        .reuse_address = options.reuse_address,
+        .kernel_backlog = options.kernel_backlog,
+    };
+    const server = zio_net.netListenIp(rt, zio_addr, zio_options) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+    return .{
+        .socket = .{
+            .handle = server.socket.handle,
+            .address = zioIpToStdIo(server.socket.address.ip),
+        },
+    };
 }
 
 fn netAcceptImpl(userdata: ?*anyopaque, server: std.Io.net.Socket.Handle) std.Io.net.Server.AcceptError!std.Io.net.Stream {
-    _ = userdata;
-    _ = server;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const stream = zio_net.netAccept(rt, server) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+    return .{
+        .socket = .{
+            .handle = stream.socket.handle,
+            .address = zioIpToStdIo(stream.socket.address.ip),
+        },
+    };
 }
 
 fn netBindIpImpl(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.BindOptions) std.Io.net.IpAddress.BindError!std.Io.net.Socket {
-    _ = userdata;
-    _ = address;
-    _ = options;
-    @panic("TODO");
+    _ = options; // No options used in zio yet
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_addr = stdIoIpToZio(address.*);
+    const socket = zio_net.netBindIp(rt, zio_addr) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+    return .{
+        .handle = socket.handle,
+        .address = zioIpToStdIo(socket.address.ip),
+    };
 }
 
 fn netConnectIpImpl(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Stream {
-    _ = userdata;
-    _ = address;
-    _ = options;
-    @panic("TODO");
+    _ = options; // No options used in zio yet
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_addr = stdIoIpToZio(address.*);
+    const stream = zio_net.netConnectIp(rt, zio_addr) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+    return .{
+        .socket = .{
+            .handle = stream.socket.handle,
+            .address = zioIpToStdIo(stream.socket.address.ip),
+        },
+    };
 }
 
 fn netListenUnixImpl(userdata: ?*anyopaque, address: *const std.Io.net.UnixAddress, options: std.Io.net.UnixAddress.ListenOptions) std.Io.net.UnixAddress.ListenError!std.Io.net.Socket.Handle {
@@ -377,25 +437,24 @@ fn netReceiveImpl(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, messa
 }
 
 fn netReadImpl(userdata: ?*anyopaque, src: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
-    _ = userdata;
-    _ = src;
-    _ = data;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return zio_net.netRead(rt, src, data) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
 }
 
 fn netWriteImpl(userdata: ?*anyopaque, dest: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
-    _ = userdata;
-    _ = dest;
-    _ = header;
-    _ = data;
-    _ = splat;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return zio_net.netWrite(rt, dest, header, data, splat) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
 }
 
 fn netCloseImpl(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle) void {
-    _ = userdata;
-    _ = handle;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    zio_net.netClose(rt, handle);
 }
 
 fn netInterfaceNameResolveImpl(userdata: ?*anyopaque, name: *const std.Io.net.Interface.Name) std.Io.net.Interface.Name.ResolveError!std.Io.net.Interface {
