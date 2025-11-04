@@ -7,8 +7,6 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const meta = @import("meta.zig");
-const FutureResult = @import("future_result.zig").FutureResult;
 
 pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
@@ -38,6 +36,12 @@ pub const Context = switch (builtin.cpu.arch) {
         pc: u64,
         extra: ExtraContext,
     },
+    .riscv64 => extern struct {
+        sp: u64,
+        fp: u64,
+        pc: u64,
+        extra: ExtraContext,
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -52,6 +56,12 @@ pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Contex
             .extra = undefined,
         },
         .aarch64 => .{
+            .sp = @intFromPtr(stack_ptr),
+            .fp = 0,
+            .pc = @intFromPtr(entry_point),
+            .extra = undefined,
+        },
+        .riscv64 => .{
             .sp = @intFromPtr(stack_ptr),
             .fp = 0,
             .pc = @intFromPtr(entry_point),
@@ -299,18 +309,97 @@ pub fn switchContext(
               .ffr = true,
               .memory = true,
             }),
+        .riscv64 => asm volatile (
+            \\ lla t0, 0f
+            \\ sd t0, 16(a0)
+            \\ sd sp, 0(a0)
+            \\ sd s0, 8(a0)
+            \\
+            \\ ld sp, 0(a1)
+            \\ ld s0, 8(a1)
+            \\ ld t0, 16(a1)
+            \\ jr t0
+            \\0:
+            :
+            : [current] "{a0}" (current_context),
+              [new] "{a1}" (new_context),
+            : .{
+              .x1 = true,   // ra
+              .x2 = true,   // sp
+              .x3 = true,   // gp
+              .x4 = true,   // tp
+              .x5 = true,   // t0
+              .x6 = true,   // t1
+              .x7 = true,   // t2
+              .x8 = true,   // s0/fp
+              .x9 = true,   // s1
+              .x10 = true,  // a0
+              .x11 = true,  // a1
+              .x12 = true,  // a2
+              .x13 = true,  // a3
+              .x14 = true,  // a4
+              .x15 = true,  // a5
+              .x16 = true,  // a6
+              .x17 = true,  // a7
+              .x18 = true,  // s2
+              .x19 = true,  // s3
+              .x20 = true,  // s4
+              .x21 = true,  // s5
+              .x22 = true,  // s6
+              .x23 = true,  // s7
+              .x24 = true,  // s8
+              .x25 = true,  // s9
+              .x26 = true,  // s10
+              .x27 = true,  // s11
+              .x28 = true,  // t3
+              .x29 = true,  // t4
+              .x30 = true,  // t5
+              .x31 = true,  // t6
+              .f0 = true,   // ft0
+              .f1 = true,   // ft1
+              .f2 = true,   // ft2
+              .f3 = true,   // ft3
+              .f4 = true,   // ft4
+              .f5 = true,   // ft5
+              .f6 = true,   // ft6
+              .f7 = true,   // ft7
+              .f8 = true,   // fs0
+              .f9 = true,   // fs1
+              .f10 = true,  // fa0
+              .f11 = true,  // fa1
+              .f12 = true,  // fa2
+              .f13 = true,  // fa3
+              .f14 = true,  // fa4
+              .f15 = true,  // fa5
+              .f16 = true,  // fa6
+              .f17 = true,  // fa7
+              .f18 = true,  // fs2
+              .f19 = true,  // fs3
+              .f20 = true,  // fs4
+              .f21 = true,  // fs5
+              .f22 = true,  // fs6
+              .f23 = true,  // fs7
+              .f24 = true,  // fs8
+              .f25 = true,  // fs9
+              .f26 = true,  // fs10
+              .f27 = true,  // fs11
+              .f28 = true,  // ft8
+              .f29 = true,  // ft9
+              .f30 = true,  // ft10
+              .f31 = true,  // ft11
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
 
-/// Entry point for coroutines that reads function pointer from stack and passes data pointer.
+/// Entry point for coroutines that reads function pointer and context from stack.
 ///
-/// Expected stack layout for all platforms.
-///   rsp/sp + 0 = CoroutineData.func     (function pointer)
-///   rsp/sp + 8 = CoroutineData.args     (args data)
-///   rsp/sp + ... = CoroutineData.result (result storage)
+/// Expected stack layout (Entrypoint structure):
+///   rsp/sp + 0 = func     (function pointer)
+///   rsp/sp + 8 = context  (context pointer)
 ///
-/// The function is called with a pointer to the entire CoroutineData structure.
+/// The function is called with the context pointer as the first argument.
 ///
 /// x86_64 handles stack alignment here since we use JMP instead of CALL:
 /// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
@@ -327,23 +416,29 @@ fn coroEntry() callconv(.naked) noreturn {
                 asm volatile (
                     \\ subq $32, %%rsp
                     \\ pushq $0
-                    \\ leaq 40(%%rsp), %%rcx
+                    \\ movq 48(%%rsp), %%rcx
                     \\ jmpq *40(%%rsp)
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
                 asm volatile (
                     \\ pushq $0
-                    \\ leaq 8(%%rsp), %%rdi
+                    \\ movq 16(%%rsp), %%rdi
                     \\ jmpq *8(%%rsp)
                 );
             }
         },
         .aarch64 => asm volatile (
             \\ mov x30, #0
-            \\ mov x0, sp
+            \\ ldr x0, [sp, #8]
             \\ ldr x2, [sp]
             \\ br x2
+        ),
+        .riscv64 => asm volatile (
+            \\ li ra, 0
+            \\ ld a0, 8(sp)
+            \\ ld t0, 0(sp)
+            \\ jr t0
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -355,25 +450,40 @@ pub const Coroutine = struct {
     stack: ?Stack,
     finished: bool = false,
 
-    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.ReturnType(func))) void {
-        const Result = meta.ReturnType(func);
-        const Args = @TypeOf(args);
+    /// Step into the coroutine
+    pub fn step(self: *Coroutine) void {
+        switchContext(self.parent_context_ptr, &self.context);
+    }
+
+    /// Yield control back to the caller
+    pub fn yield(self: *Coroutine) void {
+        switchContext(&self.context, self.parent_context_ptr);
+    }
+
+    /// Yield control to another coroutine
+    pub fn yieldTo(self: *Coroutine, other: *Coroutine) void {
+        switchContext(&self.context, &other.context);
+    }
+
+    pub fn setup(self: *Coroutine, func: *const fn (*Coroutine, ?*anyopaque) void, userdata: ?*anyopaque) void {
+        const Entrypoint = extern struct {
+            func: *const fn (*anyopaque) callconv(.c) noreturn,
+            context: *anyopaque,
+        };
 
         const CoroutineData = struct {
-            func: *const fn (*anyopaque) callconv(.c) noreturn,
-            args: Args,
-            result_ptr: *FutureResult(Result),
             coro: *Coroutine,
+            func: *const fn (*Coroutine, ?*anyopaque) void,
+            userdata: ?*anyopaque,
 
-            fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
-                const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
+            fn entrypointFn(context_ptr: *anyopaque) callconv(.c) noreturn {
+                const coro_data: *@This() = @ptrCast(@alignCast(context_ptr));
                 const coro = coro_data.coro;
 
-                const result = @call(.always_inline, func, coro_data.args);
-                _ = coro_data.result_ptr.set(result);
+                coro_data.func(coro, coro_data.userdata);
 
                 coro.finished = true;
-                switchContext(&coro.context, coro.parent_context_ptr);
+                coro.yield();
                 unreachable;
             }
         };
@@ -381,20 +491,23 @@ pub const Coroutine = struct {
         // Convert the stack pointer to ints for calculations
         const stack = self.stack.?; // Stack must be non-null during setup
         const stack_base = @intFromPtr(stack.ptr);
-        const stack_end = stack_base + stack.len;
+        var stack_end = stack_base + stack.len;
 
-        // Store function pointer, args, and result space as a contiguous block at the end of stack
-        const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
-
-        // Set up function pointer, args, result_ptr, and coro pointer
-        const data: *CoroutineData = @ptrFromInt(data_ptr);
-        data.func = &CoroutineData.wrapper;
-        data.args = args;
-        data.result_ptr = result_ptr;
+        // Copy our wrapper to stack
+        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), @alignOf(CoroutineData));
+        const data: *CoroutineData = @ptrFromInt(stack_end);
         data.coro = self;
+        data.func = func;
+        data.userdata = userdata;
+
+        // Allocate and configure structure for coroEntry
+        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(Entrypoint), stack_alignment);
+        const entry: *Entrypoint = @ptrFromInt(stack_end);
+        entry.func = &CoroutineData.entrypointFn;
+        entry.context = data;
 
         // Initialize the context with the entry point
-        self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);
+        self.context = initContext(@ptrCast(@alignCast(entry)), &coroEntry);
 
         // Initialize Windows TIB fields for the coroutine stack
         if (builtin.os.tag == .windows) {
@@ -405,3 +518,140 @@ pub const Coroutine = struct {
         }
     }
 };
+
+pub fn Closure(func: anytype) type {
+    const func_info = @typeInfo(@TypeOf(func));
+    const ReturnType = func_info.@"fn".return_type.?;
+    const FullArgs = std.meta.ArgsTuple(@TypeOf(func));
+
+    // Build a new tuple type without the first argument (Coroutine)
+    const args_fields = std.meta.fields(FullArgs);
+    comptime var user_types: [args_fields.len - 1]type = undefined;
+    inline for (args_fields[1..], 0..) |field, i| {
+        user_types[i] = field.type;
+    }
+    const UserArgs = std.meta.Tuple(&user_types);
+
+    return struct {
+        args: UserArgs,
+        result: ReturnType = undefined,
+
+        pub fn init(a: UserArgs) @This() {
+            return .{ .args = a };
+        }
+
+        pub fn start(coro: *Coroutine, userdata: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            // Prepend the coroutine to the args tuple
+            const full_args = .{coro} ++ self.args;
+            self.result = @call(.auto, func, full_args);
+        }
+    };
+}
+
+test "Coroutine: basic" {
+    const stack = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack);
+
+    var parent_context: Context = undefined;
+    var coro: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .stack = stack,
+    };
+
+    const Fn = struct {
+        fn sum(_: *Coroutine, a: u32, b: u32) u32 {
+            return a + b;
+        }
+    };
+
+    const C = Closure(Fn.sum);
+    var closure = C.init(.{ 1, 2 });
+    coro.setup(&C.start, &closure);
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    try std.testing.expectEqual(3, closure.result);
+}
+
+test "Coroutine: message passing" {
+    const stack1 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack1);
+    const stack2 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack2);
+
+    var parent_context: Context = undefined;
+
+    // Simple single-slot channel
+    const Channel = struct {
+        data: ?i32 = null,
+
+        fn send(self: *@This(), coro: *Coroutine, value: i32) void {
+            while (self.data != null) {
+                coro.yield(); // wait for slot to be empty
+            }
+            self.data = value;
+        }
+
+        fn recv(self: *@This(), coro: *Coroutine) i32 {
+            while (self.data == null) {
+                coro.yield(); // wait for data
+            }
+            const value = self.data.?;
+            self.data = null;
+            return value;
+        }
+    };
+
+    var chan_to_receiver = Channel{};
+    var chan_to_sender = Channel{};
+
+    var coro1: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack1 };
+    var coro2: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack2 };
+
+    const sender = struct {
+        fn run(coro: *Coroutine, send_chan: *Channel, recv_chan: *Channel) void {
+            var counter: i32 = 0;
+            while (counter < 10) {
+                send_chan.send(coro, counter);
+                const reply = recv_chan.recv(coro);
+                assert(reply == counter); // verify we got back what we sent
+                counter += 1;
+            }
+            // Send EOF
+            send_chan.send(coro, -1);
+        }
+    }.run;
+
+    const receiver = struct {
+        fn run(coro: *Coroutine, recv_chan: *Channel, send_chan: *Channel) i32 {
+            var last: i32 = 0;
+            while (true) {
+                const msg = recv_chan.recv(coro);
+                if (msg == -1) break;
+                last = msg;
+                send_chan.send(coro, msg); // echo it back
+            }
+            return last;
+        }
+    }.run;
+
+    const SenderClosure = Closure(sender);
+    const ReceiverClosure = Closure(receiver);
+
+    var sender_closure = SenderClosure.init(.{ &chan_to_receiver, &chan_to_sender });
+    var receiver_closure = ReceiverClosure.init(.{ &chan_to_receiver, &chan_to_sender });
+
+    coro1.setup(&SenderClosure.start, &sender_closure);
+    coro2.setup(&ReceiverClosure.start, &receiver_closure);
+
+    // Round-robin scheduler
+    while (!coro1.finished or !coro2.finished) {
+        if (!coro1.finished) coro1.step();
+        if (!coro2.finished) coro2.step();
+    }
+
+    try std.testing.expectEqual(9, receiver_closure.result);
+}

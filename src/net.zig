@@ -64,10 +64,13 @@ pub fn lookupHost(
     name: []const u8,
     port: u16,
 ) LookupHostError!IpAddressIterator {
-    var task = try runtime.spawnBlocking(
+    var task = runtime.spawnBlocking(
         lookupHostBlocking,
         .{ name, port },
-    );
+    ) catch |err| switch (err) {
+        error.ResultTooLarge, error.ContextTooLarge => unreachable,
+        else => |e| return @as(LookupHostError, e),
+    };
     defer task.cancel(runtime);
 
     return try task.join(runtime);
