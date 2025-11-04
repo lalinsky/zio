@@ -46,19 +46,19 @@ jobs:
         sudo apt-get install -q -y qemu-user-static
 
     - name: Build
-      run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.qemu_binary && '-Dxev_backend=epoll' || '' }}
       timeout-minutes: 5
 
     - name: Build examples
-      run: zig build examples ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build examples ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.qemu_binary && '-Dxev_backend=epoll' || '' }}
       timeout-minutes: 5
 
     - name: Build benchmarks
-      run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.qemu_binary && '-Dxev_backend=epoll' || '' }}
       timeout-minutes: 5
 
     - name: Build test binary
-      run: zig build build-tests ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build build-tests ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.qemu_binary && '-Dxev_backend=epoll' || '' }}
       timeout-minutes: 5
 
     - name: Run tests (native)

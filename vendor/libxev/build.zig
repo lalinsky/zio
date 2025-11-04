@@ -11,10 +11,6 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("xev", .{
-        .root_source_file = b.path("src/main.zig"),
-    });
-
     const emit_man = b.option(
         bool,
         "emit-man-pages",
@@ -40,6 +36,26 @@ pub fn build(b: *std.Build) !void {
         "emit-example",
         "Install the example binaries to zig-out",
     ) orelse false;
+
+    const backend = b.option(
+        []const u8,
+        "backend",
+        "Override the default backend (io_uring, epoll, kqueue, iocp, wasi_poll)",
+    );
+
+    const xev_module = b.addModule("xev", .{
+        .root_source_file = b.path("src/main.zig"),
+    });
+
+    if (backend) |be| {
+        const options = b.addOptions();
+        options.addOption(?[]const u8, "backend_override", be);
+        xev_module.addOptions("build_options", options);
+    } else {
+        const options = b.addOptions();
+        options.addOption(?[]const u8, "backend_override", null);
+        xev_module.addOptions("build_options", options);
+    }
 
     const c_api_module = b.createModule(.{
         .root_source_file = b.path("src/c_api.zig"),

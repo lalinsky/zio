@@ -1,5 +1,8 @@
+const std = @import("std");
 const builtin = @import("builtin");
 const stream = @import("watcher/stream.zig");
+
+const build_options = @import("build_options");
 
 /// The backend types.
 pub const Backend = enum {
@@ -11,6 +14,12 @@ pub const Backend = enum {
 
     /// Returns a recommend default backend from inspecting the system.
     pub fn default() Backend {
+        // Check for build-time override
+        if (build_options.backend_override) |override| {
+            return std.meta.stringToEnum(Backend, override) orelse
+                @compileError("Invalid backend override: " ++ override);
+        }
+
         return switch (builtin.os.tag) {
             .linux => .io_uring,
             .ios, .macos => .kqueue,
