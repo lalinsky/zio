@@ -38,6 +38,18 @@ pub const Context = switch (builtin.cpu.arch) {
         pc: u64,
         extra: ExtraContext,
     },
+    .riscv64 => extern struct {
+        sp: u64,
+        fp: u64,
+        ra: u64,
+        extra: ExtraContext,
+    },
+    .riscv32 => extern struct {
+        sp: u32,
+        fp: u32,
+        ra: u32,
+        extra: ExtraContext,
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -55,6 +67,18 @@ pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Contex
             .sp = @intFromPtr(stack_ptr),
             .fp = 0,
             .pc = @intFromPtr(entry_point),
+            .extra = undefined,
+        },
+        .riscv64 => .{
+            .sp = @intFromPtr(stack_ptr),
+            .fp = 0,
+            .ra = @intFromPtr(entry_point),
+            .extra = undefined,
+        },
+        .riscv32 => .{
+            .sp = @intCast(@intFromPtr(stack_ptr)),
+            .fp = 0,
+            .ra = @intCast(@intFromPtr(entry_point)),
             .extra = undefined,
         },
         else => @compileError("unsupported architecture"),
@@ -299,6 +323,166 @@ pub fn switchContext(
               .ffr = true,
               .memory = true,
             }),
+        .riscv64 => asm volatile (
+            \\ lla t0, 0f
+            \\ sd t0, 16(a0)
+            \\ sd sp, 0(a0)
+            \\ sd s0, 8(a0)
+            \\
+            \\ ld sp, 0(a1)
+            \\ ld s0, 8(a1)
+            \\ ld t0, 16(a1)
+            \\ jr t0
+            \\0:
+            :
+            : [current] "{a0}" (current_context),
+              [new] "{a1}" (new_context),
+            : .{
+              .ra = true,
+              .sp = true,
+              .gp = true,
+              .tp = true,
+              .t0 = true,
+              .t1 = true,
+              .t2 = true,
+              .s0 = true,
+              .s1 = true,
+              .a0 = true,
+              .a1 = true,
+              .a2 = true,
+              .a3 = true,
+              .a4 = true,
+              .a5 = true,
+              .a6 = true,
+              .a7 = true,
+              .s2 = true,
+              .s3 = true,
+              .s4 = true,
+              .s5 = true,
+              .s6 = true,
+              .s7 = true,
+              .s8 = true,
+              .s9 = true,
+              .s10 = true,
+              .s11 = true,
+              .t3 = true,
+              .t4 = true,
+              .t5 = true,
+              .t6 = true,
+              .ft0 = true,
+              .ft1 = true,
+              .ft2 = true,
+              .ft3 = true,
+              .ft4 = true,
+              .ft5 = true,
+              .ft6 = true,
+              .ft7 = true,
+              .fs0 = true,
+              .fs1 = true,
+              .fa0 = true,
+              .fa1 = true,
+              .fa2 = true,
+              .fa3 = true,
+              .fa4 = true,
+              .fa5 = true,
+              .fa6 = true,
+              .fa7 = true,
+              .fs2 = true,
+              .fs3 = true,
+              .fs4 = true,
+              .fs5 = true,
+              .fs6 = true,
+              .fs7 = true,
+              .fs8 = true,
+              .fs9 = true,
+              .fs10 = true,
+              .fs11 = true,
+              .ft8 = true,
+              .ft9 = true,
+              .ft10 = true,
+              .ft11 = true,
+              .memory = true,
+            }),
+        .riscv32 => asm volatile (
+            \\ lla t0, 0f
+            \\ sw t0, 8(a0)
+            \\ sw sp, 0(a0)
+            \\ sw s0, 4(a0)
+            \\
+            \\ lw sp, 0(a1)
+            \\ lw s0, 4(a1)
+            \\ lw t0, 8(a1)
+            \\ jr t0
+            \\0:
+            :
+            : [current] "{a0}" (current_context),
+              [new] "{a1}" (new_context),
+            : .{
+              .ra = true,
+              .sp = true,
+              .gp = true,
+              .tp = true,
+              .t0 = true,
+              .t1 = true,
+              .t2 = true,
+              .s0 = true,
+              .s1 = true,
+              .a0 = true,
+              .a1 = true,
+              .a2 = true,
+              .a3 = true,
+              .a4 = true,
+              .a5 = true,
+              .a6 = true,
+              .a7 = true,
+              .s2 = true,
+              .s3 = true,
+              .s4 = true,
+              .s5 = true,
+              .s6 = true,
+              .s7 = true,
+              .s8 = true,
+              .s9 = true,
+              .s10 = true,
+              .s11 = true,
+              .t3 = true,
+              .t4 = true,
+              .t5 = true,
+              .t6 = true,
+              .ft0 = true,
+              .ft1 = true,
+              .ft2 = true,
+              .ft3 = true,
+              .ft4 = true,
+              .ft5 = true,
+              .ft6 = true,
+              .ft7 = true,
+              .fs0 = true,
+              .fs1 = true,
+              .fa0 = true,
+              .fa1 = true,
+              .fa2 = true,
+              .fa3 = true,
+              .fa4 = true,
+              .fa5 = true,
+              .fa6 = true,
+              .fa7 = true,
+              .fs2 = true,
+              .fs3 = true,
+              .fs4 = true,
+              .fs5 = true,
+              .fs6 = true,
+              .fs7 = true,
+              .fs8 = true,
+              .fs9 = true,
+              .fs10 = true,
+              .fs11 = true,
+              .ft8 = true,
+              .ft9 = true,
+              .ft10 = true,
+              .ft11 = true,
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -344,6 +528,18 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ mov x0, sp
             \\ ldr x2, [sp]
             \\ br x2
+        ),
+        .riscv64 => asm volatile (
+            \\ li ra, 0
+            \\ mv a0, sp
+            \\ ld t0, 0(sp)
+            \\ jr t0
+        ),
+        .riscv32 => asm volatile (
+            \\ li ra, 0
+            \\ mv a0, sp
+            \\ lw t0, 0(sp)
+            \\ jr t0
         ),
         else => @compileError("unsupported architecture"),
     }
