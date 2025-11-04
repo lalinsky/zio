@@ -422,9 +422,13 @@ pub const Coroutine = struct {
 };
 
 pub fn Closure(func: anytype) type {
+    const func_info = @typeInfo(@TypeOf(func));
+    const ReturnType = func_info.@"fn".return_type.?;
     const Args = std.meta.ArgsTuple(@TypeOf(func));
+
     return struct {
         args: Args,
+        result: ReturnType = undefined,
 
         pub fn init(a: Args) @This() {
             return .{ .args = a };
@@ -432,7 +436,7 @@ pub fn Closure(func: anytype) type {
 
         pub fn start(_: *Coroutine, userdata: ?*anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(userdata));
-            @call(.auto, func, self.args);
+            self.result = @call(.auto, func, self.args);
         }
     };
 }
@@ -448,20 +452,18 @@ test "Coroutine: basic" {
     };
 
     const Fn = struct {
-        fn sum(a: u32, b: u32, c: *u32) void {
-            c.* = a + b;
+        fn sum(a: u32, b: u32) u32 {
+            return a + b;
         }
     };
 
-    var result: u32 = 0;
-
     const C = Closure(Fn.sum);
-    var closure = C.init(.{1, 2, &result});
+    var closure = C.init(.{ 1, 2 });
     coro.setup(&C.start, &closure);
 
     while (!coro.finished) {
         coro.step();
     }
 
-    try std.testing.expectEqual(3, result);
+    try std.testing.expectEqual(3, closure.result);
 }
