@@ -67,5 +67,7 @@ jobs:
 
     - name: Run tests (QEMU)
       if: matrix.qemu_binary
-      run: ${{ matrix.qemu_binary }} env TEST_FILTER="sleep" ./zig-out/bin/test
+      run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
       timeout-minutes: 10
+      environment:
+        TEST_FILTER: sleep
