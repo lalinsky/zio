@@ -35,7 +35,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: master
+        version: 0.16.0-dev.1188+74c23a237
 
     - name: Build
       run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
