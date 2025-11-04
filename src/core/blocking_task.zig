@@ -35,25 +35,19 @@ pub const AnyBlockingTask = struct {
         start: *const fn (context: *const anyopaque, result: *anyopaque) void,
         destroy_fn: *const fn (*Runtime, *Awaitable) void,
     ) !*AnyBlockingTask {
-        var allocation_size: usize = @sizeOf(AnyBlockingTask);
+        // Allocate task with closure
+        const alloc_result = try Closure.alloc(
+            AnyBlockingTask,
+            runtime.allocator,
+            result_len,
+            result_alignment,
+            context.len,
+            context_alignment,
+            start,
+        );
+        errdefer alloc_result.closure.free(AnyBlockingTask, runtime.allocator, alloc_result.task);
 
-        // Reserve space for result
-        if (result_len > Closure.max_result_len) return error.ResultTooLarge;
-        if (result_alignment.toByteUnits() > Closure.max_result_alignment) return error.ResultTooLarge;
-        const result_padding = result_alignment.forward(allocation_size) - allocation_size;
-        allocation_size += result_padding + result_len;
-
-        // Reserve space for context
-        if (context.len > Closure.max_context_len) return error.ContextTooLarge;
-        if (context_alignment.toByteUnits() > Closure.max_context_alignment) return error.ContextTooLarge;
-        const context_padding = context_alignment.forward(allocation_size) - allocation_size;
-        allocation_size += context_padding + context.len;
-
-        // Allocate task
-        const allocation = try runtime.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(AnyBlockingTask)), allocation_size);
-        errdefer runtime.allocator.free(allocation);
-
-        const self: *AnyBlockingTask = @ptrCast(allocation.ptr);
+        const self = alloc_result.task;
         self.* = .{
             .awaitable = .{
                 .kind = .blocking_task,
@@ -64,13 +58,7 @@ pub const AnyBlockingTask = struct {
             },
             .thread_pool_task = .{ .callback = threadPoolCallback },
             .runtime = runtime,
-            .closure = .{
-                .start = start,
-                .result_padding = @intCast(result_padding),
-                .result_len = @intCast(result_len),
-                .context_padding = @intCast(context_padding),
-                .context_len = @intCast(context.len),
-            },
+            .closure = alloc_result.closure,
         };
 
         // Copy context data into the allocation
@@ -161,8 +149,7 @@ pub fn BlockingTask(comptime T: type) type {
 
         pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
-            const allocation = any_blocking_task.closure.getAllocationSlice(AnyBlockingTask, any_blocking_task);
-            rt.allocator.free(allocation);
+            any_blocking_task.closure.free(AnyBlockingTask, rt.allocator, any_blocking_task);
         }
 
         pub fn create(

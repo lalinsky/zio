@@ -34,6 +34,7 @@ pub const Closure = struct {
     pub const max_result_alignment = 1 << 4;
     pub const max_context_len = 1 << 12;
     pub const max_context_alignment = 1 << 4;
+    pub const task_alignment = 1 << 4;
 
     pub fn getResultPtr(self: *const Closure, comptime TaskType: type, task: *TaskType) *anyopaque {
         const result_ptr = @intFromPtr(task) + @sizeOf(TaskType) + self.result_padding;
@@ -59,13 +60,63 @@ pub const Closure = struct {
         return context[0..self.context_len];
     }
 
-    pub fn getAllocationSlice(self: *const Closure, comptime TaskType: type, task: *TaskType) []align(@alignOf(TaskType)) u8 {
+    pub fn getAllocationSlice(self: *const Closure, comptime TaskType: type, task: *TaskType) []align(task_alignment) u8 {
         var allocation_size: usize = @sizeOf(TaskType);
         allocation_size += self.result_padding;
         allocation_size += self.result_len;
         allocation_size += self.context_padding;
         allocation_size += self.context_len;
-        return @as([*]align(@alignOf(TaskType)) u8, @ptrCast(task))[0..allocation_size];
+        return @as([*]align(task_alignment) u8, @ptrCast(@alignCast(task)))[0..allocation_size];
+    }
+
+    pub fn AllocResult(comptime TaskType: type) type {
+        return struct {
+            closure: Closure,
+            task: *TaskType,
+        };
+    }
+
+    pub fn alloc(
+        comptime TaskType: type,
+        allocator: std.mem.Allocator,
+        result_len: usize,
+        result_alignment: std.mem.Alignment,
+        context_len: usize,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    ) !AllocResult(TaskType) {
+        var allocation_size: usize = @sizeOf(TaskType);
+
+        // Reserve space for result
+        if (result_len > max_result_len) return error.ResultTooLarge;
+        if (result_alignment.toByteUnits() > max_result_alignment) return error.ResultTooLarge;
+        const result_padding = result_alignment.forward(allocation_size) - allocation_size;
+        allocation_size += result_padding + result_len;
+
+        // Reserve space for context
+        if (context_len > max_context_len) return error.ContextTooLarge;
+        if (context_alignment.toByteUnits() > max_context_alignment) return error.ContextTooLarge;
+        const context_padding = context_alignment.forward(allocation_size) - allocation_size;
+        allocation_size += context_padding + context_len;
+
+        // Allocate task
+        const allocation = try allocator.alignedAlloc(u8, .fromByteUnits(task_alignment), allocation_size);
+
+        return .{
+            .closure = .{
+                .start = start,
+                .result_len = @intCast(result_len),
+                .result_padding = @intCast(result_padding),
+                .context_len = @intCast(context_len),
+                .context_padding = @intCast(context_padding),
+            },
+            .task = @ptrCast(allocation.ptr),
+        };
+    }
+
+    pub fn free(self: *const Closure, comptime TaskType: type, allocator: std.mem.Allocator, task: *TaskType) void {
+        const allocation = self.getAllocationSlice(TaskType, task);
+        allocator.free(allocation);
     }
 };
 
@@ -290,8 +341,7 @@ pub const AnyTask = struct {
             executor.stack_pool.release(stack);
         }
 
-        const allocation = self.closure.getAllocationSlice(AnyTask, self);
-        rt.allocator.free(allocation);
+        self.closure.free(AnyTask, rt.allocator, self);
     }
 
     pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
@@ -313,29 +363,23 @@ pub const AnyTask = struct {
         start: *const fn (context: *const anyopaque, result: *anyopaque) void,
         options: CreateOptions,
     ) !*AnyTask {
-        var allocation_size: usize = @sizeOf(AnyTask);
-
-        // Reserve space for result
-        if (result_len > Closure.max_result_len) return error.ResultTooLarge;
-        if (result_alignment.toByteUnits() > Closure.max_result_alignment) return error.ResultTooLarge;
-        const result_padding = result_alignment.forward(allocation_size) - allocation_size;
-        allocation_size += result_padding + result_len;
-
-        // Reserve space for context
-        if (context.len > Closure.max_context_len) return error.ContextTooLarge;
-        if (context_alignment.toByteUnits() > Closure.max_context_alignment) return error.ContextTooLarge;
-        const context_padding = context_alignment.forward(allocation_size) - allocation_size;
-        allocation_size += context_padding + context.len;
-
-        // Allocate task context
-        const allocation = try executor.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(AnyTask)), allocation_size);
-        errdefer executor.allocator.free(allocation);
+        // Allocate task with closure
+        const alloc_result = try Closure.alloc(
+            AnyTask,
+            executor.allocator,
+            result_len,
+            result_alignment,
+            context.len,
+            context_alignment,
+            start,
+        );
+        errdefer alloc_result.closure.free(AnyTask, executor.allocator, alloc_result.task);
 
         // Acquire stack from pool
         const stack = try executor.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
         errdefer executor.stack_pool.release(stack);
 
-        const self: *AnyTask = @ptrCast(allocation.ptr);
+        const self = alloc_result.task;
         self.* = .{
             .state = .init(.new),
             .awaitable = .{
@@ -349,13 +393,7 @@ pub const AnyTask = struct {
                 .stack = stack,
                 .parent_context_ptr = &executor.main_context,
             },
-            .closure = .{
-                .start = start,
-                .result_padding = @intCast(result_padding),
-                .result_len = @intCast(result_len),
-                .context_padding = @intCast(context_padding),
-                .context_len = @intCast(context.len),
-            },
+            .closure = alloc_result.closure,
             .pin_count = if (options.pinned) 1 else 0,
         };
 
