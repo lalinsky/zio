@@ -36,6 +36,12 @@ pub const Context = switch (builtin.cpu.arch) {
         pc: u64,
         extra: ExtraContext,
     },
+    .riscv64 => extern struct {
+        sp: u64,
+        fp: u64,
+        pc: u64,
+        extra: ExtraContext,
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -50,6 +56,12 @@ pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Contex
             .extra = undefined,
         },
         .aarch64 => .{
+            .sp = @intFromPtr(stack_ptr),
+            .fp = 0,
+            .pc = @intFromPtr(entry_point),
+            .extra = undefined,
+        },
+        .riscv64 => .{
             .sp = @intFromPtr(stack_ptr),
             .fp = 0,
             .pc = @intFromPtr(entry_point),
@@ -297,6 +309,86 @@ pub fn switchContext(
               .ffr = true,
               .memory = true,
             }),
+        .riscv64 => asm volatile (
+            \\ lla t0, 0f
+            \\ sd t0, 16(a0)
+            \\ sd sp, 0(a0)
+            \\ sd s0, 8(a0)
+            \\
+            \\ ld sp, 0(a1)
+            \\ ld s0, 8(a1)
+            \\ ld t0, 16(a1)
+            \\ jr t0
+            \\0:
+            :
+            : [current] "{a0}" (current_context),
+              [new] "{a1}" (new_context),
+            : .{
+              .x1 = true,   // ra
+              .x2 = true,   // sp
+              .x3 = true,   // gp
+              .x4 = true,   // tp
+              .x5 = true,   // t0
+              .x6 = true,   // t1
+              .x7 = true,   // t2
+              .x8 = true,   // s0/fp
+              .x9 = true,   // s1
+              .x10 = true,  // a0
+              .x11 = true,  // a1
+              .x12 = true,  // a2
+              .x13 = true,  // a3
+              .x14 = true,  // a4
+              .x15 = true,  // a5
+              .x16 = true,  // a6
+              .x17 = true,  // a7
+              .x18 = true,  // s2
+              .x19 = true,  // s3
+              .x20 = true,  // s4
+              .x21 = true,  // s5
+              .x22 = true,  // s6
+              .x23 = true,  // s7
+              .x24 = true,  // s8
+              .x25 = true,  // s9
+              .x26 = true,  // s10
+              .x27 = true,  // s11
+              .x28 = true,  // t3
+              .x29 = true,  // t4
+              .x30 = true,  // t5
+              .x31 = true,  // t6
+              .f0 = true,   // ft0
+              .f1 = true,   // ft1
+              .f2 = true,   // ft2
+              .f3 = true,   // ft3
+              .f4 = true,   // ft4
+              .f5 = true,   // ft5
+              .f6 = true,   // ft6
+              .f7 = true,   // ft7
+              .f8 = true,   // fs0
+              .f9 = true,   // fs1
+              .f10 = true,  // fa0
+              .f11 = true,  // fa1
+              .f12 = true,  // fa2
+              .f13 = true,  // fa3
+              .f14 = true,  // fa4
+              .f15 = true,  // fa5
+              .f16 = true,  // fa6
+              .f17 = true,  // fa7
+              .f18 = true,  // fs2
+              .f19 = true,  // fs3
+              .f20 = true,  // fs4
+              .f21 = true,  // fs5
+              .f22 = true,  // fs6
+              .f23 = true,  // fs7
+              .f24 = true,  // fs8
+              .f25 = true,  // fs9
+              .f26 = true,  // fs10
+              .f27 = true,  // fs11
+              .f28 = true,  // ft8
+              .f29 = true,  // ft9
+              .f30 = true,  // ft10
+              .f31 = true,  // ft11
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -341,6 +433,12 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ ldr x0, [sp, #8]
             \\ ldr x2, [sp]
             \\ br x2
+        ),
+        .riscv64 => asm volatile (
+            \\ li ra, 0
+            \\ ld a0, 8(sp)
+            \\ ld t0, 0(sp)
+            \\ jr t0
         ),
         else => @compileError("unsupported architecture"),
     }

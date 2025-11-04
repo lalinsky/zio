@@ -18,6 +18,10 @@ jobs:
             target: aarch64-linux
             qemu_binary: qemu-aarch64-static
             xev_backend: epoll
+          - os: ubuntu-latest
+            target: riscv64-linux
+            qemu_binary: qemu-riscv64-static
+            xev_backend: epoll
           - os: macos-latest
             target: native
           - os: windows-latest
