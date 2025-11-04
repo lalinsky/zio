@@ -1,40 +1,76 @@
 const std = @import("std");
 const Runtime = @import("runtime.zig").Runtime;
+const AnyTask = @import("core/task.zig").AnyTask;
+const CreateOptions = @import("core/task.zig").CreateOptions;
+const Awaitable = @import("core/awaitable.zig").Awaitable;
+const select = @import("select.zig");
 
 fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*std.Io.AnyFuture {
-    _ = userdata;
-    _ = result;
-    _ = result_alignment;
-    _ = context;
-    _ = context_alignment;
-    _ = start;
-    @panic("TODO");
+    return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
+        // If we can't schedule asynchronously, execute synchronously
+        start(context.ptr, result.ptr);
+        return null;
+    };
 }
 
 fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) std.Io.ConcurrentError!*std.Io.AnyFuture {
-    _ = userdata;
-    _ = result_len;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Check if runtime is shutting down
+    if (rt.tasks.isClosed()) {
+        return error.ConcurrencyUnavailable;
+    }
+
+    // Pick an executor (round-robin)
+    const executor = rt.pickExecutor(.any) catch return error.ConcurrencyUnavailable;
+
+    // Create the task using AnyTask.create
+    const task = AnyTask.create(
+        executor,
+        result_len,
+        result_alignment,
+        context,
+        context_alignment,
+        start,
+        CreateOptions{},
+    ) catch return error.ConcurrencyUnavailable;
+    errdefer task.closure.free(AnyTask, executor.allocator, task);
+
+    // Register and schedule the task
+    rt.registerAndScheduleTask(executor, task) catch return error.ConcurrencyUnavailable;
+
+    // Return the awaitable as AnyFuture
+    return @ptrCast(&task.awaitable);
+}
+
+fn awaitOrCancel(userdata: ?*anyopaque, any_future: *std.Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment, should_cancel: bool) void {
     _ = result_alignment;
-    _ = context;
-    _ = context_alignment;
-    _ = start;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const awaitable: *Awaitable = @ptrCast(@alignCast(any_future));
+
+    // Request cancellation if needed
+    if (should_cancel and !awaitable.done.load(.acquire)) {
+        awaitable.cancel();
+    }
+
+    // Wait for completion
+    _ = select.waitUntilComplete(rt, awaitable);
+
+    // Copy result from task to result buffer
+    const task = AnyTask.fromAwaitable(awaitable);
+    const task_result = task.closure.getResultSlice(AnyTask, task);
+    @memcpy(result, task_result);
+
+    // Release the awaitable (decrements ref count, may destroy)
+    rt.releaseAwaitable(awaitable, false);
 }
 
 fn awaitImpl(userdata: ?*anyopaque, any_future: *std.Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment) void {
-    _ = userdata;
-    _ = any_future;
-    _ = result;
-    _ = result_alignment;
-    @panic("TODO");
+    awaitOrCancel(userdata, any_future, result, result_alignment, false);
 }
 
 fn cancelImpl(userdata: ?*anyopaque, any_future: *std.Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment) void {
-    _ = userdata;
-    _ = any_future;
-    _ = result;
-    _ = result_alignment;
-    @panic("TODO");
+    awaitOrCancel(userdata, any_future, result, result_alignment, true);
 }
 
 fn cancelRequestedImpl(userdata: ?*anyopaque) bool {
@@ -433,4 +469,50 @@ test "Io: basic" {
 
     const io = fromRuntime(rt);
     try std.testing.expect(io.vtable == &vtable);
+}
+
+test "Io: async/await pattern" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn computeValue(x: i32) i32 {
+            return x * 2 + 10;
+        }
+
+        fn mainTask(io: std.Io) !void {
+            // Create async future
+            var future = io.async(computeValue, .{21});
+            defer _ = future.cancel(io);
+
+            // Await the result
+            const result = future.await(io);
+            try std.testing.expectEqual(52, result);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: concurrent/await pattern" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn computeValue(x: i32) i32 {
+            return x * 2 + 10;
+        }
+
+        fn mainTask(io: std.Io) !void {
+            // Create concurrent future (guaranteed async)
+            var future = try io.concurrent(computeValue, .{21});
+            defer _ = future.cancel(io);
+
+            // Await the result
+            const result = future.await(io);
+            try std.testing.expectEqual(52, result);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
 }
