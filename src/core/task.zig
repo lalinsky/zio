@@ -28,32 +28,32 @@ const max_result_alignment = 1 << 4;
 const max_context_len = 1 << 12;
 const max_context_alignment = 1 << 4;
 
-const Closure = struct {
+pub const Closure = struct {
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
     result_len: u12,
     result_padding: u4,
     context_len: u12,
     context_padding: u4,
 
-    fn getResultPtr(self: *const Closure, task: *AnyTask) *anyopaque {
-        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+    pub fn getResultPtr(self: *const Closure, comptime TaskType: type, task: *TaskType) *anyopaque {
+        const result_ptr = @intFromPtr(task) + @sizeOf(TaskType) + self.result_padding;
         return @ptrFromInt(result_ptr);
     }
 
-    fn getResultSlice(self: *const Closure, task: *AnyTask) []u8 {
-        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+    pub fn getResultSlice(self: *const Closure, comptime TaskType: type, task: *TaskType) []u8 {
+        const result_ptr = @intFromPtr(task) + @sizeOf(TaskType) + self.result_padding;
         const result: [*]u8 = @ptrFromInt(result_ptr);
         return result[0..self.result_len];
     }
 
-    fn getContextPtr(self: *const Closure, task: *AnyTask) *const anyopaque {
-        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+    pub fn getContextPtr(self: *const Closure, comptime TaskType: type, task: *TaskType) *const anyopaque {
+        const result_ptr = @intFromPtr(task) + @sizeOf(TaskType) + self.result_padding;
         const context_ptr = result_ptr + self.result_len + self.context_padding;
         return @ptrFromInt(context_ptr);
     }
 
-    fn getContextSlice(self: *const Closure, task: *AnyTask) []u8 {
-        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+    pub fn getContextSlice(self: *const Closure, comptime TaskType: type, task: *TaskType) []u8 {
+        const result_ptr = @intFromPtr(task) + @sizeOf(TaskType) + self.result_padding;
         const context_ptr = result_ptr + self.result_len + self.context_padding;
         const context: [*]u8 = @ptrFromInt(context_ptr);
         return context[0..self.context_len];
@@ -293,8 +293,8 @@ pub const AnyTask = struct {
         const self = fromCoroutine(coro);
         const c = &self.closure;
 
-        const result = c.getResultPtr(self);
-        const context = c.getContextPtr(self);
+        const result = c.getResultPtr(AnyTask, self);
+        const context = c.getContextPtr(AnyTask, self);
 
         c.start(context, result);
     }
@@ -355,7 +355,7 @@ pub const AnyTask = struct {
         };
 
         // Copy context data into the allocation
-        const context_dest = self.closure.getContextSlice(self);
+        const context_dest = self.closure.getContextSlice(AnyTask, self);
         @memcpy(context_dest, context);
 
         self.coro.setup(&AnyTask.startFn, null);

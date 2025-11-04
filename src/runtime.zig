@@ -151,7 +151,7 @@ pub fn JoinHandle(comptime T: type) type {
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
             self.result = switch (awaitable.kind) {
                 .task => Task(T).fromAwaitable(awaitable).getResult(),
-                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.result,
+                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
             };
             rt.releaseAwaitable(awaitable, false);
             self.awaitable = null;
@@ -194,7 +194,7 @@ pub fn JoinHandle(comptime T: type) type {
             if (self.awaitable) |awaitable| {
                 return switch (awaitable.kind) {
                     .task => Task(T).fromAwaitable(awaitable).getResult(),
-                    .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.result,
+                    .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
                 };
             } else {
                 return self.result;
@@ -1050,21 +1050,21 @@ pub const Runtime = struct {
         errdefer task.destroy(self);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.tasks.add(&task.impl.base.awaitable);
-        errdefer _ = self.tasks.remove(&task.impl.base.awaitable);
+        try self.tasks.add(&task.base.awaitable);
+        errdefer _ = self.tasks.remove(&task.base.awaitable);
 
         // Increment ref count for JoinHandle BEFORE scheduling
         // This prevents race where task completes before we create the handle
-        task.impl.base.awaitable.ref_count.incr();
-        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+        task.base.awaitable.ref_count.incr();
+        errdefer _ = task.base.awaitable.ref_count.decr();
 
         // Schedule the task to run on the thread pool
         thread_pool.schedule(
-            xev.ThreadPool.Batch.from(&task.impl.base.thread_pool_task),
+            xev.ThreadPool.Batch.from(&task.base.thread_pool_task),
         );
 
         return JoinHandle(Result){
-            .awaitable = &task.impl.base.awaitable,
+            .awaitable = &task.base.awaitable,
             .result = undefined,
         };
     }
