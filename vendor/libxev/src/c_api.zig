@@ -9,7 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const xev = @import("main.zig");
+const xev = @import("xev");
 
 const func_callconv: std.builtin.CallingConvention = if (blk: {
     const order = builtin.zig_version.order(.{ .major = 0, .minor = 14, .patch = 1 });

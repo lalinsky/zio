@@ -62,6 +62,8 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    // C API needs xev module which has build_options
+    c_api_module.addImport("xev", xev_module);
 
     // Static C lib
     const static_lib: ?*Step.Compile = lib: {
@@ -138,12 +140,10 @@ pub fn build(b: *std.Build) !void {
         const test_exe = b.addTest(.{
             .name = "xev-test",
             .filters = if (test_filter) |filter| &.{filter} else &.{},
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
+            .root_module = xev_module,
         });
+        test_exe.root_module.target = target;
+        test_exe.root_module.optimize = optimize;
         switch (target.result.os.tag) {
             .linux, .macos => test_exe.linkLibC(),
             else => {},
