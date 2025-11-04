@@ -69,5 +69,5 @@ jobs:
       if: matrix.qemu_binary
       run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
       timeout-minutes: 10
-      environment:
+      env:
         TEST_FILTER: sleep
