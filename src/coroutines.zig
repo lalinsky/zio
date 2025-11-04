@@ -468,7 +468,7 @@ test "Coroutine: basic" {
     try std.testing.expectEqual(3, closure.result);
 }
 
-test "Coroutine: ping pong with parent control" {
+test "Coroutine: ping pong with rendezvous channel" {
     const stack1 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
     defer std.testing.allocator.free(stack1);
     const stack2 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
@@ -485,72 +485,104 @@ test "Coroutine: ping pong with parent control" {
         .stack = stack2,
     };
 
-    const SharedState = struct {
-        counter: u32 = 0,
-        last_id: u32 = 0,
-    };
+    // Simple unbuffered/rendezvous channel
+    const Channel = struct {
+        value: ?u32 = null,
+        sender_waiting: bool = false,
+        receiver_waiting: bool = false,
 
-    const PingPong = struct {
-        state: *SharedState,
-        id: u32,
-        increment: u32,
-        max: u32,
-        local_sum: u32 = undefined,
-
-        fn run(coro: *Coroutine, userdata: ?*anyopaque) void {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-
-            // Local stack variables that should be preserved across yields
-            var local_sum: u32 = 0;
-            var iteration: u32 = 0;
-
-            while (self.state.counter < self.max) {
-                // Verify that the other coroutine updated last (or this is the first iteration)
-                assert(self.state.last_id != self.id);
-
-                // Update local state
-                iteration += 1;
-                local_sum += self.increment;
-
-                // Update shared state
-                self.state.counter += 1;
-                self.state.last_id = self.id;
-
-                // Yield back to parent after each increment
+        fn send(self: *@This(), coro: *Coroutine, val: u32) void {
+            if (self.receiver_waiting) {
+                // Receiver is waiting, complete the rendezvous
+                self.value = val;
+                self.receiver_waiting = false;
                 coro.yield();
+            } else {
+                // No receiver yet, block
+                self.value = val;
+                self.sender_waiting = true;
+                coro.yield();
+                // When we resume, transfer is complete
+                self.sender_waiting = false;
             }
+        }
 
-            // Store final local sum for verification
-            self.local_sum = local_sum;
+        fn recv(self: *@This(), coro: *Coroutine) u32 {
+            if (self.sender_waiting) {
+                // Sender is waiting, complete the rendezvous
+                const val = self.value.?;
+                self.value = null;
+                self.sender_waiting = false;
+                coro.yield();
+                return val;
+            } else {
+                // No sender yet, block
+                self.receiver_waiting = true;
+                coro.yield();
+                // When we resume, value should be ready
+                const val = self.value.?;
+                self.value = null;
+                return val;
+            }
         }
     };
 
-    var shared = SharedState{};
-    var pp1 = PingPong{
-        .state = &shared,
-        .id = 1,
-        .increment = 1,
-        .max = 10,
-    };
-    var pp2 = PingPong{
-        .state = &shared,
-        .id = 2,
-        .increment = 2,
-        .max = 10,
+    const PingData = struct {
+        ch: *Channel,
+        max: u32,
     };
 
-    coro1.setup(&PingPong.run, &pp1);
-    coro2.setup(&PingPong.run, &pp2);
+    const PongData = struct {
+        ch: *Channel,
+        max: u32,
+    };
+
+    const Ping = struct {
+        fn run(coro: *Coroutine, userdata: ?*anyopaque) void {
+            const data: *PingData = @ptrCast(@alignCast(userdata));
+            var val: u32 = 0;
+            var local_count: u32 = 0;
+
+            while (val < data.max) {
+                local_count += 1;
+                data.ch.send(coro, val);
+                val = data.ch.recv(coro);
+            }
+
+            // Verify local variable preserved across multiple yields
+            assert(local_count == data.max);
+        }
+    };
+
+    const Pong = struct {
+        fn run(coro: *Coroutine, userdata: ?*anyopaque) void {
+            const data: *PongData = @ptrCast(@alignCast(userdata));
+            var local_count: u32 = 0;
+
+            while (true) {
+                var val = data.ch.recv(coro);
+                local_count += 1;
+                val += 1;
+                if (val >= data.max) break;
+                data.ch.send(coro, val);
+            }
+
+            // Verify local variable preserved across multiple yields
+            assert(local_count == data.max);
+        }
+    };
+
+    var channel = Channel{};
+    var ping_data = PingData{ .ch = &channel, .max = 10 };
+    var pong_data = PongData{ .ch = &channel, .max = 10 };
+
+    coro1.setup(&Ping.run, &ping_data);
+    coro2.setup(&Pong.run, &pong_data);
 
     // Parent naively alternates stepping into each coroutine
+    // The channel handles the synchronization
     while (!coro1.finished or !coro2.finished) {
         if (!coro1.finished) coro1.step();
         if (!coro2.finished) coro2.step();
     }
-
-    try std.testing.expectEqual(10, shared.counter);
-    // Verify that local stack variables were preserved across yields
-    // Each coroutine ran 5 times (alternating to reach counter=10)
-    try std.testing.expectEqual(5, pp1.local_sum);  // 5 iterations * increment 1
-    try std.testing.expectEqual(10, pp2.local_sum); // 5 iterations * increment 2
 }
