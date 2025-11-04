@@ -34,15 +34,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(zio_lib);
 
-    const install_docs = b.addInstallDirectory(.{
-        .source_dir = zio_lib.getEmittedDocs(),
-        .install_dir = .prefix,
-        .install_subdir = "docs",
-    });
-
-    const docs_step = b.step("docs", "Install docs into zig-out/docs");
-    docs_step.dependOn(&install_docs.step);
-
     // Examples configuration
     const examples = [_]struct { name: []const u8, file: []const u8 }{
         .{ .name = "sleep", .file = "examples/sleep.zig" },
