@@ -23,6 +23,43 @@ pub const CreateOptions = struct {
     pinned: bool = false,
 };
 
+const max_result_len = 1 << 12;
+const max_result_alignment = 1 << 4;
+const max_context_len = 1 << 12;
+const max_context_alignment = 1 << 4;
+
+const Closure = struct {
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    result_len: u12,
+    result_padding: u4,
+    context_len: u12,
+    context_padding: u4,
+
+    fn getResultPtr(self: *const Closure, task: *AnyTask) *anyopaque {
+        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+        return @ptrFromInt(result_ptr);
+    }
+
+    fn getResultSlice(self: *const Closure, task: *AnyTask) []u8 {
+        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+        const result: [*]u8 = @ptrFromInt(result_ptr);
+        return result[0..self.result_len];
+    }
+
+    fn getContextPtr(self: *const Closure, task: *AnyTask) *const anyopaque {
+        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+        const context_ptr = result_ptr + self.result_len + self.context_padding;
+        return @ptrFromInt(context_ptr);
+    }
+
+    fn getContextSlice(self: *const Closure, task: *AnyTask) []u8 {
+        const result_ptr = @intFromPtr(task) + @sizeOf(AnyTask) + self.result_padding;
+        const context_ptr = result_ptr + self.result_len + self.context_padding;
+        const context: [*]u8 = @ptrFromInt(context_ptr);
+        return context[0..self.context_len];
+    }
+};
+
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
@@ -38,6 +75,9 @@ pub const AnyTask = struct {
 
     // Number of times this task was pinned to the current executor
     pin_count: u8 = 0,
+
+    // Closure for the task
+    closure: Closure,
 
     pub const State = enum(u8) {
         new,
@@ -232,6 +272,96 @@ pub const AnyTask = struct {
             return error.Canceled;
         }
     }
+
+    pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
+        const self = fromAwaitable(awaitable);
+
+        if (self.coro.stack) |stack| {
+            const executor = Executor.fromCoroutine(&self.coro);
+            executor.stack_pool.release(stack);
+        }
+
+        var allocation_size: usize = @sizeOf(AnyTask);
+        allocation_size += self.closure.result_padding + self.closure.result_len;
+        allocation_size += self.closure.context_padding + self.closure.context_len;
+
+        const allocation = @as([*]align(@alignOf(AnyTask)) u8, @ptrCast(self))[0..allocation_size];
+        rt.allocator.free(allocation);
+    }
+
+    pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
+        const self = fromCoroutine(coro);
+        const c = &self.closure;
+
+        const result = c.getResultPtr(self);
+        const context = c.getContextPtr(self);
+
+        c.start(context, result);
+    }
+
+    pub fn create(
+        executor: *Executor,
+        result_len: usize,
+        result_alignment: std.mem.Alignment,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        options: CreateOptions,
+    ) !*AnyTask {
+        var allocation_size: usize = @sizeOf(AnyTask);
+
+        // Reserve space for result
+        if (result_len > max_result_len) return error.ResultTooLarge;
+        if (result_alignment.toByteUnits() > max_result_alignment) return error.ResultTooLarge;
+        const result_padding = result_alignment.forward(allocation_size) - allocation_size;
+        allocation_size += result_padding + result_len;
+
+        // Reserve space for context
+        if (context.len > max_context_len) return error.ContextTooLarge;
+        if (context_alignment.toByteUnits() > max_context_alignment) return error.ContextTooLarge;
+        const context_padding = context_alignment.forward(allocation_size) - allocation_size;
+        allocation_size += context_padding + context.len;
+
+        // Allocate task context
+        const allocation = try executor.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(AnyTask)), allocation_size);
+        errdefer executor.allocator.free(allocation);
+
+        // Acquire stack from pool
+        const stack = try executor.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
+        errdefer executor.stack_pool.release(stack);
+
+        const self: *AnyTask = @ptrCast(allocation.ptr);
+        self.* = .{
+            .state = .init(.new),
+            .awaitable = .{
+                .kind = .task,
+                .destroy_fn = &AnyTask.destroyFn,
+                .wait_node = .{
+                    .vtable = &AnyTask.wait_node_vtable,
+                },
+            },
+            .coro = .{
+                .stack = stack,
+                .parent_context_ptr = &executor.main_context,
+            },
+            .closure = .{
+                .start = start,
+                .result_padding = @intCast(result_padding),
+                .result_len = @intCast(result_len),
+                .context_padding = @intCast(context_padding),
+                .context_len = @intCast(context.len),
+            },
+            .pin_count = if (options.pinned) 1 else 0,
+        };
+
+        // Copy context data into the allocation
+        const context_dest = self.closure.getContextSlice(self);
+        @memcpy(context_dest, context);
+
+        self.coro.setup(&AnyTask.startFn, null);
+
+        return self;
+    }
 };
 
 // Typed task that contains the AnyTask and FutureResult
@@ -284,48 +414,25 @@ pub fn Task(comptime T: type) type {
             args: meta.ArgsType(func),
             options: CreateOptions,
         ) !*Self {
-            // Allocate task context
-            const allocation = try executor.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(Self)), allocationSize());
-            errdefer executor.allocator.free(allocation);
-
-            // Acquire stack from pool
-            const stack = try executor.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
-            errdefer executor.stack_pool.release(stack);
-
-            const task: *Self = @ptrCast(allocation.ptr);
-            task.* = .{
-                .base = .{
-                    .awaitable = .{
-                        .kind = .task,
-                        .destroy_fn = &Self.destroyFn,
-                        .wait_node = .{
-                            .vtable = &AnyTask.wait_node_vtable,
-                        },
-                    },
-                    .coro = .{
-                        .stack = stack,
-                        .parent_context_ptr = &executor.main_context,
-                    },
-                    .state = .init(.new),
-                },
-            };
-
             const Wrapper = struct {
-                fn call(coro: *Coroutine, ctx: *anyopaque) void {
-                    const t = Self.fromAny(AnyTask.fromCoroutine(coro));
-                    const a: *@TypeOf(args) = @ptrCast(@alignCast(ctx));
-                    t.getResultPtr().* = @call(.auto, func, a.*);
+                fn start(ctx: *const anyopaque, result: *anyopaque) void {
+                    const a: *const @TypeOf(args) = @ptrCast(@alignCast(ctx));
+                    const r: *T = @ptrCast(@alignCast(result));
+                    r.* = @call(.auto, func, a.*);
                 }
             };
 
-            task.base.coro.setup(&Wrapper.call, std.mem.asBytes(&args), .fromByteUnits(@alignOf(@TypeOf(args))));
+            const task = try AnyTask.create(
+                executor,
+                @sizeOf(T),
+                .fromByteUnits(@alignOf(T)),
+                std.mem.asBytes(&args),
+                .fromByteUnits(@alignOf(@TypeOf(args))),
+                &Wrapper.start,
+                options,
+            );
 
-            // Set pin count if task is pinned
-            if (options.pinned) {
-                task.base.pin_count = 1;
-            }
-
-            return task;
+            return Self.fromAny(task);
         }
 
         pub fn destroy(self: *Self, executor: *Executor) void {
