@@ -70,4 +70,4 @@ jobs:
       run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
       timeout-minutes: 10
       env:
-        TEST_FILTER: sleep
+        TEST_FILTER: Coroutine
