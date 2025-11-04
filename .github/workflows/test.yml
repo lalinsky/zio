@@ -11,24 +11,26 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux builds with multiple architectures
+          # Linux x86_64 native
           - os: ubuntu-latest
             target: x86_64-linux
-            native: true
+            qemu: false
+          # Linux ARM64 with QEMU
           - os: ubuntu-latest
             target: aarch64-linux
-            native: false
+            qemu: qemu-aarch64-static
+          # Linux RISC-V 64 with QEMU
           - os: ubuntu-latest
             target: riscv64-linux
-            native: false
-          # macOS build (native only)
+            qemu: qemu-riscv64-static
+          # macOS native
           - os: macos-latest
             target: native
-            native: true
-          # Windows build (native only)
+            qemu: false
+          # Windows native
           - os: windows-latest
             target: native
-            native: true
+            qemu: false
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -39,6 +41,12 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: 0.15.2
+
+    - name: Install QEMU (Linux cross-arch)
+      if: matrix.qemu != false
+      run: |
+        sudo apt-get update -q -y
+        sudo apt-get install -q -y ${{ matrix.qemu }}
 
     - name: Build
       run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
@@ -52,12 +60,21 @@ jobs:
       run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
-    - name: Run tests
-      if: matrix.native
-      run: zig build test
+    - name: Build test binary
+      run: zig build build-tests ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
-    - name: Run xev tests
-      if: matrix.native
+    - name: Run tests (native)
+      if: matrix.qemu == false
+      run: ./zig-out/bin/test
+      timeout-minutes: 5
+
+    - name: Run tests (QEMU)
+      if: matrix.qemu != false
+      run: ${{ matrix.qemu }} ./zig-out/bin/test
+      timeout-minutes: 10
+
+    - name: Run xev tests (native only)
+      if: matrix.qemu == false
       run: cd vendor/libxev && zig build test
       timeout-minutes: 5
