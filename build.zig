@@ -7,7 +7,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const xev = b.dependency("libxev", .{ .target = target, .optimize = optimize });
+    const xev_backend = b.option(
+        []const u8,
+        "xev_backend",
+        "Override the default xev backend (io_uring, epoll, kqueue, iocp, wasi_poll)",
+    );
+
+    const xev = b.dependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = xev_backend,
+    });
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
