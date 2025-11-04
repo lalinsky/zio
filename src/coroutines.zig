@@ -493,20 +493,35 @@ test "Coroutine: ping pong with parent control" {
     const PingPong = struct {
         state: *SharedState,
         id: u32,
+        increment: u32,
         max: u32,
+        local_sum: u32 = undefined,
 
         fn run(coro: *Coroutine, userdata: ?*anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(userdata));
+
+            // Local stack variables that should be preserved across yields
+            var local_sum: u32 = 0;
+            var iteration: u32 = 0;
+
             while (self.state.counter < self.max) {
                 // Verify that the other coroutine updated last (or this is the first iteration)
                 assert(self.state.last_id != self.id);
 
+                // Update local state
+                iteration += 1;
+                local_sum += self.increment;
+
+                // Update shared state
                 self.state.counter += 1;
                 self.state.last_id = self.id;
 
                 // Yield back to parent after each increment
                 coro.yield();
             }
+
+            // Store final local sum for verification
+            self.local_sum = local_sum;
         }
     };
 
@@ -514,11 +529,13 @@ test "Coroutine: ping pong with parent control" {
     var pp1 = PingPong{
         .state = &shared,
         .id = 1,
+        .increment = 1,
         .max = 10,
     };
     var pp2 = PingPong{
         .state = &shared,
         .id = 2,
+        .increment = 2,
         .max = 10,
     };
 
@@ -532,4 +549,8 @@ test "Coroutine: ping pong with parent control" {
     }
 
     try std.testing.expectEqual(10, shared.counter);
+    // Verify that local stack variables were preserved across yields
+    // Each coroutine ran 5 times (alternating to reach counter=10)
+    try std.testing.expectEqual(5, pp1.local_sum);  // 5 iterations * increment 1
+    try std.testing.expectEqual(10, pp2.local_sum); // 5 iterations * increment 2
 }
