@@ -10,7 +10,25 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Linux builds with multiple architectures
+          - os: ubuntu-latest
+            target: x86_64-linux
+            native: true
+          - os: ubuntu-latest
+            target: aarch64-linux
+            native: false
+          - os: ubuntu-latest
+            target: riscv64-linux
+            native: false
+          # macOS build (native only)
+          - os: macos-latest
+            target: native
+            native: true
+          # Windows build (native only)
+          - os: windows-latest
+            target: native
+            native: true
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -23,21 +41,23 @@ jobs:
         version: 0.15.2
 
     - name: Build
-      run: zig build
+      run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
     - name: Build examples
-      run: zig build examples
+      run: zig build examples ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
     - name: Build benchmarks
-      run: zig build benchmarks
+      run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
     - name: Run tests
+      if: matrix.native
       run: zig build test
       timeout-minutes: 5
 
     - name: Run xev tests
+      if: matrix.native
       run: cd vendor/libxev && zig build test
       timeout-minutes: 5
