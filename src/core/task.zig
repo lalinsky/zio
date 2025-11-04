@@ -427,24 +427,10 @@ pub fn Task(comptime T: type) type {
             return executor.runtime;
         }
 
-        fn allocationSize() usize {
-            return comptime blk: {
-                var s = @sizeOf(Self);
-                s = std.mem.alignForward(usize, s, @alignOf(T)) + @sizeOf(T);
-                break :blk s;
-            };
-        }
-
-        fn getResultOffset() usize {
-            return comptime blk: {
-                var s = @sizeOf(Self);
-                s = std.mem.alignForward(usize, s, @alignOf(T));
-                break :blk s;
-            };
-        }
-
         fn getResultPtr(self: *Self) *T {
-            return @ptrFromInt(@intFromPtr(self) + getResultOffset());
+            const c = &self.base.closure;
+            const result_ptr = c.getResultPtr(AnyTask, &self.base);
+            return @ptrCast(@alignCast(result_ptr));
         }
 
         pub fn getResult(self: *Self) T {
@@ -480,20 +466,6 @@ pub fn Task(comptime T: type) type {
 
         pub fn destroy(self: *Self, executor: *Executor) void {
             self.base.awaitable.destroy_fn(executor.runtime, &self.base.awaitable);
-        }
-
-        pub fn destroyFn(runtime: *Runtime, awaitable: *Awaitable) void {
-            const any_task = AnyTask.fromAwaitable(awaitable);
-            const self = fromAny(any_task);
-
-            // Release stack if it's still allocated
-            if (any_task.coro.stack) |stack| {
-                const executor = Executor.fromCoroutine(&any_task.coro);
-                executor.stack_pool.release(stack);
-            }
-
-            const allocation = @as([*]align(@alignOf(Self)) u8, @ptrCast(self))[0..allocationSize()];
-            runtime.allocator.free(allocation);
         }
     };
 }
