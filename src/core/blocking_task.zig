@@ -13,11 +13,6 @@ const Closure = @import("task.zig").Closure;
 
 const assert = std.debug.assert;
 
-const max_result_len = 1 << 12;
-const max_result_alignment = 1 << 4;
-const max_context_len = 1 << 12;
-const max_context_alignment = 1 << 4;
-
 pub const AnyBlockingTask = struct {
     awaitable: Awaitable,
     thread_pool_task: xev.ThreadPool.Task,
@@ -29,6 +24,60 @@ pub const AnyBlockingTask = struct {
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
         return @fieldParentPtr("awaitable", awaitable);
+    }
+
+    pub fn create(
+        runtime: *Runtime,
+        result_len: usize,
+        result_alignment: std.mem.Alignment,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        destroy_fn: *const fn (*Runtime, *Awaitable) void,
+    ) !*AnyBlockingTask {
+        var allocation_size: usize = @sizeOf(AnyBlockingTask);
+
+        // Reserve space for result
+        if (result_len > Closure.max_result_len) return error.ResultTooLarge;
+        if (result_alignment.toByteUnits() > Closure.max_result_alignment) return error.ResultTooLarge;
+        const result_padding = result_alignment.forward(allocation_size) - allocation_size;
+        allocation_size += result_padding + result_len;
+
+        // Reserve space for context
+        if (context.len > Closure.max_context_len) return error.ContextTooLarge;
+        if (context_alignment.toByteUnits() > Closure.max_context_alignment) return error.ContextTooLarge;
+        const context_padding = context_alignment.forward(allocation_size) - allocation_size;
+        allocation_size += context_padding + context.len;
+
+        // Allocate task
+        const allocation = try runtime.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(AnyBlockingTask)), allocation_size);
+        errdefer runtime.allocator.free(allocation);
+
+        const self: *AnyBlockingTask = @ptrCast(allocation.ptr);
+        self.* = .{
+            .awaitable = .{
+                .kind = .blocking_task,
+                .destroy_fn = destroy_fn,
+                .wait_node = .{
+                    .vtable = &AnyBlockingTask.wait_node_vtable,
+                },
+            },
+            .thread_pool_task = .{ .callback = threadPoolCallback },
+            .runtime = runtime,
+            .closure = .{
+                .start = start,
+                .result_padding = @intCast(result_padding),
+                .result_len = @intCast(result_len),
+                .context_padding = @intCast(context_padding),
+                .context_len = @intCast(context.len),
+            },
+        };
+
+        // Copy context data into the allocation
+        const context_dest = self.closure.getContextSlice(AnyBlockingTask, self);
+        @memcpy(context_dest, context);
+
+        return self;
     }
 };
 
@@ -112,12 +161,7 @@ pub fn BlockingTask(comptime T: type) type {
 
         pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
-
-            var allocation_size: usize = @sizeOf(AnyBlockingTask);
-            allocation_size += any_blocking_task.closure.result_padding + any_blocking_task.closure.result_len;
-            allocation_size += any_blocking_task.closure.context_padding + any_blocking_task.closure.context_len;
-
-            const allocation = @as([*]align(@alignOf(AnyBlockingTask)) u8, @ptrCast(any_blocking_task))[0..allocation_size];
+            const allocation = any_blocking_task.closure.getAllocationSlice(AnyBlockingTask, any_blocking_task);
             rt.allocator.free(allocation);
         }
 
@@ -134,54 +178,15 @@ pub fn BlockingTask(comptime T: type) type {
                 }
             };
 
-            var allocation_size: usize = @sizeOf(AnyBlockingTask);
-
-            // Reserve space for result
-            const result_len = @sizeOf(T);
-            const result_alignment = std.mem.Alignment.fromByteUnits(@alignOf(T));
-            if (result_len > max_result_len) return error.ResultTooLarge;
-            if (result_alignment.toByteUnits() > max_result_alignment) return error.ResultTooLarge;
-            const result_padding = result_alignment.forward(allocation_size) - allocation_size;
-            allocation_size += result_padding + result_len;
-
-            // Reserve space for context
-            const context = std.mem.asBytes(&args);
-            const context_alignment = std.mem.Alignment.fromByteUnits(@alignOf(@TypeOf(args)));
-            if (context.len > max_context_len) return error.ContextTooLarge;
-            if (context_alignment.toByteUnits() > max_context_alignment) return error.ContextTooLarge;
-            const context_padding = context_alignment.forward(allocation_size) - allocation_size;
-            allocation_size += context_padding + context.len;
-
-            // Allocate task
-            const allocation = try runtime.allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(AnyBlockingTask)), allocation_size);
-            errdefer runtime.allocator.free(allocation);
-
-            const any_blocking_task: *AnyBlockingTask = @ptrCast(allocation.ptr);
-            any_blocking_task.* = .{
-                .awaitable = .{
-                    .kind = .blocking_task,
-                    .destroy_fn = &Self.destroyFn,
-                    .wait_node = .{
-                        .vtable = &AnyBlockingTask.wait_node_vtable,
-                    },
-                },
-                .thread_pool_task = .{ .callback = threadPoolCallback },
-                .runtime = runtime,
-                .closure = .{
-                    .start = &Wrapper.start,
-                    .result_padding = @intCast(result_padding),
-                    .result_len = @intCast(result_len),
-                    .context_padding = @intCast(context_padding),
-                    .context_len = @intCast(context.len),
-                },
-            };
-
-            // Copy context data into the allocation
-            const context_dest = any_blocking_task.closure.getContextSlice(AnyBlockingTask, any_blocking_task);
-            @memcpy(context_dest, context);
-
-            // Initialize result as undefined (will be set by execute)
-            // No need to explicitly do anything here as memory is uninitialized
+            const any_blocking_task = try AnyBlockingTask.create(
+                runtime,
+                @sizeOf(T),
+                .fromByteUnits(@alignOf(T)),
+                std.mem.asBytes(&args),
+                .fromByteUnits(@alignOf(@TypeOf(args))),
+                &Wrapper.start,
+                &Self.destroyFn,
+            );
 
             return Self.fromAny(any_blocking_task);
         }

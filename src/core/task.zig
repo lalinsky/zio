@@ -23,17 +23,17 @@ pub const CreateOptions = struct {
     pinned: bool = false,
 };
 
-const max_result_len = 1 << 12;
-const max_result_alignment = 1 << 4;
-const max_context_len = 1 << 12;
-const max_context_alignment = 1 << 4;
-
 pub const Closure = struct {
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
     result_len: u12,
     result_padding: u4,
     context_len: u12,
     context_padding: u4,
+
+    pub const max_result_len = 1 << 12;
+    pub const max_result_alignment = 1 << 4;
+    pub const max_context_len = 1 << 12;
+    pub const max_context_alignment = 1 << 4;
 
     pub fn getResultPtr(self: *const Closure, comptime TaskType: type, task: *TaskType) *anyopaque {
         const result_ptr = @intFromPtr(task) + @sizeOf(TaskType) + self.result_padding;
@@ -57,6 +57,15 @@ pub const Closure = struct {
         const context_ptr = result_ptr + self.result_len + self.context_padding;
         const context: [*]u8 = @ptrFromInt(context_ptr);
         return context[0..self.context_len];
+    }
+
+    pub fn getAllocationSlice(self: *const Closure, comptime TaskType: type, task: *TaskType) []align(@alignOf(TaskType)) u8 {
+        var allocation_size: usize = @sizeOf(TaskType);
+        allocation_size += self.result_padding;
+        allocation_size += self.result_len;
+        allocation_size += self.context_padding;
+        allocation_size += self.context_len;
+        return @as([*]align(@alignOf(TaskType)) u8, @ptrCast(task))[0..allocation_size];
     }
 };
 
@@ -281,11 +290,7 @@ pub const AnyTask = struct {
             executor.stack_pool.release(stack);
         }
 
-        var allocation_size: usize = @sizeOf(AnyTask);
-        allocation_size += self.closure.result_padding + self.closure.result_len;
-        allocation_size += self.closure.context_padding + self.closure.context_len;
-
-        const allocation = @as([*]align(@alignOf(AnyTask)) u8, @ptrCast(self))[0..allocation_size];
+        const allocation = self.closure.getAllocationSlice(AnyTask, self);
         rt.allocator.free(allocation);
     }
 
@@ -311,14 +316,14 @@ pub const AnyTask = struct {
         var allocation_size: usize = @sizeOf(AnyTask);
 
         // Reserve space for result
-        if (result_len > max_result_len) return error.ResultTooLarge;
-        if (result_alignment.toByteUnits() > max_result_alignment) return error.ResultTooLarge;
+        if (result_len > Closure.max_result_len) return error.ResultTooLarge;
+        if (result_alignment.toByteUnits() > Closure.max_result_alignment) return error.ResultTooLarge;
         const result_padding = result_alignment.forward(allocation_size) - allocation_size;
         allocation_size += result_padding + result_len;
 
         // Reserve space for context
-        if (context.len > max_context_len) return error.ContextTooLarge;
-        if (context_alignment.toByteUnits() > max_context_alignment) return error.ContextTooLarge;
+        if (context.len > Closure.max_context_len) return error.ContextTooLarge;
+        if (context_alignment.toByteUnits() > Closure.max_context_alignment) return error.ContextTooLarge;
         const context_padding = context_alignment.forward(allocation_size) - allocation_size;
         allocation_size += context_padding + context.len;
 
