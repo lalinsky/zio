@@ -467,3 +467,69 @@ test "Coroutine: basic" {
 
     try std.testing.expectEqual(3, closure.result);
 }
+
+test "Coroutine: ping pong with parent control" {
+    const stack1 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack1);
+    const stack2 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack2);
+
+    var parent_context: Context = undefined;
+
+    var coro1: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .stack = stack1,
+    };
+    var coro2: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .stack = stack2,
+    };
+
+    const SharedState = struct {
+        counter: u32 = 0,
+        last_id: u32 = 0,
+    };
+
+    const PingPong = struct {
+        state: *SharedState,
+        id: u32,
+        max: u32,
+
+        fn run(coro: *Coroutine, userdata: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            while (self.state.counter < self.max) {
+                // Verify that the other coroutine updated last (or this is the first iteration)
+                assert(self.state.last_id != self.id);
+
+                self.state.counter += 1;
+                self.state.last_id = self.id;
+
+                // Yield back to parent after each increment
+                coro.yield();
+            }
+        }
+    };
+
+    var shared = SharedState{};
+    var pp1 = PingPong{
+        .state = &shared,
+        .id = 1,
+        .max = 10,
+    };
+    var pp2 = PingPong{
+        .state = &shared,
+        .id = 2,
+        .max = 10,
+    };
+
+    coro1.setup(&PingPong.run, &pp1);
+    coro2.setup(&PingPong.run, &pp2);
+
+    // Parent naively alternates stepping into each coroutine
+    while (!coro1.finished or !coro2.finished) {
+        if (!coro1.finished) coro1.step();
+        if (!coro2.finished) coro2.step();
+    }
+
+    try std.testing.expectEqual(10, shared.counter);
+}
