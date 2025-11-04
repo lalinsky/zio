@@ -74,8 +74,9 @@ fn cancelImpl(userdata: ?*anyopaque, any_future: *std.Io.AnyFuture, result: []u8
 }
 
 fn cancelRequestedImpl(userdata: ?*anyopaque) bool {
-    _ = userdata;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    rt.checkCanceled() catch return true;
+    return false;
 }
 
 fn groupAsyncImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (*std.Io.Group, context: *const anyopaque) void) void {
