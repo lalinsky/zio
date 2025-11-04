@@ -135,14 +135,21 @@ pub fn build(b: *std.Build) !void {
             "test-filter",
             "Filter for test",
         );
+        const test_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        // Add build_options to the test module
+        const options = b.addOptions();
+        options.addOption(?[]const u8, "backend_override", backend);
+        test_module.addOptions("build_options", options);
+
         const test_exe = b.addTest(.{
             .name = "xev-test",
             .filters = if (test_filter) |filter| &.{filter} else &.{},
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
+            .root_module = test_module,
         });
         switch (target.result.os.tag) {
             .linux, .macos => test_exe.linkLibC(),
