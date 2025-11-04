@@ -407,33 +407,37 @@ pub const AnyTask = struct {
     }
 };
 
-// Typed task that contains the AnyTask and FutureResult
+// Typed task that wraps a pointer to AnyTask
 pub fn Task(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        base: AnyTask,
+        task: *AnyTask,
 
-        pub fn fromAwaitable(awaitable: *Awaitable) *Self {
-            return fromAny(.fromAwaitable(awaitable));
+        pub fn fromAwaitable(awaitable: *Awaitable) Self {
+            return Self{ .task = AnyTask.fromAwaitable(awaitable) };
         }
 
-        pub fn fromAny(task: *AnyTask) *Self {
-            return @fieldParentPtr("base", task);
+        pub fn fromAny(task: *AnyTask) Self {
+            return Self{ .task = task };
         }
 
-        pub fn getRuntime(self: *Self) *Runtime {
-            const executor = Executor.fromCoroutine(&self.base.coro);
+        pub fn toAwaitable(self: Self) *Awaitable {
+            return &self.task.awaitable;
+        }
+
+        pub fn getRuntime(self: Self) *Runtime {
+            const executor = Executor.fromCoroutine(&self.task.coro);
             return executor.runtime;
         }
 
-        fn getResultPtr(self: *Self) *T {
-            const c = &self.base.closure;
-            const result_ptr = c.getResultPtr(AnyTask, &self.base);
+        fn getResultPtr(self: Self) *T {
+            const c = &self.task.closure;
+            const result_ptr = c.getResultPtr(AnyTask, self.task);
             return @ptrCast(@alignCast(result_ptr));
         }
 
-        pub fn getResult(self: *Self) T {
+        pub fn getResult(self: Self) T {
             return self.getResultPtr().*;
         }
 
@@ -442,7 +446,7 @@ pub fn Task(comptime T: type) type {
             func: anytype,
             args: meta.ArgsType(func),
             options: CreateOptions,
-        ) !*Self {
+        ) !Self {
             const Wrapper = struct {
                 fn start(ctx: *const anyopaque, result: *anyopaque) void {
                     const a: *const @TypeOf(args) = @ptrCast(@alignCast(ctx));
@@ -464,8 +468,8 @@ pub fn Task(comptime T: type) type {
             return Self.fromAny(task);
         }
 
-        pub fn destroy(self: *Self, executor: *Executor) void {
-            self.base.awaitable.destroy_fn(executor.runtime, &self.base.awaitable);
+        pub fn destroy(self: Self, executor: *Executor) void {
+            self.task.awaitable.destroy_fn(executor.runtime, &self.task.awaitable);
         }
     };
 }

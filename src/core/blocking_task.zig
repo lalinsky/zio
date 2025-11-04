@@ -91,60 +91,60 @@ fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
     runtime.releaseAwaitable(&any_blocking_task.awaitable, true);
 }
 
-// Typed blocking task that wraps AnyBlockingTask
+// Typed blocking task that wraps a pointer to AnyBlockingTask
 pub fn BlockingTask(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        base: AnyBlockingTask,
+        task: *AnyBlockingTask,
 
         pub const Result = T;
 
-        pub fn fromAny(any_blocking_task: *AnyBlockingTask) *Self {
-            return @fieldParentPtr("base", any_blocking_task);
+        pub fn fromAny(any_blocking_task: *AnyBlockingTask) Self {
+            return Self{ .task = any_blocking_task };
         }
 
-        pub fn fromAwaitable(awaitable: *Awaitable) *Self {
+        pub fn fromAwaitable(awaitable: *Awaitable) Self {
             return fromAny(AnyBlockingTask.fromAwaitable(awaitable));
         }
 
-        pub fn toAwaitable(self: *Self) *Awaitable {
-            return &self.base.awaitable;
+        pub fn toAwaitable(self: Self) *Awaitable {
+            return &self.task.awaitable;
         }
 
-        pub fn cancel(self: *Self) void {
-            self.base.awaitable.cancel();
+        pub fn cancel(self: Self) void {
+            self.task.awaitable.cancel();
         }
 
-        pub fn wait(self: *Self, runtime: *Runtime) !T {
-            try self.base.awaitable.wait(runtime);
+        pub fn wait(self: Self, runtime: *Runtime) !T {
+            try self.task.awaitable.wait(runtime);
             return self.getResult();
         }
 
-        pub fn asyncWait(self: *Self, comptime options: Awaitable.AsyncWaitOptions) Awaitable.AsyncWaitResult(options) {
-            return self.base.awaitable.asyncWait(options);
+        pub fn asyncWait(self: Self, comptime options: Awaitable.AsyncWaitOptions) Awaitable.AsyncWaitResult(options) {
+            return self.task.awaitable.asyncWait(options);
         }
 
-        pub fn asyncCancelWait(self: *Self, comptime options: Awaitable.AsyncWaitOptions) Awaitable.AsyncCancelWaitResult(options) {
-            return self.base.awaitable.asyncCancelWait(options);
+        pub fn asyncCancelWait(self: Self, comptime options: Awaitable.AsyncWaitOptions) Awaitable.AsyncCancelWaitResult(options) {
+            return self.task.awaitable.asyncCancelWait(options);
         }
 
-        pub fn deinit(_: *Self) void {
+        pub fn deinit(_: Self) void {
             // Result stored inline, no separate deallocation needed
         }
 
-        fn getResultPtr(self: *Self) *T {
-            const c = &self.base.closure;
-            const result_ptr = c.getResultPtr(AnyBlockingTask, &self.base);
+        fn getResultPtr(self: Self) *T {
+            const c = &self.task.closure;
+            const result_ptr = c.getResultPtr(AnyBlockingTask, self.task);
             return @ptrCast(@alignCast(result_ptr));
         }
 
-        pub fn getResult(self: *Self) T {
+        pub fn getResult(self: Self) T {
             return self.getResultPtr().*;
         }
 
-        pub fn getRuntime(self: *Self) *Runtime {
-            return self.base.runtime;
+        pub fn getRuntime(self: Self) *Runtime {
+            return self.task.runtime;
         }
 
         pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
@@ -156,7 +156,7 @@ pub fn BlockingTask(comptime T: type) type {
             runtime: *Runtime,
             func: anytype,
             args: meta.ArgsType(func),
-        ) !*Self {
+        ) !Self {
             const Wrapper = struct {
                 fn start(ctx: *const anyopaque, result: *anyopaque) void {
                     const a: *const @TypeOf(args) = @ptrCast(@alignCast(ctx));
@@ -178,8 +178,8 @@ pub fn BlockingTask(comptime T: type) type {
             return Self.fromAny(any_blocking_task);
         }
 
-        pub fn destroy(self: *Self, runtime: *Runtime) void {
-            self.base.awaitable.destroy_fn(runtime, &self.base.awaitable);
+        pub fn destroy(self: Self, runtime: *Runtime) void {
+            self.task.awaitable.destroy_fn(runtime, &self.task.awaitable);
         }
     };
 }

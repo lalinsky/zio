@@ -277,7 +277,7 @@ pub fn JoinHandle(comptime T: type) type {
             return switch (awaitable.kind) {
                 .task => {
                     const task = Task(T).fromAwaitable(awaitable);
-                    const executor = task.base.getExecutor();
+                    const executor = task.task.getExecutor();
                     return executor.id;
                 },
                 .blocking_task => null,
@@ -461,22 +461,22 @@ pub const Executor = struct {
         errdefer task.destroy(self);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.runtime.tasks.add(&task.base.awaitable);
-        errdefer _ = self.runtime.tasks.remove(&task.base.awaitable);
+        try self.runtime.tasks.add(task.toAwaitable());
+        errdefer _ = self.runtime.tasks.remove(task.toAwaitable());
 
         // Increment ref count for JoinHandle BEFORE scheduling
         // This prevents race where task completes before we create the handle
-        task.base.awaitable.ref_count.incr();
-        errdefer _ = task.base.awaitable.ref_count.decr();
+        task.toAwaitable().ref_count.incr();
+        errdefer _ = task.toAwaitable().ref_count.decr();
 
         // Schedule the task to run (handles cross-thread notification)
-        self.scheduleTask(&task.base, .maybe_remote);
+        self.scheduleTask(task.task, .maybe_remote);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
 
         return JoinHandle(Result){
-            .awaitable = &task.base.awaitable,
+            .awaitable = task.toAwaitable(),
             .result = undefined,
         };
     }
@@ -1050,21 +1050,21 @@ pub const Runtime = struct {
         errdefer task.destroy(self);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.tasks.add(&task.base.awaitable);
-        errdefer _ = self.tasks.remove(&task.base.awaitable);
+        try self.tasks.add(task.toAwaitable());
+        errdefer _ = self.tasks.remove(task.toAwaitable());
 
         // Increment ref count for JoinHandle BEFORE scheduling
         // This prevents race where task completes before we create the handle
-        task.base.awaitable.ref_count.incr();
-        errdefer _ = task.base.awaitable.ref_count.decr();
+        task.toAwaitable().ref_count.incr();
+        errdefer _ = task.toAwaitable().ref_count.decr();
 
         // Schedule the task to run on the thread pool
         thread_pool.schedule(
-            xev.ThreadPool.Batch.from(&task.base.thread_pool_task),
+            xev.ThreadPool.Batch.from(&task.task.thread_pool_task),
         );
 
         return JoinHandle(Result){
-            .awaitable = &task.base.awaitable,
+            .awaitable = task.toAwaitable(),
             .result = undefined,
         };
     }
