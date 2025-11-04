@@ -565,3 +565,83 @@ test "Coroutine: basic" {
 
     try std.testing.expectEqual(3, closure.result);
 }
+
+test "Coroutine: message passing" {
+    const stack1 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack1);
+    const stack2 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack2);
+
+    var parent_context: Context = undefined;
+
+    // Simple single-slot channel
+    const Channel = struct {
+        data: ?i32 = null,
+
+        fn send(self: *@This(), coro: *Coroutine, value: i32) void {
+            while (self.data != null) {
+                coro.yield(); // wait for slot to be empty
+            }
+            self.data = value;
+        }
+
+        fn recv(self: *@This(), coro: *Coroutine) i32 {
+            while (self.data == null) {
+                coro.yield(); // wait for data
+            }
+            const value = self.data.?;
+            self.data = null;
+            return value;
+        }
+    };
+
+    var chan_to_receiver = Channel{};
+    var chan_to_sender = Channel{};
+
+    var coro1: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack1 };
+    var coro2: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack2 };
+
+    const sender = struct {
+        fn run(coro: *Coroutine, send_chan: *Channel, recv_chan: *Channel) void {
+            var counter: i32 = 0;
+            while (counter < 10) {
+                send_chan.send(coro, counter);
+                const reply = recv_chan.recv(coro);
+                assert(reply == counter); // verify we got back what we sent
+                counter += 1;
+            }
+            // Send EOF
+            send_chan.send(coro, -1);
+        }
+    }.run;
+
+    const receiver = struct {
+        fn run(coro: *Coroutine, recv_chan: *Channel, send_chan: *Channel) i32 {
+            var last: i32 = 0;
+            while (true) {
+                const msg = recv_chan.recv(coro);
+                if (msg == -1) break;
+                last = msg;
+                send_chan.send(coro, msg); // echo it back
+            }
+            return last;
+        }
+    }.run;
+
+    const SenderClosure = Closure(sender);
+    const ReceiverClosure = Closure(receiver);
+
+    var sender_closure = SenderClosure.init(.{ &coro1, &chan_to_receiver, &chan_to_sender });
+    var receiver_closure = ReceiverClosure.init(.{ &coro2, &chan_to_receiver, &chan_to_sender });
+
+    coro1.setup(&SenderClosure.start, &sender_closure);
+    coro2.setup(&ReceiverClosure.start, &receiver_closure);
+
+    // Round-robin scheduler
+    while (!coro1.finished or !coro2.finished) {
+        if (!coro1.finished) coro1.step();
+        if (!coro2.finished) coro2.step();
+    }
+
+    try std.testing.expectEqual(9, receiver_closure.result);
+}
