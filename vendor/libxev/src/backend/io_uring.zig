@@ -1039,7 +1039,7 @@ pub const Operation = union(OperationType) {
         buffer: ReadBuffer,
 
         /// Internal storage for msghdr when using vectored recv
-        msghdr: posix.msghdr = undefined,
+        msghdr: linux.msghdr = undefined,
     },
 
     send: struct {
@@ -1047,12 +1047,12 @@ pub const Operation = union(OperationType) {
         buffer: WriteBuffer,
 
         /// Internal storage for msghdr when using vectored send
-        msghdr: posix.msghdr_const = undefined,
+        msghdr: linux.msghdr_const = undefined,
     },
 
     sendmsg: struct {
         fd: posix.fd_t,
-        msghdr: *posix.msghdr_const,
+        msghdr: *linux.msghdr_const,
 
         /// Optionally, a write buffer can be specified and the given
         /// msghdr will be populated with information about this buffer.
@@ -1064,7 +1064,7 @@ pub const Operation = union(OperationType) {
 
     recvmsg: struct {
         fd: posix.fd_t,
-        msghdr: *posix.msghdr,
+        msghdr: *linux.msghdr,
     },
 
     shutdown: struct {
