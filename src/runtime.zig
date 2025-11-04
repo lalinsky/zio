@@ -17,7 +17,6 @@ const Coroutine = coroutines.Coroutine;
 
 // const Error = coroutines.Error;
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
-const FutureResult = @import("future_result.zig").FutureResult;
 const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
 const StackPoolOptions = stack_pool.StackPoolOptions;
@@ -150,11 +149,10 @@ pub fn JoinHandle(comptime T: type) type {
 
         /// Helper to get result from awaitable and release it
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
-            const result = switch (awaitable.kind) {
-                .task => Task(T).fromAwaitable(awaitable).impl.future_result.get().?,
-                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.future_result.get().?,
+            self.result = switch (awaitable.kind) {
+                .task => Task(T).fromAwaitable(awaitable).getResult(),
+                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
             };
-            self.result = result;
             rt.releaseAwaitable(awaitable, false);
             self.awaitable = null;
         }
@@ -193,18 +191,14 @@ pub fn JoinHandle(comptime T: type) type {
         /// This is used internally by select() to preserve error union types.
         pub fn getResult(self: *Self) T {
             assert(self.hasResult());
-
-            // If awaitable is null, return cached result
-            if (self.awaitable == null) {
+            if (self.awaitable) |awaitable| {
+                return switch (awaitable.kind) {
+                    .task => Task(T).fromAwaitable(awaitable).getResult(),
+                    .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
+                };
+            } else {
                 return self.result;
             }
-
-            // Get the stored result of type T from awaitable
-            const awaitable = self.awaitable.?;
-            return switch (awaitable.kind) {
-                .task => Task(T).fromAwaitable(awaitable).impl.future_result.get().?,
-                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).impl.future_result.get().?,
-            };
         }
 
         /// Registers a wait node to be notified when the task completes.
@@ -283,7 +277,7 @@ pub fn JoinHandle(comptime T: type) type {
             return switch (awaitable.kind) {
                 .task => {
                     const task = Task(T).fromAwaitable(awaitable);
-                    const executor = task.impl.base.getExecutor();
+                    const executor = task.task.getExecutor();
                     return executor.id;
                 },
                 .blocking_task => null,
@@ -467,22 +461,22 @@ pub const Executor = struct {
         errdefer task.destroy(self);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.runtime.tasks.add(&task.impl.base.awaitable);
-        errdefer _ = self.runtime.tasks.remove(&task.impl.base.awaitable);
+        try self.runtime.tasks.add(task.toAwaitable());
+        errdefer _ = self.runtime.tasks.remove(task.toAwaitable());
 
         // Increment ref count for JoinHandle BEFORE scheduling
         // This prevents race where task completes before we create the handle
-        task.impl.base.awaitable.ref_count.incr();
-        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+        task.toAwaitable().ref_count.incr();
+        errdefer _ = task.toAwaitable().ref_count.decr();
 
         // Schedule the task to run (handles cross-thread notification)
-        self.scheduleTask(&task.impl.base, .maybe_remote);
+        self.scheduleTask(task.task, .maybe_remote);
 
         // Track task spawn
         self.metrics.tasks_spawned += 1;
 
         return JoinHandle(Result){
-            .awaitable = &task.impl.base.awaitable,
+            .awaitable = task.toAwaitable(),
             .result = undefined,
         };
     }
@@ -545,10 +539,10 @@ pub const Executor = struct {
             const next_task = AnyTask.fromWaitNode(next_wait_node);
 
             self.current_coroutine = &next_task.coro;
-            coroutines.switchContext(&current_coro.context, &next_task.coro.context);
+            current_coro.yieldTo(&next_task.coro);
         } else {
             // No ready tasks - return to scheduler
-            coroutines.switchContext(&current_coro.context, current_coro.parent_context_ptr);
+            current_coro.yield();
         }
 
         // After resuming, the task may have migrated to a different executor.
@@ -682,7 +676,8 @@ pub const Executor = struct {
 
                 self.current_coroutine = &task.coro;
                 defer self.current_coroutine = null;
-                coroutines.switchContext(&self.main_context, &task.coro.context);
+
+                task.coro.step();
 
                 // Handle finished coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
                 if (self.current_coroutine) |current_coro| {
@@ -1055,21 +1050,21 @@ pub const Runtime = struct {
         errdefer task.destroy(self);
 
         // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.tasks.add(&task.impl.base.awaitable);
-        errdefer _ = self.tasks.remove(&task.impl.base.awaitable);
+        try self.tasks.add(task.toAwaitable());
+        errdefer _ = self.tasks.remove(task.toAwaitable());
 
         // Increment ref count for JoinHandle BEFORE scheduling
         // This prevents race where task completes before we create the handle
-        task.impl.base.awaitable.ref_count.incr();
-        errdefer _ = task.impl.base.awaitable.ref_count.decr();
+        task.toAwaitable().ref_count.incr();
+        errdefer _ = task.toAwaitable().ref_count.decr();
 
         // Schedule the task to run on the thread pool
         thread_pool.schedule(
-            xev.ThreadPool.Batch.from(&task.impl.base.thread_pool_task),
+            xev.ThreadPool.Batch.from(&task.task.thread_pool_task),
         );
 
         return JoinHandle(Result){
-            .awaitable = &task.impl.base.awaitable,
+            .awaitable = task.toAwaitable(),
             .result = undefined,
         };
     }

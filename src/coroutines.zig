@@ -7,8 +7,6 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const meta = @import("meta.zig");
-const FutureResult = @import("future_result.zig").FutureResult;
 
 pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
 
@@ -303,14 +301,13 @@ pub fn switchContext(
     }
 }
 
-/// Entry point for coroutines that reads function pointer from stack and passes data pointer.
+/// Entry point for coroutines that reads function pointer and context from stack.
 ///
-/// Expected stack layout for all platforms.
-///   rsp/sp + 0 = CoroutineData.func     (function pointer)
-///   rsp/sp + 8 = CoroutineData.args     (args data)
-///   rsp/sp + ... = CoroutineData.result (result storage)
+/// Expected stack layout (Entrypoint structure):
+///   rsp/sp + 0 = func     (function pointer)
+///   rsp/sp + 8 = context  (context pointer)
 ///
-/// The function is called with a pointer to the entire CoroutineData structure.
+/// The function is called with the context pointer as the first argument.
 ///
 /// x86_64 handles stack alignment here since we use JMP instead of CALL:
 /// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
@@ -327,21 +324,21 @@ fn coroEntry() callconv(.naked) noreturn {
                 asm volatile (
                     \\ subq $32, %%rsp
                     \\ pushq $0
-                    \\ leaq 40(%%rsp), %%rcx
+                    \\ movq 48(%%rsp), %%rcx
                     \\ jmpq *40(%%rsp)
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
                 asm volatile (
                     \\ pushq $0
-                    \\ leaq 8(%%rsp), %%rdi
+                    \\ movq 16(%%rsp), %%rdi
                     \\ jmpq *8(%%rsp)
                 );
             }
         },
         .aarch64 => asm volatile (
             \\ mov x30, #0
-            \\ mov x0, sp
+            \\ ldr x0, [sp, #8]
             \\ ldr x2, [sp]
             \\ br x2
         ),
@@ -355,25 +352,40 @@ pub const Coroutine = struct {
     stack: ?Stack,
     finished: bool = false,
 
-    pub fn setup(self: *Coroutine, func: anytype, args: meta.ArgsType(func), result_ptr: *FutureResult(meta.ReturnType(func))) void {
-        const Result = meta.ReturnType(func);
-        const Args = @TypeOf(args);
+    /// Step into the coroutine
+    pub fn step(self: *Coroutine) void {
+        switchContext(self.parent_context_ptr, &self.context);
+    }
+
+    /// Yield control back to the caller
+    pub fn yield(self: *Coroutine) void {
+        switchContext(&self.context, self.parent_context_ptr);
+    }
+
+    /// Yield control to another coroutine
+    pub fn yieldTo(self: *Coroutine, other: *Coroutine) void {
+        switchContext(&self.context, &other.context);
+    }
+
+    pub fn setup(self: *Coroutine, func: *const fn (*Coroutine, ?*anyopaque) void, userdata: ?*anyopaque) void {
+        const Entrypoint = extern struct {
+            func: *const fn (*anyopaque) callconv(.c) noreturn,
+            context: *anyopaque,
+        };
 
         const CoroutineData = struct {
-            func: *const fn (*anyopaque) callconv(.c) noreturn,
-            args: Args,
-            result_ptr: *FutureResult(Result),
             coro: *Coroutine,
+            func: *const fn (*Coroutine, ?*anyopaque) void,
+            userdata: ?*anyopaque,
 
-            fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
-                const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
+            fn entrypointFn(context_ptr: *anyopaque) callconv(.c) noreturn {
+                const coro_data: *@This() = @ptrCast(@alignCast(context_ptr));
                 const coro = coro_data.coro;
 
-                const result = @call(.always_inline, func, coro_data.args);
-                _ = coro_data.result_ptr.set(result);
+                coro_data.func(coro, coro_data.userdata);
 
                 coro.finished = true;
-                switchContext(&coro.context, coro.parent_context_ptr);
+                coro.yield();
                 unreachable;
             }
         };
@@ -381,20 +393,23 @@ pub const Coroutine = struct {
         // Convert the stack pointer to ints for calculations
         const stack = self.stack.?; // Stack must be non-null during setup
         const stack_base = @intFromPtr(stack.ptr);
-        const stack_end = stack_base + stack.len;
+        var stack_end = stack_base + stack.len;
 
-        // Store function pointer, args, and result space as a contiguous block at the end of stack
-        const data_ptr = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), stack_alignment);
-
-        // Set up function pointer, args, result_ptr, and coro pointer
-        const data: *CoroutineData = @ptrFromInt(data_ptr);
-        data.func = &CoroutineData.wrapper;
-        data.args = args;
-        data.result_ptr = result_ptr;
+        // Copy our wrapper to stack
+        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), @alignOf(CoroutineData));
+        const data: *CoroutineData = @ptrFromInt(stack_end);
         data.coro = self;
+        data.func = func;
+        data.userdata = userdata;
+
+        // Allocate and configure structure for coroEntry
+        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(Entrypoint), stack_alignment);
+        const entry: *Entrypoint = @ptrFromInt(stack_end);
+        entry.func = &CoroutineData.entrypointFn;
+        entry.context = data;
 
         // Initialize the context with the entry point
-        self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);
+        self.context = initContext(@ptrCast(@alignCast(entry)), &coroEntry);
 
         // Initialize Windows TIB fields for the coroutine stack
         if (builtin.os.tag == .windows) {
@@ -405,3 +420,50 @@ pub const Coroutine = struct {
         }
     }
 };
+
+pub fn Closure(func: anytype) type {
+    const func_info = @typeInfo(@TypeOf(func));
+    const ReturnType = func_info.@"fn".return_type.?;
+    const Args = std.meta.ArgsTuple(@TypeOf(func));
+
+    return struct {
+        args: Args,
+        result: ReturnType = undefined,
+
+        pub fn init(a: Args) @This() {
+            return .{ .args = a };
+        }
+
+        pub fn start(_: *Coroutine, userdata: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.result = @call(.auto, func, self.args);
+        }
+    };
+}
+
+test "Coroutine: basic" {
+    const stack = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
+    defer std.testing.allocator.free(stack);
+
+    var parent_context: Context = undefined;
+    var coro: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .stack = stack,
+    };
+
+    const Fn = struct {
+        fn sum(a: u32, b: u32) u32 {
+            return a + b;
+        }
+    };
+
+    const C = Closure(Fn.sum);
+    var closure = C.init(.{ 1, 2 });
+    coro.setup(&C.start, &closure);
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    try std.testing.expectEqual(3, closure.result);
+}
