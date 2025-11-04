@@ -136,58 +136,6 @@ pub const Awaitable = struct {
     }
 };
 
-// Future for runtime - not backed by computation, can be set from callbacks
-// Shared implementation for all Future types (Task, BlockingTask, Future)
-pub fn FutureImpl(comptime T: type, comptime Base: type, comptime Parent: type) type {
-    return struct {
-        base: Base,
-        result: T = undefined,
-
-        // Future protocol - Result type
-        pub const Result = T;
-
-        pub fn cancel(parent: *Parent) void {
-            parent.impl.base.awaitable.cancel();
-        }
-
-        pub fn toAny(parent: *Parent) *Base {
-            return &parent.impl.base;
-        }
-
-        pub fn fromAny(base: *Base) *Parent {
-            const impl_ptr: *@This() = @fieldParentPtr("base", base);
-            return @fieldParentPtr("impl", impl_ptr);
-        }
-
-        pub fn toAwaitable(parent: *Parent) *Awaitable {
-            return &parent.impl.base.awaitable;
-        }
-
-        pub fn fromAwaitable(awaitable: *Awaitable) *Parent {
-            const base_ptr: *Base = @fieldParentPtr("awaitable", awaitable);
-            return fromAny(base_ptr);
-        }
-
-        pub fn deinit(parent: *Parent) void {
-            const runtime = Parent.getRuntime(parent);
-            runtime.releaseAwaitable(&parent.impl.base.awaitable, false);
-        }
-
-        /// Registers a wait node to be notified when the task completes.
-        /// This is part of the Future protocol for select().
-        /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(parent: *const Parent, _: *Runtime, wait_node: *WaitNode) bool {
-            return parent.impl.base.awaitable.asyncWait(wait_node);
-        }
-
-        /// Cancels a pending wait operation by removing the wait node.
-        /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(parent: *const Parent, _: *Runtime, wait_node: *WaitNode) void {
-            parent.impl.base.awaitable.asyncCancelWait(wait_node);
-        }
-    };
-}
-
 /// Registry of all awaitables (tasks and blocking tasks) in the runtime.
 /// Used for lifecycle management and preventing spawns during shutdown.
 ///

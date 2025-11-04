@@ -7,7 +7,6 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const CanceledStatus = @import("awaitable.zig").CanceledStatus;
-const FutureImpl = @import("awaitable.zig").FutureImpl;
 const Coroutine = @import("../coroutines.zig").Coroutine;
 const coroutines = @import("../coroutines.zig");
 const WaitNode = @import("WaitNode.zig");

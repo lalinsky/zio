@@ -6,7 +6,6 @@ const Allocator = std.mem.Allocator;
 const xev = @import("xev");
 const Runtime = @import("../runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
-const FutureImpl = @import("awaitable.zig").FutureImpl;
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 const Closure = @import("task.zig").Closure;
