@@ -522,19 +522,29 @@ pub const Coroutine = struct {
 pub fn Closure(func: anytype) type {
     const func_info = @typeInfo(@TypeOf(func));
     const ReturnType = func_info.@"fn".return_type.?;
-    const Args = std.meta.ArgsTuple(@TypeOf(func));
+    const FullArgs = std.meta.ArgsTuple(@TypeOf(func));
+
+    // Build a new tuple type without the first argument (Coroutine)
+    const args_fields = std.meta.fields(FullArgs);
+    comptime var user_types: [args_fields.len - 1]type = undefined;
+    inline for (args_fields[1..], 0..) |field, i| {
+        user_types[i] = field.type;
+    }
+    const UserArgs = std.meta.Tuple(&user_types);
 
     return struct {
-        args: Args,
+        args: UserArgs,
         result: ReturnType = undefined,
 
-        pub fn init(a: Args) @This() {
+        pub fn init(a: UserArgs) @This() {
             return .{ .args = a };
         }
 
-        pub fn start(_: *Coroutine, userdata: ?*anyopaque) void {
+        pub fn start(coro: *Coroutine, userdata: ?*anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(userdata));
-            self.result = @call(.auto, func, self.args);
+            // Prepend the coroutine to the args tuple
+            const full_args = .{coro} ++ self.args;
+            self.result = @call(.auto, func, full_args);
         }
     };
 }
@@ -550,7 +560,7 @@ test "Coroutine: basic" {
     };
 
     const Fn = struct {
-        fn sum(a: u32, b: u32) u32 {
+        fn sum(_: *Coroutine, a: u32, b: u32) u32 {
             return a + b;
         }
     };
@@ -631,8 +641,8 @@ test "Coroutine: message passing" {
     const SenderClosure = Closure(sender);
     const ReceiverClosure = Closure(receiver);
 
-    var sender_closure = SenderClosure.init(.{ &coro1, &chan_to_receiver, &chan_to_sender });
-    var receiver_closure = ReceiverClosure.init(.{ &coro2, &chan_to_receiver, &chan_to_sender });
+    var sender_closure = SenderClosure.init(.{ &chan_to_receiver, &chan_to_sender });
+    var receiver_closure = ReceiverClosure.init(.{ &chan_to_receiver, &chan_to_sender });
 
     coro1.setup(&SenderClosure.start, &sender_closure);
     coro2.setup(&ReceiverClosure.start, &receiver_closure);
