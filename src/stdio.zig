@@ -288,15 +288,33 @@ fn openSelfExeImpl(userdata: ?*anyopaque, flags: std.Io.File.OpenFlags) std.Io.F
 }
 
 fn nowImpl(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Clock.Error!std.Io.Timestamp {
-    _ = userdata;
-    _ = clock;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    return switch (clock) {
+        // libxev uses CLOCK_MONOTONIC which maps to .awake
+        // We treat .boot the same since both are monotonic clocks
+        .awake, .boot => {
+            const ms = rt.now(); // Returns milliseconds from libxev
+            const ns = ms * std.time.ns_per_ms;
+            return .{ .nanoseconds = ns };
+        },
+        .real, .cpu_process, .cpu_thread => error.UnsupportedClock,
+    };
 }
 
 fn sleepImpl(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.SleepError!void {
-    _ = userdata;
-    _ = timeout;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const io = fromRuntime(rt);
+
+    // Convert timeout to duration from now (handles none/duration/deadline cases)
+    const duration = (try timeout.toDurationFromNow(io)) orelse return;
+
+    // Convert nanoseconds to milliseconds
+    const ns: i96 = duration.raw.nanoseconds;
+    if (ns <= 0) return;
+    const ms: u64 = @intCast(@divTrunc(ns, std.time.ns_per_ms));
+
+    try rt.sleep(ms);
 }
 
 fn netListenIpImpl(userdata: ?*anyopaque, address: std.Io.net.IpAddress, options: std.Io.net.IpAddress.ListenOptions) std.Io.net.IpAddress.ListenError!std.Io.net.Server {
@@ -511,6 +529,30 @@ test "Io: concurrent/await pattern" {
             // Await the result
             const result = future.await(io);
             try std.testing.expectEqual(52, result);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: now and sleep" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            // Get current time
+            const t1 = try std.Io.Clock.now(.awake, io);
+
+            // Sleep for 10ms
+            try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+
+            // Get time after sleep
+            const t2 = try std.Io.Clock.now(.awake, io);
+
+            // Verify time moved forward
+            const elapsed = t1.durationTo(t2);
+            try std.testing.expect(elapsed.nanoseconds >= 10 * std.time.ns_per_ms);
         }
     };
 
