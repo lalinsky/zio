@@ -301,14 +301,13 @@ pub fn switchContext(
     }
 }
 
-/// Entry point for coroutines that reads function pointer from stack and passes data pointer.
+/// Entry point for coroutines that reads function pointer and context from stack.
 ///
-/// Expected stack layout for all platforms.
-///   rsp/sp + 0 = CoroutineData.func     (function pointer)
-///   rsp/sp + 8 = CoroutineData.args     (args data)
-///   rsp/sp + ... = CoroutineData.result (result storage)
+/// Expected stack layout (Entrypoint structure):
+///   rsp/sp + 0 = func     (function pointer)
+///   rsp/sp + 8 = context  (context pointer)
 ///
-/// The function is called with a pointer to the entire CoroutineData structure.
+/// The function is called with the context pointer as the first argument.
 ///
 /// x86_64 handles stack alignment here since we use JMP instead of CALL:
 /// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
@@ -325,21 +324,21 @@ fn coroEntry() callconv(.naked) noreturn {
                 asm volatile (
                     \\ subq $32, %%rsp
                     \\ pushq $0
-                    \\ leaq 40(%%rsp), %%rcx
+                    \\ movq 48(%%rsp), %%rcx
                     \\ jmpq *40(%%rsp)
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
                 asm volatile (
                     \\ pushq $0
-                    \\ leaq 8(%%rsp), %%rdi
+                    \\ movq 16(%%rsp), %%rdi
                     \\ jmpq *8(%%rsp)
                 );
             }
         },
         .aarch64 => asm volatile (
             \\ mov x30, #0
-            \\ mov x0, sp
+            \\ ldr x0, [sp, #8]
             \\ ldr x2, [sp]
             \\ br x2
         ),
@@ -368,28 +367,22 @@ pub const Coroutine = struct {
         switchContext(&self.context, &other.context);
     }
 
-    pub fn easySetup(self: *Coroutine, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) void {
-        const Wrapper = struct {
-            fn wrapper(_: *Coroutine, context_ptr: *anyopaque) void {
-                const context: *@TypeOf(args) = @ptrCast(@alignCast(context_ptr));
-                @call(.auto, func, context.*);
-            }
+    pub fn setup(self: *Coroutine, func: *const fn (*Coroutine, ?*anyopaque) void, userdata: ?*anyopaque) void {
+        const Entrypoint = extern struct {
+            func: *const fn (*anyopaque) callconv(.c) noreturn,
+            context: *anyopaque,
         };
-        self.setup(&Wrapper.wrapper, std.mem.asBytes(&args), .fromByteUnits(@alignOf(@TypeOf(args))));
-    }
 
-    pub fn setup(self: *Coroutine, func: *const fn (*Coroutine, *anyopaque) void, context: []const u8, context_align: std.mem.Alignment) void {
         const CoroutineData = struct {
-            entrypoint: *const fn (*anyopaque) callconv(.c) noreturn,
             coro: *Coroutine,
-            func: *const fn (*Coroutine, *anyopaque) void,
-            ctx: *anyopaque,
+            func: *const fn (*Coroutine, ?*anyopaque) void,
+            userdata: ?*anyopaque,
 
-            fn wrapper(coro_data_ptr: *anyopaque) callconv(.c) noreturn {
-                const coro_data: *@This() = @ptrCast(@alignCast(coro_data_ptr));
+            fn entrypointFn(context_ptr: *anyopaque) callconv(.c) noreturn {
+                const coro_data: *@This() = @ptrCast(@alignCast(context_ptr));
                 const coro = coro_data.coro;
 
-                coro_data.func(coro, coro_data.ctx);
+                coro_data.func(coro, coro_data.userdata);
 
                 coro.finished = true;
                 coro.yield();
@@ -400,22 +393,23 @@ pub const Coroutine = struct {
         // Convert the stack pointer to ints for calculations
         const stack = self.stack.?; // Stack must be non-null during setup
         const stack_base = @intFromPtr(stack.ptr);
-        const stack_end = stack_base + stack.len;
-
-        // Copy context to stack
-        const context_ptr = std.mem.alignBackward(usize, stack_end - context.len, context_align.toByteUnits());
-        @memcpy(@as([*]u8, @ptrFromInt(context_ptr))[0..context.len], context);
+        var stack_end = stack_base + stack.len;
 
         // Copy our wrapper to stack
-        const data_ptr = std.mem.alignBackward(usize, context_ptr - @sizeOf(CoroutineData), stack_alignment);
-        const data: *CoroutineData = @ptrFromInt(data_ptr);
-        data.entrypoint = &CoroutineData.wrapper;
+        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), @alignOf(CoroutineData));
+        const data: *CoroutineData = @ptrFromInt(stack_end);
         data.coro = self;
         data.func = func;
-        data.ctx = @ptrFromInt(context_ptr);
+        data.userdata = userdata;
+
+        // Allocate and configure structure for coroEntry
+        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(Entrypoint), stack_alignment);
+        const entry: *Entrypoint = @ptrFromInt(stack_end);
+        entry.func = &CoroutineData.entrypointFn;
+        entry.context = data;
 
         // Initialize the context with the entry point
-        self.context = initContext(@ptrCast(@alignCast(data)), &coroEntry);
+        self.context = initContext(@ptrCast(@alignCast(entry)), &coroEntry);
 
         // Initialize Windows TIB fields for the coroutine stack
         if (builtin.os.tag == .windows) {
@@ -426,6 +420,22 @@ pub const Coroutine = struct {
         }
     }
 };
+
+pub fn Closure(func: anytype) type {
+    const Args = std.meta.ArgsTuple(@TypeOf(func));
+    return struct {
+        args: Args,
+
+        pub fn init(a: Args) @This() {
+            return .{ .args = a };
+        }
+
+        pub fn start(_: *Coroutine, userdata: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            @call(.auto, func, self.args);
+        }
+    };
+}
 
 test "Coroutine: basic" {
     const stack = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
@@ -444,7 +454,10 @@ test "Coroutine: basic" {
     };
 
     var result: u32 = 0;
-    coro.easySetup(Fn.sum, .{1, 2, &result});
+
+    const C = Closure(Fn.sum);
+    var closure = C.init(.{1, 2, &result});
+    coro.setup(&C.start, &closure);
 
     while (!coro.finished) {
         coro.step();
