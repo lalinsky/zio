@@ -14,23 +14,20 @@ jobs:
           # Linux x86_64 native
           - os: ubuntu-latest
             target: x86_64-linux
-            qemu: false
           # Linux ARM64 with QEMU
           - os: ubuntu-latest
             target: aarch64-linux
-            qemu: qemu-aarch64-static
+            qemu_binary: qemu-aarch64-static
           # Linux RISC-V 64 with QEMU
           - os: ubuntu-latest
             target: riscv64-linux
-            qemu: qemu-riscv64-static
+            qemu_binary: qemu-riscv64-static
           # macOS native
           - os: macos-latest
             target: native
-            qemu: false
           # Windows native
           - os: windows-latest
             target: native
-            qemu: false
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -43,10 +40,10 @@ jobs:
         version: 0.15.2
 
     - name: Install QEMU (Linux cross-arch)
-      if: matrix.qemu != false
+      if: matrix.qemu_binary
       run: |
         sudo apt-get update -q -y
-        sudo apt-get install -q -y ${{ matrix.qemu }}
+        sudo apt-get install -q -y qemu-user-static
 
     - name: Build
       run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
@@ -65,16 +62,16 @@ jobs:
       timeout-minutes: 5
 
     - name: Run tests (native)
-      if: matrix.qemu == false
+      if: ${{ !matrix.qemu_binary }}
       run: ./zig-out/bin/test
       timeout-minutes: 5
 
     - name: Run tests (QEMU)
-      if: matrix.qemu != false
-      run: ${{ matrix.qemu }} ./zig-out/bin/test
+      if: matrix.qemu_binary
+      run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
       timeout-minutes: 10
 
     - name: Run xev tests (native only)
-      if: matrix.qemu == false
+      if: ${{ !matrix.qemu_binary }}
       run: cd vendor/libxev && zig build test
       timeout-minutes: 5
