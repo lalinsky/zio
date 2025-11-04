@@ -618,3 +618,143 @@ test "Io: now and sleep" {
 
     try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
 }
+
+test "Io: TCP listen/accept/connect/read/write IPv4" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
+            var server = try addr.listen(io, .{});
+            defer server.socket.close(io);
+
+            var server_future = try io.concurrent(serverFn, .{ io, &server });
+            defer server_future.cancel(io) catch {};
+
+            var client_future = try io.concurrent(clientFn, .{ io, server });
+            defer client_future.cancel(io) catch {};
+
+            try server_future.await(io);
+            try client_future.await(io);
+        }
+
+        fn serverFn(io: std.Io, server: *std.Io.net.Server) !void {
+            const stream = try server.accept(io);
+            defer stream.close(io);
+
+            var buf: [32]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", line);
+        }
+
+        fn clientFn(io: std.Io, server: std.Io.net.Server) !void {
+            const stream = try server.socket.address.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var write_buf: [32]u8 = undefined;
+            var writer = stream.writer(io, &write_buf);
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: TCP listen/accept/connect/read/write IPv6" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{
+                .ip6 = .{
+                    .bytes = .{0} ** 15 ++ .{1}, // ::1
+                    .port = 0,
+                },
+            };
+            var server = addr.listen(io, .{}) catch |err| {
+                if (err == error.AddressNotAvailable) return error.SkipZigTest;
+                return err;
+            };
+            defer server.socket.close(io);
+
+            var server_future = try io.concurrent(serverFn, .{ io, &server });
+            defer server_future.cancel(io) catch {};
+
+            var client_future = try io.concurrent(clientFn, .{ io, server });
+            defer client_future.cancel(io) catch {};
+
+            try server_future.await(io);
+            try client_future.await(io);
+        }
+
+        fn serverFn(io: std.Io, server: *std.Io.net.Server) !void {
+            const stream = try server.accept(io);
+            defer stream.close(io);
+
+            var buf: [32]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", line);
+        }
+
+        fn clientFn(io: std.Io, server: std.Io.net.Server) !void {
+            const stream = try server.socket.address.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var write_buf: [32]u8 = undefined;
+            var writer = stream.writer(io, &write_buf);
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: UDP bind IPv4" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
+            const socket = try addr.bind(io, .{ .mode = .dgram });
+            defer socket.close(io);
+
+            // Verify we got a valid address with ephemeral port
+            try std.testing.expect(socket.address.ip4.port != 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: UDP bind IPv6" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{
+                .ip6 = .{
+                    .bytes = .{0} ** 15 ++ .{1}, // ::1
+                    .port = 0,
+                },
+            };
+            const socket = addr.bind(io, .{ .mode = .dgram }) catch |err| {
+                if (err == error.AddressNotAvailable) return error.SkipZigTest;
+                return err;
+            };
+            defer socket.close(io);
+
+            // Verify we got a valid address with ephemeral port
+            try std.testing.expect(socket.address.ip6.port != 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
