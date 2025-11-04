@@ -32,13 +32,21 @@ pub const File = struct {
     }
 
     pub fn read(self: *File, rt: *Runtime, buffer: []u8) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pread = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = buffer },
-                .offset = self.position,
+        var completion: xev.Completion = .{
+            .op = .{
+                .pread = .{
+                    .fd = self.fd,
+                    .buffer = .{ .slice = buffer },
+                    .offset = self.position,
+                },
             },
-        } };
+        };
+
+        // Set threadpool flag for backends that need it for file I/O
+        switch (xev.backend) {
+            .epoll, .kqueue => completion.flags.threadpool = true,
+            else => {},
+        }
 
         const bytes_read = try runIo(rt, &completion, "pread");
         self.position += bytes_read;
@@ -46,13 +54,21 @@ pub const File = struct {
     }
 
     pub fn write(self: *File, rt: *Runtime, data: []const u8) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pwrite = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = data },
-                .offset = self.position,
+        var completion: xev.Completion = .{
+            .op = .{
+                .pwrite = .{
+                    .fd = self.fd,
+                    .buffer = .{ .slice = data },
+                    .offset = self.position,
+                },
             },
-        } };
+        };
+
+        // Set threadpool flag for backends that need it for file I/O
+        switch (xev.backend) {
+            .epoll, .kqueue => completion.flags.threadpool = true,
+            else => {},
+        }
 
         const bytes_written = try runIo(rt, &completion, "pwrite");
         self.position += bytes_written;
@@ -92,6 +108,12 @@ pub const File = struct {
             },
         } };
 
+        // Set threadpool flag for backends that need it for file I/O
+        switch (xev.backend) {
+            .epoll, .kqueue => completion.flags.threadpool = true,
+            else => {},
+        }
+
         return runIo(rt, &completion, "pread");
     }
 
@@ -103,6 +125,12 @@ pub const File = struct {
                 .offset = offset,
             },
         } };
+
+        // Set threadpool flag for backends that need it for file I/O
+        switch (xev.backend) {
+            .epoll, .kqueue => completion.flags.threadpool = true,
+            else => {},
+        }
 
         return runIo(rt, &completion, "pwrite");
     }
@@ -117,6 +145,12 @@ pub const File = struct {
                 .offset = self.position,
             },
         } };
+
+        // Set threadpool flag for backends that need it for file I/O
+        switch (xev.backend) {
+            .epoll, .kqueue => completion.flags.threadpool = true,
+            else => {},
+        }
 
         const bytes_read = runIo(rt, &completion, "pread") catch |err| switch (err) {
             error.EOF => return error.EndOfStream,
@@ -142,6 +176,12 @@ pub const File = struct {
                 .offset = self.position,
             },
         } };
+
+        // Set threadpool flag for backends that need it for file I/O
+        switch (xev.backend) {
+            .epoll, .kqueue => completion.flags.threadpool = true,
+            else => {},
+        }
 
         const bytes_written = runIo(rt, &completion, "pwrite") catch return error.WriteFailed;
         self.position += bytes_written;
