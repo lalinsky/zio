@@ -640,7 +640,7 @@ pub const Loop = struct {
                     if (self.thread_schedule(completion)) |_|
                         return
                     else |err|
-                        break :res .{ .read = err };
+                        break :res .{ .pread = err };
                 }
 
                 var ev: linux.epoll_event = .{
@@ -648,13 +648,13 @@ pub const Loop = struct {
                     .data = .{ .ptr = @intFromPtr(completion) },
                 };
 
-                const fd = completion.fd_maybe_dup() catch |err| break :res .{ .read = err };
+                const fd = completion.fd_maybe_dup() catch |err| break :res .{ .pread = err };
                 break :res if (posix.epoll_ctl(
                     self.fd,
                     linux.EPOLL.CTL_ADD,
                     fd,
                     &ev,
-                )) null else |err| .{ .read = err };
+                )) null else |err| .{ .pread = err };
             },
 
             .write => res: {
@@ -684,7 +684,7 @@ pub const Loop = struct {
                     if (self.thread_schedule(completion)) |_|
                         return
                     else |err|
-                        break :res .{ .write = err };
+                        break :res .{ .pwrite = err };
                 }
 
                 var ev: linux.epoll_event = .{
@@ -692,13 +692,13 @@ pub const Loop = struct {
                     .data = .{ .ptr = @intFromPtr(completion) },
                 };
 
-                const fd = completion.fd_maybe_dup() catch |err| break :res .{ .write = err };
+                const fd = completion.fd_maybe_dup() catch |err| break :res .{ .pwrite = err };
                 break :res if (posix.epoll_ctl(
                     self.fd,
                     linux.EPOLL.CTL_ADD,
                     fd,
                     &ev,
-                )) null else |err| .{ .write = err };
+                )) null else |err| .{ .pwrite = err };
             },
 
             .send => res: {
