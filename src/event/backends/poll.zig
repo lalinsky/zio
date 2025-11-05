@@ -4,6 +4,8 @@ const socket = @import("../os/posix/socket.zig");
 const time = @import("../time.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
+const OperationType = @import("../completion.zig").OperationType;
+const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
@@ -26,112 +28,219 @@ pub const NetShutdownError = error{
     Unexpected,
 };
 
-const Poll = struct {
-    fd: socket.pollfd,
-    completion: *Completion,
+const PollEntryType = enum {
+    connect,
+    accept,
+    send_or_recv,
+};
+
+const PollEntry = struct {
+    completions: Queue(Completion),
+    type: PollEntryType,
+    index: usize,
 };
 
 const Self = @This();
 
 const log = std.log.scoped(.zio_poll);
-const max_fds = 256;
 
-fds: std.MultiArrayList(Poll) = .empty,
+allocator: std.mem.Allocator,
+poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
+poll_fds: std.ArrayList(socket.pollfd) = .empty,
 
-pub fn init(self: *Self) !void {
-    self.* = .{};
+pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
+    self.* = .{
+        .allocator = allocator,
+    };
 }
 
 pub fn deinit(self: *Self) void {
-    if (self.fds.len > 0) {
-        std.debug.panic("poll: still have {d} fds", .{self.fds.len});
+    if (self.poll_queue.count() > 0) {
+        std.debug.panic("poll: still have {d} fds", .{self.poll_queue.count()});
     }
+    self.poll_queue.deinit(self.allocator);
+    self.poll_fds.deinit(self.allocator);
 }
 
-fn cancelCompletion(completion: *Completion, cancel: *Completion) void {
-    // Set error.Canceled result based on operation type
-    switch (completion.op) {
-        .net_connect => {
-            const data = completion.cast(NetConnect);
-            data.result = error.Canceled;
-        },
-        .net_accept => {
-            const data = completion.cast(NetAccept);
-            data.result = error.Canceled;
-        },
-        .net_recv => {
-            const data = completion.cast(NetRecv);
-            data.result = error.Canceled;
-        },
-        .net_send => {
-            const data = completion.cast(NetSend);
-            data.result = error.Canceled;
-        },
-        else => unreachable, // Only async ops can be in fds
-    }
-    // Mark both completions as done
-    completion.state = .completed;
-    cancel.state = .completed;
+fn getEvents(op: OperationType) c_short {
+    const event: c_short = switch (op) {
+        .net_connect => socket.POLL.OUT,
+        .net_accept => socket.POLL.IN,
+        .net_recv => socket.POLL.IN,
+        .net_send => socket.POLL.OUT,
+        else => unreachable,
+    };
+    return socket.POLL.ERR | socket.POLL.HUP | event;
 }
 
-fn processCancelations(self: *Self, state: *LoopState) void {
-    var i: usize = 0;
-    const completions = self.fds.items(.completion);
-    while (i < self.fds.len) {
-        const completion = completions[i];
-        if (completion.canceled) |cancel| {
-            cancelCompletion(completion, cancel);
-            // Remove from poll queue
-            self.fds.swapRemove(i);
-            state.active -= 2; // Both the operation and the cancel
+fn getPollType(op: OperationType) PollEntryType {
+    return switch (op) {
+        .net_accept => .accept,
+        .net_connect => .connect,
+        .net_recv => .send_or_recv,
+        .net_send => .send_or_recv,
+        else => unreachable,
+    };
+}
+
+/// Add a completion to the poll queue, merging with existing fd if present
+fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
+    completion.prev = null;
+    completion.next = null;
+
+    const gop = try self.poll_queue.getOrPut(self.allocator, fd);
+    errdefer if (!gop.found_existing) self.poll_queue.removeByPtr(gop.key_ptr);
+
+    var entry = gop.value_ptr;
+
+    if (!gop.found_existing) {
+        try self.poll_fds.append(self.allocator, .{ .fd = fd, .events = getEvents(completion.op), .revents = 0 });
+        entry.* = .{
+            .completions = .{},
+            .type = getPollType(completion.op),
+            .index = self.poll_fds.items.len - 1,
+        };
+        entry.completions.push(completion);
+        return;
+    }
+
+    std.debug.assert(entry.type == getPollType(completion.op));
+    self.poll_fds.items[entry.index].events |= getEvents(completion.op);
+    entry.completions.push(completion);
+}
+
+fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void {
+    const entry = self.poll_queue.getPtr(fd) orelse return;
+
+    entry.completions.remove(completion);
+    if (entry.completions.head != null) {
+        // There are still pending events, so we don't need to remove the entry
+        return;
+    }
+
+    // Remove from the fd list
+    const removed_pollfd = self.poll_fds.swapRemove(entry.index);
+    std.debug.assert(removed_pollfd.fd == fd);
+
+    // Because we swapped the position with the last fd,
+    // we need to update the index of that fd in the poll queue
+    if (entry.index < self.poll_fds.items.len) {
+        const updated_fd = self.poll_fds.items[entry.index].fd;
+        const updated_entry = self.poll_queue.getPtr(updated_fd) orelse unreachable;
+        updated_entry.index = entry.index;
+    }
+
+    // Now we can remove the entry from the poll queue
+    const was_removed = self.poll_queue.remove(fd);
+    std.debug.assert(was_removed);
+}
+
+fn getHandle(completion: *Completion) NetHandle {
+    return switch (completion.op) {
+        .net_accept => completion.cast(NetAccept).handle,
+        .net_connect => completion.cast(NetConnect).handle,
+        .net_recv => completion.cast(NetRecv).handle,
+        .net_send => completion.cast(NetSend).handle,
+        else => unreachable,
+    };
+}
+
+fn processSubmissions(self: *Self, state: *LoopState) !void {
+    var submissions = state.submissions;
+    state.submissions = .{};
+
+    var operations: Queue(Completion) = .{};
+    var cancels: Queue(Completion) = .{};
+
+    // First go over cancelations and mark operations as canceled
+    while (submissions.pop()) |completion| {
+        if (completion.op == .cancel) {
+            var data = completion.cast(Cancel);
+            if (data.cancel_c.canceled == null) {
+                data.cancel_c.canceled = completion;
+                cancels.push(completion);
+            } else {
+                data.result = error.AlreadyCanceled;
+                state.markCompleted(completion);
+            }
         } else {
-            i += 1;
+            operations.push(completion);
         }
+    }
+
+    // Now start normal operations, ignoring the canceled ones
+    while (operations.pop()) |completion| {
+        if (completion.state == .completed) continue;
+        if (completion.canceled != null) {
+            state.markCompleted(completion);
+        } else {
+            if (try self.startCompletion(completion)) {
+                state.markCompleted(completion);
+            } else {
+                state.markRunning(completion);
+            }
+        }
+    }
+
+    // And now go over remaining cancelations and remove the operations from the poll queue
+    while (cancels.pop()) |completion| {
+        if (completion.state == .completed) continue;
+        const cancel = completion.cast(Cancel);
+        const fd = getHandle(cancel.cancel_c);
+        self.removeFromPollQueue(fd, cancel.cancel_c);
+
+        // Set cancel result to success
+        // The canceled operation's result will be error.Canceled via getResult()
+        cancel.result = {};
+
+        // Mark the canceled operation as completed, which will recursively mark the cancel as completed
+        state.markCompleted(cancel.cancel_c);
     }
 }
 
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
-    var submissions = state.submissions;
-    state.submissions = null;
-
-    while (submissions) |completion| {
-        submissions = completion.next;
-        if (try self.start(completion)) {
-            completion.state = .completed;
-            state.active -= 1;
-        }
-    }
-
-    // Process cancelations before polling
-    self.processCancelations(state);
+    // Process incoming submissions, handle cancelations
+    try self.processSubmissions(state);
 
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
-    if (self.fds.len > 0) {
-        const n = try socket.poll(self.fds.items(.fd), timeout);
-        if (n == 0) {
-            return;
+
+    if (self.poll_fds.items.len == 0) {
+        if (timeout > 0) {
+            time.sleep(timeout);
         }
-    } else if (timeout_ms > 0) {
-        time.sleep(timeout);
+        return;
+    }
+
+    const n = try socket.poll(self.poll_fds.items, timeout);
+    if (n == 0) {
+        return;
     }
 
     var i: usize = 0;
-    const items = self.fds.slice();
-    const fds = items.items(.fd).ptr;
-    const completions = items.items(.completion).ptr;
-    while (i < self.fds.len) {
-        const fd = fds[i];
-        if (fd.revents != 0) {
-            self.complete(completions[i], fd.revents);
-            self.fds.swapRemove(i);
-            state.active -= 1;
-        } else {
+    while (i < self.poll_fds.items.len) {
+        const item = &self.poll_fds.items[i];
+        if (item.revents == 0) {
             i += 1;
+            continue;
         }
+
+        const entry = self.poll_queue.get(item.fd) orelse unreachable;
+
+        var iter: ?*Completion = entry.completions.head;
+        while (iter) |completion| {
+            iter = completion.next;
+            if (self.checkCompletion(completion, item.revents)) {
+                self.removeFromPollQueue(item.fd, completion);
+                state.markCompleted(completion);
+                continue;
+            }
+        }
+
+        i += 1;
     }
 }
 
-pub fn start(self: *Self, c: *Completion) !bool {
+pub fn startCompletion(self: *Self, c: *Completion) !bool {
     switch (c.op) {
         .timer => {
             // handled elsewhere in loop
@@ -186,14 +295,7 @@ pub fn start(self: *Self, c: *Completion) !bool {
                 error.WouldBlock, error.ConnectionPending => {
                     // Register for POLLOUT to detect when connection completes
                     c.state = .running;
-                    try self.fds.append(std.heap.page_allocator, .{
-                        .fd = .{
-                            .fd = data.handle,
-                            .events = socket.POLL.OUT | socket.POLL.ERR | socket.POLL.HUP,
-                            .revents = 0,
-                        },
-                        .completion = c,
-                    });
+                    try self.addToPollQueue(data.handle, c);
                     return false;
                 },
                 else => return true, // Error, complete immediately
@@ -209,69 +311,28 @@ pub fn start(self: *Self, c: *Completion) !bool {
                 error.WouldBlock => {
                     // Register for POLLIN to detect when client connects
                     c.state = .running;
-                    try self.fds.append(std.heap.page_allocator, .{
-                        .fd = .{
-                            .fd = data.handle,
-                            .events = socket.POLL.IN,
-                            .revents = 0,
-                        },
-                        .completion = c,
-                    });
+                    try self.addToPollQueue(data.handle, c);
                     return false;
                 },
                 else => return true, // Error, complete immediately
             }
         },
         .net_recv => {
+            c.state = .running;
             const data = c.cast(NetRecv);
-            data.result = socket.recv(data.handle, data.buffer, data.flags);
-            if (data.result) |_| {
-                // Received data immediately
-                return true;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Register for POLLIN to detect when data arrives
-                    c.state = .running;
-                    try self.fds.append(std.heap.page_allocator, .{
-                        .fd = .{
-                            .fd = data.handle,
-                            .events = socket.POLL.IN,
-                            .revents = 0,
-                        },
-                        .completion = c,
-                    });
-                    return false;
-                },
-                else => return true, // Error, complete immediately
-            }
+            try self.addToPollQueue(data.handle, c);
+            return false;
         },
         .net_send => {
+            c.state = .running;
             const data = c.cast(NetSend);
-            data.result = socket.send(data.handle, data.buffer, data.flags);
-            if (data.result) |_| {
-                // Sent data immediately
-                return true;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Register for POLLOUT to detect when buffer space available
-                    c.state = .running;
-                    try self.fds.append(std.heap.page_allocator, .{
-                        .fd = .{
-                            .fd = data.handle,
-                            .events = socket.POLL.OUT,
-                            .revents = 0,
-                        },
-                        .completion = c,
-                    });
-                    return false;
-                },
-                else => return true, // Error, complete immediately
-            }
+            try self.addToPollQueue(data.handle, c);
+            return false;
         },
     }
 }
 
-pub fn complete(self: *Self, c: *Completion, events: @FieldType(socket.pollfd, "revents")) void {
+pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.pollfd, "revents")) bool {
     _ = self;
 
     // Check for error conditions first
@@ -324,4 +385,5 @@ pub fn complete(self: *Self, c: *Completion, events: @FieldType(socket.pollfd, "
             std.debug.panic("unexpected completion type in complete: {}", .{c.op});
         },
     }
+    return true;
 }

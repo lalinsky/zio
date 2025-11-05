@@ -4,6 +4,7 @@ const Completion = @import("completion.zig").Completion;
 const Cancel = @import("completion.zig").Cancel;
 const NetClose = @import("completion.zig").NetClose;
 const Timer = @import("completion.zig").Timer;
+const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const time = @import("time.zig");
 
@@ -20,6 +21,8 @@ fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
 const TimerHeap = Heap(Timer, void, timerDeadlineLess);
 
 pub const LoopState = struct {
+    loop: *Loop,
+
     initialized: bool = false,
     running: bool = false,
     stopped: bool = false,
@@ -29,13 +32,26 @@ pub const LoopState = struct {
     now_ms: u64 = 0,
     timers: TimerHeap = .{ .context = {} },
 
-    submissions: ?*Completion = null,
+    submissions: Queue(Completion) = .{},
+
+    pub fn markCompleted(self: *LoopState, completion: *Completion) void {
+        if (completion.canceled) |cancel_c| {
+            self.markCompleted(cancel_c);
+        }
+        completion.state = .completed;
+        self.active -= 1;
+        completion.call(self.loop);
+    }
+
+    pub fn markRunning(self: *LoopState, completion: *Completion) void {
+        _ = self;
+        completion.state = .running;
+    }
 
     pub fn submit(self: *LoopState, completion: *Completion) void {
         completion.state = .adding;
         self.active += 1;
-        completion.next = self.submissions;
-        self.submissions = completion;
+        self.submissions.push(completion);
     }
 
     pub fn updateNow(self: *LoopState) void {
@@ -73,13 +89,13 @@ pub const Loop = struct {
 
     pub fn init(self: *Loop) !void {
         self.* = .{
-            .state = .{},
+            .state = .{ .loop = self },
             .backend = undefined,
         };
 
         self.state.updateNow();
 
-        try self.backend.init();
+        try self.backend.init(std.heap.page_allocator);
         errdefer self.backend.deinit();
 
         self.state.initialized = true;
@@ -141,11 +157,8 @@ pub const Loop = struct {
                 timeout_ms = @min(timer.deadline_ms - self.state.now_ms, self.max_wait_ms);
                 break;
             }
-            const action = timer.c.call(self);
-            switch (action) {
-                .rearm => self.state.setTimer(timer),
-                .disarm => self.state.clearTimer(timer),
-            }
+            self.state.clearTimer(timer);
+            timer.c.call(self);
         }
         return timeout_ms;
     }
@@ -476,7 +489,7 @@ test "Loop: cancel net_accept" {
     try std.testing.expectEqual(.completed, cancel.c.state);
 
     // Verify accept got canceled error
-    try std.testing.expectError(error.Canceled, accept_comp.result);
+    try std.testing.expectError(error.Canceled, accept_comp.getResult());
 
     // Close server socket
     var close_server: NetClose = .init(server_sock);
@@ -557,7 +570,7 @@ test "Loop: cancel net_recv" {
         try std.testing.expectEqual(.completed, cancel.c.state);
 
         // Verify recv got canceled error
-        try std.testing.expectError(error.Canceled, recv.result);
+        try std.testing.expectError(error.Canceled, recv.getResult());
     } else {
         // Recv completed immediately, just finish the loop
         try loop.run(.until_done);

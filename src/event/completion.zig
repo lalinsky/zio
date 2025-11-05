@@ -28,32 +28,37 @@ pub const Completion = struct {
 
     canceled: ?*Completion = null,
 
-    /// Intrusive queue of completions.
+    /// Intrusive linked list of completions.
+    /// Used for submission queue OR poll queue (mutually exclusive).
+    prev: ?*Completion = null,
     next: ?*Completion = null,
 
     pub const State = enum { new, adding, running, completed };
 
-    pub const CallbackAction = enum { disarm, rearm };
     pub const CallbackFn = fn (
         userdata: ?*anyopaque,
         loop: *Loop,
         completion: *Completion,
-    ) CallbackAction;
+    ) void;
 
     pub fn init(op: OperationType) Completion {
         return .{ .op = op };
     }
 
-    pub fn call(c: *Completion, loop: *Loop) CallbackAction {
+    pub fn call(c: *Completion, loop: *Loop) void {
         if (c.callback) |func| {
-            return func(c.userdata, loop, c);
+            func(c.userdata, loop, c);
         }
-        return .disarm;
     }
 
     pub fn cast(c: *Completion, comptime T: type) *T {
         std.debug.assert(c.op == completionOp(T));
         return @fieldParentPtr("c", c);
+    }
+
+    pub fn getResult(c: *Completion, comptime T: type) !@FieldType(T, "result") {
+        if (c.canceled != null) return error.Canceled;
+        return c.cast(T).result;
     }
 };
 
@@ -112,7 +117,9 @@ pub const Timer = struct {
 pub const Cancel = struct {
     c: Completion,
     cancel_c: *Completion,
-    result: void = {},
+    result: Error!void = undefined,
+
+    pub const Error = error{AlreadyCanceled} || Cancelable;
 
     pub fn init(cancel_c: *Completion) Cancel {
         return .{
@@ -185,7 +192,7 @@ pub const NetBind = struct {
     addr: [*]const u8,
     addr_len: u32,
 
-    pub const Error = socket.BindError;
+    pub const Error = socket.BindError || Cancelable;
 
     pub fn init(handle: Backend.NetHandle, addr: [*]const u8, addr_len: u32) NetBind {
         return .{
@@ -203,7 +210,7 @@ pub const NetListen = struct {
     handle: Backend.NetHandle,
     backlog: u31,
 
-    pub const Error = socket.ListenError;
+    pub const Error = socket.ListenError || Cancelable;
 
     pub fn init(handle: Backend.NetHandle, backlog: u31) NetListen {
         return .{
@@ -231,6 +238,11 @@ pub const NetConnect = struct {
             .addr_len = addr_len,
         };
     }
+
+    pub fn getResult(self: *const NetConnect) Error!void {
+        if (self.c.canceled != null) return error.Canceled;
+        return self.result;
+    }
 };
 
 pub const NetAccept = struct {
@@ -257,6 +269,11 @@ pub const NetAccept = struct {
             .flags = flags,
         };
     }
+
+    pub fn getResult(self: *const NetAccept) Error!Backend.NetHandle {
+        if (self.c.canceled != null) return error.Canceled;
+        return self.result;
+    }
 };
 
 pub const NetRecv = struct {
@@ -276,6 +293,11 @@ pub const NetRecv = struct {
             .flags = flags,
         };
     }
+
+    pub fn getResult(self: *const NetRecv) Error!usize {
+        if (self.c.canceled != null) return error.Canceled;
+        return self.result;
+    }
 };
 
 pub const NetSend = struct {
@@ -294,5 +316,10 @@ pub const NetSend = struct {
             .buffer = buffer,
             .flags = flags,
         };
+    }
+
+    pub fn getResult(self: *const NetSend) Error!usize {
+        if (self.c.canceled != null) return error.Canceled;
+        return self.result;
     }
 };
