@@ -1196,7 +1196,7 @@ pub const Completion = struct {
             },
 
             .accept => |*op| .{
-                .accept = if (posix.accept(
+                .accept = if (posix_ext.accept(
                     op.socket,
                     @ptrCast(&op.addr),
                     &op.addr_size,
@@ -1208,7 +1208,7 @@ pub const Completion = struct {
             },
 
             .connect => |*op| .{
-                .connect = if (posix.getsockoptError(op.socket)) {} else |err| err,
+                .connect = if (posix_ext.getsockoptError(op.socket)) {} else |err| err,
             },
 
             .write => |*op| .{
@@ -1249,13 +1249,13 @@ pub const Completion = struct {
 
             .sendto => |*op| .{
                 .sendto = switch (op.buffer) {
-                    .slice => |v| posix.sendto(op.fd, v, 0, @ptrCast(&op.addr), op.addr.getOsSockLen()),
-                    .array => |*v| posix.sendto(op.fd, v.array[0..v.len], 0, @ptrCast(&op.addr), op.addr.getOsSockLen()),
+                    .slice => |v| posix.sendto(op.fd, v, 0, @ptrCast(&op.addr), posix_ext.getSockAddrLen(@ptrCast(&op.addr))),
+                    .array => |*v| posix.sendto(op.fd, v.array[0..v.len], 0, @ptrCast(&op.addr), posix_ext.getSockAddrLen(@ptrCast(&op.addr))),
                     .vectors => |v| blk: {
                         // Use sendmsg for vectored I/O instead of writev
                         var msg: posix.msghdr_const = .{
                             .name = @ptrCast(&op.addr),
-                            .namelen = op.addr.getOsSockLen(),
+                            .namelen = posix_ext.getSockAddrLen(@ptrCast(&op.addr)),
                             .iov = v.data[0..v.len].ptr,
                             .iovlen = @intCast(v.len),
                             .control = null,
@@ -1787,6 +1787,7 @@ pub const ConnectError = posix.KEventError || posix.ConnectError || error{
     Canceled,
     Unexpected,
     AddressInUse,
+    AlreadyConnected,
 };
 
 pub const ReadError = posix.KEventError ||

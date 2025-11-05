@@ -97,3 +97,178 @@ pub fn recvmsg(
         }
     }
 }
+
+/// Wrapper around accept/accept4 with correct error set for libxev usage.
+/// The std.posix.accept function has an error set that's too restrictive for kqueue backend.
+/// This version uses an inferred error set to allow all necessary errors.
+pub fn accept(
+    sock: posix.socket_t,
+    addr: ?*posix.sockaddr,
+    addr_size: ?*posix.socklen_t,
+    flags: u32,
+) !posix.socket_t {
+    if (native_os == .windows) {
+        @compileError("accept is not supported on Windows");
+    }
+
+    const have_accept4 = !(builtin.target.os.tag.isDarwin() or native_os == .haiku);
+    std.debug.assert(0 == (flags & ~@as(u32, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC))); // Unsupported flag(s)
+
+    const accepted_sock: posix.socket_t = while (true) {
+        const rc = if (have_accept4)
+            std.os.linux.accept4(sock, addr, addr_size, flags)
+        else
+            std.c.accept(sock, addr, addr_size);
+
+        switch (posix.errno(rc)) {
+            .SUCCESS => break @intCast(rc),
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            .BADF => unreachable, // always a race condition
+            .CONNABORTED => return error.ConnectionAborted,
+            .FAULT => unreachable,
+            .INVAL => return error.SocketNotListening,
+            .NOTSOCK => unreachable,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOBUFS => return error.SystemResources,
+            .NOMEM => return error.SystemResources,
+            .OPNOTSUPP => unreachable,
+            .PROTO => return error.ProtocolFailure,
+            .PERM => return error.BlockedByFirewall,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    };
+
+    errdefer posix.close(accepted_sock);
+
+    if (!have_accept4) {
+        try setSockFlags(accepted_sock, flags);
+    }
+
+    return accepted_sock;
+}
+
+fn setSockFlags(sock: posix.socket_t, flags: u32) !void {
+    if ((flags & posix.SOCK.CLOEXEC) != 0) {
+        var fd_flags = posix.fcntl(sock, posix.F.GETFD, 0) catch |err| switch (err) {
+            error.FileBusy => unreachable,
+            error.Locked => unreachable,
+            error.PermissionDenied => unreachable,
+            error.DeadLock => unreachable,
+            error.LockedRegionLimitExceeded => unreachable,
+            else => |e| return e,
+        };
+        fd_flags |= posix.FD_CLOEXEC;
+        _ = posix.fcntl(sock, posix.F.SETFD, fd_flags) catch |err| switch (err) {
+            error.FileBusy => unreachable,
+            error.Locked => unreachable,
+            error.PermissionDenied => unreachable,
+            error.DeadLock => unreachable,
+            error.LockedRegionLimitExceeded => unreachable,
+            else => |e| return e,
+        };
+    }
+    if ((flags & posix.SOCK.NONBLOCK) != 0) {
+        var fl_flags = posix.fcntl(sock, posix.F.GETFL, 0) catch |err| switch (err) {
+            error.FileBusy => unreachable,
+            error.Locked => unreachable,
+            error.PermissionDenied => unreachable,
+            error.DeadLock => unreachable,
+            error.LockedRegionLimitExceeded => unreachable,
+            else => |e| return e,
+        };
+        fl_flags |= 1 << @bitOffsetOf(posix.O, "NONBLOCK");
+        _ = posix.fcntl(sock, posix.F.SETFL, fl_flags) catch |err| switch (err) {
+            error.FileBusy => unreachable,
+            error.Locked => unreachable,
+            error.PermissionDenied => unreachable,
+            error.DeadLock => unreachable,
+            error.LockedRegionLimitExceeded => unreachable,
+            else => |e| return e,
+        };
+    }
+}
+
+/// Wrapper around connect with correct error set for libxev usage.
+/// The std.posix.connect function has an error set that's too restrictive for kqueue backend.
+/// This version uses an inferred error set to allow all necessary errors.
+pub fn connect(
+    sock: posix.socket_t,
+    sock_addr: *const posix.sockaddr,
+    len: posix.socklen_t,
+) !void {
+    if (native_os == .windows) {
+        @compileError("connect is not supported on Windows");
+    }
+
+    while (true) {
+        switch (posix.errno(std.c.connect(sock, sock_addr, len))) {
+            .SUCCESS => return,
+            .ACCES => return error.AccessDenied,
+            .PERM => return error.PermissionDenied,
+            .ADDRINUSE => return error.AddressInUse,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .AGAIN, .INPROGRESS => return error.WouldBlock,
+            .ALREADY => return error.ConnectionPending,
+            .BADF => unreachable, // sockfd is not a valid open file descriptor.
+            .CONNREFUSED => return error.ConnectionRefused,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .FAULT => unreachable, // The socket structure address is outside the user's address space.
+            .INTR => continue,
+            .ISCONN => @panic("AlreadyConnected"), // The socket is already connected.
+            .HOSTUNREACH => return error.NetworkUnreachable,
+            .NETUNREACH => return error.NetworkUnreachable,
+            .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
+            .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
+            .TIMEDOUT => return error.Timeout,
+            .NOENT => return error.FileNotFound, // Returned when socket is AF.UNIX and the given path does not exist.
+            .CONNABORTED => unreachable, // Tried to reuse socket that previously received error.ConnectionRefused.
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+}
+
+/// Wrapper around getsockopt for SO_ERROR with correct error set for libxev usage.
+/// The std.posix.getsockoptError function has an error set that's too restrictive for kqueue backend.
+/// This version uses an inferred error set to allow all necessary errors including AddressInUse.
+pub fn getsockoptError(sockfd: posix.fd_t) !void {
+    if (native_os == .windows) {
+        @compileError("getsockoptError is not supported on Windows");
+    }
+
+    var err_code: i32 = undefined;
+    var size: u32 = @sizeOf(u32);
+    const rc = std.c.getsockopt(sockfd, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&err_code), &size);
+    std.debug.assert(size == 4);
+    switch (posix.errno(rc)) {
+        .SUCCESS => switch (@as(posix.E, @enumFromInt(err_code))) {
+            .SUCCESS => return,
+            .ACCES => return error.AccessDenied,
+            .PERM => return error.PermissionDenied,
+            .ADDRINUSE => return error.AddressInUse,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .AGAIN => return error.SystemResources,
+            .ALREADY => return error.ConnectionPending,
+            .BADF => unreachable, // sockfd is not a valid open file descriptor.
+            .CONNREFUSED => return error.ConnectionRefused,
+            .FAULT => unreachable, // The socket structure address is outside the user's address space.
+            .ISCONN => return error.AlreadyConnected, // The socket is already connected.
+            .HOSTUNREACH => return error.NetworkUnreachable,
+            .NETUNREACH => return error.NetworkUnreachable,
+            .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
+            .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
+            .TIMEDOUT => return error.Timeout,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            else => |err| return posix.unexpectedErrno(err),
+        },
+        .BADF => unreachable, // The argument sockfd is not a valid file descriptor.
+        .FAULT => unreachable, // The address pointed to by optval or optlen is not in a valid part of the process address space.
+        .INVAL => unreachable,
+        .NOPROTOOPT => unreachable, // The option is unknown at the level indicated.
+        .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
+        else => |err| return posix.unexpectedErrno(err),
+    }
+}
