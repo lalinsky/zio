@@ -45,6 +45,8 @@ pub const POLL = switch (builtin.os.tag) {
 pub const sockaddr = posix.system.sockaddr;
 pub const AF = posix.system.AF;
 pub const socklen_t = posix.system.socklen_t;
+pub const SOL = posix.system.SOL;
+pub const SO = posix.system.SO;
 
 pub const PollError = error{
     SystemResources,
@@ -499,6 +501,133 @@ pub fn getsockname(fd: fd_t, addr: *sockaddr, addr_len: *socklen_t) GetSockNameE
             if (rc != 0) {
                 return posix.unexpectedErrno(posix.errno(rc));
             }
+        },
+    }
+}
+
+pub const GetSockErrorError = error{Unexpected};
+
+pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
+    switch (builtin.os.tag) {
+        .windows => {
+            var err: i32 = 0;
+            var len: i32 = @sizeOf(i32);
+            const rc = std.os.windows.ws2_32.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
+            if (rc != 0) {
+                return unexpectedWSAError(std.os.windows.ws2_32.WSAGetLastError());
+            }
+            return err;
+        },
+        else => {
+            var err: i32 = 0;
+            var len: socklen_t = @sizeOf(i32);
+            const rc = posix.system.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
+            if (rc != 0) {
+                return posix.unexpectedErrno(posix.errno(rc));
+            }
+            return err;
+        },
+    }
+}
+
+pub fn errnoToConnectError(err: i32) ConnectError {
+    switch (builtin.os.tag) {
+        .windows => {
+            const wsa_err: std.os.windows.ws2_32.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
+            return switch (wsa_err) {
+                .WSAECONNREFUSED => error.ConnectionRefused,
+                .WSAEHOSTUNREACH, .WSAENETUNREACH => error.NetworkUnreachable,
+                .WSAEACCES => error.AccessDenied,
+                .WSAEADDRINUSE => error.AddressInUse,
+                .WSAEADDRNOTAVAIL => error.AddressNotAvailable,
+                .WSAEAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .WSAEISCONN => error.AlreadyConnected,
+                .WSAEALREADY => error.ConnectionPending,
+                else => unexpectedWSAError(wsa_err),
+            };
+        },
+        else => {
+            const errno_val: posix.system.E = @enumFromInt(err);
+            return switch (errno_val) {
+                .CONNREFUSED => error.ConnectionRefused,
+                .HOSTUNREACH, .NETUNREACH => error.NetworkUnreachable,
+                .ACCES, .PERM => error.AccessDenied,
+                .ADDRINUSE => error.AddressInUse,
+                .ADDRNOTAVAIL => error.AddressNotAvailable,
+                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .ISCONN => error.AlreadyConnected,
+                .ALREADY => error.ConnectionPending,
+                else => posix.unexpectedErrno(errno_val),
+            };
+        },
+    }
+}
+
+pub fn errnoToAcceptError(err: i32) AcceptError {
+    switch (builtin.os.tag) {
+        .windows => {
+            const wsa_err: std.os.windows.ws2_32.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
+            return switch (wsa_err) {
+                .WSAECONNABORTED => error.ConnectionAborted,
+                .WSAEACCES => error.PermissionDenied,
+                .WSAEPROTONOSUPPORT => error.ProtocolFailure,
+                else => unexpectedWSAError(wsa_err),
+            };
+        },
+        else => {
+            const errno_val: posix.system.E = @enumFromInt(err);
+            return switch (errno_val) {
+                .CONNABORTED => error.ConnectionAborted,
+                .ACCES, .PERM => error.PermissionDenied,
+                .PROTO => error.ProtocolFailure,
+                else => posix.unexpectedErrno(errno_val),
+            };
+        },
+    }
+}
+
+pub fn errnoToRecvError(err: i32) RecvError {
+    switch (builtin.os.tag) {
+        .windows => {
+            const wsa_err: std.os.windows.ws2_32.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
+            return switch (wsa_err) {
+                .WSAECONNRESET, .WSAENETRESET => error.ConnectionResetByPeer,
+                .WSAECONNREFUSED => error.ConnectionRefused,
+                else => unexpectedWSAError(wsa_err),
+            };
+        },
+        else => {
+            const errno_val: posix.system.E = @enumFromInt(err);
+            return switch (errno_val) {
+                .CONNRESET => error.ConnectionResetByPeer,
+                .CONNREFUSED => error.ConnectionRefused,
+                else => posix.unexpectedErrno(errno_val),
+            };
+        },
+    }
+}
+
+pub fn errnoToSendError(err: i32) SendError {
+    switch (builtin.os.tag) {
+        .windows => {
+            const wsa_err: std.os.windows.ws2_32.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
+            return switch (wsa_err) {
+                .WSAECONNRESET, .WSAENETRESET => error.ConnectionResetByPeer,
+                .WSAESHUTDOWN => error.BrokenPipe,
+                .WSAEACCES => error.AccessDenied,
+                .WSAEMSGSIZE => error.MessageTooBig,
+                else => unexpectedWSAError(wsa_err),
+            };
+        },
+        else => {
+            const errno_val: posix.system.E = @enumFromInt(err);
+            return switch (errno_val) {
+                .CONNRESET => error.ConnectionResetByPeer,
+                .PIPE => error.BrokenPipe,
+                .ACCES => error.AccessDenied,
+                .MSGSIZE => error.MessageTooBig,
+                else => posix.unexpectedErrno(errno_val),
+            };
         },
     }
 }

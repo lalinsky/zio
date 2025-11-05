@@ -343,8 +343,18 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
         .net_connect => {
             const data = c.cast(NetConnect);
             if (has_error or has_hup) {
-                // Connection failed - need to get the actual error via getsockopt
-                data.result = error.ConnectionRefused;
+                // Connection failed - get the actual error via getsockopt
+                const sock_err = socket.getSockError(data.handle) catch {
+                    data.result = error.Unexpected;
+                    c.state = .completed;
+                    return true;
+                };
+                if (sock_err == 0) {
+                    // No error, connection succeeded
+                    data.result = {};
+                } else {
+                    data.result = socket.errnoToConnectError(sock_err);
+                }
             } else {
                 // Connection succeeded
                 data.result = {};
@@ -354,7 +364,18 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
         .net_accept => {
             const data = c.cast(NetAccept);
             if (has_error or has_hup) {
-                data.result = error.ConnectionAborted;
+                // Get the actual error via getsockopt
+                const sock_err = socket.getSockError(data.handle) catch {
+                    data.result = error.Unexpected;
+                    c.state = .completed;
+                    return true;
+                };
+                if (sock_err == 0) {
+                    // No error, retry accept
+                    data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
+                } else {
+                    data.result = socket.errnoToAcceptError(sock_err);
+                }
             } else {
                 // Retry accept now that socket is ready
                 data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
@@ -364,7 +385,18 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
         .net_recv => {
             const data = c.cast(NetRecv);
             if (has_error or has_hup) {
-                data.result = error.ConnectionResetByPeer;
+                // Get the actual error via getsockopt
+                const sock_err = socket.getSockError(data.handle) catch {
+                    data.result = error.Unexpected;
+                    c.state = .completed;
+                    return true;
+                };
+                if (sock_err == 0) {
+                    // No error, retry recv
+                    data.result = socket.recv(data.handle, data.buffer, data.flags);
+                } else {
+                    data.result = socket.errnoToRecvError(sock_err);
+                }
             } else {
                 // Retry recv now that data is available
                 data.result = socket.recv(data.handle, data.buffer, data.flags);
@@ -374,7 +406,18 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
         .net_send => {
             const data = c.cast(NetSend);
             if (has_error or has_hup) {
-                data.result = error.BrokenPipe;
+                // Get the actual error via getsockopt
+                const sock_err = socket.getSockError(data.handle) catch {
+                    data.result = error.Unexpected;
+                    c.state = .completed;
+                    return true;
+                };
+                if (sock_err == 0) {
+                    // No error, retry send
+                    data.result = socket.send(data.handle, data.buffer, data.flags);
+                } else {
+                    data.result = socket.errnoToSendError(sock_err);
+                }
             } else {
                 // Retry send now that buffer space is available
                 data.result = socket.send(data.handle, data.buffer, data.flags);
