@@ -4,6 +4,7 @@ const socket = @import("../os/posix/socket.zig");
 const time = @import("../time.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
+const Cancel = @import("../completion.zig").Cancel;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
 const NetListen = @import("../completion.zig").NetListen;
@@ -47,6 +48,48 @@ pub fn deinit(self: *Self) void {
     }
 }
 
+fn cancelCompletion(completion: *Completion, cancel: *Completion) void {
+    // Set error.Canceled result based on operation type
+    switch (completion.op) {
+        .net_connect => {
+            const data = completion.cast(NetConnect);
+            data.result = error.Canceled;
+        },
+        .net_accept => {
+            const data = completion.cast(NetAccept);
+            data.result = error.Canceled;
+        },
+        .net_recv => {
+            const data = completion.cast(NetRecv);
+            data.result = error.Canceled;
+        },
+        .net_send => {
+            const data = completion.cast(NetSend);
+            data.result = error.Canceled;
+        },
+        else => unreachable, // Only async ops can be in fds
+    }
+    // Mark both completions as done
+    completion.state = .completed;
+    cancel.state = .completed;
+}
+
+fn processCancelations(self: *Self, state: *LoopState) void {
+    var i: usize = 0;
+    const completions = self.fds.items(.completion);
+    while (i < self.fds.len) {
+        const completion = completions[i];
+        if (completion.canceled) |cancel| {
+            cancelCompletion(completion, cancel);
+            // Remove from poll queue
+            self.fds.swapRemove(i);
+            state.active -= 2; // Both the operation and the cancel
+        } else {
+            i += 1;
+        }
+    }
+}
+
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
     var submissions = state.submissions;
     state.submissions = null;
@@ -58,6 +101,9 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
             state.active -= 1;
         }
     }
+
+    // Process cancelations before polling
+    self.processCancelations(state);
 
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
     if (self.fds.len > 0) {
@@ -92,7 +138,9 @@ pub fn start(self: *Self, c: *Completion) !bool {
             return false;
         },
         .cancel => {
-            @panic("TODO: cancel");
+            const data = c.cast(Cancel);
+            data.cancel_c.canceled = c;
+            return false; // Cancel waits until target is actually cancelled
         },
 
         // Synchronous operations - complete immediately

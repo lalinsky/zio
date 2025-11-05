@@ -427,3 +427,148 @@ test "Loop: send and recv" {
     loop.add(&close_server.c);
     try loop.run(.until_done);
 }
+
+test "Loop: cancel net_accept" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    const NetOpen = @import("completion.zig").NetOpen;
+    const NetBind = @import("completion.zig").NetBind;
+    const NetListen = @import("completion.zig").NetListen;
+    const NetAccept = @import("completion.zig").NetAccept;
+
+    // Create and bind server socket
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&server_open.c);
+    try loop.run(.until_done);
+    const server_sock = try server_open.result;
+
+    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    loop.add(&server_bind.c);
+    try loop.run(.until_done);
+    try server_bind.result;
+
+    // Listen
+    var server_listen: NetListen = .init(server_sock, 1);
+    loop.add(&server_listen.c);
+    try loop.run(.until_done);
+    try server_listen.result;
+
+    // Start accept (will block waiting for connection)
+    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    loop.add(&accept_comp.c);
+
+    // Run once to get accept into poll queue
+    try loop.run(.once);
+    try std.testing.expectEqual(.running, accept_comp.c.state);
+
+    // Cancel the accept
+    var cancel: Cancel = .init(&accept_comp.c);
+    loop.add(&cancel.c);
+
+    // Run until both complete
+    try loop.run(.until_done);
+
+    // Verify both completed
+    try std.testing.expectEqual(.completed, accept_comp.c.state);
+    try std.testing.expectEqual(.completed, cancel.c.state);
+
+    // Verify accept got canceled error
+    try std.testing.expectError(error.Canceled, accept_comp.result);
+
+    // Close server socket
+    var close_server: NetClose = .init(server_sock);
+    loop.add(&close_server.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: cancel net_recv" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    const NetOpen = @import("completion.zig").NetOpen;
+    const NetBind = @import("completion.zig").NetBind;
+    const NetListen = @import("completion.zig").NetListen;
+    const NetAccept = @import("completion.zig").NetAccept;
+    const NetConnect = @import("completion.zig").NetConnect;
+    const NetRecv = @import("completion.zig").NetRecv;
+
+    // Create and setup server
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&server_open.c);
+    try loop.run(.until_done);
+    const server_sock = try server_open.result;
+
+    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    loop.add(&server_bind.c);
+    try loop.run(.until_done);
+    try server_bind.result;
+
+    var bound_addr: std.posix.sockaddr.in = undefined;
+    var bound_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try std.posix.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    var server_listen: NetListen = .init(server_sock, 1);
+    loop.add(&server_listen.c);
+    try loop.run(.until_done);
+    try server_listen.result;
+
+    // Create client and connect
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&client_open.c);
+    try loop.run(.until_done);
+    const client_sock = try client_open.result;
+
+    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    loop.add(&accept_comp.c);
+
+    const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr.any), connect_addr.getOsSockLen());
+    loop.add(&connect.c);
+
+    try loop.run(.until_done);
+    const accepted_sock = try accept_comp.result;
+    try connect.result;
+
+    // Start recv (will block waiting for data)
+    var recv_buf: [128]u8 = undefined;
+    var recv: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    loop.add(&recv.c);
+
+    // Run once to get recv into poll queue
+    try loop.run(.once);
+
+    // Only test cancellation if recv is actually waiting
+    if (recv.c.state == .running) {
+        // Cancel the recv
+        var cancel: Cancel = .init(&recv.c);
+        loop.add(&cancel.c);
+
+        // Run until both complete
+        try loop.run(.until_done);
+
+        // Verify both completed
+        try std.testing.expectEqual(.completed, recv.c.state);
+        try std.testing.expectEqual(.completed, cancel.c.state);
+
+        // Verify recv got canceled error
+        try std.testing.expectError(error.Canceled, recv.result);
+    } else {
+        // Recv completed immediately, just finish the loop
+        try loop.run(.until_done);
+    }
+
+    // Close sockets
+    var close_accepted: NetClose = .init(accepted_sock);
+    var close_client: NetClose = .init(client_sock);
+    var close_server: NetClose = .init(server_sock);
+    loop.add(&close_accepted.c);
+    loop.add(&close_client.c);
+    loop.add(&close_server.c);
+    try loop.run(.until_done);
+}

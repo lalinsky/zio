@@ -26,7 +26,7 @@ pub const Completion = struct {
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
 
-    canceled: bool = false,
+    canceled: ?*Completion = null,
 
     /// Intrusive queue of completions.
     next: ?*Completion = null,
