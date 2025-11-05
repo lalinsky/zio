@@ -159,6 +159,7 @@ pub const Loop = struct {
                 timeout_ms = @min(timer.deadline_ms - self.state.now_ms, self.max_wait_ms);
                 break;
             }
+            timer.result = {};
             self.state.clearTimer(timer);
             timer.c.call(self);
         }
