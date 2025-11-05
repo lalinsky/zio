@@ -7,6 +7,7 @@ const Timer = @import("completion.zig").Timer;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const time = @import("time.zig");
+const socket = @import("os/posix/socket.zig");
 
 pub const RunMode = enum {
     no_wait,
@@ -93,6 +94,7 @@ pub const Loop = struct {
             .backend = undefined,
         };
 
+        socket.ensureWSAInitialized();
         self.state.updateNow();
 
         try self.backend.init(std.heap.page_allocator);
@@ -282,8 +284,13 @@ test "Loop: socket create and bind" {
     const sock = try open.result;
 
     // Bind to localhost
-    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
-    var bind: NetBind = .init(sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    var addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var bind: NetBind = .init(sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&bind.c);
     try loop.run(.until_done);
 
@@ -312,16 +319,21 @@ test "Loop: listen and accept" {
     try loop.run(.until_done);
     const server_sock = try server_open.result;
 
-    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
-    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    var addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
     try server_bind.result;
 
     // Get the actual port that was bound
-    var bound_addr: std.posix.sockaddr.in = undefined;
-    var bound_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(bound_addr));
-    try std.posix.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    var bound_addr: socket.sockaddr.in = undefined;
+    var bound_addr_len: socket.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try socket.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
     const port = std.mem.bigToNative(u16, bound_addr.port);
 
     // Listen
@@ -340,8 +352,13 @@ test "Loop: listen and accept" {
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
-    const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
-    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr.any), connect_addr.getOsSockLen());
+    const connect_addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr), @sizeOf(@TypeOf(connect_addr)));
     loop.add(&connect.c);
 
     // Run until both complete
@@ -379,16 +396,21 @@ test "Loop: send and recv" {
     try loop.run(.until_done);
     const server_sock = try server_open.result;
 
-    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
-    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    var addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
     try server_bind.result;
 
     // Get the actual port
-    var bound_addr: std.posix.sockaddr.in = undefined;
-    var bound_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(bound_addr));
-    try std.posix.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    var bound_addr: socket.sockaddr.in = undefined;
+    var bound_addr_len: socket.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try socket.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
     const port = std.mem.bigToNative(u16, bound_addr.port);
 
     // Listen
@@ -406,8 +428,13 @@ test "Loop: send and recv" {
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
-    const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
-    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr.any), connect_addr.getOsSockLen());
+    const connect_addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr), @sizeOf(@TypeOf(connect_addr)));
     loop.add(&connect.c);
 
     try loop.run(.until_done);
@@ -457,8 +484,13 @@ test "Loop: cancel net_accept" {
     try loop.run(.until_done);
     const server_sock = try server_open.result;
 
-    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
-    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    var addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
     try server_bind.result;
@@ -515,15 +547,20 @@ test "Loop: cancel net_recv" {
     try loop.run(.until_done);
     const server_sock = try server_open.result;
 
-    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
-    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    var addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
     try server_bind.result;
 
-    var bound_addr: std.posix.sockaddr.in = undefined;
-    var bound_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(bound_addr));
-    try std.posix.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    var bound_addr: socket.sockaddr.in = undefined;
+    var bound_addr_len: socket.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try socket.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
     const port = std.mem.bigToNative(u16, bound_addr.port);
 
     var server_listen: NetListen = .init(server_sock, 1);
@@ -540,8 +577,13 @@ test "Loop: cancel net_recv" {
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
-    const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
-    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr.any), connect_addr.getOsSockLen());
+    const connect_addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr), @sizeOf(@TypeOf(connect_addr)));
     loop.add(&connect.c);
 
     try loop.run(.until_done);

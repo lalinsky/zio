@@ -14,6 +14,19 @@ fn unexpectedWSAError(err: std.os.windows.ws2_32.WinsockError) error{Unexpected}
     return error.Unexpected;
 }
 
+var wsa_init_once = std.once(wsaInit);
+
+fn wsaInit() void {
+    if (builtin.os.tag == .windows) {
+        var wsa_data: std.os.windows.ws2_32.WSADATA = undefined;
+        _ = std.os.windows.ws2_32.WSAStartup(2 << 8 | 2, &wsa_data);
+    }
+}
+
+pub fn ensureWSAInitialized() void {
+    wsa_init_once.call();
+}
+
 pub const fd_t = switch (builtin.os.tag) {
     .windows => std.os.windows.ws2_32.SOCKET,
     else => posix.system.fd_t,
@@ -28,6 +41,10 @@ pub const POLL = switch (builtin.os.tag) {
     .windows => std.os.windows.ws2_32.POLL,
     else => posix.system.POLL,
 };
+
+pub const sockaddr = posix.system.sockaddr;
+pub const AF = posix.system.AF;
+pub const socklen_t = posix.system.socklen_t;
 
 pub const PollError = error{
     SystemResources,
@@ -71,7 +88,7 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
 pub fn close(fd: fd_t) void {
     switch (builtin.os.tag) {
         .windows => {
-            std.os.windows.ws2_32.closesocket(fd);
+            _ = std.os.windows.ws2_32.closesocket(fd);
         },
         else => {
             while (true) {
@@ -111,7 +128,7 @@ pub fn shutdown(fd: fd_t, how: ShutdownHow) ShutdownError!void {
                 .send => std.os.windows.ws2_32.SD_SEND,
                 .both => std.os.windows.ws2_32.SD_BOTH,
             };
-            std.os.windows.ws2_32.shutdown(fd, system_how);
+            _ = std.os.windows.ws2_32.shutdown(fd, system_how);
         },
         else => {
             const system_how: c_int = switch (how) {
@@ -241,7 +258,7 @@ pub const BindError = error{
     Unexpected,
 };
 
-pub fn bind(fd: fd_t, addr: [*]const u8, addr_len: u32) BindError!void {
+pub fn bind(fd: fd_t, addr: *const sockaddr, addr_len: socklen_t) BindError!void {
     switch (builtin.os.tag) {
         .windows => {
             const rc = std.os.windows.ws2_32.bind(fd, @ptrCast(addr), @intCast(addr_len));
@@ -258,7 +275,7 @@ pub fn bind(fd: fd_t, addr: [*]const u8, addr_len: u32) BindError!void {
         },
         else => {
             while (true) {
-                const rc = posix.system.bind(fd, @ptrCast(@alignCast(addr)), addr_len);
+                const rc = posix.system.bind(fd, addr, addr_len);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return,
                     .INTR => continue,
@@ -334,7 +351,7 @@ pub const ConnectError = error{
     Unexpected,
 };
 
-pub fn connect(fd: fd_t, addr: [*]const u8, addr_len: u32) ConnectError!void {
+pub fn connect(fd: fd_t, addr: *const sockaddr, addr_len: socklen_t) ConnectError!void {
     switch (builtin.os.tag) {
         .windows => {
             const rc = std.os.windows.ws2_32.connect(fd, @ptrCast(addr), @intCast(addr_len));
@@ -349,7 +366,6 @@ pub fn connect(fd: fd_t, addr: [*]const u8, addr_len: u32) ConnectError!void {
                     .WSAEISCONN => error.AlreadyConnected,
                     .WSAEALREADY => error.ConnectionPending,
                     .WSAECONNREFUSED => error.ConnectionRefused,
-                    .WSAENOENT => error.FileNotFound,
                     .WSAETIMEDOUT => error.ConnectionRefused,
                     .WSAENETUNREACH => error.NetworkUnreachable,
                     else => unexpectedWSAError(err),
@@ -358,7 +374,7 @@ pub fn connect(fd: fd_t, addr: [*]const u8, addr_len: u32) ConnectError!void {
         },
         else => {
             while (true) {
-                const rc = posix.system.connect(fd, @ptrCast(@alignCast(addr)), addr_len);
+                const rc = posix.system.connect(fd, addr, addr_len);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return,
                     .INTR => continue,
@@ -396,7 +412,7 @@ pub const AcceptError = error{
     Unexpected,
 };
 
-pub fn accept(fd: fd_t, addr: ?[*]u8, addr_len: ?*u32, flags: OpenFlags) AcceptError!fd_t {
+pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlags) AcceptError!fd_t {
     switch (builtin.os.tag) {
         .windows => {
             var addr_len_tmp: c_int = if (addr_len) |len| @intCast(len.*) else 0;
@@ -463,6 +479,25 @@ pub fn accept(fd: fd_t, addr: ?[*]u8, addr_len: ?*u32, flags: OpenFlags) AcceptE
                     .PROTO => return error.ProtocolFailure,
                     else => |err| return posix.unexpectedErrno(err),
                 }
+            }
+        },
+    }
+}
+
+pub const GetSockNameError = error{Unexpected};
+
+pub fn getsockname(fd: fd_t, addr: *sockaddr, addr_len: *socklen_t) GetSockNameError!void {
+    switch (builtin.os.tag) {
+        .windows => {
+            const rc = std.os.windows.ws2_32.getsockname(fd, @ptrCast(addr), @ptrCast(addr_len));
+            if (rc != 0) {
+                return unexpectedWSAError(std.os.windows.ws2_32.WSAGetLastError());
+            }
+        },
+        else => {
+            const rc = posix.system.getsockname(fd, addr, addr_len);
+            if (rc != 0) {
+                return posix.unexpectedErrno(posix.errno(rc));
             }
         },
     }
@@ -561,7 +596,7 @@ pub fn send(fd: fd_t, buffer: []const u8, flags: SendFlags) SendError!usize {
                 fd,
                 buffer.ptr,
                 @intCast(buffer.len),
-                sys_flags,
+                @intCast(sys_flags),
             );
             if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
                 const err = std.os.windows.ws2_32.WSAGetLastError();

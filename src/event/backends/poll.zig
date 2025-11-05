@@ -17,7 +17,7 @@ const NetSend = @import("../completion.zig").NetSend;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 
-pub const NetHandle = posix.system.fd_t;
+pub const NetHandle = socket.fd_t;
 
 pub const NetOpenError = error{
     Unexpected,

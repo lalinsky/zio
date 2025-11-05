@@ -187,12 +187,12 @@ pub const NetBind = struct {
     c: Completion,
     result: Error!void = undefined,
     handle: Backend.NetHandle,
-    addr: [*]const u8,
-    addr_len: u32,
+    addr: *const socket.sockaddr,
+    addr_len: socket.socklen_t,
 
     pub const Error = socket.BindError || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, addr: [*]const u8, addr_len: u32) NetBind {
+    pub fn init(handle: Backend.NetHandle, addr: *const socket.sockaddr, addr_len: socket.socklen_t) NetBind {
         return .{
             .c = .init(.net_bind),
             .handle = handle,
@@ -223,12 +223,12 @@ pub const NetConnect = struct {
     c: Completion,
     result: Error!void = undefined,
     handle: Backend.NetHandle,
-    addr: [*]const u8,
-    addr_len: u32,
+    addr: *const socket.sockaddr,
+    addr_len: socket.socklen_t,
 
     pub const Error = socket.ConnectError || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, addr: [*]const u8, addr_len: u32) NetConnect {
+    pub fn init(handle: Backend.NetHandle, addr: *const socket.sockaddr, addr_len: socket.socklen_t) NetConnect {
         return .{
             .c = .init(.net_connect),
             .handle = handle,
@@ -247,16 +247,16 @@ pub const NetAccept = struct {
     c: Completion,
     result: Error!Backend.NetHandle = undefined,
     handle: Backend.NetHandle,
-    addr: ?[*]u8,
-    addr_len: ?*u32,
+    addr: ?*socket.sockaddr,
+    addr_len: ?*socket.socklen_t,
     flags: socket.OpenFlags = .{ .nonblocking = true },
 
     pub const Error = socket.AcceptError || Cancelable;
 
     pub fn init(
         handle: Backend.NetHandle,
-        addr: ?[*]u8,
-        addr_len: ?*u32,
+        addr: ?*socket.sockaddr,
+        addr_len: ?*socket.socklen_t,
     ) NetAccept {
         return .{
             .c = .init(.net_accept),
