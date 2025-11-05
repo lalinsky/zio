@@ -42,28 +42,23 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Zig
-      if: matrix.run != 'vm'
       uses: mlugg/setup-zig@v2
       with:
         version: 0.15.2
 
     - name: Build
-      if: matrix.run != 'vm'
       run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build tests
-      if: matrix.run != 'vm'
       run: zig build build-tests ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build examples
-      if: matrix.run != 'vm'
       run: zig build examples ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build benchmarks
-      if: matrix.run != 'vm'
       run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
@@ -95,12 +90,5 @@ jobs:
       uses: vmactions/netbsd-vm@v1
       with:
         usesh: true
-        prepare: |
-          pkg_add curl
-          curl -LO https://ziglang.org/download/0.15.2/zig-freebsd-x86_64-0.15.2.tar.xz
-          tar xf zig-freebsd-x86_64-0.15.2.tar.xz
-          mv zig-freebsd-x86_64-0.15.2 /usr/local/zig
         run: |
-          export PATH="/usr/local/zig:$PATH"
-          zig build build-tests
           ./zig-out/bin/test
