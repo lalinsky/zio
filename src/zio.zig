@@ -55,4 +55,6 @@ test {
     std.testing.refAllDecls(@This());
 
     _ = @import("event/loop.zig");
+    _ = @import("event/heap.zig");
+    _ = @import("event/timer.zig");
 }

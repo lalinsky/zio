@@ -3,7 +3,7 @@ const Backend = @import("backend.zig").Backend;
 const Completion = @import("completion.zig").Completion;
 const Timer = @import("timer.zig").Timer;
 const TimerHeap = @import("timer.zig").TimerHeap;
-const any_os = @import("os/any.zig");
+const time = @import("time.zig");
 
 pub const RunMode = enum {
     no_wait,
@@ -30,7 +30,7 @@ pub const Loop = struct {
             .state = .{},
             .timers = .{ .context = {} },
             .backend = undefined,
-            .now_ms = any_os.now(.monotonic),
+            .now_ms = time.now(.monotonic),
         };
 
         try self.backend.init();
@@ -89,7 +89,7 @@ pub const Loop = struct {
 
     fn setTimer(self: *Loop, timer: *Timer) void {
         const was_active = timer.deadline_ms > 0;
-        timer.deadline_ms = self.now_ms + timer.delay_ms;
+        timer.deadline_ms = self.now_ms +| timer.delay_ms;
         timer.c.state = .active;
         if (was_active) {
             self.timers.remove(timer);
@@ -110,7 +110,7 @@ pub const Loop = struct {
     }
 
     fn checkTimers(self: *Loop) u64 {
-        self.now_ms = any_os.now(.monotonic);
+        self.now_ms = time.now(.monotonic);
         var timeout_ms: u64 = 0;
         while (self.timers.peek()) |timer| {
             if (timer.deadline_ms > self.now_ms) {
@@ -206,4 +206,8 @@ test "Loop: timer iters cancel" {
         n_iter += 1;
     }
     try std.testing.expectEqual(6, n_iter);
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }
