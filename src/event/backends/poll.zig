@@ -21,6 +21,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn tick(self: *Self, timeout_ms: u64) !void {
-    _ = try socket.poll(&self.fds, self.num_fds, @intCast(timeout_ms));
+    const timeout = std.math.cast(i32, timeout_ms) orelse -1;
+    _ = try socket.poll(&self.fds, self.num_fds, timeout);
     // TODO: handle events
 }
