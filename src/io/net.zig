@@ -565,13 +565,18 @@ pub const Socket = struct {
     }
 
     fn receiveFromRecvmsg(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+        // Get the msghdr type that libxev expects for this backend
+        const OpUnion = @TypeOf(@as(xev.Completion, undefined).op);
+        const recvmsg_type = std.meta.TagPayload(OpUnion, .recvmsg);
+        const MsgHdr = std.meta.Child(@TypeOf(@as(recvmsg_type, undefined).msghdr));
+
         var iov = [_]std.posix.iovec{.{
             .base = buf.ptr,
             .len = buf.len,
         }};
 
         var addr_storage: std.posix.sockaddr.storage = undefined;
-        var msg: std.posix.msghdr = .{
+        var msg: MsgHdr = .{
             .name = @ptrCast(&addr_storage),
             .namelen = @sizeOf(std.posix.sockaddr.storage),
             .iov = &iov,
@@ -633,12 +638,17 @@ pub const Socket = struct {
     }
 
     fn sendToSendmsg(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+        // Get the msghdr_const type that libxev expects for this backend
+        const OpUnion = @TypeOf(@as(xev.Completion, undefined).op);
+        const sendmsg_type = std.meta.TagPayload(OpUnion, .sendmsg);
+        const MsgHdr = std.meta.Child(@TypeOf(@as(sendmsg_type, undefined).msghdr));
+
         var iov = [_]std.posix.iovec_const{.{
             .base = data.ptr,
             .len = data.len,
         }};
 
-        var msg: std.posix.msghdr_const = .{
+        var msg: MsgHdr = .{
             .name = @ptrCast(@constCast(&addr.any)),
             .namelen = @intCast(getSockAddrLen(&addr.any)),
             .iov = &iov,
