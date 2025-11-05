@@ -31,8 +31,12 @@ pub fn now(clock: Clock) u64 {
                 .realtime => {
                     // RtlGetSystemTimePrecise() has a granularity of 100 nanoseconds
                     // and uses the NTFS/Windows epoch, which is 1601-01-01.
+                    // Convert to Unix epoch (1970-01-01) by subtracting the difference.
                     const ticks = std.os.windows.ntdll.RtlGetSystemTimePrecise();
-                    return @intCast(@divFloor(ticks, std.time.ns_per_ms / 100));
+                    const ms_since_windows_epoch = @divFloor(ticks, std.time.ns_per_ms / 100);
+                    // Seconds between Windows epoch (1601) and Unix epoch (1970)
+                    const epoch_diff_ms: i64 = 11644473600 * std.time.ms_per_s;
+                    return @intCast(ms_since_windows_epoch - epoch_diff_ms);
                 },
             }
         },
