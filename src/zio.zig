@@ -56,5 +56,5 @@ test {
 
     _ = @import("event/loop.zig");
     _ = @import("event/heap.zig");
-    _ = @import("event/timer.zig");
+    _ = @import("event/completion.zig");
 }

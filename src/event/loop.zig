@@ -1,8 +1,10 @@
 const std = @import("std");
 const Backend = @import("backend.zig").Backend;
 const Completion = @import("completion.zig").Completion;
-const Timer = @import("timer.zig").Timer;
-const TimerHeap = @import("timer.zig").TimerHeap;
+const Cancel = @import("completion.zig").Cancel;
+const NetClose = @import("completion.zig").NetClose;
+const Timer = @import("completion.zig").Timer;
+const Heap = @import("heap.zig").Heap;
 const time = @import("time.zig");
 
 pub const RunMode = enum {
@@ -11,27 +13,71 @@ pub const RunMode = enum {
     until_done,
 };
 
-pub const Loop = struct {
-    state: State,
-    backend: Backend,
-    timers: TimerHeap,
-    active: usize = 0,
-    now_ms: u64 = 0,
-    max_wait_ms: u64 = 60 * std.time.ms_per_s,
+fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
+    return a.deadline_ms < b.deadline_ms;
+}
 
-    const State = packed struct {
-        initialized: bool = false,
-        running: bool = false,
-        stopped: bool = false,
-    };
+const TimerHeap = Heap(Timer, void, timerDeadlineLess);
+
+pub const LoopState = struct {
+    initialized: bool = false,
+    running: bool = false,
+    stopped: bool = false,
+
+    active: usize = 0,
+
+    now_ms: u64 = 0,
+    timers: TimerHeap = .{ .context = {} },
+
+    submissions: ?*Completion = null,
+
+    pub fn submit(self: *LoopState, completion: *Completion) void {
+        completion.state = .adding;
+        self.active += 1;
+        completion.next = self.submissions;
+        self.submissions = completion;
+    }
+
+    pub fn updateNow(self: *LoopState) void {
+        self.now_ms = time.now(.monotonic);
+    }
+
+    pub fn setTimer(self: *LoopState, timer: *Timer) void {
+        const was_active = timer.deadline_ms > 0;
+        timer.deadline_ms = self.now_ms +| timer.delay_ms;
+        timer.c.state = .running;
+        if (was_active) {
+            self.timers.remove(timer);
+        } else {
+            self.active += 1;
+        }
+        self.timers.insert(timer);
+    }
+
+    pub fn clearTimer(self: *LoopState, timer: *Timer) void {
+        const was_active = timer.deadline_ms > 0;
+        timer.deadline_ms = 0;
+        timer.c.state = .completed;
+        if (was_active) {
+            self.timers.remove(timer);
+            self.active -= 1;
+        }
+    }
+};
+
+pub const Loop = struct {
+    state: LoopState,
+    backend: Backend,
+
+    max_wait_ms: u64 = 60 * std.time.ms_per_s,
 
     pub fn init(self: *Loop) !void {
         self.* = .{
             .state = .{},
-            .timers = .{ .context = {} },
             .backend = undefined,
-            .now_ms = time.now(.monotonic),
         };
+
+        self.state.updateNow();
 
         try self.backend.init();
         errdefer self.backend.deinit();
@@ -52,7 +98,7 @@ pub const Loop = struct {
     }
 
     pub fn done(self: *const Loop) bool {
-        return self.state.stopped or self.active == 0;
+        return self.state.stopped or self.state.active == 0;
     }
 
     pub fn run(self: *Loop, mode: RunMode) !void {
@@ -68,59 +114,37 @@ pub const Loop = struct {
     pub fn add(self: *Loop, c: *Completion) void {
         switch (c.op) {
             .timer => {
-                setTimer(self, .fromCompletion(c));
+                const timer = c.cast(Timer);
+                self.state.setTimer(timer);
+                return;
             },
             else => {
-                @panic("TODO");
+                if (c.op == .cancel) {
+                    const cancel = c.cast(Cancel);
+                    if (cancel.cancel_c.op == .timer) {
+                        const timer = cancel.cancel_c.cast(Timer);
+                        self.state.clearTimer(timer);
+                        return;
+                    }
+                }
+                self.state.submit(c);
+                return;
             },
-        }
-    }
-
-    pub fn cancel(self: *Loop, c: *Completion) void {
-        switch (c.op) {
-            .timer => {
-                clearTimer(self, .fromCompletion(c));
-            },
-            else => {
-                @panic("TODO");
-            },
-        }
-    }
-
-    fn setTimer(self: *Loop, timer: *Timer) void {
-        const was_active = timer.deadline_ms > 0;
-        timer.deadline_ms = self.now_ms +| timer.delay_ms;
-        timer.c.state = .active;
-        if (was_active) {
-            self.timers.remove(timer);
-        } else {
-            self.active += 1;
-        }
-        self.timers.insert(timer);
-    }
-
-    fn clearTimer(self: *Loop, timer: *Timer) void {
-        const was_active = timer.deadline_ms > 0;
-        timer.deadline_ms = 0;
-        timer.c.state = .dead;
-        if (was_active) {
-            self.timers.remove(timer);
-            self.active -= 1;
         }
     }
 
     fn checkTimers(self: *Loop) u64 {
-        self.now_ms = time.now(.monotonic);
+        self.state.updateNow();
         var timeout_ms: u64 = 0;
-        while (self.timers.peek()) |timer| {
-            if (timer.deadline_ms > self.now_ms) {
-                timeout_ms = @min(timer.deadline_ms - self.now_ms, self.max_wait_ms);
+        while (self.state.timers.peek()) |timer| {
+            if (timer.deadline_ms > self.state.now_ms) {
+                timeout_ms = @min(timer.deadline_ms - self.state.now_ms, self.max_wait_ms);
                 break;
             }
             const action = timer.c.call(self);
             switch (action) {
-                .rearm => self.setTimer(timer),
-                .disarm => self.clearTimer(timer),
+                .rearm => self.state.setTimer(timer),
+                .disarm => self.state.clearTimer(timer),
             }
         }
         return timeout_ms;
@@ -134,7 +158,7 @@ pub const Loop = struct {
             timeout_ms = 0;
         }
 
-        try self.backend.tick(timeout_ms);
+        try self.backend.tick(&self.state, timeout_ms);
 
         // Check times again, to trigger the one that set timeout for the tick
         _ = checkTimers(self);
@@ -174,7 +198,7 @@ test "Loop: timer iters" {
     loop.add(&timer.c);
 
     var n_iter: usize = 0;
-    while (timer.c.state == .active) {
+    while (timer.c.state != .completed) {
         if (n_iter >= 10) {
             try loop.run(.once);
         } else {
@@ -193,13 +217,15 @@ test "Loop: timer iters cancel" {
     var timer: Timer = .init(5);
     loop.add(&timer.c);
 
+    var cancel: Cancel = .init(&timer.c);
+
     var n_iter: usize = 0;
-    while (timer.c.state == .active) {
+    while (timer.c.state != .completed) {
         if (n_iter >= 10) {
             try loop.run(.once);
         } else {
             if (n_iter == 5) {
-                loop.cancel(&timer.c);
+                loop.add(&cancel.c);
             }
             try loop.run(.no_wait);
         }
@@ -208,6 +234,196 @@ test "Loop: timer iters cancel" {
     try std.testing.expectEqual(6, n_iter);
 }
 
-test {
-    std.testing.refAllDecls(@This());
+test "Loop: close" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    const NetOpen = @import("completion.zig").NetOpen;
+
+    // Create a socket first
+    var open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&open.c);
+    try loop.run(.until_done);
+    const sock = try open.result;
+
+    // Now close it
+    var close: NetClose = .init(sock);
+    loop.add(&close.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: socket create and bind" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    // Create socket
+    const NetOpen = @import("completion.zig").NetOpen;
+    const NetBind = @import("completion.zig").NetBind;
+
+    var open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&open.c);
+    try loop.run(.until_done);
+
+    const sock = try open.result;
+
+    // Bind to localhost
+    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
+    var bind: NetBind = .init(sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    loop.add(&bind.c);
+    try loop.run(.until_done);
+
+    try bind.result;
+
+    // Close socket
+    var close: NetClose = .init(sock);
+    loop.add(&close.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: listen and accept" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    const NetOpen = @import("completion.zig").NetOpen;
+    const NetBind = @import("completion.zig").NetBind;
+    const NetListen = @import("completion.zig").NetListen;
+    const NetAccept = @import("completion.zig").NetAccept;
+    const NetConnect = @import("completion.zig").NetConnect;
+
+    // Create and bind server socket
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&server_open.c);
+    try loop.run(.until_done);
+    const server_sock = try server_open.result;
+
+    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    loop.add(&server_bind.c);
+    try loop.run(.until_done);
+    try server_bind.result;
+
+    // Get the actual port that was bound
+    var bound_addr: std.posix.sockaddr.in = undefined;
+    var bound_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try std.posix.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    // Listen
+    var server_listen: NetListen = .init(server_sock, 1);
+    loop.add(&server_listen.c);
+    try loop.run(.until_done);
+    try server_listen.result;
+
+    // Create client socket
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&client_open.c);
+    try loop.run(.until_done);
+    const client_sock = try client_open.result;
+
+    // Start accept and connect concurrently
+    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    loop.add(&accept_comp.c);
+
+    const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr.any), connect_addr.getOsSockLen());
+    loop.add(&connect.c);
+
+    // Run until both complete
+    try loop.run(.until_done);
+
+    const accepted_sock = try accept_comp.result;
+    try connect.result;
+
+    // Close all sockets
+    var close_accepted: NetClose = .init(accepted_sock);
+    var close_client: NetClose = .init(client_sock);
+    var close_server: NetClose = .init(server_sock);
+    loop.add(&close_accepted.c);
+    loop.add(&close_client.c);
+    loop.add(&close_server.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: send and recv" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    const NetOpen = @import("completion.zig").NetOpen;
+    const NetBind = @import("completion.zig").NetBind;
+    const NetListen = @import("completion.zig").NetListen;
+    const NetAccept = @import("completion.zig").NetAccept;
+    const NetConnect = @import("completion.zig").NetConnect;
+    const NetSend = @import("completion.zig").NetSend;
+    const NetRecv = @import("completion.zig").NetRecv;
+
+    // Create and bind server socket
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&server_open.c);
+    try loop.run(.until_done);
+    const server_sock = try server_open.result;
+
+    const addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 0);
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr.any), addr.getOsSockLen());
+    loop.add(&server_bind.c);
+    try loop.run(.until_done);
+    try server_bind.result;
+
+    // Get the actual port
+    var bound_addr: std.posix.sockaddr.in = undefined;
+    var bound_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try std.posix.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    // Listen
+    var server_listen: NetListen = .init(server_sock, 1);
+    loop.add(&server_listen.c);
+    try loop.run(.until_done);
+    try server_listen.result;
+
+    // Create client socket and connect
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    loop.add(&client_open.c);
+    try loop.run(.until_done);
+    const client_sock = try client_open.result;
+
+    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    loop.add(&accept_comp.c);
+
+    const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr.any), connect_addr.getOsSockLen());
+    loop.add(&connect.c);
+
+    try loop.run(.until_done);
+    const accepted_sock = try accept_comp.result;
+    try connect.result;
+
+    // Send data from client
+    const msg = "Hello, World!";
+    var send: NetSend = .init(client_sock, msg, .{});
+    loop.add(&send.c);
+    try loop.run(.until_done);
+    const sent = try send.result;
+    try std.testing.expectEqual(msg.len, sent);
+
+    // Recv data on server
+    var recv_buf: [128]u8 = undefined;
+    var recv: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    loop.add(&recv.c);
+    try loop.run(.until_done);
+    const recvd = try recv.result;
+    try std.testing.expectEqual(msg.len, recvd);
+    try std.testing.expectEqualStrings(msg, recv_buf[0..recvd]);
+
+    // Close all sockets
+    var close_accepted: NetClose = .init(accepted_sock);
+    var close_client: NetClose = .init(client_sock);
+    var close_server: NetClose = .init(server_sock);
+    loop.add(&close_accepted.c);
+    loop.add(&close_client.c);
+    loop.add(&close_server.c);
+    try loop.run(.until_done);
 }
