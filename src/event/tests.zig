@@ -10,6 +10,7 @@ const NetAccept = @import("completion.zig").NetAccept;
 const NetConnect = @import("completion.zig").NetConnect;
 const NetSend = @import("completion.zig").NetSend;
 const NetRecv = @import("completion.zig").NetRecv;
+const NetShutdown = @import("completion.zig").NetShutdown;
 const socket = @import("os/posix/socket.zig");
 
 test "Loop: empty run(.no_wait)" {
@@ -420,6 +421,106 @@ test "Loop: cancel net_recv" {
     }
 
     // Close sockets
+    var close_accepted: NetClose = .init(accepted_sock);
+    var close_client: NetClose = .init(client_sock);
+    var close_server: NetClose = .init(server_sock);
+    loop.add(&close_accepted.c);
+    loop.add(&close_client.c);
+    loop.add(&close_server.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: shutdown" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    // Create and bind server socket
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
+    loop.add(&server_open.c);
+    try loop.run(.until_done);
+    const server_sock = try server_open.result;
+
+    var addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
+    loop.add(&server_bind.c);
+    try loop.run(.until_done);
+    try server_bind.result;
+
+    // Get the actual port
+    var bound_addr: socket.sockaddr.in = undefined;
+    var bound_addr_len: socket.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try socket.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    // Listen
+    var server_listen: NetListen = .init(server_sock, 1);
+    loop.add(&server_listen.c);
+    try loop.run(.until_done);
+    try server_listen.result;
+
+    // Create client socket and connect
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
+    loop.add(&client_open.c);
+    try loop.run(.until_done);
+    const client_sock = try client_open.result;
+
+    var accept_comp: NetAccept = .init(server_sock, null, null);
+    loop.add(&accept_comp.c);
+
+    const connect_addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr), @sizeOf(@TypeOf(connect_addr)));
+    loop.add(&connect.c);
+
+    try loop.run(.until_done);
+    const accepted_sock = try accept_comp.result;
+    try connect.result;
+
+    // Send data from client
+    const msg = "Hello, World!";
+    var send: NetSend = .init(client_sock, msg, .{});
+    loop.add(&send.c);
+    try loop.run(.until_done);
+    const sent = try send.result;
+    try std.testing.expectEqual(msg.len, sent);
+
+    // Shutdown send side of client
+    var shutdown: NetShutdown = .init(client_sock, .send);
+    loop.add(&shutdown.c);
+    try loop.run(.until_done);
+    try shutdown.result;
+
+    // Recv data on server (should get the message)
+    var recv_buf: [128]u8 = undefined;
+    var recv: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    loop.add(&recv.c);
+    try loop.run(.until_done);
+    const recvd = try recv.result;
+    try std.testing.expectEqual(msg.len, recvd);
+    try std.testing.expectEqualStrings(msg, recv_buf[0..recvd]);
+
+    // Another recv should get 0 (EOF) on Linux, or ConnectionResetByPeer on Windows
+    var recv2: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    loop.add(&recv2.c);
+    try loop.run(.until_done);
+    if (recv2.result) |recvd2| {
+        try std.testing.expectEqual(0, recvd2);
+    } else |err| {
+        // Windows may return ConnectionResetByPeer after shutdown
+        try std.testing.expectEqual(error.ConnectionResetByPeer, err);
+    }
+
+    // Close all sockets
     var close_accepted: NetClose = .init(accepted_sock);
     var close_client: NetClose = .init(client_sock);
     var close_server: NetClose = .init(server_sock);
