@@ -165,7 +165,7 @@ pub const NetOpen = struct {
     domain: socket.Domain,
     socket_type: socket.Type,
     protocol: socket.Protocol,
-    flags: socket.OpenFlags,
+    flags: socket.OpenFlags = .{ .nonblocking = true },
 
     pub const Error = socket.OpenError;
 
@@ -173,14 +173,12 @@ pub const NetOpen = struct {
         domain: socket.Domain,
         socket_type: socket.Type,
         protocol: socket.Protocol,
-        flags: socket.OpenFlags,
     ) NetOpen {
         return .{
             .c = .init(.net_open),
             .domain = domain,
             .socket_type = socket_type,
             .protocol = protocol,
-            .flags = flags,
         };
     }
 };
@@ -251,7 +249,7 @@ pub const NetAccept = struct {
     handle: Backend.NetHandle,
     addr: ?[*]u8,
     addr_len: ?*u32,
-    flags: socket.OpenFlags,
+    flags: socket.OpenFlags = .{ .nonblocking = true },
 
     pub const Error = socket.AcceptError || Cancelable;
 
@@ -259,14 +257,12 @@ pub const NetAccept = struct {
         handle: Backend.NetHandle,
         addr: ?[*]u8,
         addr_len: ?*u32,
-        flags: socket.OpenFlags,
     ) NetAccept {
         return .{
             .c = .init(.net_accept),
             .handle = handle,
             .addr = addr,
             .addr_len = addr_len,
-            .flags = flags,
         };
     }
 

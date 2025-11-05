@@ -255,7 +255,7 @@ test "Loop: close" {
     const NetOpen = @import("completion.zig").NetOpen;
 
     // Create a socket first
-    var open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&open.c);
     try loop.run(.until_done);
     const sock = try open.result;
@@ -275,7 +275,7 @@ test "Loop: socket create and bind" {
     const NetOpen = @import("completion.zig").NetOpen;
     const NetBind = @import("completion.zig").NetBind;
 
-    var open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&open.c);
     try loop.run(.until_done);
 
@@ -307,7 +307,7 @@ test "Loop: listen and accept" {
     const NetConnect = @import("completion.zig").NetConnect;
 
     // Create and bind server socket
-    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.result;
@@ -331,13 +331,13 @@ test "Loop: listen and accept" {
     try server_listen.result;
 
     // Create client socket
-    var client_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
     const client_sock = try client_open.result;
 
     // Start accept and connect concurrently
-    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
     const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
@@ -374,7 +374,7 @@ test "Loop: send and recv" {
     const NetRecv = @import("completion.zig").NetRecv;
 
     // Create and bind server socket
-    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.result;
@@ -398,12 +398,12 @@ test "Loop: send and recv" {
     try server_listen.result;
 
     // Create client socket and connect
-    var client_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
     const client_sock = try client_open.result;
 
-    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
     const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
@@ -452,7 +452,7 @@ test "Loop: cancel net_accept" {
     const NetAccept = @import("completion.zig").NetAccept;
 
     // Create and bind server socket
-    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.result;
@@ -470,7 +470,7 @@ test "Loop: cancel net_accept" {
     try server_listen.result;
 
     // Start accept (will block waiting for connection)
-    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
     // Run once to get accept into poll queue
@@ -510,7 +510,7 @@ test "Loop: cancel net_recv" {
     const NetRecv = @import("completion.zig").NetRecv;
 
     // Create and setup server
-    var server_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.result;
@@ -532,12 +532,12 @@ test "Loop: cancel net_recv" {
     try server_listen.result;
 
     // Create client and connect
-    var client_open: NetOpen = .init(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
     const client_sock = try client_open.result;
 
-    var accept_comp: NetAccept = .init(server_sock, null, null, .{ .nonblocking = true });
+    var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
     const connect_addr = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, port);
