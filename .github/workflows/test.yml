@@ -14,18 +14,27 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-linux
+            run: native
           - os: ubuntu-latest
             target: aarch64-linux
+            run: qemu
             qemu_binary: qemu-aarch64-static
             xev_backend: epoll
           - os: ubuntu-latest
             target: riscv64-linux
+            run: qemu
             qemu_binary: qemu-riscv64-static
             xev_backend: epoll
+          - os: ubuntu-latest
+            target: x86_64-netbsd
+            run: vm
+            vm_type: netbsd
           - os: macos-latest
             target: native
+            run: native
           - os: windows-latest
             target: native
+            run: native
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -33,45 +42,65 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Zig
+      if: matrix.run != 'vm'
       uses: mlugg/setup-zig@v2
       with:
         version: 0.15.2
 
     - name: Build
+      if: matrix.run != 'vm'
       run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build tests
+      if: matrix.run != 'vm'
       run: zig build build-tests ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build examples
+      if: matrix.run != 'vm'
       run: zig build examples ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build benchmarks
+      if: matrix.run != 'vm'
       run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Run tests (native)
-      if: ${{ !matrix.qemu_binary }}
+      if: matrix.run == 'native'
       run: ./zig-out/bin/test
       timeout-minutes: 5
 
     - name: Run xev tests (native only)
-      if: ${{ !matrix.qemu_binary }}
+      if: matrix.run == 'native'
       run: cd vendor/libxev && zig build test
       timeout-minutes: 5
 
     - name: Install QEMU
-      if: matrix.qemu_binary
+      if: matrix.run == 'qemu'
       run: |
         sudo apt-get update -q -y
         sudo apt-get install -q -y qemu-user-static
 
     - name: Run tests (QEMU)
-      if: matrix.qemu_binary
+      if: matrix.run == 'qemu'
       run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
       timeout-minutes: 10
       env:
         TEST_FILTER: Coroutine
+
+    - name: Test in NetBSD VM
+      if: matrix.run == 'vm' && matrix.vm_type == 'netbsd'
+      uses: vmactions/netbsd-vm@v1
+      with:
+        usesh: true
+        prepare: |
+          pkg_add curl
+          curl -LO https://ziglang.org/download/0.15.2/zig-freebsd-x86_64-0.15.2.tar.xz
+          tar xf zig-freebsd-x86_64-0.15.2.tar.xz
+          mv zig-freebsd-x86_64-0.15.2 /usr/local/zig
+        run: |
+          export PATH="/usr/local/zig:$PATH"
+          zig build build-tests
+          ./zig-out/bin/test
