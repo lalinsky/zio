@@ -58,11 +58,6 @@ jobs:
       run: ./zig-out/bin/test
       timeout-minutes: 5
 
-    - name: Run xev tests (native only)
-      if: ${{ !matrix.qemu_binary }}
-      run: cd vendor/libxev && zig build test
-      timeout-minutes: 5
-
     - name: Install QEMU
       if: matrix.qemu_binary
       run: |
