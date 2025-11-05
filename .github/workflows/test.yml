@@ -89,9 +89,17 @@ jobs:
       env:
         TEST_FILTER: Coroutine
 
-    - name: Test in ${{ matrix.vm_type }} VM
-      if: matrix.run == 'vm'
-      uses: vmactions/${{ matrix.vm_type }}-vm@v1
+    - name: Test in NetBSD VM
+      if: matrix.run == 'vm' && matrix.vm_type == 'netbsd'
+      uses: vmactions/netbsd-vm@v1
+      with:
+        usesh: true
+        run: |
+          ./zig-out/bin/test
+
+    - name: Test in FreeBSD VM
+      if: matrix.run == 'vm' && matrix.vm_type == 'freebsd'
+      uses: vmactions/freebsd-vm@v1
       with:
         usesh: true
         run: |
