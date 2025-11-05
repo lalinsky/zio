@@ -6,6 +6,8 @@ pub const system = switch (builtin.os.tag) {
     else => std.c,
 };
 
+pub const O = system.O;
+
 pub const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.zig_backend) {
     .stage2_llvm, .stage2_x86_64 => true,
     else => false,

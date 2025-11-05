@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const posix = @import("../posix.zig");
 const time = @import("../../time.zig");
 
+const log = std.log.scoped(.zio_socket);
+
 fn unexpectedWSAError(err: std.os.windows.ws2_32.WinsockError) error{Unexpected} {
     if (posix.unexpected_error_tracing) {
         std.debug.print(
@@ -64,9 +66,12 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
                 const err = std.os.windows.ws2_32.WSAGetLastError();
                 switch (err) {
                     .WSAEINTR => continue,
-                    .WSAEINVAL => return error.SystemResources,
                     .WSAENOBUFS => return error.SystemResources,
                     .WSAEFAULT => unreachable,
+                    .WSAEINVAL => {
+                        log.err("WSAPoll returned WSAEINVAL - invalid parameter (fds.len={}, timeout={})", .{ fds.len, timeout });
+                        return unexpectedWSAError(err);
+                    },
                     else => return unexpectedWSAError(err),
                 }
             }
@@ -443,28 +448,24 @@ pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlag
             return sock;
         },
         else => {
-            var sock_flags: c_int = 0;
-            if (flags.nonblocking) {
-                sock_flags |= posix.system.SOCK.NONBLOCK;
-            }
-            if (flags.cloexec) {
-                sock_flags |= posix.system.SOCK.CLOEXEC;
-            }
-
             while (true) {
                 var addr_len_tmp: posix.system.socklen_t = if (addr_len) |len| len.* else 0;
-                const rc = posix.system.accept4(
+                const rc = posix.system.accept(
                     fd,
                     if (addr) |a| @ptrCast(@alignCast(a)) else null,
                     if (addr_len != null) &addr_len_tmp else null,
-                    @intCast(sock_flags),
                 );
                 switch (posix.errno(rc)) {
                     .SUCCESS => {
                         if (addr_len) |len| {
                             len.* = addr_len_tmp;
                         }
-                        return @intCast(rc);
+                        const sock: fd_t = @intCast(rc);
+                        if (flags.nonblocking) {
+                            const fl_flags = posix.system.fcntl(sock, posix.system.F.GETFL, @as(c_int, 0));
+                            _ = posix.system.fcntl(sock, posix.system.F.SETFL, fl_flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK")));
+                        }
+                        return sock;
                     },
                     .INTR => continue,
                     .AGAIN => return error.WouldBlock,
@@ -676,7 +677,7 @@ pub fn recv(fd: fd_t, buffer: []u8, flags: RecvFlags) RecvError!usize {
                 const rc = if (builtin.os.tag == .linux)
                     posix.system.recvfrom(fd, buffer.ptr, buffer.len, @intCast(sys_flags), null, null)
                 else
-                    posix.system.recv(fd, buffer.ptr, buffer.len, sys_flags);
+                    posix.system.recv(fd, buffer.ptr, buffer.len, @intCast(sys_flags));
 
                 if (rc >= 0) {
                     return @intCast(rc);
@@ -744,7 +745,7 @@ pub fn send(fd: fd_t, buffer: []const u8, flags: SendFlags) SendError!usize {
                 const rc = if (builtin.os.tag == .linux)
                     posix.system.sendto(fd, buffer.ptr, buffer.len, @intCast(sys_flags), null, 0)
                 else
-                    posix.system.send(fd, buffer.ptr, buffer.len, sys_flags);
+                    posix.system.send(fd, buffer.ptr, buffer.len, @intCast(sys_flags));
 
                 if (rc >= 0) {
                     return @intCast(rc);
