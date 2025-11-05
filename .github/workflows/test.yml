@@ -29,10 +29,12 @@ jobs:
             target: x86_64-netbsd
             run: vm
             vm_type: netbsd
+            xev_backend: kqueue
           - os: ubuntu-latest
             target: x86_64-freebsd
             run: vm
             vm_type: freebsd
+            xev_backend: kqueue
           - os: macos-latest
             target: native
             run: native
