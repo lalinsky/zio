@@ -221,11 +221,15 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
         },
         else => {
             var sock_flags: c_int = @intFromEnum(socket_type);
-            if (flags.nonblocking) {
-                sock_flags |= posix.system.SOCK.NONBLOCK;
-            }
-            if (flags.cloexec) {
-                sock_flags |= posix.system.SOCK.CLOEXEC;
+            // Linux supports SOCK_NONBLOCK and SOCK_CLOEXEC flags in socket()
+            // BSD (macOS, FreeBSD, etc.) requires fcntl() instead
+            if (builtin.os.tag == .linux) {
+                if (flags.nonblocking) {
+                    sock_flags |= posix.system.SOCK.NONBLOCK;
+                }
+                if (flags.cloexec) {
+                    sock_flags |= posix.system.SOCK.CLOEXEC;
+                }
             }
 
             while (true) {
@@ -235,7 +239,22 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                     @intCast(@intFromEnum(protocol)),
                 );
                 switch (posix.errno(rc)) {
-                    .SUCCESS => return @intCast(rc),
+                    .SUCCESS => {
+                        const fd: fd_t = @intCast(rc);
+
+                        // On non-Linux systems, set flags using fcntl
+                        if (builtin.os.tag != .linux) {
+                            if (flags.nonblocking) {
+                                const fl_flags = posix.system.fcntl(fd, posix.system.F.GETFL, @as(c_int, 0));
+                                _ = posix.system.fcntl(fd, posix.system.F.SETFL, fl_flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK")));
+                            }
+                            if (flags.cloexec) {
+                                _ = posix.system.fcntl(fd, posix.system.F.SETFD, @as(c_int, posix.system.FD_CLOEXEC));
+                            }
+                        }
+
+                        return fd;
+                    },
                     .INTR => continue,
                     .ACCES => return error.PermissionDenied,
                     .AFNOSUPPORT => return error.AddressFamilyNotSupported,
