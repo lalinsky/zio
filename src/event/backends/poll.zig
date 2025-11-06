@@ -229,9 +229,14 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         var iter: ?*Completion = entry.completions.head;
         while (iter) |completion| {
             iter = completion.next;
-            if (self.checkCompletion(completion, item.revents)) {
-                self.removeFromPollQueue(fd, completion);
-                state.markCompleted(completion);
+            switch (self.checkCompletion(completion, item.revents)) {
+                .completed => {
+                    self.removeFromPollQueue(fd, completion);
+                    state.markCompleted(completion);
+                },
+                .requeue => {
+                    // Spurious wakeup - keep in poll queue
+                },
             }
         }
 
@@ -331,7 +336,7 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
     }
 }
 
-pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.pollfd, "revents")) bool {
+pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.pollfd, "revents")) enum { completed, requeue } {
     _ = self;
 
     // Check for error conditions first
@@ -345,8 +350,7 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Connection failed - get the actual error via getsockopt
                 const sock_err = socket.getSockError(data.handle) catch {
                     data.result = error.Unexpected;
-                    c.state = .completed;
-                    return true;
+                    return .completed;
                 };
                 if (sock_err == 0) {
                     // No error, connection succeeded
@@ -358,7 +362,7 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Connection succeeded
                 data.result = {};
             }
-            c.state = .completed;
+            return .completed;
         },
         .net_accept => {
             const data = c.cast(NetAccept);
@@ -366,8 +370,7 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Get the actual error via getsockopt
                 const sock_err = socket.getSockError(data.handle) catch {
                     data.result = error.Unexpected;
-                    c.state = .completed;
-                    return true;
+                    return .completed;
                 };
                 if (sock_err == 0) {
                     // No error, retry accept
@@ -379,7 +382,19 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Retry accept now that socket is ready
                 data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
             }
-            c.state = .completed;
+
+            // Check for spurious wakeup
+            if (data.result) |_| {
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => {
+                    // Spurious wakeup - keep in poll queue
+                    return .requeue;
+                },
+                else => {
+                    return .completed;
+                },
+            }
         },
         .net_recv => {
             const data = c.cast(NetRecv);
@@ -387,8 +402,7 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Get the actual error via getsockopt
                 const sock_err = socket.getSockError(data.handle) catch {
                     data.result = error.Unexpected;
-                    c.state = .completed;
-                    return true;
+                    return .completed;
                 };
                 if (sock_err == 0) {
                     // No error, retry recv
@@ -400,7 +414,19 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Retry recv now that data is available
                 data.result = socket.recv(data.handle, data.buffer, data.flags);
             }
-            c.state = .completed;
+
+            // Check for spurious wakeup
+            if (data.result) |_| {
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => {
+                    // Spurious wakeup - keep in poll queue
+                    return .requeue;
+                },
+                else => {
+                    return .completed;
+                },
+            }
         },
         .net_send => {
             const data = c.cast(NetSend);
@@ -408,8 +434,7 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Get the actual error via getsockopt
                 const sock_err = socket.getSockError(data.handle) catch {
                     data.result = error.Unexpected;
-                    c.state = .completed;
-                    return true;
+                    return .completed;
                 };
                 if (sock_err == 0) {
                     // No error, retry send
@@ -421,11 +446,22 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
                 // Retry send now that buffer space is available
                 data.result = socket.send(data.handle, data.buffer, data.flags);
             }
-            c.state = .completed;
+
+            // Check for spurious wakeup
+            if (data.result) |_| {
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => {
+                    // Spurious wakeup - keep in poll queue
+                    return .requeue;
+                },
+                else => {
+                    return .completed;
+                },
+            }
         },
         else => {
             std.debug.panic("unexpected completion type in complete: {}", .{c.op});
         },
     }
-    return true;
 }
