@@ -67,7 +67,7 @@ pub fn deinit(self: *Self) void {
         impl.deinit();
     }
     self.poll_queue.deinit(self.allocator);
-    self.poll_fds.deinit();
+    self.poll_fds.deinit(self.allocator);
 }
 
 pub fn wake(self: *Self) void {
