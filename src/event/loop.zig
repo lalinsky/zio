@@ -153,7 +153,7 @@ pub const Loop = struct {
 
     fn checkTimers(self: *Loop) u64 {
         self.state.updateNow();
-        var timeout_ms: u64 = 0;
+        var timeout_ms: u64 = self.max_wait_ms;
         while (self.state.timers.peek()) |timer| {
             if (timer.deadline_ms > self.state.now_ms) {
                 timeout_ms = @min(timer.deadline_ms - self.state.now_ms, self.max_wait_ms);
