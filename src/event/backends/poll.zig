@@ -235,7 +235,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         var iter: ?*Completion = entry.completions.head;
         while (iter) |completion| {
             iter = completion.next;
-            switch (self.checkCompletion(completion, item.revents)) {
+            switch (checkCompletion(completion, item)) {
                 .completed => {
                     self.removeFromPollQueue(fd, completion);
                     state.markCompleted(completion);
@@ -339,193 +339,82 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
     }
 }
 
-pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.pollfd, "revents")) enum { completed, requeue } {
-    _ = self;
+const CheckResult = enum { completed, requeue };
 
-    // Check for error conditions first
-    const has_error = (events & socket.POLL.ERR) != 0;
-    const has_hup = (events & socket.POLL.HUP) != 0;
+fn handlePollError(item: *const socket.pollfd, comptime errnoToError: fn (i32) anyerror) ?anyerror {
+    const has_error = (item.revents & socket.POLL.ERR) != 0;
+    const has_hup = (item.revents & socket.POLL.HUP) != 0;
+    if (!has_error and !has_hup) return null;
 
+    const sock_err = socket.getSockError(item.fd) catch return error.Unexpected;
+    if (sock_err == 0) return null; // No actual error, caller should retry operation
+    return errnoToError(sock_err);
+}
+
+fn checkSpuriousWakeup(result: anytype) CheckResult {
+    if (result) |_| {
+        return .completed;
+    } else |err| switch (err) {
+        error.WouldBlock => return .requeue,
+        else => return .completed,
+    }
+}
+
+pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
     switch (c.op) {
         .net_connect => {
             const data = c.cast(NetConnect);
-            if (has_error or has_hup) {
-                // Connection failed - get the actual error via getsockopt
-                const sock_err = socket.getSockError(data.handle) catch {
-                    data.result = error.Unexpected;
-                    return .completed;
-                };
-                if (sock_err == 0) {
-                    // No error, connection succeeded
-                    data.result = {};
-                } else {
-                    data.result = socket.errnoToConnectError(sock_err);
-                }
+            if (handlePollError(item, socket.errnoToConnectError)) |err| {
+                data.result = @errorCast(err);
             } else {
-                // Connection succeeded
                 data.result = {};
             }
             return .completed;
         },
         .net_accept => {
             const data = c.cast(NetAccept);
-            if (has_error or has_hup) {
-                // Get the actual error via getsockopt
-                const sock_err = socket.getSockError(data.handle) catch {
-                    data.result = error.Unexpected;
-                    return .completed;
-                };
-                if (sock_err == 0) {
-                    // No error, retry accept
-                    data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
-                } else {
-                    data.result = socket.errnoToAcceptError(sock_err);
-                }
-            } else {
-                // Retry accept now that socket is ready
-                data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
-            }
-
-            // Check for spurious wakeup
-            if (data.result) |_| {
+            if (handlePollError(item, socket.errnoToAcceptError)) |err| {
+                data.result = @errorCast(err);
                 return .completed;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Spurious wakeup - keep in poll queue
-                    return .requeue;
-                },
-                else => {
-                    return .completed;
-                },
             }
+            data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
+            return checkSpuriousWakeup(data.result);
         },
         .net_recv => {
             const data = c.cast(NetRecv);
-            if (has_error or has_hup) {
-                // Get the actual error via getsockopt
-                const sock_err = socket.getSockError(data.handle) catch {
-                    data.result = error.Unexpected;
-                    return .completed;
-                };
-                if (sock_err == 0) {
-                    // No error, retry recv
-                    data.result = socket.recv(data.handle, data.buffer, data.flags);
-                } else {
-                    data.result = socket.errnoToRecvError(sock_err);
-                }
-            } else {
-                // Retry recv now that data is available
-                data.result = socket.recv(data.handle, data.buffer, data.flags);
-            }
-
-            // Check for spurious wakeup
-            if (data.result) |_| {
+            if (handlePollError(item, socket.errnoToRecvError)) |err| {
+                data.result = @errorCast(err);
                 return .completed;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Spurious wakeup - keep in poll queue
-                    return .requeue;
-                },
-                else => {
-                    return .completed;
-                },
             }
+            data.result = socket.recv(data.handle, data.buffer, data.flags);
+            return checkSpuriousWakeup(data.result);
         },
         .net_send => {
             const data = c.cast(NetSend);
-            if (has_error or has_hup) {
-                // Get the actual error via getsockopt
-                const sock_err = socket.getSockError(data.handle) catch {
-                    data.result = error.Unexpected;
-                    return .completed;
-                };
-                if (sock_err == 0) {
-                    // No error, retry send
-                    data.result = socket.send(data.handle, data.buffer, data.flags);
-                } else {
-                    data.result = socket.errnoToSendError(sock_err);
-                }
-            } else {
-                // Retry send now that buffer space is available
-                data.result = socket.send(data.handle, data.buffer, data.flags);
-            }
-
-            // Check for spurious wakeup
-            if (data.result) |_| {
+            if (handlePollError(item, socket.errnoToSendError)) |err| {
+                data.result = @errorCast(err);
                 return .completed;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Spurious wakeup - keep in poll queue
-                    return .requeue;
-                },
-                else => {
-                    return .completed;
-                },
             }
+            data.result = socket.send(data.handle, data.buffer, data.flags);
+            return checkSpuriousWakeup(data.result);
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
-            if (has_error or has_hup) {
-                // Get the actual error via getsockopt
-                const sock_err = socket.getSockError(data.handle) catch {
-                    data.result = error.Unexpected;
-                    return .completed;
-                };
-                if (sock_err == 0) {
-                    // No error, retry recvfrom
-                    data.result = socket.recvfrom(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
-                } else {
-                    data.result = socket.errnoToRecvError(sock_err);
-                }
-            } else {
-                // Retry recvfrom now that data is available
-                data.result = socket.recvfrom(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
-            }
-
-            // Check for spurious wakeup
-            if (data.result) |_| {
+            if (handlePollError(item, socket.errnoToRecvError)) |err| {
+                data.result = @errorCast(err);
                 return .completed;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Spurious wakeup - keep in poll queue
-                    return .requeue;
-                },
-                else => {
-                    return .completed;
-                },
             }
+            data.result = socket.recvfrom(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
+            return checkSpuriousWakeup(data.result);
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
-            if (has_error or has_hup) {
-                // Get the actual error via getsockopt
-                const sock_err = socket.getSockError(data.handle) catch {
-                    data.result = error.Unexpected;
-                    return .completed;
-                };
-                if (sock_err == 0) {
-                    // No error, retry sendto
-                    data.result = socket.sendto(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
-                } else {
-                    data.result = socket.errnoToSendError(sock_err);
-                }
-            } else {
-                // Retry sendto now that buffer space is available
-                data.result = socket.sendto(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
-            }
-
-            // Check for spurious wakeup
-            if (data.result) |_| {
+            if (handlePollError(item, socket.errnoToSendError)) |err| {
+                data.result = @errorCast(err);
                 return .completed;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Spurious wakeup - keep in poll queue
-                    return .requeue;
-                },
-                else => {
-                    return .completed;
-                },
             }
+            data.result = socket.sendto(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
+            return checkSpuriousWakeup(data.result);
         },
         else => {
             std.debug.panic("unexpected completion type in complete: {}", .{c.op});
