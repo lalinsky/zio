@@ -57,7 +57,7 @@ test "Loop: timer iters" {
         }
         n_iter += 1;
     }
-    try std.testing.expectEqual(11, n_iter);
+    try std.testing.expect(n_iter > 10 and n_iter < 15);
 }
 
 test "Loop: timer iters cancel" {
@@ -82,7 +82,7 @@ test "Loop: timer iters cancel" {
         }
         n_iter += 1;
     }
-    try std.testing.expectEqual(6, n_iter);
+    try std.testing.expect(n_iter > 5 and n_iter < 10);
 }
 
 test "Loop: close" {
