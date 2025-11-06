@@ -260,6 +260,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         if (self.async_impl) |*impl| {
             if (fd == impl.read_fd) {
                 state.loop.processAsyncHandles();
+                impl.drain();
                 i += 1;
                 continue;
             }
