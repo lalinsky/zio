@@ -39,36 +39,46 @@ const PollEntryType = enum {
 const PollEntry = struct {
     completions: Queue(Completion),
     type: PollEntryType,
-    index: usize,
+    events: u32,
 };
 
 const Self = @This();
 
-const log = std.log.scoped(.zio_poll);
+const log = std.log.scoped(.zio_epoll);
 
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
-poll_fds: std.ArrayList(socket.pollfd) = .empty,
+epoll_fd: i32 = -1,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
+    const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
+    const epoll_fd: i32 = switch (posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => |err| return posix.unexpectedErrno(err),
+    };
+    errdefer _ = std.os.linux.close(epoll_fd);
+
     self.* = .{
         .allocator = allocator,
+        .epoll_fd = epoll_fd,
     };
 }
 
 pub fn deinit(self: *Self) void {
     self.poll_queue.deinit(self.allocator);
-    self.poll_fds.deinit(self.allocator);
+    if (self.epoll_fd != -1) {
+        _ = std.os.linux.close(self.epoll_fd);
+    }
 }
 
-fn getEvents(op: OperationType) @FieldType(socket.pollfd, "events") {
+fn getEvents(op: OperationType) u32 {
     return switch (op) {
-        .net_connect => socket.POLL.OUT,
-        .net_accept => socket.POLL.IN,
-        .net_recv => socket.POLL.IN,
-        .net_send => socket.POLL.OUT,
-        .net_recvfrom => socket.POLL.IN,
-        .net_sendto => socket.POLL.OUT,
+        .net_connect => std.os.linux.EPOLL.OUT,
+        .net_accept => std.os.linux.EPOLL.IN,
+        .net_recv => std.os.linux.EPOLL.IN,
+        .net_send => std.os.linux.EPOLL.OUT,
+        .net_recvfrom => std.os.linux.EPOLL.IN,
+        .net_sendto => std.os.linux.EPOLL.OUT,
         else => unreachable,
     };
 }
@@ -97,11 +107,19 @@ fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
     const op_events = getEvents(completion.op);
 
     if (!gop.found_existing) {
-        try self.poll_fds.append(self.allocator, .{ .fd = fd, .events = op_events, .revents = 0 });
+        var event = std.os.linux.epoll_event{
+            .data = .{ .fd = fd },
+            .events = op_events,
+        };
+        const rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_ADD, fd, &event);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {},
+            else => |err| return posix.unexpectedErrno(err),
+        }
         entry.* = .{
             .completions = .{},
             .type = getPollType(completion.op),
-            .index = self.poll_fds.items.len - 1,
+            .events = op_events,
         };
         entry.completions.push(completion);
         return;
@@ -109,41 +127,62 @@ fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
 
     std.debug.assert(entry.type == getPollType(completion.op));
 
-    self.poll_fds.items[entry.index].events |= op_events;
+    const new_events = entry.events | op_events;
+    if (new_events != entry.events) {
+        var event = std.os.linux.epoll_event{
+            .events = new_events,
+            .data = .{ .fd = fd },
+        };
+        const rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_MOD, fd, &event);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {},
+            else => |err| return posix.unexpectedErrno(err),
+        }
+        entry.events = new_events;
+    }
     entry.completions.push(completion);
 }
 
-fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void {
+fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
     const entry = self.poll_queue.getPtr(fd) orelse return;
 
     entry.completions.remove(completion);
+
     if (entry.completions.head == null) {
-        // No more completions - remove from poll list and poll queue
-        const removed_pollfd = self.poll_fds.swapRemove(entry.index);
-        std.debug.assert(removed_pollfd.fd == fd);
-
-        // Because we swapped the position with the last fd,
-        // we need to update the index of that fd in the poll queue
-        if (entry.index < self.poll_fds.items.len) {
-            const updated_fd = self.poll_fds.items[entry.index].fd;
-            const updated_entry = self.poll_queue.getPtr(updated_fd) orelse unreachable;
-            updated_entry.index = entry.index;
+        // No more completions - remove from epoll and poll queue
+        const del_rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
+        switch (posix.errno(del_rc)) {
+            .SUCCESS, .NOENT => {
+                // SUCCESS: successfully removed
+                // NOENT: fd was not registered (already removed or never added) - safe to proceed
+            },
+            else => |err| return posix.unexpectedErrno(err),
         }
-
-        // Now we can remove the entry from the poll queue
         const was_removed = self.poll_queue.remove(fd);
         std.debug.assert(was_removed);
         return;
     }
 
     // Recalculate events from remaining completions
-    var new_events: @FieldType(socket.pollfd, "events") = 0;
+    var new_events: u32 = 0;
     var iter: ?*Completion = entry.completions.head;
     while (iter) |c| : (iter = c.next) {
         new_events |= getEvents(c.op);
     }
 
-    self.poll_fds.items[entry.index].events = new_events;
+    if (new_events != entry.events) {
+        var event = std.os.linux.epoll_event{
+            .events = new_events,
+            .data = .{ .fd = fd },
+        };
+        const mod_rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_MOD, fd, &event);
+        switch (posix.errno(mod_rc)) {
+            .SUCCESS => {
+                entry.events = new_events;
+            },
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
 }
 
 fn getHandle(completion: *Completion) NetHandle {
@@ -199,7 +238,7 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
         if (completion.state == .completed) continue;
         const cancel = completion.cast(Cancel);
         const fd = getHandle(cancel.cancel_c);
-        self.removeFromPollQueue(fd, cancel.cancel_c);
+        try self.removeFromPollQueue(fd, cancel.cancel_c);
 
         // Set cancel result to success
         // The canceled operation's result will be error.Canceled via getResult()
@@ -223,40 +262,30 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         return;
     }
 
-    const n = try socket.poll(self.poll_fds.items, timeout);
-    if (n == 0) {
-        return;
-    }
+    var events: [64]std.os.linux.epoll_event = undefined;
+    const rc = std.os.linux.epoll_wait(self.epoll_fd, &events, events.len, timeout);
+    const n: usize = switch (posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .INTR => 0, // Interrupted by signal, no events
+        else => |err| return posix.unexpectedErrno(err),
+    };
 
-    var i: usize = 0;
-    while (i < self.poll_fds.items.len) {
-        const item = &self.poll_fds.items[i];
-        if (item.revents == 0) {
-            i += 1;
-            continue;
-        }
-
-        const fd = item.fd;
-        const entry = self.poll_queue.get(fd) orelse unreachable;
+    for (events[0..n]) |event| {
+        const fd = event.data.fd;
+        const entry = self.poll_queue.get(fd) orelse continue;
 
         var iter: ?*Completion = entry.completions.head;
         while (iter) |completion| {
             iter = completion.next;
-            switch (checkCompletion(completion, item)) {
+            switch (checkCompletion(completion, &event)) {
                 .completed => {
-                    self.removeFromPollQueue(fd, completion);
+                    try self.removeFromPollQueue(fd, completion);
                     state.markCompleted(completion);
                 },
                 .requeue => {
                     // Spurious wakeup - keep in poll queue
                 },
             }
-        }
-
-        // Only increment if the fd at position i is still the same.
-        // If it changed, swapRemove moved a different fd here, so reprocess.
-        if (item.fd == fd) {
-            i += 1;
         }
     }
 }
@@ -348,12 +377,12 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
 
 const CheckResult = enum { completed, requeue };
 
-fn handlePollError(item: *const socket.pollfd, comptime errnoToError: fn (i32) anyerror) ?anyerror {
-    const has_error = (item.revents & socket.POLL.ERR) != 0;
-    const has_hup = (item.revents & socket.POLL.HUP) != 0;
+fn handleEpollError(event: *const std.os.linux.epoll_event, comptime errnoToError: fn (i32) anyerror) ?anyerror {
+    const has_error = (event.events & std.os.linux.EPOLL.ERR) != 0;
+    const has_hup = (event.events & std.os.linux.EPOLL.HUP) != 0;
     if (!has_error and !has_hup) return null;
 
-    const sock_err = socket.getSockError(item.fd) catch return error.Unexpected;
+    const sock_err = socket.getSockError(event.data.fd) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
     return errnoToError(sock_err);
 }
@@ -367,11 +396,11 @@ fn checkSpuriousWakeup(result: anytype) CheckResult {
     }
 }
 
-pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
+pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) CheckResult {
     switch (c.op) {
         .net_connect => {
             const data = c.cast(NetConnect);
-            if (handlePollError(item, socket.errnoToConnectError)) |err| {
+            if (handleEpollError(event, socket.errnoToConnectError)) |err| {
                 data.result = @errorCast(err);
             } else {
                 data.result = {};
@@ -380,7 +409,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_accept => {
             const data = c.cast(NetAccept);
-            if (handlePollError(item, socket.errnoToAcceptError)) |err| {
+            if (handleEpollError(event, socket.errnoToAcceptError)) |err| {
                 data.result = @errorCast(err);
                 return .completed;
             }
@@ -389,7 +418,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_recv => {
             const data = c.cast(NetRecv);
-            if (handlePollError(item, socket.errnoToRecvError)) |err| {
+            if (handleEpollError(event, socket.errnoToRecvError)) |err| {
                 data.result = @errorCast(err);
                 return .completed;
             }
@@ -398,7 +427,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_send => {
             const data = c.cast(NetSend);
-            if (handlePollError(item, socket.errnoToSendError)) |err| {
+            if (handleEpollError(event, socket.errnoToSendError)) |err| {
                 data.result = @errorCast(err);
                 return .completed;
             }
@@ -407,7 +436,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
-            if (handlePollError(item, socket.errnoToRecvError)) |err| {
+            if (handleEpollError(event, socket.errnoToRecvError)) |err| {
                 data.result = @errorCast(err);
                 return .completed;
             }
@@ -416,7 +445,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
-            if (handlePollError(item, socket.errnoToSendError)) |err| {
+            if (handleEpollError(event, socket.errnoToSendError)) |err| {
                 data.result = @errorCast(err);
                 return .completed;
             }
