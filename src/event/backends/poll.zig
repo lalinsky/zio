@@ -57,9 +57,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
 }
 
 pub fn deinit(self: *Self) void {
-    if (self.poll_queue.count() > 0) {
-        std.debug.panic("poll: still have {d} fds", .{self.poll_queue.count()});
-    }
     self.poll_queue.deinit(self.allocator);
     self.poll_fds.deinit(self.allocator);
 }
