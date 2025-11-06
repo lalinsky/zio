@@ -46,7 +46,7 @@ pub const POLL = switch (builtin.os.tag) {
 
 pub const sockaddr = posix.system.sockaddr;
 pub const AF = posix.system.AF;
-pub const socklen_t = posix.system.socklen_t;
+pub const socklen_t = if (builtin.os.tag == .windows) i32 else posix.system.socklen_t;
 pub const SOL = posix.system.SOL;
 pub const SO = posix.system.SO;
 
@@ -422,11 +422,10 @@ pub const AcceptError = error{
 pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlags) AcceptError!fd_t {
     switch (builtin.os.tag) {
         .windows => {
-            var addr_len_tmp: c_int = if (addr_len) |len| @intCast(len.*) else 0;
             const sock = std.os.windows.ws2_32.accept(
                 fd,
                 if (addr) |a| @ptrCast(a) else null,
-                if (addr_len != null) &addr_len_tmp else null,
+                addr_len,
             );
             if (sock == std.os.windows.ws2_32.INVALID_SOCKET) {
                 const err = std.os.windows.ws2_32.WSAGetLastError();
@@ -437,9 +436,6 @@ pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlag
                     .WSAENOBUFS => error.SystemResources,
                     else => unexpectedWSAError(err),
                 };
-            }
-            if (addr_len) |len| {
-                len.* = @intCast(addr_len_tmp);
             }
             if (flags.nonblocking) {
                 var mode: c_ulong = 1;
@@ -785,8 +781,8 @@ pub fn recvfrom(
     switch (builtin.os.tag) {
         .windows => {
             var sys_flags: c_int = 0;
-            if (flags.peek) sys_flags |= std.os.windows.ws2_32.MSG_PEEK;
-            if (flags.waitall) sys_flags |= std.os.windows.ws2_32.MSG_WAITALL;
+            if (flags.peek) sys_flags |= std.os.windows.ws2_32.MSG.PEEK;
+            if (flags.waitall) sys_flags |= std.os.windows.ws2_32.MSG.WAITALL;
 
             const rc = std.os.windows.ws2_32.recvfrom(
                 fd,
@@ -861,7 +857,7 @@ pub fn sendto(
                 @intCast(buffer.len),
                 @intCast(sys_flags),
                 addr,
-                addr_len,
+                @intCast(addr_len),
             );
             if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
                 const err = std.os.windows.ws2_32.WSAGetLastError();
