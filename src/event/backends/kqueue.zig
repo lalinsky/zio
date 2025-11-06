@@ -207,11 +207,9 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
     };
 
     for (events[0..n]) |event| {
-        const fd: NetHandle = @intCast(event.ident);
-
-        // Check if this is the async wakeup fd
+        // Check if this is the async wakeup user event
         if (self.async_impl) |*impl| {
-            if (fd == impl.read_fd) {
+            if (event.filter == c.EVFILT.USER and event.ident == impl.ident) {
                 state.loop.processAsyncHandles();
                 impl.drain();
                 continue;
@@ -222,6 +220,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         if (event.udata == 0) continue; // Shouldn't happen, but be defensive
 
         const completion: *Completion = @ptrFromInt(event.udata);
+        const fd: NetHandle = @intCast(event.ident);
 
         switch (checkCompletion(completion, &event)) {
             .completed => {
@@ -411,26 +410,21 @@ pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
     }
 }
 
-/// Async notification implementation using pipe
+/// Async notification implementation using EVFILT_USER
 pub const AsyncImpl = struct {
-    read_fd: socket.fd_t = undefined,
-    write_fd: socket.fd_t = undefined,
     kqueue_fd: i32,
+    ident: usize,
 
     pub fn init(self: *AsyncImpl, kqueue_fd: i32) !void {
-        // Use pipe for async notifications
-        const pipefd = try posix.pipe(.{ .nonblocking = true, .cloexec = true });
-        errdefer {
-            std.posix.close(pipefd[0]);
-            std.posix.close(pipefd[1]);
-        }
+        // Use a unique identifier for the user event
+        const ident: usize = @intFromPtr(self);
 
-        // Register read end with kqueue
+        // Register EVFILT_USER with kqueue
         var changes: [1]c.Kevent = undefined;
         changes[0] = .{
-            .ident = @intCast(pipefd[0]),
-            .filter = c.EVFILT.READ,
-            .flags = c.EV.ADD | c.EV.ENABLE,
+            .ident = ident,
+            .filter = c.EVFILT.USER,
+            .flags = c.EV.ADD | c.EV.ENABLE | c.EV.CLEAR,
             .fflags = 0,
             .data = 0,
             .udata = 0,
@@ -441,9 +435,8 @@ pub const AsyncImpl = struct {
         }
 
         self.* = .{
-            .read_fd = pipefd[0],
-            .write_fd = pipefd[1],
             .kqueue_fd = kqueue_fd,
+            .ident = ident,
         };
     }
 
@@ -451,30 +444,35 @@ pub const AsyncImpl = struct {
         // Remove from kqueue
         var changes: [1]c.Kevent = undefined;
         changes[0] = .{
-            .ident = @intCast(self.read_fd),
-            .filter = c.EVFILT.READ,
+            .ident = self.ident,
+            .filter = c.EVFILT.USER,
             .flags = c.EV.DELETE,
             .fflags = 0,
             .data = 0,
             .udata = 0,
         };
         _ = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-
-        std.posix.close(self.read_fd);
-        std.posix.close(self.write_fd);
     }
 
     /// Notify the event loop (thread-safe)
     pub fn notify(self: *AsyncImpl) void {
-        const byte: [1]u8 = .{1};
-        _ = std.posix.write(self.write_fd, &byte) catch |err| {
-            log.err("Failed to write to wakeup pipe: {}", .{err});
+        var changes: [1]c.Kevent = undefined;
+        changes[0] = .{
+            .ident = self.ident,
+            .filter = c.EVFILT.USER,
+            .flags = 0,
+            .fflags = c.NOTE.TRIGGER,
+            .data = 0,
+            .udata = 0,
         };
+        const rc = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+        if (posix.errno(rc) != .SUCCESS) {
+            log.err("Failed to trigger user event: {}", .{posix.errno(rc)});
+        }
     }
 
-    /// Drain the pipe (called by event loop when EVFILT_READ is ready)
+    /// No draining needed for EVFILT_USER
     pub fn drain(self: *AsyncImpl) void {
-        var buf: [64]u8 = undefined;
-        _ = std.posix.read(self.read_fd, &buf) catch {};
+        _ = self;
     }
 };
