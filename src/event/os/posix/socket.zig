@@ -489,23 +489,52 @@ pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlag
             return sock;
         },
         else => {
+            // Linux supports accept4 with SOCK_NONBLOCK and SOCK_CLOEXEC flags
+            // BSD (macOS, FreeBSD, etc.) requires fcntl() instead
+            var accept_flags: c_int = 0;
+            if (builtin.os.tag == .linux) {
+                if (flags.nonblocking) {
+                    accept_flags |= posix.system.SOCK.NONBLOCK;
+                }
+                if (flags.cloexec) {
+                    accept_flags |= posix.system.SOCK.CLOEXEC;
+                }
+            }
+
             while (true) {
                 var addr_len_tmp: posix.system.socklen_t = if (addr_len) |len| len.* else 0;
-                const rc = posix.system.accept(
-                    fd,
-                    if (addr) |a| @ptrCast(@alignCast(a)) else null,
-                    if (addr_len != null) &addr_len_tmp else null,
-                );
+                const rc = if (builtin.os.tag == .linux)
+                    posix.system.accept4(
+                        fd,
+                        if (addr) |a| @ptrCast(@alignCast(a)) else null,
+                        if (addr_len != null) &addr_len_tmp else null,
+                        @intCast(accept_flags),
+                    )
+                else
+                    posix.system.accept(
+                        fd,
+                        if (addr) |a| @ptrCast(@alignCast(a)) else null,
+                        if (addr_len != null) &addr_len_tmp else null,
+                    );
+
                 switch (posix.errno(rc)) {
                     .SUCCESS => {
                         if (addr_len) |len| {
                             len.* = addr_len_tmp;
                         }
                         const sock: fd_t = @intCast(rc);
-                        if (flags.nonblocking) {
-                            const fl_flags = posix.system.fcntl(sock, posix.system.F.GETFL, @as(c_int, 0));
-                            _ = posix.system.fcntl(sock, posix.system.F.SETFL, fl_flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK")));
+
+                        // On non-Linux systems, set flags using fcntl
+                        if (builtin.os.tag != .linux) {
+                            if (flags.nonblocking) {
+                                const fl_flags = posix.system.fcntl(sock, posix.system.F.GETFL, @as(c_int, 0));
+                                _ = posix.system.fcntl(sock, posix.system.F.SETFL, fl_flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK")));
+                            }
+                            if (flags.cloexec) {
+                                _ = posix.system.fcntl(sock, posix.system.F.SETFD, @as(c_int, posix.system.FD_CLOEXEC));
+                            }
                         }
+
                         return sock;
                     },
                     .INTR => continue,
