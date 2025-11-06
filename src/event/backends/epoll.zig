@@ -150,7 +150,18 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void
 
     if (entry.completions.head == null) {
         // No more completions - remove from epoll and poll queue
-        _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
+        const del_rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
+        switch (posix.errno(del_rc)) {
+            .SUCCESS, .NOENT => {
+                // SUCCESS: successfully removed
+                // NOENT: fd was not registered (already removed or never added) - safe to proceed
+            },
+            else => |err| {
+                log.err("epoll_ctl(CTL_DEL, fd={}) failed: {}", .{ fd, err });
+                // Don't remove from poll_queue to maintain consistency with epoll state
+                return;
+            },
+        }
         const was_removed = self.poll_queue.remove(fd);
         std.debug.assert(was_removed);
         return;
@@ -168,8 +179,16 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void
             .events = new_events,
             .data = .{ .fd = fd },
         };
-        _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_MOD, fd, &event);
-        entry.events = new_events;
+        const mod_rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_MOD, fd, &event);
+        switch (posix.errno(mod_rc)) {
+            .SUCCESS => {
+                entry.events = new_events;
+            },
+            else => |err| {
+                log.err("epoll_ctl(CTL_MOD, fd={}) failed: {}", .{ fd, err });
+                // Keep old events mask to maintain consistency with epoll state
+            },
+        }
     }
 }
 
