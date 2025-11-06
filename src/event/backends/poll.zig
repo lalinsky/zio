@@ -62,7 +62,7 @@ pub fn deinit(self: *Self) void {
 }
 
 fn getEvents(op: OperationType) c_short {
-    const event: c_short = switch (op) {
+    return switch (op) {
         .net_connect => socket.POLL.OUT,
         .net_accept => socket.POLL.IN,
         .net_recv => socket.POLL.IN,
@@ -71,7 +71,6 @@ fn getEvents(op: OperationType) c_short {
         .net_sendto => socket.POLL.OUT,
         else => unreachable,
     };
-    return socket.POLL.ERR | socket.POLL.HUP | event;
 }
 
 fn getPollType(op: OperationType) PollEntryType {
