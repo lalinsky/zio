@@ -133,6 +133,7 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void
         // Now we can remove the entry from the poll queue
         const was_removed = self.poll_queue.remove(fd);
         std.debug.assert(was_removed);
+        return;
     }
 
     // Recalculate events from remaining completions
