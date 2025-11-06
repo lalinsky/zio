@@ -37,3 +37,94 @@ pub fn unexpectedErrno(err: system.E) error{Unexpected} {
     }
     return error.Unexpected;
 }
+
+pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
+    const fl_flags = system.fcntl(fd, system.F.GETFL, @as(c_int, 0));
+    switch (errno(fl_flags)) {
+        .SUCCESS => {},
+        .BADF => unreachable, // Invalid fd
+        .FAULT => unreachable, // Invalid address
+        else => |err| return unexpectedErrno(err),
+    }
+
+    const new_flags = fl_flags | (@as(c_int, 1) << @bitOffsetOf(O, "NONBLOCK"));
+    switch (errno(system.fcntl(fd, system.F.SETFL, new_flags))) {
+        .SUCCESS => {},
+        .BADF => unreachable,
+        .FAULT => unreachable,
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
+pub fn setCloexec(fd: std.posix.fd_t) error{Unexpected}!void {
+    switch (errno(system.fcntl(fd, system.F.SETFD, @as(c_int, system.FD_CLOEXEC)))) {
+        .SUCCESS => {},
+        .BADF => unreachable,
+        .FAULT => unreachable,
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
+pub const PipeFlags = packed struct {
+    nonblocking: bool = false,
+    cloexec: bool = true,
+};
+
+pub const PipeError = error{
+    SystemFdQuotaExceeded,
+    ProcessFdQuotaExceeded,
+    Unexpected,
+};
+
+pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
+    switch (system) {
+        std.c => {
+            // BSD/non-Linux: use pipe() + fcntl()
+            var fds: [2]std.posix.fd_t = undefined;
+
+            switch (errno(system.pipe(&fds))) {
+                .SUCCESS => {},
+                .FAULT => unreachable,
+                .NFILE => return error.SystemFdQuotaExceeded,
+                .MFILE => return error.ProcessFdQuotaExceeded,
+                else => |err| return unexpectedErrno(err),
+            }
+            errdefer {
+                std.posix.close(fds[0]);
+                std.posix.close(fds[1]);
+            }
+
+            // Set flags using fcntl
+            if (flags.nonblocking) {
+                try setNonblocking(fds[0]);
+                try setNonblocking(fds[1]);
+            }
+            if (flags.cloexec) {
+                try setCloexec(fds[0]);
+                try setCloexec(fds[1]);
+            }
+
+            return fds;
+        },
+        std.os.linux => {
+            var fds: [2]std.posix.fd_t = undefined;
+            var pipe_flags: u32 = 0;
+            if (flags.nonblocking) {
+                pipe_flags |= std.os.linux.O.NONBLOCK;
+            }
+            if (flags.cloexec) {
+                pipe_flags |= std.os.linux.O.CLOEXEC;
+            }
+
+            switch (errno(system.pipe2(&fds, pipe_flags))) {
+                .SUCCESS => return fds,
+                .FAULT => unreachable,
+                .INVAL => unreachable, // Invalid flags - would be a bug
+                .NFILE => return error.SystemFdQuotaExceeded,
+                .MFILE => return error.ProcessFdQuotaExceeded,
+                else => |err| return unexpectedErrno(err),
+            }
+        },
+        else => @compileError("unsupported OS"),
+    }
+}

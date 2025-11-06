@@ -481,8 +481,7 @@ pub const AsyncImpl = struct {
             },
             else => {
                 // POSIX: use pipe
-                var pipefd: [2]std.posix.fd_t = undefined;
-                try std.posix.pipe2(&pipefd, .{ .NONBLOCK = true, .CLOEXEC = true });
+                const pipefd = try posix.pipe(.{ .nonblocking = true, .cloexec = true });
                 self.* = .{
                     .read_fd = pipefd[0],
                     .write_fd = pipefd[1],

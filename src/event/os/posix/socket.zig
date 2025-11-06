@@ -279,11 +279,10 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                         // On non-Linux systems, set flags using fcntl
                         if (builtin.os.tag != .linux) {
                             if (flags.nonblocking) {
-                                const fl_flags = posix.system.fcntl(fd, posix.system.F.GETFL, @as(c_int, 0));
-                                _ = posix.system.fcntl(fd, posix.system.F.SETFL, fl_flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK")));
+                                try posix.setNonblocking(fd);
                             }
                             if (flags.cloexec) {
-                                _ = posix.system.fcntl(fd, posix.system.F.SETFD, @as(c_int, posix.system.FD_CLOEXEC));
+                                try posix.setCloexec(fd);
                             }
                         }
 
@@ -535,11 +534,10 @@ pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlag
                         // On non-Linux systems, set flags using fcntl
                         if (builtin.os.tag != .linux) {
                             if (flags.nonblocking) {
-                                const fl_flags = posix.system.fcntl(sock, posix.system.F.GETFL, @as(c_int, 0));
-                                _ = posix.system.fcntl(sock, posix.system.F.SETFL, fl_flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK")));
+                                try posix.setNonblocking(sock);
                             }
                             if (flags.cloexec) {
-                                _ = posix.system.fcntl(sock, posix.system.F.SETFD, @as(c_int, posix.system.FD_CLOEXEC));
+                                try posix.setCloexec(sock);
                             }
                         }
 
