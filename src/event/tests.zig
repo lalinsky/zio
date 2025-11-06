@@ -2,6 +2,7 @@ const std = @import("std");
 const Loop = @import("loop.zig").Loop;
 const Timer = @import("completion.zig").Timer;
 const Cancel = @import("completion.zig").Cancel;
+const Async = @import("completion.zig").Async;
 const NetClose = @import("completion.zig").NetClose;
 const NetOpen = @import("completion.zig").NetOpen;
 const NetBind = @import("completion.zig").NetBind;
@@ -848,4 +849,96 @@ test "Loop: vectored sendto and recvfrom" {
     loop.add(&close1.c);
     loop.add(&close2.c);
     try loop.run(.until_done);
+}
+
+test "Loop: async notification - same thread" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    var async_handle: Async = .init();
+    loop.add(&async_handle.c);
+
+    // Notify immediately in same thread
+    async_handle.notify();
+
+    // Run loop - async should complete
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.completed, async_handle.c.state);
+    try async_handle.result;
+}
+
+test "Loop: async notification - cross-thread" {
+    const Context = struct {
+        async_handle: *Async,
+    };
+
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    var async_handle: Async = .init();
+    loop.add(&async_handle.c);
+
+    // Create thread that will notify after a delay
+    var ctx = Context{ .async_handle = &async_handle };
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn notifyThread(c: *Context) void {
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            c.async_handle.notify();
+        }
+    }.notifyThread, .{&ctx});
+
+    // Run loop - should block until notified
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.completed, async_handle.c.state);
+    try async_handle.result;
+
+    thread.join();
+}
+
+test "Loop: async notification - multiple handles" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    var async1: Async = .init();
+    var async2: Async = .init();
+    var async3: Async = .init();
+
+    loop.add(&async1.c);
+    loop.add(&async2.c);
+    loop.add(&async3.c);
+
+    // Notify all three
+    async1.notify();
+    async2.notify();
+    async3.notify();
+
+    // Run loop - all should complete
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.completed, async1.c.state);
+    try std.testing.expectEqual(.completed, async2.c.state);
+    try std.testing.expectEqual(.completed, async3.c.state);
+}
+
+test "Loop: async notification - re-arm" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    var async_handle: Async = .init();
+
+    // First notification cycle
+    loop.add(&async_handle.c);
+    async_handle.notify();
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.completed, async_handle.c.state);
+
+    // Re-arm for second notification
+    async_handle = .init();
+    loop.add(&async_handle.c);
+    async_handle.notify();
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.completed, async_handle.c.state);
 }

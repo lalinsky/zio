@@ -1183,3 +1183,51 @@ pub fn sendto(
         },
     }
 }
+
+/// Creates a connected socket pair using loopback connection (for Windows async wakeup)
+/// Returns [read_socket, write_socket] - writing to write_socket wakes up poll on read_socket
+pub const CreateLoopbackSocketPairError = OpenError || BindError || ListenError || ConnectError || AcceptError || GetSockNameError;
+
+pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
+    ensureWSAInitialized();
+
+    // Create a listening socket on loopback
+    const listen_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    errdefer close(listen_sock);
+
+    // Bind to 127.0.0.1:0 (any available port)
+    var bind_addr: sockaddr = @bitCast(std.posix.sockaddr.in{
+        .family = AF.INET,
+        .port = 0, // Let OS choose port
+        .addr = 0x0100007F, // 127.0.0.1 in network byte order (little-endian)
+        .zero = [_]u8{0} ** 8,
+    });
+    try bind(listen_sock, &bind_addr, @sizeOf(std.posix.sockaddr.in));
+
+    // Listen for connections
+    try listen(listen_sock, 1);
+
+    // Get the actual bound address
+    var actual_addr: sockaddr = undefined;
+    var addr_len: socklen_t = @sizeOf(sockaddr);
+    try getsockname(listen_sock, &actual_addr, &addr_len);
+
+    // Create connecting socket
+    const write_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    errdefer close(write_sock);
+
+    // Connect to the listening socket
+    connect(write_sock, &actual_addr, addr_len) catch |err| {
+        if (err != error.WouldBlock) return err;
+        // WouldBlock is expected for non-blocking connect
+    };
+
+    // Accept the connection
+    const read_sock = try accept(listen_sock, null, null, .{ .nonblocking = true });
+    errdefer close(read_sock);
+
+    // Close the listening socket - no longer needed
+    close(listen_sock);
+
+    return .{ read_sock, write_sock };
+}

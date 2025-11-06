@@ -49,6 +49,7 @@ const log = std.log.scoped(.zio_epoll);
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 epoll_fd: i32 = -1,
+async_impl: ?AsyncImpl = null,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
@@ -62,12 +63,26 @@ pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
         .allocator = allocator,
         .epoll_fd = epoll_fd,
     };
+
+    // Initialize AsyncImpl
+    var async_impl: AsyncImpl = undefined;
+    try async_impl.init(epoll_fd);
+    self.async_impl = async_impl;
 }
 
 pub fn deinit(self: *Self) void {
+    if (self.async_impl) |*impl| {
+        impl.deinit();
+    }
     self.poll_queue.deinit(self.allocator);
     if (self.epoll_fd != -1) {
         _ = std.os.linux.close(self.epoll_fd);
+    }
+}
+
+pub fn wake(self: *Self) void {
+    if (self.async_impl) |*impl| {
+        impl.notify();
     }
 }
 
@@ -255,7 +270,9 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
-    if (self.poll_queue.count() == 0) {
+    // Check if we have any fds to monitor (network I/O or async_impl)
+    const has_fds = self.poll_queue.count() > 0 or self.async_impl != null;
+    if (!has_fds) {
         if (timeout > 0) {
             time.sleep(timeout);
         }
@@ -272,6 +289,15 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
     for (events[0..n]) |event| {
         const fd = event.data.fd;
+
+        // Check if this is the async wakeup fd
+        if (self.async_impl) |*impl| {
+            if (fd == impl.eventfd) {
+                state.loop.processAsyncHandles();
+                continue;
+            }
+        }
+
         const entry = self.poll_queue.get(fd) orelse continue;
 
         var iter: ?*Completion = entry.completions.head;
@@ -293,6 +319,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
     switch (c.op) {
         .timer => unreachable, // Timers are handled elsewhere in the loop
+        .async => unreachable, // Async handles are managed separately
         .cancel => {
             const data = c.cast(Cancel);
             data.cancel_c.canceled = c;
@@ -457,3 +484,54 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
         },
     }
 }
+
+/// Async notification implementation using eventfd
+pub const AsyncImpl = struct {
+    const linux = @import("../os/linux.zig");
+
+    eventfd: i32 = -1,
+    epoll_fd: i32,
+
+    pub fn init(self: *AsyncImpl, epoll_fd: i32) !void {
+        const efd = try linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
+        errdefer _ = std.os.linux.close(efd);
+
+        // Register eventfd with epoll
+        var event: std.os.linux.epoll_event = .{
+            .events = std.os.linux.EPOLL.IN,
+            .data = .{ .fd = efd },
+        };
+        const rc = std.os.linux.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, efd, &event);
+        if (posix.errno(rc) != .SUCCESS) {
+            return posix.unexpectedErrno(posix.errno(rc));
+        }
+
+        self.* = .{
+            .eventfd = efd,
+            .epoll_fd = epoll_fd,
+        };
+    }
+
+    pub fn deinit(self: *AsyncImpl) void {
+        if (self.eventfd != -1) {
+            // Remove from epoll
+            _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, self.eventfd, null);
+            _ = std.os.linux.close(self.eventfd);
+            self.eventfd = -1;
+        }
+    }
+
+    /// Notify the event loop (thread-safe)
+    pub fn notify(self: *AsyncImpl) void {
+        linux.eventfd_write(self.eventfd, 1) catch |err| {
+            log.err("Failed to write to eventfd: {}", .{err});
+        };
+    }
+
+    /// Drain the eventfd counter (called by event loop when EPOLLIN is ready)
+    pub fn drain(self: *AsyncImpl) void {
+        _ = linux.eventfd_read(self.eventfd) catch |err| {
+            log.err("Failed to read from eventfd: {}", .{err});
+        };
+    }
+};

@@ -49,16 +49,32 @@ const log = std.log.scoped(.zio_poll);
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 poll_fds: std.ArrayList(socket.pollfd) = .empty,
+async_impl: ?AsyncImpl = null,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     self.* = .{
         .allocator = allocator,
+        .poll_fds = std.ArrayList(socket.pollfd).init(allocator),
     };
+
+    // Initialize AsyncImpl
+    var async_impl: AsyncImpl = undefined;
+    try async_impl.init(self);
+    self.async_impl = async_impl;
 }
 
 pub fn deinit(self: *Self) void {
+    if (self.async_impl) |*impl| {
+        impl.deinit();
+    }
     self.poll_queue.deinit(self.allocator);
-    self.poll_fds.deinit(self.allocator);
+    self.poll_fds.deinit();
+}
+
+pub fn wake(self: *Self) void {
+    if (self.async_impl) |*impl| {
+        impl.notify();
+    }
 }
 
 fn getEvents(op: OperationType) @FieldType(socket.pollfd, "events") {
@@ -126,8 +142,9 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void
         // we need to update the index of that fd in the poll queue
         if (entry.index < self.poll_fds.items.len) {
             const updated_fd = self.poll_fds.items[entry.index].fd;
-            const updated_entry = self.poll_queue.getPtr(updated_fd) orelse unreachable;
-            updated_entry.index = entry.index;
+            if (self.poll_queue.getPtr(updated_fd)) |updated_entry| {
+                updated_entry.index = entry.index;
+            }
         }
 
         // Now we can remove the entry from the poll queue
@@ -216,7 +233,9 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
-    if (self.poll_queue.count() == 0) {
+    // Check if we have any fds to monitor (network I/O or async_impl)
+    const has_fds = self.poll_queue.count() > 0 or self.async_impl != null;
+    if (!has_fds) {
         if (timeout > 0) {
             time.sleep(timeout);
         }
@@ -237,6 +256,16 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         }
 
         const fd = item.fd;
+
+        // Check if this is the async wakeup fd
+        if (self.async_impl) |*impl| {
+            if (fd == impl.read_fd) {
+                state.loop.processAsyncHandles();
+                i += 1;
+                continue;
+            }
+        }
+
         const entry = self.poll_queue.get(fd) orelse unreachable;
 
         var iter: ?*Completion = entry.completions.head;
@@ -264,6 +293,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
     switch (c.op) {
         .timer => unreachable, // Timers are handled elsewhere in the loop
+        .async => unreachable, // Async handles are managed separately
         .cancel => {
             const data = c.cast(Cancel);
             data.cancel_c.canceled = c;
@@ -428,3 +458,89 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
     }
 }
+
+/// Async notification implementation using pipe (POSIX) or loopback socket (Windows)
+pub const AsyncImpl = struct {
+    const builtin = @import("builtin");
+
+    read_fd: socket.fd_t = undefined,
+    write_fd: socket.fd_t = undefined,
+    backend: *Self,
+
+    pub fn init(self: *AsyncImpl, backend: *Self) !void {
+        socket.ensureWSAInitialized();
+
+        switch (builtin.os.tag) {
+            .windows => {
+                // Windows: use loopback socket pair
+                const pair = try socket.createLoopbackSocketPair();
+                self.* = .{
+                    .read_fd = pair[0],
+                    .write_fd = pair[1],
+                    .backend = backend,
+                };
+            },
+            else => {
+                // POSIX: use pipe
+                var pipefd: [2]std.posix.fd_t = undefined;
+                try std.posix.pipe2(&pipefd, .{ .NONBLOCK = true, .CLOEXEC = true });
+                self.* = .{
+                    .read_fd = pipefd[0],
+                    .write_fd = pipefd[1],
+                    .backend = backend,
+                };
+            },
+        }
+        errdefer self.deinit();
+
+        // Add read fd to poll_fds
+        try backend.poll_fds.append(backend.allocator, .{
+            .fd = self.read_fd,
+            .events = socket.POLL.IN,
+            .revents = 0,
+        });
+    }
+
+    pub fn deinit(self: *AsyncImpl) void {
+        // Remove from poll_fds by finding its index
+        for (self.backend.poll_fds.items, 0..) |pfd, i| {
+            if (pfd.fd == self.read_fd) {
+                _ = self.backend.poll_fds.swapRemove(i);
+                break;
+            }
+        }
+
+        socket.close(self.read_fd);
+        socket.close(self.write_fd);
+    }
+
+    /// Notify the event loop (thread-safe)
+    pub fn notify(self: *AsyncImpl) void {
+        const byte: [1]u8 = .{1};
+        switch (builtin.os.tag) {
+            .windows => {
+                _ = socket.send(self.write_fd, &[_]socket.iovec_const{socket.iovecConstFromSlice(&byte)}, .{}) catch |err| {
+                    log.err("Failed to send to wakeup socket: {}", .{err});
+                };
+            },
+            else => {
+                _ = std.posix.write(self.write_fd, &byte) catch |err| {
+                    log.err("Failed to write to wakeup pipe: {}", .{err});
+                };
+            },
+        }
+    }
+
+    /// Drain the pipe/socket (called by event loop when POLLIN is ready)
+    pub fn drain(self: *AsyncImpl) void {
+        var buf: [64]u8 = undefined;
+        switch (builtin.os.tag) {
+            .windows => {
+                _ = socket.recv(self.read_fd, &[_]socket.iovec{socket.iovecFromSlice(&buf)}, .{}) catch {};
+            },
+            else => {
+                _ = std.posix.read(self.read_fd, &buf) catch {};
+            },
+        }
+    }
+};

@@ -4,6 +4,7 @@ const Completion = @import("completion.zig").Completion;
 const Cancel = @import("completion.zig").Cancel;
 const NetClose = @import("completion.zig").NetClose;
 const Timer = @import("completion.zig").Timer;
+const Async = @import("completion.zig").Async;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const time = @import("time.zig");
@@ -34,6 +35,7 @@ pub const LoopState = struct {
     timers: TimerHeap = .{ .context = {} },
 
     submissions: Queue(Completion) = .{},
+    async_handles: Queue(Completion) = .{},
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
         if (completion.canceled) |cancel_c| {
@@ -117,13 +119,20 @@ pub const Loop = struct {
         return self.state.stopped or (self.state.active == 0 and self.state.submissions.empty());
     }
 
+    /// Wake up the loop from blocking poll/epoll (thread-safe)
+    pub fn wake(self: *Loop) void {
+        self.backend.wake();
+    }
+
     pub fn run(self: *Loop, mode: RunMode) !void {
         std.debug.assert(self.state.initialized);
         if (self.state.stopped) return;
         switch (mode) {
             .no_wait => try self.tick(false),
             .once => try self.tick(true),
-            .until_done => while (!self.done()) try self.tick(true),
+            .until_done => while (!self.done()) {
+                try self.tick(true);
+            },
         }
     }
 
@@ -132,6 +141,15 @@ pub const Loop = struct {
             .timer => {
                 const timer = c.cast(Timer);
                 self.state.setTimer(timer);
+                return;
+            },
+            .async => {
+                const async_handle = c.cast(Async);
+                // Set loop reference and add to async_handles queue
+                async_handle.loop = self;
+                async_handle.c.state = .running;
+                self.state.active += 1;
+                self.state.async_handles.push(&async_handle.c);
                 return;
             },
             else => {
@@ -164,6 +182,28 @@ pub const Loop = struct {
             self.state.markCompleted(&timer.c);
         }
         return null;
+    }
+
+    pub fn processAsyncHandles(self: *Loop) void {
+        // Drain the async_impl wakeup fd if it was triggered
+        if (self.backend.async_impl) |*impl| {
+            impl.drain();
+        }
+
+        // Check all async handles for pending notifications
+        var c = self.state.async_handles.head;
+        while (c) |completion| {
+            const next = completion.next;
+            const async_handle = completion.cast(Async);
+            const was_pending = async_handle.pending.swap(0, .acquire);
+            if (was_pending != 0) {
+                // This handle was notified - remove from queue and complete it
+                self.state.async_handles.remove(completion);
+                async_handle.result = {};
+                self.state.markCompleted(&async_handle.c);
+            }
+            c = next;
+        }
     }
 
     pub fn tick(self: *Loop, wait: bool) !void {

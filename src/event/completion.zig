@@ -8,6 +8,7 @@ const socket = @import("os/posix/socket.zig");
 pub const OperationType = enum {
     timer,
     cancel,
+    async,
     net_open,
     net_bind,
     net_listen,
@@ -68,6 +69,7 @@ pub fn completionOp(comptime T: type) OperationType {
     return switch (T) {
         Timer => .timer,
         Cancel => .cancel,
+        Async => .async,
         NetOpen => .net_open,
         NetBind => .net_bind,
         NetListen => .net_listen,
@@ -87,6 +89,7 @@ pub fn CompletionType(comptime op: OperationType) type {
     return switch (op) {
         .timer => Timer,
         .cancel => Cancel,
+        .async => Async,
         .net_open => NetOpen,
         .net_bind => NetBind,
         .net_listen => NetListen,
@@ -132,6 +135,31 @@ pub const Cancel = struct {
             .c = .init(.cancel),
             .cancel_c = cancel_c,
         };
+    }
+};
+
+pub const Async = struct {
+    c: Completion,
+    result: Error!void = undefined,
+    pending: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    loop: *Loop = undefined,
+
+    pub const Error = Cancelable;
+
+    pub fn init() Async {
+        return .{
+            .c = .init(.async),
+        };
+    }
+
+    /// Notify the loop to wake up and complete this async handle (thread-safe)
+    pub fn notify(self: *Async) void {
+        // Atomically set pending flag
+        const was_pending = self.pending.swap(1, .release);
+        if (was_pending == 0) {
+            // Only notify loop if transitioning from not-pending to pending
+            self.loop.wake();
+        }
     }
 };
 
