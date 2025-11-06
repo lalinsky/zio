@@ -61,7 +61,7 @@ pub fn deinit(self: *Self) void {
     self.poll_fds.deinit(self.allocator);
 }
 
-fn getEvents(op: OperationType) c_short {
+fn getEvents(op: OperationType) @FieldType(socket.pollfd, "events") {
     return switch (op) {
         .net_connect => socket.POLL.OUT,
         .net_accept => socket.POLL.IN,
@@ -136,7 +136,7 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void
     }
 
     // Recalculate events from remaining completions
-    var new_events: u32 = 0;
+    var new_events: @FieldType(socket.pollfd, "events") = 0;
     var iter: ?*Completion = entry.completions.head;
     while (iter) |c| : (iter = c.next) {
         new_events |= getEvents(c.op);
