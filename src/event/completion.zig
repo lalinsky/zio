@@ -15,6 +15,8 @@ pub const OperationType = enum {
     net_accept,
     net_recv,
     net_send,
+    net_recvfrom,
+    net_sendto,
     net_shutdown,
     net_close,
 };
@@ -73,6 +75,8 @@ pub fn completionOp(comptime T: type) OperationType {
         NetAccept => .net_accept,
         NetRecv => .net_recv,
         NetSend => .net_send,
+        NetRecvFrom => .net_recvfrom,
+        NetSendTo => .net_sendto,
         NetClose => .net_close,
         NetShutdown => .net_shutdown,
         else => @compileError("unknown completion type"),
@@ -90,6 +94,8 @@ pub fn CompletionType(comptime op: OperationType) type {
         .net_accept => NetAccept,
         .net_recv => NetRecv,
         .net_send => NetSend,
+        .net_recvfrom => NetRecvFrom,
+        .net_sendto => NetSendTo,
         .net_close => NetClose,
         .net_shutdown => NetShutdown,
     };
@@ -315,6 +321,74 @@ pub const NetSend = struct {
     }
 
     pub fn getResult(self: *const NetSend) Error!usize {
+        if (self.c.canceled != null) return error.Canceled;
+        return self.result;
+    }
+};
+
+pub const NetRecvFrom = struct {
+    c: Completion,
+    result: Error!usize = undefined,
+    handle: Backend.NetHandle,
+    buffer: []u8,
+    flags: socket.RecvFlags,
+    addr: ?*socket.sockaddr,
+    addr_len: ?*socket.socklen_t,
+
+    pub const Error = socket.RecvError || Cancelable;
+
+    pub fn init(
+        handle: Backend.NetHandle,
+        buffer: []u8,
+        flags: socket.RecvFlags,
+        addr: ?*socket.sockaddr,
+        addr_len: ?*socket.socklen_t,
+    ) NetRecvFrom {
+        return .{
+            .c = .init(.net_recvfrom),
+            .handle = handle,
+            .buffer = buffer,
+            .flags = flags,
+            .addr = addr,
+            .addr_len = addr_len,
+        };
+    }
+
+    pub fn getResult(self: *const NetRecvFrom) Error!usize {
+        if (self.c.canceled != null) return error.Canceled;
+        return self.result;
+    }
+};
+
+pub const NetSendTo = struct {
+    c: Completion,
+    result: Error!usize = undefined,
+    handle: Backend.NetHandle,
+    buffer: []const u8,
+    flags: socket.SendFlags,
+    addr: *const socket.sockaddr,
+    addr_len: socket.socklen_t,
+
+    pub const Error = socket.SendError || Cancelable;
+
+    pub fn init(
+        handle: Backend.NetHandle,
+        buffer: []const u8,
+        flags: socket.SendFlags,
+        addr: *const socket.sockaddr,
+        addr_len: socket.socklen_t,
+    ) NetSendTo {
+        return .{
+            .c = .init(.net_sendto),
+            .handle = handle,
+            .buffer = buffer,
+            .flags = flags,
+            .addr = addr,
+            .addr_len = addr_len,
+        };
+    }
+
+    pub fn getResult(self: *const NetSendTo) Error!usize {
         if (self.c.canceled != null) return error.Canceled;
         return self.result;
     }

@@ -14,6 +14,8 @@ const NetConnect = @import("../completion.zig").NetConnect;
 const NetAccept = @import("../completion.zig").NetAccept;
 const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
+const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
+const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 
@@ -68,6 +70,8 @@ fn getEvents(op: OperationType) c_short {
         .net_accept => socket.POLL.IN,
         .net_recv => socket.POLL.IN,
         .net_send => socket.POLL.OUT,
+        .net_recvfrom => socket.POLL.IN,
+        .net_sendto => socket.POLL.OUT,
         else => unreachable,
     };
     return socket.POLL.ERR | socket.POLL.HUP | event;
@@ -79,6 +83,8 @@ fn getPollType(op: OperationType) PollEntryType {
         .net_connect => .connect,
         .net_recv => .send_or_recv,
         .net_send => .send_or_recv,
+        .net_recvfrom => .send_or_recv,
+        .net_sendto => .send_or_recv,
         else => unreachable,
     };
 }
@@ -320,6 +326,16 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
             try self.addToPollQueue(data.handle, c);
             return .running;
         },
+        .net_recvfrom => {
+            const data = c.cast(NetRecvFrom);
+            try self.addToPollQueue(data.handle, c);
+            return .running;
+        },
+        .net_sendto => {
+            const data = c.cast(NetSendTo);
+            try self.addToPollQueue(data.handle, c);
+            return .running;
+        },
     }
 }
 
@@ -432,6 +448,70 @@ pub fn checkCompletion(self: *Self, c: *Completion, events: @FieldType(socket.po
             } else {
                 // Retry send now that buffer space is available
                 data.result = socket.send(data.handle, data.buffer, data.flags);
+            }
+
+            // Check for spurious wakeup
+            if (data.result) |_| {
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => {
+                    // Spurious wakeup - keep in poll queue
+                    return .requeue;
+                },
+                else => {
+                    return .completed;
+                },
+            }
+        },
+        .net_recvfrom => {
+            const data = c.cast(NetRecvFrom);
+            if (has_error or has_hup) {
+                // Get the actual error via getsockopt
+                const sock_err = socket.getSockError(data.handle) catch {
+                    data.result = error.Unexpected;
+                    return .completed;
+                };
+                if (sock_err == 0) {
+                    // No error, retry recvfrom
+                    data.result = socket.recvfrom(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
+                } else {
+                    data.result = socket.errnoToRecvError(sock_err);
+                }
+            } else {
+                // Retry recvfrom now that data is available
+                data.result = socket.recvfrom(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
+            }
+
+            // Check for spurious wakeup
+            if (data.result) |_| {
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => {
+                    // Spurious wakeup - keep in poll queue
+                    return .requeue;
+                },
+                else => {
+                    return .completed;
+                },
+            }
+        },
+        .net_sendto => {
+            const data = c.cast(NetSendTo);
+            if (has_error or has_hup) {
+                // Get the actual error via getsockopt
+                const sock_err = socket.getSockError(data.handle) catch {
+                    data.result = error.Unexpected;
+                    return .completed;
+                };
+                if (sock_err == 0) {
+                    // No error, retry sendto
+                    data.result = socket.sendto(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
+                } else {
+                    data.result = socket.errnoToSendError(sock_err);
+                }
+            } else {
+                // Retry sendto now that buffer space is available
+                data.result = socket.sendto(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
             }
 
             // Check for spurious wakeup

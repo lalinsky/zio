@@ -10,6 +10,8 @@ const NetAccept = @import("completion.zig").NetAccept;
 const NetConnect = @import("completion.zig").NetConnect;
 const NetSend = @import("completion.zig").NetSend;
 const NetRecv = @import("completion.zig").NetRecv;
+const NetRecvFrom = @import("completion.zig").NetRecvFrom;
+const NetSendTo = @import("completion.zig").NetSendTo;
 const NetShutdown = @import("completion.zig").NetShutdown;
 const socket = @import("os/posix/socket.zig");
 
@@ -527,5 +529,96 @@ test "Loop: shutdown" {
     loop.add(&close_accepted.c);
     loop.add(&close_client.c);
     loop.add(&close_server.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: UDP sendto and recvfrom" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    // Create first UDP socket
+    var sock1_open: NetOpen = .init(.ipv4, .dgram, .udp);
+    loop.add(&sock1_open.c);
+    try loop.run(.until_done);
+    const sock1 = try sock1_open.result;
+
+    // Bind first socket to any port
+    var addr1 = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var bind1: NetBind = .init(sock1, @ptrCast(&addr1), @sizeOf(@TypeOf(addr1)));
+    loop.add(&bind1.c);
+    try loop.run(.until_done);
+    try bind1.result;
+
+    // Get the actual port that was bound
+    var bound_addr1: socket.sockaddr.in = undefined;
+    var bound_addr_len1: socket.socklen_t = @sizeOf(@TypeOf(bound_addr1));
+    try socket.getsockname(sock1, @ptrCast(&bound_addr1), &bound_addr_len1);
+    const port1 = std.mem.bigToNative(u16, bound_addr1.port);
+
+    // Create second UDP socket
+    var sock2_open: NetOpen = .init(.ipv4, .dgram, .udp);
+    loop.add(&sock2_open.c);
+    try loop.run(.until_done);
+    const sock2 = try sock2_open.result;
+
+    // Bind second socket to any port
+    var addr2 = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var bind2: NetBind = .init(sock2, @ptrCast(&addr2), @sizeOf(@TypeOf(addr2)));
+    loop.add(&bind2.c);
+    try loop.run(.until_done);
+    try bind2.result;
+
+    // Get the actual port that was bound
+    var bound_addr2: socket.sockaddr.in = undefined;
+    var bound_addr_len2: socket.socklen_t = @sizeOf(@TypeOf(bound_addr2));
+    try socket.getsockname(sock2, @ptrCast(&bound_addr2), &bound_addr_len2);
+    const port2 = std.mem.bigToNative(u16, bound_addr2.port);
+
+    // Send data from sock1 to sock2
+    const msg = "Hello, UDP!";
+    const dest_addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = std.mem.nativeToBig(u16, port2),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var sendto: NetSendTo = .init(sock1, msg, .{}, @ptrCast(&dest_addr), @sizeOf(@TypeOf(dest_addr)));
+    loop.add(&sendto.c);
+    try loop.run(.until_done);
+    const sent = try sendto.result;
+    try std.testing.expectEqual(msg.len, sent);
+
+    // Receive data on sock2
+    var recv_buf: [128]u8 = undefined;
+    var src_addr: socket.sockaddr.in = undefined;
+    var src_addr_len: socket.socklen_t = @sizeOf(@TypeOf(src_addr));
+    var recvfrom: NetRecvFrom = .init(sock2, &recv_buf, .{}, @ptrCast(&src_addr), &src_addr_len);
+    loop.add(&recvfrom.c);
+    try loop.run(.until_done);
+    const recvd = try recvfrom.result;
+    try std.testing.expectEqual(msg.len, recvd);
+    try std.testing.expectEqualStrings(msg, recv_buf[0..recvd]);
+
+    // Verify the source address
+    try std.testing.expectEqual(socket.AF.INET, src_addr.family);
+    try std.testing.expectEqual(port1, std.mem.bigToNative(u16, src_addr.port));
+    try std.testing.expectEqual(@as(u32, @bitCast([4]u8{ 127, 0, 0, 1 })), src_addr.addr);
+
+    // Close sockets
+    var close1: NetClose = .init(sock1);
+    var close2: NetClose = .init(sock2);
+    loop.add(&close1.c);
+    loop.add(&close2.c);
     try loop.run(.until_done);
 }
