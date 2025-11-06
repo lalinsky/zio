@@ -259,7 +259,8 @@ test "Loop: send and recv" {
 
     // Send data from client
     const msg = "Hello, World!";
-    var send: NetSend = .init(client_sock, msg, .{});
+    var send_iov = [_]socket.iovec_const{socket.iovecConstFromSlice(msg)};
+    var send: NetSend = .init(client_sock, &send_iov, .{});
     loop.add(&send.c);
     try loop.run(.until_done);
     const sent = try send.result;
@@ -267,7 +268,8 @@ test "Loop: send and recv" {
 
     // Recv data on server
     var recv_buf: [128]u8 = undefined;
-    var recv: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    var recv_iov = [_]socket.iovec{socket.iovecFromSlice(&recv_buf)};
+    var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
     try loop.run(.until_done);
     const recvd = try recv.result;
@@ -396,7 +398,8 @@ test "Loop: cancel net_recv" {
 
     // Start recv (will block waiting for data)
     var recv_buf: [128]u8 = undefined;
-    var recv: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    var recv_iov = [_]socket.iovec{socket.iovecFromSlice(&recv_buf)};
+    var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
 
     // Run once to get recv into poll queue
@@ -490,7 +493,8 @@ test "Loop: shutdown" {
 
     // Send data from client
     const msg = "Hello, World!";
-    var send: NetSend = .init(client_sock, msg, .{});
+    var send_iov = [_]socket.iovec_const{socket.iovecConstFromSlice(msg)};
+    var send: NetSend = .init(client_sock, &send_iov, .{});
     loop.add(&send.c);
     try loop.run(.until_done);
     const sent = try send.result;
@@ -504,7 +508,8 @@ test "Loop: shutdown" {
 
     // Recv data on server (should get the message)
     var recv_buf: [128]u8 = undefined;
-    var recv: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    var recv_iov = [_]socket.iovec{socket.iovecFromSlice(&recv_buf)};
+    var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
     try loop.run(.until_done);
     const recvd = try recv.result;
@@ -512,7 +517,8 @@ test "Loop: shutdown" {
     try std.testing.expectEqualStrings(msg, recv_buf[0..recvd]);
 
     // Another recv should get 0 (EOF) on Linux, or ConnectionResetByPeer on Windows
-    var recv2: NetRecv = .init(accepted_sock, &recv_buf, .{});
+    var recv2_iov = [_]socket.iovec{socket.iovecFromSlice(&recv_buf)};
+    var recv2: NetRecv = .init(accepted_sock, &recv2_iov, .{});
     loop.add(&recv2.c);
     try loop.run(.until_done);
     if (recv2.result) |recvd2| {
@@ -593,7 +599,8 @@ test "Loop: UDP sendto and recvfrom" {
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
         .zero = [_]u8{0} ** 8,
     };
-    var sendto: NetSendTo = .init(sock1, msg, .{}, @ptrCast(&dest_addr), @sizeOf(@TypeOf(dest_addr)));
+    var sendto_iov = [_]socket.iovec_const{socket.iovecConstFromSlice(msg)};
+    var sendto: NetSendTo = .init(sock1, &sendto_iov, .{}, @ptrCast(&dest_addr), @sizeOf(@TypeOf(dest_addr)));
     loop.add(&sendto.c);
     try loop.run(.until_done);
     const sent = try sendto.result;
@@ -603,7 +610,8 @@ test "Loop: UDP sendto and recvfrom" {
     var recv_buf: [128]u8 = undefined;
     var src_addr: socket.sockaddr.in = undefined;
     var src_addr_len: socket.socklen_t = @sizeOf(@TypeOf(src_addr));
-    var recvfrom: NetRecvFrom = .init(sock2, &recv_buf, .{}, @ptrCast(&src_addr), &src_addr_len);
+    var recvfrom_iov = [_]socket.iovec{socket.iovecFromSlice(&recv_buf)};
+    var recvfrom: NetRecvFrom = .init(sock2, &recvfrom_iov, .{}, @ptrCast(&src_addr), &src_addr_len);
     loop.add(&recvfrom.c);
     try loop.run(.until_done);
     const recvd = try recvfrom.result;
@@ -614,6 +622,225 @@ test "Loop: UDP sendto and recvfrom" {
     try std.testing.expectEqual(socket.AF.INET, src_addr.family);
     try std.testing.expectEqual(port1, std.mem.bigToNative(u16, src_addr.port));
     try std.testing.expectEqual(@as(u32, @bitCast([4]u8{ 127, 0, 0, 1 })), src_addr.addr);
+
+    // Close sockets
+    var close1: NetClose = .init(sock1);
+    var close2: NetClose = .init(sock2);
+    loop.add(&close1.c);
+    loop.add(&close2.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: vectored send and recv" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    // Create and bind server socket
+    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
+    loop.add(&server_open.c);
+    try loop.run(.until_done);
+    const server_sock = try server_open.result;
+
+    var addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
+    loop.add(&server_bind.c);
+    try loop.run(.until_done);
+    try server_bind.result;
+
+    // Get the actual port
+    var bound_addr: socket.sockaddr.in = undefined;
+    var bound_addr_len: socket.socklen_t = @sizeOf(@TypeOf(bound_addr));
+    try socket.getsockname(server_sock, @ptrCast(&bound_addr), &bound_addr_len);
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    // Listen
+    var server_listen: NetListen = .init(server_sock, 1);
+    loop.add(&server_listen.c);
+    try loop.run(.until_done);
+    try server_listen.result;
+
+    // Create client socket and connect
+    var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
+    loop.add(&client_open.c);
+    try loop.run(.until_done);
+    const client_sock = try client_open.result;
+
+    var accept_comp: NetAccept = .init(server_sock, null, null);
+    loop.add(&accept_comp.c);
+
+    const connect_addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var connect: NetConnect = .init(client_sock, @ptrCast(&connect_addr), @sizeOf(@TypeOf(connect_addr)));
+    loop.add(&connect.c);
+
+    try loop.run(.until_done);
+    const accepted_sock = try accept_comp.result;
+    try connect.result;
+
+    // Send data from client using multiple buffers
+    const msg1 = "Hello, ";
+    const msg2 = "vectored ";
+    const msg3 = "I/O!";
+    var send_iov = [_]socket.iovec_const{
+        socket.iovecConstFromSlice(msg1),
+        socket.iovecConstFromSlice(msg2),
+        socket.iovecConstFromSlice(msg3),
+    };
+    var send: NetSend = .init(client_sock, &send_iov, .{});
+    loop.add(&send.c);
+    try loop.run(.until_done);
+    const sent = try send.result;
+    const expected_len = msg1.len + msg2.len + msg3.len;
+    try std.testing.expectEqual(expected_len, sent);
+
+    // Recv data on server using multiple buffers
+    var recv_buf1: [10]u8 = undefined;
+    var recv_buf2: [10]u8 = undefined;
+    var recv_buf3: [10]u8 = undefined;
+    var recv_iov = [_]socket.iovec{
+        socket.iovecFromSlice(&recv_buf1),
+        socket.iovecFromSlice(&recv_buf2),
+        socket.iovecFromSlice(&recv_buf3),
+    };
+    var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
+    loop.add(&recv.c);
+    try loop.run(.until_done);
+    const recvd = try recv.result;
+    try std.testing.expectEqual(expected_len, recvd);
+
+    // Verify the received data
+    const expected = msg1 ++ msg2 ++ msg3;
+    var received: std.ArrayList(u8) = .empty;
+    defer received.deinit(std.testing.allocator);
+    var remaining = recvd;
+    for ([_][]u8{ &recv_buf1, &recv_buf2, &recv_buf3 }) |buf| {
+        const to_copy = @min(buf.len, remaining);
+        try received.appendSlice(std.testing.allocator, buf[0..to_copy]);
+        remaining -= to_copy;
+        if (remaining == 0) break;
+    }
+    try std.testing.expectEqualStrings(expected, received.items);
+
+    // Close all sockets
+    var close_accepted: NetClose = .init(accepted_sock);
+    var close_client: NetClose = .init(client_sock);
+    var close_server: NetClose = .init(server_sock);
+    loop.add(&close_accepted.c);
+    loop.add(&close_client.c);
+    loop.add(&close_server.c);
+    try loop.run(.until_done);
+}
+
+test "Loop: vectored sendto and recvfrom" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    // Create and bind first UDP socket
+    var sock1_open: NetOpen = .init(.ipv4, .dgram, .udp);
+    loop.add(&sock1_open.c);
+    try loop.run(.until_done);
+    const sock1 = try sock1_open.result;
+
+    var addr1 = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var bind1: NetBind = .init(sock1, @ptrCast(&addr1), @sizeOf(@TypeOf(addr1)));
+    loop.add(&bind1.c);
+    try loop.run(.until_done);
+    try bind1.result;
+
+    var bound_addr1: socket.sockaddr.in = undefined;
+    var bound_addr_len1: socket.socklen_t = @sizeOf(@TypeOf(bound_addr1));
+    try socket.getsockname(sock1, @ptrCast(&bound_addr1), &bound_addr_len1);
+    const port1 = std.mem.bigToNative(u16, bound_addr1.port);
+
+    // Create and bind second UDP socket
+    var sock2_open: NetOpen = .init(.ipv4, .dgram, .udp);
+    loop.add(&sock2_open.c);
+    try loop.run(.until_done);
+    const sock2 = try sock2_open.result;
+
+    var addr2 = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var bind2: NetBind = .init(sock2, @ptrCast(&addr2), @sizeOf(@TypeOf(addr2)));
+    loop.add(&bind2.c);
+    try loop.run(.until_done);
+    try bind2.result;
+
+    var bound_addr2: socket.sockaddr.in = undefined;
+    var bound_addr_len2: socket.socklen_t = @sizeOf(@TypeOf(bound_addr2));
+    try socket.getsockname(sock2, @ptrCast(&bound_addr2), &bound_addr_len2);
+    const port2 = std.mem.bigToNative(u16, bound_addr2.port);
+
+    // Send data from sock1 to sock2 using multiple buffers
+    const msg1 = "UDP ";
+    const msg2 = "vectored!";
+    const dest_addr = socket.sockaddr.in{
+        .family = socket.AF.INET,
+        .port = std.mem.nativeToBig(u16, port2),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = [_]u8{0} ** 8,
+    };
+    var sendto_iov = [_]socket.iovec_const{
+        socket.iovecConstFromSlice(msg1),
+        socket.iovecConstFromSlice(msg2),
+    };
+    var sendto: NetSendTo = .init(sock1, &sendto_iov, .{}, @ptrCast(&dest_addr), @sizeOf(@TypeOf(dest_addr)));
+    loop.add(&sendto.c);
+    try loop.run(.until_done);
+    const sent = try sendto.result;
+    const expected_len = msg1.len + msg2.len;
+    try std.testing.expectEqual(expected_len, sent);
+
+    // Receive data on sock2 using multiple buffers
+    var recv_buf1: [10]u8 = undefined;
+    var recv_buf2: [10]u8 = undefined;
+    var src_addr: socket.sockaddr.in = undefined;
+    var src_addr_len: socket.socklen_t = @sizeOf(@TypeOf(src_addr));
+    var recvfrom_iov = [_]socket.iovec{
+        socket.iovecFromSlice(&recv_buf1),
+        socket.iovecFromSlice(&recv_buf2),
+    };
+    var recvfrom: NetRecvFrom = .init(sock2, &recvfrom_iov, .{}, @ptrCast(&src_addr), &src_addr_len);
+    loop.add(&recvfrom.c);
+    try loop.run(.until_done);
+    const recvd = try recvfrom.result;
+    try std.testing.expectEqual(expected_len, recvd);
+
+    // Verify the received data
+    const expected = msg1 ++ msg2;
+    var received: std.ArrayList(u8) = .empty;
+    defer received.deinit(std.testing.allocator);
+    var remaining = recvd;
+    for ([_][]u8{ &recv_buf1, &recv_buf2 }) |buf| {
+        const to_copy = @min(buf.len, remaining);
+        try received.appendSlice(std.testing.allocator, buf[0..to_copy]);
+        remaining -= to_copy;
+        if (remaining == 0) break;
+    }
+    try std.testing.expectEqualStrings(expected, received.items);
+
+    // Verify the source address
+    try std.testing.expectEqual(socket.AF.INET, src_addr.family);
+    try std.testing.expectEqual(port1, std.mem.bigToNative(u16, src_addr.port));
 
     // Close sockets
     var close1: NetClose = .init(sock1);

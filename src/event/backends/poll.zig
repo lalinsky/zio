@@ -388,7 +388,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
                 data.result = @errorCast(err);
                 return .completed;
             }
-            data.result = socket.recv(data.handle, data.buffer, data.flags);
+            data.result = socket.recv(data.handle, data.buffers, data.flags);
             return checkSpuriousWakeup(data.result);
         },
         .net_send => {
@@ -397,7 +397,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
                 data.result = @errorCast(err);
                 return .completed;
             }
-            data.result = socket.send(data.handle, data.buffer, data.flags);
+            data.result = socket.send(data.handle, data.buffers, data.flags);
             return checkSpuriousWakeup(data.result);
         },
         .net_recvfrom => {
@@ -406,7 +406,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
                 data.result = @errorCast(err);
                 return .completed;
             }
-            data.result = socket.recvfrom(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
+            data.result = socket.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len);
             return checkSpuriousWakeup(data.result);
         },
         .net_sendto => {
@@ -415,7 +415,7 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
                 data.result = @errorCast(err);
                 return .completed;
             }
-            data.result = socket.sendto(data.handle, data.buffer, data.flags, data.addr, data.addr_len);
+            data.result = socket.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len);
             return checkSpuriousWakeup(data.result);
         },
         else => {

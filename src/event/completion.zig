@@ -282,16 +282,16 @@ pub const NetRecv = struct {
     c: Completion,
     result: Error!usize = undefined,
     handle: Backend.NetHandle,
-    buffer: []u8,
+    buffers: []socket.iovec,
     flags: socket.RecvFlags,
 
     pub const Error = socket.RecvError || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, buffer: []u8, flags: socket.RecvFlags) NetRecv {
+    pub fn init(handle: Backend.NetHandle, buffers: []socket.iovec, flags: socket.RecvFlags) NetRecv {
         return .{
             .c = .init(.net_recv),
             .handle = handle,
-            .buffer = buffer,
+            .buffers = buffers,
             .flags = flags,
         };
     }
@@ -306,16 +306,16 @@ pub const NetSend = struct {
     c: Completion,
     result: Error!usize = undefined,
     handle: Backend.NetHandle,
-    buffer: []const u8,
+    buffers: []const socket.iovec_const,
     flags: socket.SendFlags,
 
     pub const Error = socket.SendError || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, buffer: []const u8, flags: socket.SendFlags) NetSend {
+    pub fn init(handle: Backend.NetHandle, buffers: []const socket.iovec_const, flags: socket.SendFlags) NetSend {
         return .{
             .c = .init(.net_send),
             .handle = handle,
-            .buffer = buffer,
+            .buffers = buffers,
             .flags = flags,
         };
     }
@@ -330,7 +330,7 @@ pub const NetRecvFrom = struct {
     c: Completion,
     result: Error!usize = undefined,
     handle: Backend.NetHandle,
-    buffer: []u8,
+    buffers: []socket.iovec,
     flags: socket.RecvFlags,
     addr: ?*socket.sockaddr,
     addr_len: ?*socket.socklen_t,
@@ -339,7 +339,7 @@ pub const NetRecvFrom = struct {
 
     pub fn init(
         handle: Backend.NetHandle,
-        buffer: []u8,
+        buffers: []socket.iovec,
         flags: socket.RecvFlags,
         addr: ?*socket.sockaddr,
         addr_len: ?*socket.socklen_t,
@@ -347,7 +347,7 @@ pub const NetRecvFrom = struct {
         return .{
             .c = .init(.net_recvfrom),
             .handle = handle,
-            .buffer = buffer,
+            .buffers = buffers,
             .flags = flags,
             .addr = addr,
             .addr_len = addr_len,
@@ -364,7 +364,7 @@ pub const NetSendTo = struct {
     c: Completion,
     result: Error!usize = undefined,
     handle: Backend.NetHandle,
-    buffer: []const u8,
+    buffers: []const socket.iovec_const,
     flags: socket.SendFlags,
     addr: *const socket.sockaddr,
     addr_len: socket.socklen_t,
@@ -373,7 +373,7 @@ pub const NetSendTo = struct {
 
     pub fn init(
         handle: Backend.NetHandle,
-        buffer: []const u8,
+        buffers: []const socket.iovec_const,
         flags: socket.SendFlags,
         addr: *const socket.sockaddr,
         addr_len: socket.socklen_t,
@@ -381,7 +381,7 @@ pub const NetSendTo = struct {
         return .{
             .c = .init(.net_sendto),
             .handle = handle,
-            .buffer = buffer,
+            .buffers = buffers,
             .flags = flags,
             .addr = addr,
             .addr_len = addr_len,

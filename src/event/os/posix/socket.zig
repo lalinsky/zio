@@ -50,6 +50,32 @@ pub const socklen_t = if (builtin.os.tag == .windows) i32 else posix.system.sock
 pub const SOL = posix.system.SOL;
 pub const SO = posix.system.SO;
 
+// Vectored I/O types
+pub const iovec = switch (builtin.os.tag) {
+    .windows => std.os.windows.ws2_32.WSABUF,
+    else => std.posix.iovec,
+};
+
+pub const iovec_const = switch (builtin.os.tag) {
+    .windows => std.os.windows.ws2_32.WSABUF,
+    else => std.posix.iovec_const,
+};
+
+// Helper functions for single buffer conversion
+pub inline fn iovecFromSlice(buffer: []u8) iovec {
+    return switch (builtin.os.tag) {
+        .windows => .{ .len = @intCast(buffer.len), .buf = buffer.ptr },
+        else => .{ .base = buffer.ptr, .len = buffer.len },
+    };
+}
+
+pub inline fn iovecConstFromSlice(buffer: []const u8) iovec_const {
+    return switch (builtin.os.tag) {
+        .windows => .{ .len = @intCast(buffer.len), .buf = @constCast(buffer.ptr) },
+        else => .{ .base = buffer.ptr, .len = buffer.len },
+    };
+}
+
 pub const PollError = error{
     SystemResources,
     Unexpected,
@@ -661,19 +687,25 @@ pub const RecvError = error{
     Unexpected,
 };
 
-pub fn recv(fd: fd_t, buffer: []u8, flags: RecvFlags) RecvError!usize {
+pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
+    if (buffers.len == 0) return 0;
+
     var sys_flags: c_int = 0;
     if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
     if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
 
     switch (builtin.os.tag) {
         .windows => {
-            var received: c_int = 0;
-            const rc = std.os.windows.ws2_32.recv(
+            var bytes_received: std.os.windows.DWORD = 0;
+            var win_flags: std.os.windows.DWORD = @intCast(sys_flags);
+            const rc = std.os.windows.ws2_32.WSARecv(
                 fd,
-                buffer.ptr,
-                @intCast(buffer.len),
-                sys_flags,
+                @ptrCast(buffers.ptr),
+                @intCast(buffers.len),
+                &bytes_received,
+                &win_flags,
+                null,
+                null,
             );
             if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
                 const err = std.os.windows.ws2_32.WSAGetLastError();
@@ -684,31 +716,66 @@ pub fn recv(fd: fd_t, buffer: []u8, flags: RecvFlags) RecvError!usize {
                     else => unexpectedWSAError(err),
                 };
             }
-            received = rc;
-            return @intCast(received);
+            return bytes_received;
         },
         else => {
-            while (true) {
-                const rc = if (builtin.os.tag == .linux)
-                    posix.system.recvfrom(fd, buffer.ptr, buffer.len, @intCast(sys_flags), null, null)
-                else
-                    posix.system.recv(fd, buffer.ptr, buffer.len, @intCast(sys_flags));
+            if (buffers.len == 1) {
+                // Single buffer - use recv/recvfrom
+                const buffer = buffers[0];
+                while (true) {
+                    const rc = if (builtin.os.tag == .linux)
+                        posix.system.recvfrom(fd, buffer.base, buffer.len, @intCast(sys_flags), null, null)
+                    else
+                        posix.system.recv(fd, buffer.base, buffer.len, @intCast(sys_flags));
 
-                if (rc >= 0) {
-                    return @intCast(rc);
+                    if (rc >= 0) {
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .BADF => unreachable,
+                        .CONNREFUSED => return error.ConnectionRefused,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
-                switch (posix.errno(rc)) {
-                    .INTR => continue,
-                    .AGAIN => return error.WouldBlock,
-                    .BADF => unreachable, // sockfd is not a valid file descriptor - would be a bug
-                    .CONNREFUSED => return error.ConnectionRefused,
-                    .FAULT => unreachable, // Buffer pointer outside accessible address space - would be a bug
-                    .INVAL => unreachable, // Invalid argument passed - would be a bug
-                    .NOMEM => return error.SystemResources,
-                    .NOTCONN => unreachable, // Socket not connected (for connection-oriented) - would be a bug
-                    .NOTSOCK => unreachable, // sockfd doesn't refer to a socket - would be a bug
-                    .CONNRESET => return error.ConnectionResetByPeer,
-                    else => |err| return posix.unexpectedErrno(err),
+            } else {
+                // Multiple buffers - use recvmsg
+                var msg: posix.system.msghdr = .{
+                    .name = null,
+                    .namelen = 0,
+                    .iov = buffers.ptr,
+                    .iovlen = buffers.len,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                };
+
+                while (true) {
+                    const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
+
+                    if (rc >= 0) {
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .BADF => unreachable,
+                        .CONNREFUSED => return error.ConnectionRefused,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
             }
         },
@@ -729,7 +796,9 @@ pub const SendError = error{
     Unexpected,
 };
 
-pub fn send(fd: fd_t, buffer: []const u8, flags: SendFlags) SendError!usize {
+pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!usize {
+    if (buffers.len == 0) return 0;
+
     var sys_flags: c_int = 0;
     if (flags.no_signal and builtin.os.tag != .windows) {
         sys_flags |= posix.system.MSG.NOSIGNAL;
@@ -737,11 +806,15 @@ pub fn send(fd: fd_t, buffer: []const u8, flags: SendFlags) SendError!usize {
 
     switch (builtin.os.tag) {
         .windows => {
-            const rc = std.os.windows.ws2_32.send(
+            var bytes_sent: std.os.windows.DWORD = 0;
+            const rc = std.os.windows.ws2_32.WSASend(
                 fd,
-                buffer.ptr,
-                @intCast(buffer.len),
+                @ptrCast(@constCast(buffers.ptr)),
+                @intCast(buffers.len),
+                &bytes_sent,
                 @intCast(sys_flags),
+                null,
+                null,
             );
             if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
                 const err = std.os.windows.ws2_32.WSAGetLastError();
@@ -753,37 +826,80 @@ pub fn send(fd: fd_t, buffer: []const u8, flags: SendFlags) SendError!usize {
                     else => unexpectedWSAError(err),
                 };
             }
-            return @intCast(rc);
+            return bytes_sent;
         },
         else => {
-            while (true) {
-                const rc = if (builtin.os.tag == .linux)
-                    posix.system.sendto(fd, buffer.ptr, buffer.len, @intCast(sys_flags), null, 0)
-                else
-                    posix.system.send(fd, buffer.ptr, buffer.len, @intCast(sys_flags));
+            if (buffers.len == 1) {
+                // Single buffer - use send/sendto
+                const buffer = buffers[0];
+                while (true) {
+                    const rc = if (builtin.os.tag == .linux)
+                        posix.system.sendto(fd, buffer.base, buffer.len, @intCast(sys_flags), null, 0)
+                    else
+                        posix.system.send(fd, buffer.base, buffer.len, @intCast(sys_flags));
 
-                if (rc >= 0) {
-                    return @intCast(rc);
+                    if (rc >= 0) {
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .ACCES => return error.AccessDenied,
+                        .ALREADY => unreachable,
+                        .BADF => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        .DESTADDRREQ => unreachable,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .ISCONN => unreachable,
+                        .MSGSIZE => return error.MessageTooBig,
+                        .NOBUFS => return error.SystemResources,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .OPNOTSUPP => unreachable,
+                        .PIPE => return error.BrokenPipe,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
-                switch (posix.errno(rc)) {
-                    .INTR => continue,
-                    .AGAIN => return error.WouldBlock,
-                    .ACCES => return error.AccessDenied,
-                    .ALREADY => unreachable, // Fast Open already in progress - shouldn't happen
-                    .BADF => unreachable, // sockfd is not a valid file descriptor - would be a bug
-                    .CONNRESET => return error.ConnectionResetByPeer,
-                    .DESTADDRREQ => unreachable, // Socket not connection-mode and no peer address set - would be a bug
-                    .FAULT => unreachable, // Buffer pointer outside accessible address space - would be a bug
-                    .INVAL => unreachable, // Invalid argument passed - would be a bug
-                    .ISCONN => unreachable, // Connection-mode socket already connected - would be a bug
-                    .MSGSIZE => return error.MessageTooBig,
-                    .NOBUFS => return error.SystemResources,
-                    .NOMEM => return error.SystemResources,
-                    .NOTCONN => unreachable, // Socket not connected - would be a bug
-                    .NOTSOCK => unreachable, // sockfd doesn't refer to a socket - would be a bug
-                    .OPNOTSUPP => unreachable, // Inappropriate flag for socket type - would be a bug
-                    .PIPE => return error.BrokenPipe,
-                    else => |err| return posix.unexpectedErrno(err),
+            } else {
+                // Multiple buffers - use sendmsg
+                var msg: posix.system.msghdr_const = .{
+                    .name = null,
+                    .namelen = 0,
+                    .iov = buffers.ptr,
+                    .iovlen = buffers.len,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                };
+
+                while (true) {
+                    const rc = posix.system.sendmsg(fd, &msg, @intCast(sys_flags));
+
+                    if (rc >= 0) {
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .ACCES => return error.AccessDenied,
+                        .ALREADY => unreachable,
+                        .BADF => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        .DESTADDRREQ => unreachable,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .ISCONN => unreachable,
+                        .MSGSIZE => return error.MessageTooBig,
+                        .NOBUFS => return error.SystemResources,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .OPNOTSUPP => unreachable,
+                        .PIPE => return error.BrokenPipe,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
             }
         },
@@ -792,25 +908,43 @@ pub fn send(fd: fd_t, buffer: []const u8, flags: SendFlags) SendError!usize {
 
 pub fn recvfrom(
     fd: fd_t,
-    buffer: []u8,
+    buffers: []iovec,
     flags: RecvFlags,
     addr: ?*sockaddr,
     addr_len: ?*socklen_t,
 ) RecvError!usize {
+    if (buffers.len == 0) return 0;
+
+    var sys_flags: c_int = 0;
+    if (flags.peek) {
+        sys_flags |= if (builtin.os.tag == .windows)
+            std.os.windows.ws2_32.MSG.PEEK
+        else
+            posix.system.MSG.PEEK;
+    }
+    if (flags.waitall) {
+        sys_flags |= if (builtin.os.tag == .windows)
+            std.os.windows.ws2_32.MSG.WAITALL
+        else
+            posix.system.MSG.WAITALL;
+    }
+
     switch (builtin.os.tag) {
         .windows => {
-            var sys_flags: c_int = 0;
-            if (flags.peek) sys_flags |= std.os.windows.ws2_32.MSG.PEEK;
-            if (flags.waitall) sys_flags |= std.os.windows.ws2_32.MSG.WAITALL;
-
-            const rc = std.os.windows.ws2_32.recvfrom(
+            var bytes_received: std.os.windows.DWORD = 0;
+            var from_len: c_int = if (addr_len) |len| @intCast(len.*) else 0;
+            const rc = std.os.windows.ws2_32.WSARecvFrom(
                 fd,
-                buffer.ptr,
-                @intCast(buffer.len),
-                sys_flags,
+                @ptrCast(buffers.ptr),
+                @intCast(buffers.len),
+                &bytes_received,
+                @ptrCast(&sys_flags),
                 addr,
-                addr_len,
+                if (addr_len != null) &from_len else null,
+                null,
+                null,
             );
+            if (addr_len) |len| len.* = @intCast(from_len);
             if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
                 const err = std.os.windows.ws2_32.WSAGetLastError();
                 return switch (err) {
@@ -820,38 +954,71 @@ pub fn recvfrom(
                     else => unexpectedWSAError(err),
                 };
             }
-            return @intCast(rc);
+            return bytes_received;
         },
         else => {
-            var sys_flags: c_int = 0;
-            if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
-            if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
+            if (buffers.len == 1) {
+                // Single buffer: use recvfrom directly
+                const buffer = buffers[0];
+                while (true) {
+                    const rc = posix.system.recvfrom(
+                        fd,
+                        buffer.base,
+                        buffer.len,
+                        @intCast(sys_flags),
+                        addr,
+                        addr_len,
+                    );
 
-            while (true) {
-                const rc = posix.system.recvfrom(
-                    fd,
-                    buffer.ptr,
-                    buffer.len,
-                    @intCast(sys_flags),
-                    addr,
-                    addr_len,
-                );
-
-                if (rc >= 0) {
-                    return @intCast(rc);
+                    if (rc >= 0) {
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .BADF => unreachable,
+                        .CONNREFUSED => return error.ConnectionRefused,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
-                switch (posix.errno(rc)) {
-                    .INTR => continue,
-                    .AGAIN => return error.WouldBlock,
-                    .BADF => unreachable,
-                    .CONNREFUSED => return error.ConnectionRefused,
-                    .FAULT => unreachable,
-                    .INVAL => unreachable,
-                    .NOMEM => return error.SystemResources,
-                    .NOTCONN => unreachable,
-                    .NOTSOCK => unreachable,
-                    .CONNRESET => return error.ConnectionResetByPeer,
-                    else => |err| return posix.unexpectedErrno(err),
+            } else {
+                // Multiple buffers: use recvmsg
+                var msg: posix.system.msghdr = .{
+                    .name = addr,
+                    .namelen = if (addr_len) |len| len.* else 0,
+                    .iov = buffers.ptr,
+                    .iovlen = buffers.len,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                };
+
+                while (true) {
+                    const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
+
+                    if (rc >= 0) {
+                        if (addr_len) |len| len.* = msg.namelen;
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .BADF => unreachable,
+                        .CONNREFUSED => return error.ConnectionRefused,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
             }
         },
@@ -860,23 +1027,31 @@ pub fn recvfrom(
 
 pub fn sendto(
     fd: fd_t,
-    buffer: []const u8,
+    buffers: []const iovec_const,
     flags: SendFlags,
     addr: *const sockaddr,
     addr_len: socklen_t,
 ) SendError!usize {
+    if (buffers.len == 0) return 0;
+
+    var sys_flags: c_int = 0;
+    if (flags.no_signal and builtin.os.tag != .windows) {
+        sys_flags |= posix.system.MSG.NOSIGNAL;
+    }
+
     switch (builtin.os.tag) {
         .windows => {
-            const sys_flags: c_int = 0;
-            // no_signal doesn't apply to Windows
-
-            const rc = std.os.windows.ws2_32.sendto(
+            var bytes_sent: std.os.windows.DWORD = 0;
+            const rc = std.os.windows.ws2_32.WSASendTo(
                 fd,
-                buffer.ptr,
-                @intCast(buffer.len),
+                @ptrCast(@constCast(buffers.ptr)),
+                @intCast(buffers.len),
+                &bytes_sent,
                 @intCast(sys_flags),
                 addr,
                 @intCast(addr_len),
+                null,
+                null,
             );
             if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
                 const err = std.os.windows.ws2_32.WSAGetLastError();
@@ -888,44 +1063,84 @@ pub fn sendto(
                     else => unexpectedWSAError(err),
                 };
             }
-            return @intCast(rc);
+            return bytes_sent;
         },
         else => {
-            var sys_flags: c_int = 0;
-            if (flags.no_signal) sys_flags |= posix.system.MSG.NOSIGNAL;
+            if (buffers.len == 1) {
+                // Single buffer - use sendto
+                const buffer = buffers[0];
+                while (true) {
+                    const rc = posix.system.sendto(
+                        fd,
+                        buffer.base,
+                        buffer.len,
+                        @intCast(sys_flags),
+                        addr,
+                        addr_len,
+                    );
 
-            while (true) {
-                const rc = posix.system.sendto(
-                    fd,
-                    buffer.ptr,
-                    buffer.len,
-                    @intCast(sys_flags),
-                    addr,
-                    addr_len,
-                );
-
-                if (rc >= 0) {
-                    return @intCast(rc);
+                    if (rc >= 0) {
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .ACCES => return error.AccessDenied,
+                        .ALREADY => unreachable,
+                        .BADF => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        .DESTADDRREQ => unreachable,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .ISCONN => unreachable,
+                        .MSGSIZE => return error.MessageTooBig,
+                        .NOBUFS => return error.SystemResources,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .OPNOTSUPP => unreachable,
+                        .PIPE => return error.BrokenPipe,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
-                switch (posix.errno(rc)) {
-                    .INTR => continue,
-                    .AGAIN => return error.WouldBlock,
-                    .ACCES => return error.AccessDenied,
-                    .ALREADY => unreachable,
-                    .BADF => unreachable,
-                    .CONNRESET => return error.ConnectionResetByPeer,
-                    .DESTADDRREQ => unreachable,
-                    .FAULT => unreachable,
-                    .INVAL => unreachable,
-                    .ISCONN => unreachable,
-                    .MSGSIZE => return error.MessageTooBig,
-                    .NOBUFS => return error.SystemResources,
-                    .NOMEM => return error.SystemResources,
-                    .NOTCONN => unreachable,
-                    .NOTSOCK => unreachable,
-                    .OPNOTSUPP => unreachable,
-                    .PIPE => return error.BrokenPipe,
-                    else => |err| return posix.unexpectedErrno(err),
+            } else {
+                // Multiple buffers - use sendmsg
+                var msg: posix.system.msghdr_const = .{
+                    .name = addr,
+                    .namelen = addr_len,
+                    .iov = buffers.ptr,
+                    .iovlen = buffers.len,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                };
+
+                while (true) {
+                    const rc = posix.system.sendmsg(fd, &msg, @intCast(sys_flags));
+
+                    if (rc >= 0) {
+                        return @intCast(rc);
+                    }
+                    switch (posix.errno(rc)) {
+                        .INTR => continue,
+                        .AGAIN => return error.WouldBlock,
+                        .ACCES => return error.AccessDenied,
+                        .ALREADY => unreachable,
+                        .BADF => unreachable,
+                        .CONNRESET => return error.ConnectionResetByPeer,
+                        .DESTADDRREQ => unreachable,
+                        .FAULT => unreachable,
+                        .INVAL => unreachable,
+                        .ISCONN => unreachable,
+                        .MSGSIZE => return error.MessageTooBig,
+                        .NOBUFS => return error.SystemResources,
+                        .NOMEM => return error.SystemResources,
+                        .NOTCONN => unreachable,
+                        .NOTSOCK => unreachable,
+                        .OPNOTSUPP => unreachable,
+                        .PIPE => return error.BrokenPipe,
+                        else => |err| return posix.unexpectedErrno(err),
+                    }
                 }
             }
         },
