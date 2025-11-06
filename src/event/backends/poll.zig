@@ -147,6 +147,8 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_connect => completion.cast(NetConnect).handle,
         .net_recv => completion.cast(NetRecv).handle,
         .net_send => completion.cast(NetSend).handle,
+        .net_recvfrom => completion.cast(NetRecvFrom).handle,
+        .net_sendto => completion.cast(NetSendTo).handle,
         else => unreachable,
     };
 }
