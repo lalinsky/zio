@@ -74,10 +74,8 @@ pub const LoopState = struct {
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
         const was_active = timer.deadline_ms > 0;
         timer.deadline_ms = 0;
-        timer.c.state = .completed;
         if (was_active) {
             self.timers.remove(timer);
-            self.active -= 1;
         }
     }
 };
@@ -116,7 +114,7 @@ pub const Loop = struct {
     }
 
     pub fn done(self: *const Loop) bool {
-        return self.state.stopped or self.state.active == 0;
+        return self.state.stopped or (self.state.active == 0 and self.state.submissions.empty());
     }
 
     pub fn run(self: *Loop, mode: RunMode) !void {
@@ -141,7 +139,11 @@ pub const Loop = struct {
                     const cancel = c.cast(Cancel);
                     if (cancel.cancel_c.op == .timer) {
                         const timer = cancel.cancel_c.cast(Timer);
+                        self.state.active += 1; // Count the cancel operation
+                        timer.c.canceled = &cancel.c;
+                        cancel.result = {};
                         self.state.clearTimer(timer);
+                        self.state.markCompleted(&timer.c);
                         return;
                     }
                 }
@@ -151,32 +153,41 @@ pub const Loop = struct {
         }
     }
 
-    fn checkTimers(self: *Loop) u64 {
+    fn checkTimers(self: *Loop) ?u64 {
         self.state.updateNow();
-        var timeout_ms: u64 = self.max_wait_ms;
         while (self.state.timers.peek()) |timer| {
             if (timer.deadline_ms > self.state.now_ms) {
-                timeout_ms = @min(timer.deadline_ms - self.state.now_ms, self.max_wait_ms);
-                break;
+                return timer.deadline_ms - self.state.now_ms;
             }
             timer.result = {};
             self.state.clearTimer(timer);
-            timer.c.call(self);
+            self.state.markCompleted(&timer.c);
         }
-        return timeout_ms;
+        return null;
     }
 
     pub fn tick(self: *Loop, wait: bool) !void {
-        if (self.state.stopped) return;
+        if (self.done()) return;
 
-        var timeout_ms: u64 = checkTimers(self);
-        if (!wait) {
-            timeout_ms = 0;
+        const timer_timeout_ms = checkTimers(self);
+
+        var timeout_ms: u64 = 0;
+        if (wait) {
+            // If we have submissions pending, process them immediately
+            if (!self.state.submissions.empty()) {
+                timeout_ms = 0;
+            } else if (timer_timeout_ms) |t| {
+                // Use timer timeout, capped at max_wait_ms
+                timeout_ms = @min(t, self.max_wait_ms);
+            } else {
+                // No timers, wait for blocking I/O
+                timeout_ms = self.max_wait_ms;
+            }
         }
 
         try self.backend.tick(&self.state, timeout_ms);
 
-        // Check times again, to trigger the one that set timeout for the tick
+        // Check timers again, to trigger the one that set timeout for the tick
         _ = checkTimers(self);
     }
 };
