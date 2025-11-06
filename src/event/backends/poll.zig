@@ -505,6 +505,12 @@ pub const AsyncImpl = struct {
         for (self.backend.poll_fds.items, 0..) |pfd, i| {
             if (pfd.fd == self.read_fd) {
                 _ = self.backend.poll_fds.swapRemove(i);
+                if (i < self.backend.poll_fds.items.len) {
+                    const moved_fd = self.backend.poll_fds.items[i].fd;
+                    if (self.backend.poll_queue.getPtr(moved_fd)) |entry| {
+                        entry.index = i;
+                    }
+                }
                 break;
             }
         }
