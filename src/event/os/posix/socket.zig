@@ -141,6 +141,21 @@ pub fn close(fd: fd_t) void {
     }
 }
 
+pub const SetNonblockingError = error{Unexpected};
+
+/// Set a socket to non-blocking mode
+pub fn setNonblocking(fd: fd_t) SetNonblockingError!void {
+    switch (builtin.os.tag) {
+        .windows => {
+            var mode: c_ulong = 1;
+            _ = std.os.windows.ws2_32.ioctlsocket(fd, std.os.windows.ws2_32.FIONBIO, &mode);
+        },
+        else => {
+            try posix.setNonblocking(fd);
+        },
+    }
+}
+
 pub const ShutdownHow = enum {
     receive,
     send,
@@ -1225,15 +1240,8 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     close(listen_sock);
 
     // Now set both sockets to non-blocking for actual use
-    if (builtin.os.tag != .windows) {
-        try posix.setNonblocking(read_sock);
-        try posix.setNonblocking(write_sock);
-    } else {
-        // Windows needs ioctlsocket
-        var mode: c_ulong = 1;
-        _ = std.os.windows.ws2_32.ioctlsocket(read_sock, std.os.windows.ws2_32.FIONBIO, &mode);
-        _ = std.os.windows.ws2_32.ioctlsocket(write_sock, std.os.windows.ws2_32.FIONBIO, &mode);
-    }
+    try setNonblocking(read_sock);
+    try setNonblocking(write_sock);
 
     return .{ read_sock, write_sock };
 }
