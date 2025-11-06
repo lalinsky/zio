@@ -174,10 +174,9 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
         if (completion.canceled != null) {
             state.markCompleted(completion);
         } else {
-            if (try self.startCompletion(completion)) {
-                state.markCompleted(completion);
-            } else {
-                state.markRunning(completion);
+            switch (try self.startCompletion(completion)) {
+                .completed => state.markCompleted(completion),
+                .running => state.markRunning(completion),
             }
         }
     }
@@ -244,16 +243,16 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
     }
 }
 
-pub fn startCompletion(self: *Self, c: *Completion) !bool {
+pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
     switch (c.op) {
         .timer => {
             // handled elsewhere in loop
-            return false;
+            return .running;
         },
         .cancel => {
             const data = c.cast(Cancel);
             data.cancel_c.canceled = c;
-            return false; // Cancel waits until target is actually cancelled
+            return .running; // Cancel waits until target is actually cancelled
         },
 
         // Synchronous operations - complete immediately
@@ -265,27 +264,27 @@ pub fn startCompletion(self: *Self, c: *Completion) !bool {
                 data.protocol,
                 data.flags,
             );
-            return true;
+            return .completed;
         },
         .net_bind => {
             const data = c.cast(NetBind);
             data.result = socket.bind(data.handle, data.addr, data.addr_len);
-            return true;
+            return .completed;
         },
         .net_listen => {
             const data = c.cast(NetListen);
             data.result = socket.listen(data.handle, data.backlog);
-            return true;
+            return .completed;
         },
         .net_close => {
             const data = c.cast(NetClose);
             data.result = socket.close(data.handle);
-            return true;
+            return .completed;
         },
         .net_shutdown => {
             const data = c.cast(NetShutdown);
             data.result = socket.shutdown(data.handle, data.how);
-            return true;
+            return .completed;
         },
 
         // Potentially async operations - try first, register if WouldBlock
@@ -294,15 +293,14 @@ pub fn startCompletion(self: *Self, c: *Completion) !bool {
             data.result = socket.connect(data.handle, data.addr, data.addr_len);
             if (data.result) |_| {
                 // Connected immediately (e.g., localhost)
-                return true;
+                return .completed;
             } else |err| switch (err) {
                 error.WouldBlock, error.ConnectionPending => {
                     // Register for POLLOUT to detect when connection completes
-                    c.state = .running;
                     try self.addToPollQueue(data.handle, c);
-                    return false;
+                    return .running;
                 },
-                else => return true, // Error, complete immediately
+                else => return .completed, // Error, complete immediately
             }
         },
         .net_accept => {
@@ -310,28 +308,25 @@ pub fn startCompletion(self: *Self, c: *Completion) !bool {
             data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
             if (data.result) |_| {
                 // Accepted immediately
-                return true;
+                return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => {
                     // Register for POLLIN to detect when client connects
-                    c.state = .running;
                     try self.addToPollQueue(data.handle, c);
-                    return false;
+                    return .running;
                 },
-                else => return true, // Error, complete immediately
+                else => return .completed, // Error, complete immediately
             }
         },
         .net_recv => {
-            c.state = .running;
             const data = c.cast(NetRecv);
             try self.addToPollQueue(data.handle, c);
-            return false;
+            return .running;
         },
         .net_send => {
-            c.state = .running;
             const data = c.cast(NetSend);
             try self.addToPollQueue(data.handle, c);
-            return false;
+            return .running;
         },
     }
 }
