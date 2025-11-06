@@ -169,7 +169,7 @@ pub const Loop = struct {
     pub fn tick(self: *Loop, wait: bool) !void {
         if (self.done()) return;
 
-        const timer_timeout_ms = checkTimers(self);
+        const timer_timeout_ms = self.checkTimers();
 
         var timeout_ms: u64 = 0;
         if (wait) {
@@ -188,7 +188,7 @@ pub const Loop = struct {
         try self.backend.tick(&self.state, timeout_ms);
 
         // Check timers again, to trigger the one that set timeout for the tick
-        _ = checkTimers(self);
+        _ = self.checkTimers();
     }
 };
 
