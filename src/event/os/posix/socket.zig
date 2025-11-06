@@ -1184,13 +1184,13 @@ pub fn sendto(
 
 /// Creates a connected socket pair using loopback connection (for Windows async wakeup)
 /// Returns [read_socket, write_socket] - writing to write_socket wakes up poll on read_socket
-pub const CreateLoopbackSocketPairError = OpenError || BindError || ListenError || ConnectError || AcceptError || GetSockNameError;
+pub const CreateLoopbackSocketPairError = OpenError || BindError || ListenError || ConnectError || AcceptError || GetSockNameError || error{Unexpected};
 
 pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     ensureWSAInitialized();
 
-    // Create a listening socket on loopback
-    const listen_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    // Create a listening socket on loopback (blocking mode for setup)
+    const listen_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = false });
     errdefer close(listen_sock);
 
     // Bind to 127.0.0.1:0 (any available port)
@@ -1210,22 +1210,30 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     var addr_len: socklen_t = @sizeOf(sockaddr);
     try getsockname(listen_sock, &actual_addr, &addr_len);
 
-    // Create connecting socket
-    const write_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    // Create connecting socket (blocking for setup)
+    const write_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = false });
     errdefer close(write_sock);
 
-    // Connect to the listening socket
-    connect(write_sock, &actual_addr, addr_len) catch |err| {
-        if (err != error.WouldBlock) return err;
-        // WouldBlock is expected for non-blocking connect
-    };
+    // Connect to the listening socket (will block until connected)
+    try connect(write_sock, &actual_addr, addr_len);
 
-    // Accept the connection
-    const read_sock = try accept(listen_sock, null, null, .{ .nonblocking = true });
+    // Accept the connection (will block until ready, avoiding WouldBlock race)
+    const read_sock = try accept(listen_sock, null, null, .{ .nonblocking = false });
     errdefer close(read_sock);
 
     // Close the listening socket - no longer needed
     close(listen_sock);
+
+    // Now set both sockets to non-blocking for actual use
+    if (builtin.os.tag != .windows) {
+        try posix.setNonblocking(read_sock);
+        try posix.setNonblocking(write_sock);
+    } else {
+        // Windows needs ioctlsocket
+        var mode: c_ulong = 1;
+        _ = std.os.windows.ws2_32.ioctlsocket(read_sock, std.os.windows.ws2_32.FIONBIO, &mode);
+        _ = std.os.windows.ws2_32.ioctlsocket(write_sock, std.os.windows.ws2_32.FIONBIO, &mode);
+    }
 
     return .{ read_sock, write_sock };
 }
