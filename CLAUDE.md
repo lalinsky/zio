@@ -9,6 +9,9 @@ Extra notes:
 - use `zig env` to get the path to the Zig standard library, if you need to check something
 - to test Windows builds on Linux: `zig build build-tests -Dtarget=x86_64-windows && wine zig-out/bin/test.exe`
 
+We are about to upgrade to Zig 0.16 and that version is removing `std.posix`, we can't depend on any of that anymore.
+We need our own wrappers.
+
 Release process:
 1. Update docs/changelog.md - change [Unreleased] to [X.Y.Z] with current date
 2. Update version in build.zig.zon
