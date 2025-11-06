@@ -42,6 +42,7 @@ const EV_EOF: u16 = 0x8000;
 allocator: std.mem.Allocator,
 kqueue_fd: i32 = -1,
 async_impl: ?AsyncImpl = null,
+change_buffer: std.ArrayListUnmanaged(c.Kevent) = .{},
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     const kq = c.kqueue();
@@ -54,6 +55,8 @@ pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     self.* = .{
         .allocator = allocator,
         .kqueue_fd = kqueue_fd,
+        .async_impl = null,
+        .change_buffer = .{},
     };
 
     // Initialize AsyncImpl
@@ -66,6 +69,7 @@ pub fn deinit(self: *Self) void {
     if (self.async_impl) |*impl| {
         impl.deinit();
     }
+    self.change_buffer.deinit(self.allocator);
     if (self.kqueue_fd != -1) {
         _ = c.close(self.kqueue_fd);
     }
@@ -89,39 +93,51 @@ fn getFilter(op: OperationType) i16 {
     };
 }
 
-/// Register a completion with kqueue
-fn registerCompletion(self: *Self, fd: NetHandle, completion: *Completion) !void {
+/// Queue a kevent change to register a completion
+fn queueRegister(self: *Self, fd: NetHandle, completion: *Completion) !void {
     const filter = getFilter(completion.op);
-    var changes: [1]c.Kevent = undefined;
-    changes[0] = .{
+    try self.change_buffer.append(self.allocator, .{
         .ident = @intCast(fd),
         .filter = filter,
         .flags = c.EV.ADD | c.EV.ENABLE | c.EV.CLEAR,
         .fflags = 0,
         .data = 0,
         .udata = @intFromPtr(completion),
-    };
-    const rc = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-    switch (posix.errno(rc)) {
-        .SUCCESS => {},
-        else => |err| return posix.unexpectedErrno(err),
-    }
+    });
 }
 
-/// Unregister a completion from kqueue
-fn unregisterCompletion(self: *Self, fd: NetHandle, completion: *Completion) void {
+/// Queue a kevent change to unregister a completion
+fn queueUnregister(self: *Self, fd: NetHandle, completion: *Completion) !void {
     const filter = getFilter(completion.op);
-    var changes: [1]c.Kevent = undefined;
-    changes[0] = .{
+    try self.change_buffer.append(self.allocator, .{
         .ident = @intCast(fd),
         .filter = filter,
         .flags = c.EV.DELETE,
         .fflags = 0,
         .data = 0,
         .udata = @intFromPtr(completion),
-    };
-    // Ignore errors - the fd might already be closed or the event might not exist
-    _ = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+    });
+}
+
+/// Submit all queued kevent changes in batches
+fn submitChanges(self: *Self) !void {
+    if (self.change_buffer.items.len == 0) return;
+
+    var offset: usize = 0;
+    while (offset < self.change_buffer.items.len) {
+        const batch_size = @min(self.change_buffer.items.len - offset, 64);
+        const batch = self.change_buffer.items[offset..][0..batch_size];
+
+        const rc = c.kevent(self.kqueue_fd, batch.ptr, @intCast(batch_size), &.{}, 0, null);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {},
+            else => |err| return posix.unexpectedErrno(err),
+        }
+
+        offset += batch_size;
+    }
+
+    self.change_buffer.clearRetainingCapacity();
 }
 
 fn getHandle(completion: *Completion) NetHandle {
@@ -160,6 +176,7 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
     }
 
     // Now start normal operations, ignoring the canceled ones
+    // This will queue kevent changes in the buffer
     while (operations.pop()) |completion| {
         if (completion.state == .completed) continue;
         if (completion.canceled != null) {
@@ -172,12 +189,12 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
         }
     }
 
-    // And now go over remaining cancelations and unregister the operations from kqueue
+    // And now go over remaining cancelations and queue unregister operations
     while (cancels.pop()) |completion| {
         if (completion.state == .completed) continue;
         const cancel = completion.cast(Cancel);
         const fd = getHandle(cancel.cancel_c);
-        self.unregisterCompletion(fd, cancel.cancel_c);
+        try self.queueUnregister(fd, cancel.cancel_c);
 
         // Set cancel result to success
         // The canceled operation's result will be error.Canceled via getResult()
@@ -186,6 +203,9 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
         // Mark the canceled operation as completed, which will recursively mark the cancel as completed
         state.markCompleted(cancel.cancel_c);
     }
+
+    // Submit all queued changes in batches (non-blocking)
+    try self.submitChanges();
 }
 
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
@@ -227,7 +247,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
         switch (checkCompletion(completion, &event)) {
             .completed => {
-                self.unregisterCompletion(fd, completion);
+                try self.queueUnregister(fd, completion);
                 state.markCompleted(completion);
             },
             .requeue => {
@@ -235,6 +255,9 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
             },
         }
     }
+
+    // Submit any unregister operations that were queued while processing events
+    try self.submitChanges();
 }
 
 pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, running } {
@@ -288,8 +311,8 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock, error.ConnectionPending => {
-                    // Register for EVFILT_WRITE to detect when connection completes
-                    try self.registerCompletion(data.handle, comp);
+                    // Queue for EVFILT_WRITE to detect when connection completes
+                    try self.queueRegister(data.handle, comp);
                     return .running;
                 },
                 else => return .completed, // Error, complete immediately
@@ -297,27 +320,27 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
         },
         .net_accept => {
             const data = comp.cast(NetAccept);
-            try self.registerCompletion(data.handle, comp);
+            try self.queueRegister(data.handle, comp);
             return .running;
         },
         .net_recv => {
             const data = comp.cast(NetRecv);
-            try self.registerCompletion(data.handle, comp);
+            try self.queueRegister(data.handle, comp);
             return .running;
         },
         .net_send => {
             const data = comp.cast(NetSend);
-            try self.registerCompletion(data.handle, comp);
+            try self.queueRegister(data.handle, comp);
             return .running;
         },
         .net_recvfrom => {
             const data = comp.cast(NetRecvFrom);
-            try self.registerCompletion(data.handle, comp);
+            try self.queueRegister(data.handle, comp);
             return .running;
         },
         .net_sendto => {
             const data = comp.cast(NetSendTo);
-            try self.registerCompletion(data.handle, comp);
+            try self.queueRegister(data.handle, comp);
             return .running;
         },
     }
