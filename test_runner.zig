@@ -77,7 +77,7 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    const env = Env.init(allocator);
+    var env = Env.init(allocator);
     defer env.deinit(allocator);
 
     var slowest = SlowTracker.init(allocator, 5);
@@ -111,8 +111,18 @@ pub fn main() !void {
         slowest.startTiming();
 
         const is_unnamed_test = isUnnamed(t);
-        if (env.filter) |f| {
-            if (!is_unnamed_test and std.mem.indexOf(u8, t.name, f) == null) {
+        if (env.filters.items.len > 0) {
+            if (is_unnamed_test) {
+                continue;
+            }
+            var matches = false;
+            for (env.filters.items) |f| {
+                if (std.mem.indexOf(u8, t.name, f) != null) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) {
                 continue;
             }
         }
@@ -307,22 +317,38 @@ const SlowTracker = struct {
 const Env = struct {
     verbose: bool,
     fail_first: bool,
-    filter: ?[]const u8,
+    filters: std.ArrayList([]const u8),
     do_log_capture: bool,
 
     fn init(allocator: Allocator) Env {
+        var filters: std.ArrayList([]const u8) = .empty;
+
+        if (readEnv(allocator, "TEST_FILTER")) |filter_str| {
+            defer allocator.free(filter_str);
+
+            var iter = std.mem.splitScalar(u8, filter_str, '|');
+            while (iter.next()) |part| {
+                const trimmed = std.mem.trim(u8, part, " \t");
+                if (trimmed.len > 0) {
+                    const owned = allocator.dupe(u8, trimmed) catch @panic("OOM");
+                    filters.append(allocator, owned) catch @panic("OOM");
+                }
+            }
+        }
+
         return .{
             .verbose = readEnvBool(allocator, "TEST_VERBOSE", true),
             .fail_first = readEnvBool(allocator, "TEST_FAIL_FIRST", false),
-            .filter = readEnv(allocator, "TEST_FILTER"),
+            .filters = filters,
             .do_log_capture = readEnvBool(allocator, "TEST_LOG_CAPTURE", true),
         };
     }
 
-    fn deinit(self: Env, allocator: Allocator) void {
-        if (self.filter) |f| {
+    fn deinit(self: *Env, allocator: Allocator) void {
+        for (self.filters.items) |f| {
             allocator.free(f);
         }
+        self.filters.deinit(allocator);
     }
 
     fn readEnv(allocator: Allocator, key: []const u8) ?[]const u8 {
