@@ -142,9 +142,7 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void
         new_events |= getEvents(c.op);
     }
 
-    if (new_events != entry.events) {
-        self.poll_fds.items[entry.index].events = new_events;
-    }
+    self.poll_fds.items[entry.index].events = new_events;
 }
 
 fn getHandle(completion: *Completion) NetHandle {
