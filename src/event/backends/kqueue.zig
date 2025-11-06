@@ -30,18 +30,6 @@ pub const NetShutdownError = error{
     Unexpected,
 };
 
-const PollEntryType = enum {
-    connect,
-    accept,
-    send_or_recv,
-};
-
-const PollEntry = struct {
-    completions: Queue(Completion),
-    type: PollEntryType,
-    events: u32,
-};
-
 const Self = @This();
 
 const log = std.log.scoped(.zio_kqueue);
@@ -49,7 +37,6 @@ const log = std.log.scoped(.zio_kqueue);
 const c = std.c;
 
 allocator: std.mem.Allocator,
-poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 kqueue_fd: i32 = -1,
 async_impl: ?AsyncImpl = null,
 
@@ -76,7 +63,6 @@ pub fn deinit(self: *Self) void {
     if (self.async_impl) |*impl| {
         impl.deinit();
     }
-    self.poll_queue.deinit(self.allocator);
     if (self.kqueue_fd != -1) {
         _ = c.close(self.kqueue_fd);
     }
@@ -100,176 +86,39 @@ fn getFilter(op: OperationType) i16 {
     };
 }
 
-fn getEvents(op: OperationType) u32 {
-    return switch (op) {
-        .net_connect => 0x02, // WRITE
-        .net_accept => 0x01, // READ
-        .net_recv => 0x01, // READ
-        .net_send => 0x02, // WRITE
-        .net_recvfrom => 0x01, // READ
-        .net_sendto => 0x02, // WRITE
-        else => unreachable,
+/// Register a completion with kqueue
+fn registerCompletion(self: *Self, fd: NetHandle, completion: *Completion) !void {
+    const filter = getFilter(completion.op);
+    var changes: [1]c.Kevent = undefined;
+    changes[0] = .{
+        .ident = @intCast(fd),
+        .filter = filter,
+        .flags = c.EV.ADD | c.EV.ENABLE | c.EV.CLEAR,
+        .fflags = 0,
+        .data = 0,
+        .udata = @intFromPtr(completion),
     };
+    const rc = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+    switch (posix.errno(rc)) {
+        .SUCCESS => {},
+        else => |err| return posix.unexpectedErrno(err),
+    }
 }
 
-fn getPollType(op: OperationType) PollEntryType {
-    return switch (op) {
-        .net_accept => .accept,
-        .net_connect => .connect,
-        .net_recv => .send_or_recv,
-        .net_send => .send_or_recv,
-        .net_recvfrom => .send_or_recv,
-        .net_sendto => .send_or_recv,
-        else => unreachable,
+/// Unregister a completion from kqueue
+fn unregisterCompletion(self: *Self, fd: NetHandle, completion: *Completion) void {
+    const filter = getFilter(completion.op);
+    var changes: [1]c.Kevent = undefined;
+    changes[0] = .{
+        .ident = @intCast(fd),
+        .filter = filter,
+        .flags = c.EV.DELETE,
+        .fflags = 0,
+        .data = 0,
+        .udata = @intFromPtr(completion),
     };
-}
-
-/// Add a completion to the poll queue, merging with existing fd if present
-fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
-    completion.prev = null;
-    completion.next = null;
-
-    const gop = try self.poll_queue.getOrPut(self.allocator, fd);
-    errdefer if (!gop.found_existing) self.poll_queue.removeByPtr(gop.key_ptr);
-
-    var entry = gop.value_ptr;
-    const op_events = getEvents(completion.op);
-
-    if (!gop.found_existing) {
-        const filter = getFilter(completion.op);
-        var changes: [1]c.Kevent = undefined;
-        changes[0] = .{
-            .ident = @intCast(fd),
-            .filter = filter,
-            .flags = c.EV.ADD | c.EV.ENABLE,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        };
-        const rc = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| return posix.unexpectedErrno(err),
-        }
-        entry.* = .{
-            .completions = .{},
-            .type = getPollType(completion.op),
-            .events = op_events,
-        };
-        entry.completions.push(completion);
-        return;
-    }
-
-    std.debug.assert(entry.type == getPollType(completion.op));
-
-    const new_events = entry.events | op_events;
-    if (new_events != entry.events) {
-        // Need to add the new filter if not already registered
-        const filter = getFilter(completion.op);
-        var changes: [1]c.Kevent = undefined;
-        changes[0] = .{
-            .ident = @intCast(fd),
-            .filter = filter,
-            .flags = c.EV.ADD | c.EV.ENABLE,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        };
-        const rc = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| return posix.unexpectedErrno(err),
-        }
-        entry.events = new_events;
-    }
-    entry.completions.push(completion);
-}
-
-fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
-    const entry = self.poll_queue.getPtr(fd) orelse return;
-
-    entry.completions.remove(completion);
-
-    if (entry.completions.head == null) {
-        // No more completions - remove from kqueue and poll queue
-        // Remove both read and write filters if they exist
-        var changes: [2]c.Kevent = undefined;
-        changes[0] = .{
-            .ident = @intCast(fd),
-            .filter = c.EVFILT.READ,
-            .flags = c.EV.DELETE,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        };
-        changes[1] = .{
-            .ident = @intCast(fd),
-            .filter = c.EVFILT.WRITE,
-            .flags = c.EV.DELETE,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        };
-        // Ignore errors from kevent DELETE (fd might not have both filters registered)
-        _ = c.kevent(self.kqueue_fd, &changes, 2, &.{}, 0, null);
-
-        const was_removed = self.poll_queue.remove(fd);
-        std.debug.assert(was_removed);
-        return;
-    }
-
-    // Recalculate events from remaining completions
-    var new_events: u32 = 0;
-    var iter: ?*Completion = entry.completions.head;
-    while (iter) |comp| : (iter = comp.next) {
-        new_events |= getEvents(comp.op);
-    }
-
-    if (new_events != entry.events) {
-        // Update filters - remove those no longer needed, keep those still needed
-        const old_has_read = (entry.events & 0x01) != 0;
-        const old_has_write = (entry.events & 0x02) != 0;
-        const new_has_read = (new_events & 0x01) != 0;
-        const new_has_write = (new_events & 0x02) != 0;
-
-        var changes: [2]c.Kevent = undefined;
-        var n_changes: usize = 0;
-
-        if (old_has_read and !new_has_read) {
-            changes[n_changes] = .{
-                .ident = @intCast(fd),
-                .filter = c.EVFILT.READ,
-                .flags = c.EV.DELETE,
-                .fflags = 0,
-                .data = 0,
-                .udata = 0,
-            };
-            n_changes += 1;
-        }
-        if (old_has_write and !new_has_write) {
-            changes[n_changes] = .{
-                .ident = @intCast(fd),
-                .filter = c.EVFILT.WRITE,
-                .flags = c.EV.DELETE,
-                .fflags = 0,
-                .data = 0,
-                .udata = 0,
-            };
-            n_changes += 1;
-        }
-
-        if (n_changes > 0) {
-            const rc = c.kevent(self.kqueue_fd, &changes, @intCast(n_changes), &.{}, 0, null);
-            switch (posix.errno(rc)) {
-                .SUCCESS => {
-                    entry.events = new_events;
-                },
-                else => |err| return posix.unexpectedErrno(err),
-            }
-        } else {
-            entry.events = new_events;
-        }
-    }
+    // Ignore errors - the fd might already be closed or the event might not exist
+    _ = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
 }
 
 fn getHandle(completion: *Completion) NetHandle {
@@ -320,12 +169,12 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
         }
     }
 
-    // And now go over remaining cancelations and remove the operations from the poll queue
+    // And now go over remaining cancelations and unregister the operations from kqueue
     while (cancels.pop()) |completion| {
         if (completion.state == .completed) continue;
         const cancel = completion.cast(Cancel);
         const fd = getHandle(cancel.cancel_c);
-        try self.removeFromPollQueue(fd, cancel.cancel_c);
+        self.unregisterCompletion(fd, cancel.cancel_c);
 
         // Set cancel result to success
         // The canceled operation's result will be error.Canceled via getResult()
@@ -339,15 +188,6 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
     // Process incoming submissions, handle cancelations
     try self.processSubmissions(state);
-
-    // Check if we have any fds to monitor (network I/O or async_impl)
-    const has_fds = self.poll_queue.count() > 0 or self.async_impl != null;
-    if (!has_fds) {
-        if (timeout_ms > 0) {
-            time.sleep(@intCast(timeout_ms));
-        }
-        return;
-    }
 
     var events: [64]c.Kevent = undefined;
     var timeout_spec: c.timespec = undefined;
@@ -378,20 +218,19 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
             }
         }
 
-        const entry = self.poll_queue.get(fd) orelse continue;
+        // Get completion pointer from udata
+        if (event.udata == 0) continue; // Shouldn't happen, but be defensive
 
-        var iter: ?*Completion = entry.completions.head;
-        while (iter) |completion| {
-            iter = completion.next;
-            switch (checkCompletion(completion, &event)) {
-                .completed => {
-                    try self.removeFromPollQueue(fd, completion);
-                    state.markCompleted(completion);
-                },
-                .requeue => {
-                    // Spurious wakeup - keep in poll queue
-                },
-            }
+        const completion: *Completion = @ptrFromInt(event.udata);
+
+        switch (checkCompletion(completion, &event)) {
+            .completed => {
+                self.unregisterCompletion(fd, completion);
+                state.markCompleted(completion);
+            },
+            .requeue => {
+                // Spurious wakeup - kevent stays registered
+            },
         }
     }
 }
@@ -448,7 +287,7 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
             } else |err| switch (err) {
                 error.WouldBlock, error.ConnectionPending => {
                     // Register for EVFILT_WRITE to detect when connection completes
-                    try self.addToPollQueue(data.handle, comp);
+                    try self.registerCompletion(data.handle, comp);
                     return .running;
                 },
                 else => return .completed, // Error, complete immediately
@@ -456,27 +295,27 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
         },
         .net_accept => {
             const data = comp.cast(NetAccept);
-            try self.addToPollQueue(data.handle, comp);
+            try self.registerCompletion(data.handle, comp);
             return .running;
         },
         .net_recv => {
             const data = comp.cast(NetRecv);
-            try self.addToPollQueue(data.handle, comp);
+            try self.registerCompletion(data.handle, comp);
             return .running;
         },
         .net_send => {
             const data = comp.cast(NetSend);
-            try self.addToPollQueue(data.handle, comp);
+            try self.registerCompletion(data.handle, comp);
             return .running;
         },
         .net_recvfrom => {
             const data = comp.cast(NetRecvFrom);
-            try self.addToPollQueue(data.handle, comp);
+            try self.registerCompletion(data.handle, comp);
             return .running;
         },
         .net_sendto => {
             const data = comp.cast(NetSendTo);
-            try self.addToPollQueue(data.handle, comp);
+            try self.registerCompletion(data.handle, comp);
             return .running;
         },
     }
