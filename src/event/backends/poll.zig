@@ -54,7 +54,6 @@ async_impl: ?AsyncImpl = null,
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     self.* = .{
         .allocator = allocator,
-        .poll_fds = std.ArrayList(socket.pollfd).init(allocator),
     };
 
     // Initialize AsyncImpl
@@ -129,7 +128,7 @@ fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
     entry.completions.push(completion);
 }
 
-fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void {
+fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
     const entry = self.poll_queue.getPtr(fd) orelse return;
 
     entry.completions.remove(completion);
@@ -216,7 +215,7 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
         if (completion.state == .completed) continue;
         const cancel = completion.cast(Cancel);
         const fd = getHandle(cancel.cancel_c);
-        self.removeFromPollQueue(fd, cancel.cancel_c);
+        try self.removeFromPollQueue(fd, cancel.cancel_c);
 
         // Set cancel result to success
         // The canceled operation's result will be error.Canceled via getResult()
@@ -273,7 +272,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
             iter = completion.next;
             switch (checkCompletion(completion, item)) {
                 .completed => {
-                    self.removeFromPollQueue(fd, completion);
+                    try self.removeFromPollQueue(fd, completion);
                     state.markCompleted(completion);
                 },
                 .requeue => {
