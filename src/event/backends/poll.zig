@@ -224,19 +224,23 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
             continue;
         }
 
-        const entry = self.poll_queue.get(item.fd) orelse unreachable;
+        const fd = item.fd;
+        const entry = self.poll_queue.get(fd) orelse unreachable;
 
         var iter: ?*Completion = entry.completions.head;
         while (iter) |completion| {
             iter = completion.next;
             if (self.checkCompletion(completion, item.revents)) {
-                self.removeFromPollQueue(item.fd, completion);
+                self.removeFromPollQueue(fd, completion);
                 state.markCompleted(completion);
-                continue;
             }
         }
 
-        i += 1;
+        // Only increment if the fd at position i is still the same.
+        // If it changed, swapRemove moved a different fd here, so reprocess.
+        if (item.fd == fd) {
+            i += 1;
+        }
     }
 }
 
