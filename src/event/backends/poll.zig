@@ -310,18 +310,8 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
         },
         .net_accept => {
             const data = c.cast(NetAccept);
-            data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
-            if (data.result) |_| {
-                // Accepted immediately
-                return .completed;
-            } else |err| switch (err) {
-                error.WouldBlock => {
-                    // Register for POLLIN to detect when client connects
-                    try self.addToPollQueue(data.handle, c);
-                    return .running;
-                },
-                else => return .completed, // Error, complete immediately
-            }
+            try self.addToPollQueue(data.handle, c);
+            return .running;
         },
         .net_recv => {
             const data = c.cast(NetRecv);
