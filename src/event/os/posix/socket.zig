@@ -161,7 +161,15 @@ pub fn shutdown(fd: fd_t, how: ShutdownHow) ShutdownError!void {
                 .send => std.os.windows.ws2_32.SD_SEND,
                 .both => std.os.windows.ws2_32.SD_BOTH,
             };
-            _ = std.os.windows.ws2_32.shutdown(fd, system_how);
+            const rc = std.os.windows.ws2_32.shutdown(fd, system_how);
+            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+                const err = std.os.windows.ws2_32.WSAGetLastError();
+                return switch (err) {
+                    .WSAENOTCONN => error.NotConnected,
+                    .WSAENOTSOCK => error.NotSocket,
+                    else => unexpectedWSAError(err),
+                };
+            }
         },
         else => {
             const system_how: c_int = switch (how) {
