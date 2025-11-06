@@ -217,7 +217,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
-    if (self.poll_queue.empty()) {
+    if (self.poll_queue.count() == 0) {
         if (timeout > 0) {
             time.sleep(timeout);
         }
