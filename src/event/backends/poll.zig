@@ -534,7 +534,8 @@ pub const AsyncImpl = struct {
         var buf: [64]u8 = undefined;
         switch (builtin.os.tag) {
             .windows => {
-                _ = socket.recv(self.read_fd, &[_]socket.iovec{socket.iovecFromSlice(&buf)}, .{}) catch {};
+                var bufs: [1]socket.iovec = .{socket.iovecFromSlice(&buf)};
+                _ = socket.recv(self.read_fd, &bufs, .{}) catch {};
             },
             else => {
                 _ = std.posix.read(self.read_fd, &buf) catch {};
