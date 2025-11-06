@@ -48,50 +48,18 @@ const log = std.log.scoped(.zio_kqueue);
 
 const c = std.c;
 
-// kqueue event filters
-const EVFILT_READ = -1;
-const EVFILT_WRITE = -2;
-
-// kqueue flags
-const EV_ADD = 0x0001;
-const EV_DELETE = 0x0002;
-const EV_ENABLE = 0x0004;
-const EV_ONESHOT = 0x0010;
-const EV_CLEAR = 0x0020;
-const EV_ERROR = 0x4000;
-const EV_EOF = 0x8000;
-
-const kevent_t = extern struct {
-    ident: usize,
-    filter: i16,
-    flags: u16,
-    fflags: u32,
-    data: isize,
-    udata: ?*anyopaque,
-};
-
-extern "c" fn kqueue() c_int;
-extern "c" fn kevent(
-    kq: c_int,
-    changelist: [*]const kevent_t,
-    nchanges: c_int,
-    eventlist: [*]kevent_t,
-    nevents: c_int,
-    timeout: ?*const std.c.timespec,
-) c_int;
-
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 kqueue_fd: i32 = -1,
 async_impl: ?AsyncImpl = null,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
-    const kq = kqueue();
+    const kq = c.kqueue();
     const kqueue_fd: i32 = switch (posix.errno(kq)) {
         .SUCCESS => @intCast(kq),
         else => |err| return posix.unexpectedErrno(err),
     };
-    errdefer _ = std.c.close(kqueue_fd);
+    errdefer _ = c.close(kqueue_fd);
 
     self.* = .{
         .allocator = allocator,
@@ -110,7 +78,7 @@ pub fn deinit(self: *Self) void {
     }
     self.poll_queue.deinit(self.allocator);
     if (self.kqueue_fd != -1) {
-        _ = std.c.close(self.kqueue_fd);
+        _ = c.close(self.kqueue_fd);
     }
 }
 
@@ -122,12 +90,12 @@ pub fn wake(self: *Self) void {
 
 fn getFilter(op: OperationType) i16 {
     return switch (op) {
-        .net_connect => EVFILT_WRITE,
-        .net_accept => EVFILT_READ,
-        .net_recv => EVFILT_READ,
-        .net_send => EVFILT_WRITE,
-        .net_recvfrom => EVFILT_READ,
-        .net_sendto => EVFILT_WRITE,
+        .net_connect => c.EVFILT.WRITE,
+        .net_accept => c.EVFILT.READ,
+        .net_recv => c.EVFILT.READ,
+        .net_send => c.EVFILT.WRITE,
+        .net_recvfrom => c.EVFILT.READ,
+        .net_sendto => c.EVFILT.WRITE,
         else => unreachable,
     };
 }
@@ -169,16 +137,16 @@ fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
 
     if (!gop.found_existing) {
         const filter = getFilter(completion.op);
-        var changes: [1]kevent_t = undefined;
+        var changes: [1]c.Kevent = undefined;
         changes[0] = .{
             .ident = @intCast(fd),
             .filter = filter,
-            .flags = EV_ADD | EV_ENABLE,
+            .flags = c.EV.ADD | c.EV.ENABLE,
             .fflags = 0,
             .data = 0,
-            .udata = null,
+            .udata = 0,
         };
-        const rc = kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+        const rc = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             else => |err| return posix.unexpectedErrno(err),
@@ -198,16 +166,16 @@ fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
     if (new_events != entry.events) {
         // Need to add the new filter if not already registered
         const filter = getFilter(completion.op);
-        var changes: [1]kevent_t = undefined;
+        var changes: [1]c.Kevent = undefined;
         changes[0] = .{
             .ident = @intCast(fd),
             .filter = filter,
-            .flags = EV_ADD | EV_ENABLE,
+            .flags = c.EV.ADD | c.EV.ENABLE,
             .fflags = 0,
             .data = 0,
-            .udata = null,
+            .udata = 0,
         };
-        const rc = kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+        const rc = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             else => |err| return posix.unexpectedErrno(err),
@@ -225,25 +193,25 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
     if (entry.completions.head == null) {
         // No more completions - remove from kqueue and poll queue
         // Remove both read and write filters if they exist
-        var changes: [2]kevent_t = undefined;
+        var changes: [2]c.Kevent = undefined;
         changes[0] = .{
             .ident = @intCast(fd),
-            .filter = EVFILT_READ,
-            .flags = EV_DELETE,
+            .filter = c.EVFILT.READ,
+            .flags = c.EV.DELETE,
             .fflags = 0,
             .data = 0,
-            .udata = null,
+            .udata = 0,
         };
         changes[1] = .{
             .ident = @intCast(fd),
-            .filter = EVFILT_WRITE,
-            .flags = EV_DELETE,
+            .filter = c.EVFILT.WRITE,
+            .flags = c.EV.DELETE,
             .fflags = 0,
             .data = 0,
-            .udata = null,
+            .udata = 0,
         };
         // Ignore errors from kevent DELETE (fd might not have both filters registered)
-        _ = kevent(self.kqueue_fd, &changes, 2, &.{}, 0, null);
+        _ = c.kevent(self.kqueue_fd, &changes, 2, &.{}, 0, null);
 
         const was_removed = self.poll_queue.remove(fd);
         std.debug.assert(was_removed);
@@ -264,34 +232,34 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
         const new_has_read = (new_events & 0x01) != 0;
         const new_has_write = (new_events & 0x02) != 0;
 
-        var changes: [2]kevent_t = undefined;
+        var changes: [2]c.Kevent = undefined;
         var n_changes: usize = 0;
 
         if (old_has_read and !new_has_read) {
             changes[n_changes] = .{
                 .ident = @intCast(fd),
-                .filter = EVFILT_READ,
-                .flags = EV_DELETE,
+                .filter = c.EVFILT.READ,
+                .flags = c.EV.DELETE,
                 .fflags = 0,
                 .data = 0,
-                .udata = null,
+                .udata = 0,
             };
             n_changes += 1;
         }
         if (old_has_write and !new_has_write) {
             changes[n_changes] = .{
                 .ident = @intCast(fd),
-                .filter = EVFILT_WRITE,
-                .flags = EV_DELETE,
+                .filter = c.EVFILT.WRITE,
+                .flags = c.EV.DELETE,
                 .fflags = 0,
                 .data = 0,
-                .udata = null,
+                .udata = 0,
             };
             n_changes += 1;
         }
 
         if (n_changes > 0) {
-            const rc = kevent(self.kqueue_fd, &changes, @intCast(n_changes), &.{}, 0, null);
+            const rc = c.kevent(self.kqueue_fd, &changes, @intCast(n_changes), &.{}, 0, null);
             switch (posix.errno(rc)) {
                 .SUCCESS => {
                     entry.events = new_events;
@@ -381,9 +349,9 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         return;
     }
 
-    var events: [64]kevent_t = undefined;
-    var timeout_spec: std.c.timespec = undefined;
-    const timeout_ptr: ?*const std.c.timespec = if (timeout_ms < std.math.maxInt(u64)) blk: {
+    var events: [64]c.Kevent = undefined;
+    var timeout_spec: c.timespec = undefined;
+    const timeout_ptr: ?*const c.timespec = if (timeout_ms < std.math.maxInt(u64)) blk: {
         timeout_spec = .{
             .sec = @intCast(timeout_ms / 1000),
             .nsec = @intCast((timeout_ms % 1000) * 1_000_000),
@@ -391,7 +359,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         break :blk &timeout_spec;
     } else null;
 
-    const rc = kevent(self.kqueue_fd, &.{}, 0, &events, events.len, timeout_ptr);
+    const rc = c.kevent(self.kqueue_fd, &.{}, 0, &events, events.len, timeout_ptr);
     const n: usize = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INTR => 0, // Interrupted by signal, no events
@@ -516,9 +484,9 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
 
 const CheckResult = enum { completed, requeue };
 
-fn handleKqueueError(event: *const kevent_t, comptime errnoToError: fn (i32) anyerror) ?anyerror {
-    const has_error = (event.flags & EV_ERROR) != 0;
-    const has_eof = (event.flags & EV_EOF) != 0;
+fn handleKqueueError(event: *const c.Kevent, comptime errnoToError: fn (i32) anyerror) ?anyerror {
+    const has_error = (event.flags & c.EV.ERROR) != 0;
+    const has_eof = (event.flags & c.EV.EOF) != 0;
     if (!has_error and !has_eof) return null;
 
     if (has_error) {
@@ -542,7 +510,7 @@ fn checkSpuriousWakeup(result: anytype) CheckResult {
     }
 }
 
-pub fn checkCompletion(comp: *Completion, event: *const kevent_t) CheckResult {
+pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
     switch (comp.op) {
         .net_connect => {
             const data = comp.cast(NetConnect);
@@ -619,16 +587,16 @@ pub const AsyncImpl = struct {
         }
 
         // Register read end with kqueue
-        var changes: [1]kevent_t = undefined;
+        var changes: [1]c.Kevent = undefined;
         changes[0] = .{
             .ident = @intCast(pipefd[0]),
-            .filter = EVFILT_READ,
-            .flags = EV_ADD | EV_ENABLE,
+            .filter = c.EVFILT.READ,
+            .flags = c.EV.ADD | c.EV.ENABLE,
             .fflags = 0,
             .data = 0,
-            .udata = null,
+            .udata = 0,
         };
-        const rc = kevent(kqueue_fd, &changes, 1, &.{}, 0, null);
+        const rc = c.kevent(kqueue_fd, &changes, 1, &.{}, 0, null);
         if (posix.errno(rc) != .SUCCESS) {
             return posix.unexpectedErrno(posix.errno(rc));
         }
@@ -642,16 +610,16 @@ pub const AsyncImpl = struct {
 
     pub fn deinit(self: *AsyncImpl) void {
         // Remove from kqueue
-        var changes: [1]kevent_t = undefined;
+        var changes: [1]c.Kevent = undefined;
         changes[0] = .{
             .ident = @intCast(self.read_fd),
-            .filter = EVFILT_READ,
-            .flags = EV_DELETE,
+            .filter = c.EVFILT.READ,
+            .flags = c.EV.DELETE,
             .fflags = 0,
             .data = 0,
-            .udata = null,
+            .udata = 0,
         };
-        _ = kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+        _ = c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
 
         std.posix.close(self.read_fd);
         std.posix.close(self.write_fd);
