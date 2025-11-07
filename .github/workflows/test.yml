@@ -59,10 +59,9 @@ jobs:
 
     - name: Build
       run: >
-        zig build
-          -Dinstall-tests
-          ${{ matrix.backend && format('-Dbackend={0}', matrix.backend) || '' }}
-          ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+        zig build -Dinstall-tests
+        ${{ matrix.backend && format('-Dbackend={0}', matrix.backend) || '' }}
+        ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
     - name: Run tests (native)
