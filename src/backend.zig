@@ -8,6 +8,8 @@ pub const Backend = blk: {
             break :blk @import("backends/epoll.zig");
         } else if (std.mem.eql(u8, backend_name, "poll")) {
             break :blk @import("backends/poll.zig");
+        } else if (std.mem.eql(u8, backend_name, "kqueue")) {
+            break :blk @import("backends/kqueue.zig");
         } else {
             @compileError("Unknown backend: " ++ backend_name);
         }
@@ -16,7 +18,8 @@ pub const Backend = blk: {
     // Default backend based on OS
     break :blk switch (builtin.os.tag) {
         .linux => @import("backends/epoll.zig"),
-        // TODO: implement io_uring, kqueue, iocp
+        .macos, .freebsd, .netbsd => @import("backends/kqueue.zig"),
+        // TODO: implement io_uring, iocp
         else => @import("backends/poll.zig"),
     };
 };

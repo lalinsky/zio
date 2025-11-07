@@ -38,6 +38,11 @@ jobs:
             run: vm
             vm_type: freebsd
 
+          - os: ubuntu-latest
+            target: x86_64-netbsd
+            run: vm
+            vm_type: netbsd
+
           - os: macos-latest
             target: native
             run: native
@@ -84,4 +89,11 @@ jobs:
       if: matrix.run == 'vm' && matrix.vm_type == 'freebsd'
       uses: vmactions/freebsd-vm@v1
       with:
+        run: ./zig-out/bin/test
+
+    - name: Run tests (NetBSD VM)
+      if: matrix.run == 'vm' && matrix.vm_type == 'netbsd'
+      uses: vmactions/netbsd-vm@v1
+      with:
+        release: '10.1'
         run: ./zig-out/bin/test
