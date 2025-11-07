@@ -4,14 +4,8 @@ const zevent_options = @import("zevent_options");
 
 pub const Backend = blk: {
     if (zevent_options.backend) |backend_name| {
-        if (std.mem.eql(u8, backend_name, "io_uring")) {
-            break :blk @import("backends/io_uring.zig");
-        } else if (std.mem.eql(u8, backend_name, "epoll")) {
+        if (std.mem.eql(u8, backend_name, "epoll")) {
             break :blk @import("backends/epoll.zig");
-        } else if (std.mem.eql(u8, backend_name, "kqueue")) {
-            break :blk @import("backends/kqueue.zig");
-        } else if (std.mem.eql(u8, backend_name, "iocp")) {
-            break :blk @import("backends/iocp.zig");
         } else if (std.mem.eql(u8, backend_name, "poll")) {
             break :blk @import("backends/poll.zig");
         } else {
