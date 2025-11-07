@@ -367,10 +367,19 @@ fn netAcceptImpl(userdata: ?*anyopaque, server: std.Io.net.Socket.Handle) std.Io
         error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
+
+    // Convert address based on family
+    // Note: std.Io.net.Stream.socket.address is IpAddress only, so for Unix sockets we use a fake address
+    const std_addr: std.Io.net.IpAddress = switch (stream.socket.address.any.family) {
+        std.posix.AF.INET, std.posix.AF.INET6 => zioIpToStdIo(stream.socket.address.ip),
+        std.posix.AF.UNIX => .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } }, // Fake address for Unix sockets
+        else => unreachable,
+    };
+
     return .{
         .socket = .{
             .handle = stream.socket.handle,
-            .address = zioIpToStdIo(stream.socket.address.ip),
+            .address = std_addr,
         },
     };
 }
@@ -406,16 +415,50 @@ fn netConnectIpImpl(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress,
 }
 
 fn netListenUnixImpl(userdata: ?*anyopaque, address: *const std.Io.net.UnixAddress, options: std.Io.net.UnixAddress.ListenOptions) std.Io.net.UnixAddress.ListenError!std.Io.net.Socket.Handle {
-    _ = userdata;
-    _ = address;
-    _ = options;
-    @panic("TODO");
+    if (!zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Convert std.Io.net.UnixAddress (path) to zio UnixAddress (sockaddr)
+    const zio_addr = zio_net.UnixAddress.init(address.path) catch {
+        // NameTooLong isn't in the error set, so treat as Unexpected
+        return error.Unexpected;
+    };
+    const zio_options: zio_net.UnixAddress.ListenOptions = .{
+        .kernel_backlog = options.kernel_backlog,
+    };
+
+    const server = zio_net.netListenUnix(rt, zio_addr, zio_options) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.AddressInUse => return error.AddressInUse,
+        error.SystemResources => return error.SystemResources,
+        error.SymLinkLoop => return error.SymLinkLoop,
+        error.FileNotFound => return error.FileNotFound,
+        error.NotDir => return error.NotDir,
+        error.ReadOnlyFileSystem => return error.ReadOnlyFileSystem,
+        else => return error.Unexpected,
+    };
+
+    return server.socket.handle;
 }
 
 fn netConnectUnixImpl(userdata: ?*anyopaque, address: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
-    _ = userdata;
-    _ = address;
-    @panic("TODO");
+    if (!zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Convert std.Io.net.UnixAddress (path) to zio UnixAddress (sockaddr)
+    const zio_addr = zio_net.UnixAddress.init(address.path) catch {
+        // NameTooLong isn't in the error set, so treat as Unexpected
+        return error.Unexpected;
+    };
+
+    const stream = zio_net.netConnectUnix(rt, zio_addr) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.SystemResources => return error.SystemResources,
+        // Map any other error to Unexpected
+        else => return error.Unexpected,
+    };
+
+    return stream.socket.handle;
 }
 
 fn netSendImpl(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
@@ -753,6 +796,61 @@ test "Io: UDP bind IPv6" {
 
             // Verify we got a valid address with ephemeral port
             try std.testing.expect(socket.address.ip6.port != 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Unix domain socket listen/accept/connect/read/write" {
+    if (!zio_net.has_unix_sockets) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            // Create a temporary path for the socket
+            var tmp_dir = std.testing.tmpDir(.{});
+            defer tmp_dir.cleanup();
+
+            var path_buf1: [std.fs.max_path_bytes]u8 = undefined;
+            var path_buf2: [std.fs.max_path_bytes]u8 = undefined;
+            const socket_path = try tmp_dir.dir.realpath(".", &path_buf1);
+            const full_path = try std.fmt.bufPrint(&path_buf2, "{s}/test.sock", .{socket_path});
+
+            const addr = try std.Io.net.UnixAddress.init(full_path);
+            var server = try addr.listen(io, .{});
+            defer server.deinit(io);
+
+            var server_future = try io.concurrent(serverFn, .{ io, &server });
+            defer server_future.cancel(io) catch {};
+
+            var client_future = try io.concurrent(clientFn, .{ io, addr });
+            defer client_future.cancel(io) catch {};
+
+            try server_future.await(io);
+            try client_future.await(io);
+        }
+
+        fn serverFn(io: std.Io, server: *std.Io.net.Server) !void {
+            const stream = try server.accept(io);
+            defer stream.close(io);
+
+            var buf: [32]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello unix", line);
+        }
+
+        fn clientFn(io: std.Io, addr: std.Io.net.UnixAddress) !void {
+            const stream = try addr.connect(io);
+            defer stream.close(io);
+
+            var write_buf: [32]u8 = undefined;
+            var writer = stream.writer(io, &write_buf);
+            try writer.interface.writeAll("hello unix\n");
+            try writer.interface.flush();
         }
     };
 
