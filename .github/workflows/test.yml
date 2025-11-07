@@ -37,15 +37,36 @@ jobs:
             target: x86_64-freebsd
             run: vm
             vm_type: freebsd
+            backend: kqueue
+
+          - os: ubuntu-latest
+            target: x86_64-freebsd
+            run: vm
+            vm_type: freebsd
+            backend: poll
 
           - os: ubuntu-latest
             target: x86_64-netbsd
             run: vm
             vm_type: netbsd
+            backend: kqueue
+
+          - os: ubuntu-latest
+            target: x86_64-netbsd
+            run: vm
+            vm_type: netbsd
+            backend: epoll
+
 
           - os: macos-latest
             target: native
             run: native
+            backend: kqueue
+
+          - os: macos-latest
+            target: native
+            run: native
+            backend: poll
 
           - os: windows-latest
             target: native
