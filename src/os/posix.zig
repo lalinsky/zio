@@ -108,13 +108,10 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
         },
         std.os.linux => {
             var fds: [2]std.posix.fd_t = undefined;
-            var pipe_flags: u32 = 0;
-            if (flags.nonblocking) {
-                pipe_flags |= std.os.linux.O.NONBLOCK;
-            }
-            if (flags.cloexec) {
-                pipe_flags |= std.os.linux.O.CLOEXEC;
-            }
+            const pipe_flags: std.os.linux.O = .{
+                .NONBLOCK = flags.nonblocking,
+                .CLOEXEC = flags.cloexec,
+            };
 
             switch (errno(system.pipe2(&fds, pipe_flags))) {
                 .SUCCESS => return fds,
