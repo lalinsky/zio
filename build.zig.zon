@@ -1,0 +1,18 @@
+.{
+    .name = .zio,
+    .version = "0.4.0",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0xcf1598b354d576c4,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "vendor",
+    },
+    .dependencies = .{
+        .libxev = .{
+            .path = "vendor/libxev",
+        },
+    },
+}
