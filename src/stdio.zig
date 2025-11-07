@@ -5,6 +5,7 @@ const CreateOptions = @import("core/task.zig").CreateOptions;
 const Awaitable = @import("core/awaitable.zig").Awaitable;
 const select = @import("select.zig");
 const zio_net = @import("io/net.zig");
+const zio_file_io = @import("io/file.zig");
 
 fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*std.Io.AnyFuture {
     return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
@@ -234,39 +235,53 @@ fn fileStatImpl(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!
 }
 
 fn fileCloseImpl(userdata: ?*anyopaque, file: std.Io.File) void {
-    _ = userdata;
-    _ = file;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var zio_file = zio_file_io.File.initFd(file.handle);
+    zio_file.close(rt);
 }
 
 fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: std.Io.File, buffer: [][]const u8) std.Io.File.WriteStreamingError!usize {
     _ = userdata;
     _ = file;
     _ = buffer;
-    @panic("TODO");
+    return error.Unexpected;
 }
 
 fn fileWritePositionalImpl(userdata: ?*anyopaque, file: std.Io.File, buffer: [][]const u8, offset: u64) std.Io.File.WritePositionalError!usize {
-    _ = userdata;
-    _ = file;
-    _ = buffer;
-    _ = offset;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var zio_file = zio_file_io.File.initFd(file.handle);
+
+    // Write from the first buffer (std.Io doesn't support gather writes in this API)
+    if (buffer.len == 0) return 0;
+    const data = buffer[0];
+    if (data.len == 0) return 0;
+
+    return zio_file.pwrite(rt, data, offset) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
 }
 
 fn fileReadStreamingImpl(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8) std.Io.File.Reader.Error!usize {
     _ = userdata;
     _ = file;
     _ = data;
-    @panic("TODO");
+    return error.Unexpected;
 }
 
 fn fileReadPositionalImpl(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-    _ = userdata;
-    _ = file;
-    _ = data;
-    _ = offset;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var zio_file = zio_file_io.File.initFd(file.handle);
+
+    // Handle the buffer passed from std.Io.File.readPositional
+    // It passes a single buffer as []u8 but the vtable signature is [][]u8
+    // So we need to interpret data as a pointer to the buffer
+    const buffer: []u8 = @as(*[]u8, @ptrCast(@alignCast(data.ptr))).*;
+
+    return zio_file.pread(rt, buffer, offset) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
 }
 
 fn fileSeekByImpl(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
@@ -851,6 +866,27 @@ test "Io: Unix domain socket listen/accept/connect/read/write" {
             var writer = stream.writer(io, &write_buf);
             try writer.interface.writeAll("hello unix\n");
             try writer.interface.flush();
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: File close" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const file_path = "test_stdio_file_close.txt";
+            defer std.fs.cwd().deleteFile(file_path) catch {};
+
+            // Create file using std.fs
+            const std_file = try std.fs.cwd().createFile(file_path, .{});
+            const file: std.Io.File = .{ .handle = std_file.handle };
+
+            // Test that close works
+            file.close(io);
         }
     };
 
