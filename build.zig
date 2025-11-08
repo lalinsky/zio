@@ -22,14 +22,14 @@ pub fn build(b: *std.Build) void {
     var options = b.addOptions();
     options.addOption(?[]const u8, "backend", backend);
 
-    const mod = b.addModule("zevent", .{
+    const mod = b.addModule("aio", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
-    mod.addOptions("zevent_options", options);
+    mod.addOptions("aio_options", options);
 
     const tests = b.addTest(.{
         .root_module = mod,

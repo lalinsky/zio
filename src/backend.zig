@@ -1,25 +1,35 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const zevent_options = @import("zevent_options");
+const options = @import("aio_options");
 
-pub const Backend = blk: {
-    if (zevent_options.backend) |backend_name| {
+pub const BackendType = enum {
+    poll,
+    epoll,
+    kqueue,
+};
+
+pub const backend = blk: {
+    if (options.backend) |backend_name| {
         if (std.mem.eql(u8, backend_name, "epoll")) {
-            break :blk @import("backends/epoll.zig");
+            break :blk BackendType.epoll;
         } else if (std.mem.eql(u8, backend_name, "poll")) {
-            break :blk @import("backends/poll.zig");
+            break :blk BackendType.poll;
         } else if (std.mem.eql(u8, backend_name, "kqueue")) {
-            break :blk @import("backends/kqueue.zig");
+            break :blk BackendType.kqueue;
         } else {
             @compileError("Unknown backend: " ++ backend_name);
         }
     }
 
-    // Default backend based on OS
-    break :blk switch (builtin.os.tag) {
-        .linux => @import("backends/epoll.zig"),
-        .macos, .freebsd, .netbsd => @import("backends/kqueue.zig"),
-        // TODO: implement io_uring, iocp
-        else => @import("backends/poll.zig"),
-    };
+    switch (builtin.os.tag) {
+        .linux => break :blk BackendType.epoll,
+        .macos, .ios, .tvos, .visionos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => break :blk BackendType.kqueue,
+        else => break :blk BackendType.poll,
+    }
+};
+
+pub const Backend = switch (backend) {
+    .poll => @import("backends/poll.zig"),
+    .epoll => @import("backends/epoll.zig"),
+    .kqueue => @import("backends/kqueue.zig"),
 };
