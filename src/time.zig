@@ -65,7 +65,7 @@ pub fn sleep(timeout_ms: i32) void {
     switch (builtin.os.tag) {
         .windows => {
             if (timeout_ms > 0) {
-                _ = std.os.windows.kernel32.SleepEx(@intCast(timeout_ms), std.os.windows.FALSE);
+                std.os.windows.kernel32.Sleep(@intCast(timeout_ms));
             }
         },
         else => {
