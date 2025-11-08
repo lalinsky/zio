@@ -31,9 +31,14 @@ pub fn unexpectedErrno(err: system.E) error{Unexpected} {
     if (unexpected_error_tracing) {
         std.debug.print(
             \\unexpected errno: {d}
-            \\please file a bug report: https://github.com/lalinsky/zio/issues/new
+            \\please file a bug report: https://github.com/lalinsky/aio.zig/issues/new
+            \\
         , .{@intFromEnum(err)});
-        std.debug.dumpCurrentStackTrace(null);
+        if (comptime builtin.zig_version.order(.{ .major = 0, .minor = 16, .patch = 0 }) != .lt) {
+            std.debug.dumpCurrentStackTrace(.{});
+        } else {
+            std.debug.dumpCurrentStackTrace(null);
+        }
     }
     return error.Unexpected;
 }
