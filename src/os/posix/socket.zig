@@ -12,11 +12,7 @@ fn unexpectedWSAError(err: std.os.windows.ws2_32.WinsockError) error{Unexpected}
             \\please file a bug report: https://github.com/lalinsky/aio.zig/issues/new
             \\
         , .{err});
-        if (comptime builtin.zig_version.order(.{ .major = 0, .minor = 16, .patch = 0 }) != .lt) {
-            std.debug.dumpCurrentStackTrace(.{});
-        } else {
-            std.debug.dumpCurrentStackTrace(null);
-        }
+        std.debug.dumpCurrentStackTrace(null);
     }
     return error.Unexpected;
 }
