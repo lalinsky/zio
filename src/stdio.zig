@@ -244,19 +244,16 @@ fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: std.Io.File, buffer: [][]
     _ = userdata;
     _ = file;
     _ = buffer;
+    // Cannot track position with bare file handle - std.Io.File is just a handle
     return error.Unexpected;
 }
 
 fn fileWritePositionalImpl(userdata: ?*anyopaque, file: std.Io.File, buffer: [][]const u8, offset: u64) std.Io.File.WritePositionalError!usize {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var zio_file = zio_file_io.File.initFd(file.handle);
 
-    // Write from the first buffer (std.Io doesn't support gather writes in this API)
     if (buffer.len == 0) return 0;
-    const data = buffer[0];
-    if (data.len == 0) return 0;
 
-    return zio_file.pwrite(rt, data, offset) catch |err| switch (err) {
+    return zio_file_io.fileWritePositional(rt, file.handle, buffer, offset) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
@@ -266,19 +263,16 @@ fn fileReadStreamingImpl(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8)
     _ = userdata;
     _ = file;
     _ = data;
+    // Cannot track position with bare file handle - std.Io.File is just a handle
     return error.Unexpected;
 }
 
 fn fileReadPositionalImpl(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8, offset: u64) std.Io.File.ReadPositionalError!usize {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var zio_file = zio_file_io.File.initFd(file.handle);
 
-    // Handle the buffer passed from std.Io.File.readPositional
-    // It passes a single buffer as []u8 but the vtable signature is [][]u8
-    // So we need to interpret data as a pointer to the buffer
-    const buffer: []u8 = @as(*[]u8, @ptrCast(@alignCast(data.ptr))).*;
+    if (data.len == 0) return 0;
 
-    return zio_file.pread(rt, buffer, offset) catch |err| switch (err) {
+    return zio_file_io.fileReadPositional(rt, file.handle, data, offset) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
@@ -288,14 +282,16 @@ fn fileSeekByImpl(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64
     _ = userdata;
     _ = file;
     _ = relative_offset;
-    @panic("TODO");
+    // Cannot seek without position tracking - std.Io.File is just a handle
+    return error.Unseekable;
 }
 
 fn fileSeekToImpl(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
     _ = userdata;
     _ = file;
     _ = absolute_offset;
-    @panic("TODO");
+    // Cannot seek without position tracking - std.Io.File is just a handle
+    return error.Unseekable;
 }
 
 fn openSelfExeImpl(userdata: ?*anyopaque, flags: std.Io.File.OpenFlags) std.Io.File.OpenSelfExeError!std.Io.File {
