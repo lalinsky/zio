@@ -15,6 +15,7 @@ const NetRecvFrom = @import("completion.zig").NetRecvFrom;
 const NetSendTo = @import("completion.zig").NetSendTo;
 const NetShutdown = @import("completion.zig").NetShutdown;
 const socket = @import("os/posix/socket.zig");
+const time = @import("time.zig");
 
 test "Loop: empty run(.no_wait)" {
     var loop: Loop = undefined;
@@ -926,7 +927,7 @@ test "Loop: async notification - cross-thread" {
     var ctx = Context{ .async_handle = &async_handle };
     const thread = try std.Thread.spawn(.{}, struct {
         fn notifyThread(c: *Context) void {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            time.sleep(10);
             c.async_handle.notify();
         }
     }.notifyThread, .{&ctx});
