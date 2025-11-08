@@ -9,6 +9,7 @@ pub const OperationType = enum {
     timer,
     cancel,
     async,
+    work,
     net_open,
     net_bind,
     net_listen,
@@ -75,6 +76,7 @@ pub fn completionOp(comptime T: type) OperationType {
         Timer => .timer,
         Cancel => .cancel,
         Async => .async,
+        Work => .work,
         NetOpen => .net_open,
         NetBind => .net_bind,
         NetListen => .net_listen,
@@ -95,6 +97,7 @@ pub fn CompletionType(comptime op: OperationType) type {
         .timer => Timer,
         .cancel => Cancel,
         .async => Async,
+        .work => Work,
         .net_open => NetOpen,
         .net_bind => NetBind,
         .net_listen => NetListen,
@@ -133,7 +136,7 @@ pub const Cancel = struct {
     cancel_c: *Completion,
     result: Error!void = undefined,
 
-    pub const Error = error{AlreadyCanceled} || Cancelable;
+    pub const Error = error{ AlreadyCanceled, AlreadyCompleted } || Cancelable;
 
     pub fn init(cancel_c: *Completion) Cancel {
         return .{
@@ -165,6 +168,40 @@ pub const Async = struct {
             // Only notify loop if transitioning from not-pending to pending
             self.loop.wake();
         }
+    }
+};
+
+pub const Work = struct {
+    c: Completion,
+    result: Error!void = undefined,
+
+    func: *const WorkFn,
+    userdata: ?*anyopaque,
+
+    loop: ?*Loop = null,
+    state: std.atomic.Value(State) = std.atomic.Value(State).init(.pending),
+
+    pub const Error = error{NoThreadPool} || Cancelable;
+
+    pub const State = enum(u8) {
+        pending,
+        running,
+        completed,
+        canceled,
+    };
+
+    pub const WorkFn = fn (userdata: ?*anyopaque, loop: *Loop, completion: *Completion) void;
+
+    pub fn init(func: *const WorkFn, userdata: ?*anyopaque) Work {
+        return .{
+            .c = .init(.work),
+            .func = func,
+            .userdata = userdata,
+        };
+    }
+
+    pub fn isCanceled(self: *Work) bool {
+        return self.state.load(.acquire) == .canceled;
     }
 };
 

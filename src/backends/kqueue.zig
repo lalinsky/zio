@@ -275,8 +275,8 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
 pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, running } {
     switch (comp.op) {
-        .timer => unreachable, // Timers are handled elsewhere in the loop
-        .async => unreachable, // Async handles are managed separately
+        .timer, .async, .work => unreachable, // Manged by the loop
+
         .cancel => {
             const data = comp.cast(Cancel);
             data.cancel_c.canceled = comp;

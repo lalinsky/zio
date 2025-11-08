@@ -17,9 +17,13 @@ const NetShutdown = @import("completion.zig").NetShutdown;
 const socket = @import("os/posix/socket.zig");
 const time = @import("time.zig");
 
+test {
+    _ = @import("test/thread_pool.zig");
+}
+
 test "Loop: empty run(.no_wait)" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     try loop.run(.no_wait);
@@ -27,7 +31,7 @@ test "Loop: empty run(.no_wait)" {
 
 test "Loop: empty run(.once)" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     try loop.run(.once);
@@ -35,7 +39,7 @@ test "Loop: empty run(.once)" {
 
 test "Loop: empty run(.until_done)" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     try loop.run(.until_done);
@@ -43,7 +47,7 @@ test "Loop: empty run(.until_done)" {
 
 test "Loop: timer basic" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     const timeout_ms = 50;
@@ -64,7 +68,7 @@ test "Loop: timer basic" {
 
 test "Loop: timer cancel" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     const timeout_ms = 100;
@@ -89,7 +93,7 @@ test "Loop: timer cancel" {
 
 test "Loop: close" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create a socket first
@@ -106,7 +110,7 @@ test "Loop: close" {
 
 test "Loop: socket create and bind" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create socket
@@ -137,7 +141,7 @@ test "Loop: socket create and bind" {
 
 test "Loop: listen and accept" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create and bind server socket
@@ -206,7 +210,7 @@ test "Loop: listen and accept" {
 
 test "Loop: send and recv" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create and bind server socket
@@ -291,7 +295,7 @@ test "Loop: send and recv" {
 
 test "Loop: cancel net_accept" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create and bind server socket
@@ -347,7 +351,7 @@ test "Loop: cancel net_accept" {
 
 test "Loop: cancel net_recv" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create and setup server
@@ -440,7 +444,7 @@ test "Loop: cancel net_recv" {
 
 test "Loop: shutdown" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create and bind server socket
@@ -543,7 +547,7 @@ test "Loop: shutdown" {
 
 test "Loop: UDP sendto and recvfrom" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create first UDP socket
@@ -636,7 +640,7 @@ test "Loop: UDP sendto and recvfrom" {
 
 test "Loop: vectored send and recv" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create and bind server socket
@@ -746,7 +750,7 @@ test "Loop: vectored send and recv" {
 
 test "Loop: vectored sendto and recvfrom" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     // Create and bind first UDP socket
@@ -855,7 +859,7 @@ test "Loop: vectored sendto and recvfrom" {
 
 test "Loop: async notification - same thread" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     var async_handle: Async = .init();
@@ -876,7 +880,7 @@ test "Loop: async notification - cross-thread" {
     };
 
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     var async_handle: Async = .init();
@@ -901,7 +905,7 @@ test "Loop: async notification - cross-thread" {
 
 test "Loop: async notification - multiple handles" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     var async1: Async = .init();
@@ -926,7 +930,7 @@ test "Loop: async notification - multiple handles" {
 
 test "Loop: async notification - re-arm" {
     var loop: Loop = undefined;
-    try loop.init();
+    try loop.init(.{});
     defer loop.deinit();
 
     var async_handle: Async = .init();

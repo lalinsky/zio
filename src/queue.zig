@@ -82,8 +82,13 @@ pub fn Queue(comptime T: type) type {
         }
 
         /// Remove a specific element from the queue.
-        /// The element must be in the queue.
-        pub fn remove(self: *Self, v: *T) void {
+        /// Returns true if the element was in the queue and removed, false otherwise.
+        pub fn remove(self: *Self, v: *T) bool {
+            // Check if the element is actually in the queue
+            if (v.prev == null and v.next == null and self.head != v and self.tail != v) {
+                return false;
+            }
+
             // Update the previous element's next pointer
             if (v.prev) |prev| {
                 prev.next = v.next;
@@ -103,6 +108,7 @@ pub fn Queue(comptime T: type) type {
             // Clear the element's pointers
             v.next = null;
             v.prev = null;
+            return true;
         }
 
         /// Returns true if the queue is empty.
@@ -156,7 +162,7 @@ test Queue {
     q.push(&elems[0]);
     q.push(&elems[1]);
     q.push(&elems[2]);
-    q.remove(&elems[1]);
+    try testing.expect(q.remove(&elems[1]));
     try testing.expect(q.pop().? == &elems[0]);
     try testing.expect(q.pop().? == &elems[2]);
     try testing.expect(q.pop() == null);
@@ -165,7 +171,7 @@ test Queue {
     q.push(&elems[0]);
     q.push(&elems[1]);
     q.push(&elems[2]);
-    q.remove(&elems[0]);
+    try testing.expect(q.remove(&elems[0]));
     try testing.expect(q.pop().? == &elems[1]);
     try testing.expect(q.pop().? == &elems[2]);
     try testing.expect(q.pop() == null);
@@ -174,14 +180,14 @@ test Queue {
     q.push(&elems[0]);
     q.push(&elems[1]);
     q.push(&elems[2]);
-    q.remove(&elems[2]);
+    try testing.expect(q.remove(&elems[2]));
     try testing.expect(q.pop().? == &elems[0]);
     try testing.expect(q.pop().? == &elems[1]);
     try testing.expect(q.pop() == null);
 
     // Remove single element
     q.push(&elems[0]);
-    q.remove(&elems[0]);
+    try testing.expect(q.remove(&elems[0]));
     try testing.expect(q.empty());
     try testing.expect(q.pop() == null);
 }

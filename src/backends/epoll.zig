@@ -161,7 +161,7 @@ fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
 fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
     const entry = self.poll_queue.getPtr(fd) orelse return;
 
-    entry.completions.remove(completion);
+    _ = entry.completions.remove(completion);
 
     if (entry.completions.head == null) {
         // No more completions - remove from epoll and poll queue
@@ -318,8 +318,8 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
 pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
     switch (c.op) {
-        .timer => unreachable, // Timers are handled elsewhere in the loop
-        .async => unreachable, // Async handles are managed separately
+        .timer, .async, .work => unreachable, // Manged by the loop
+
         .cancel => {
             const data = c.cast(Cancel);
             data.cancel_c.canceled = c;
