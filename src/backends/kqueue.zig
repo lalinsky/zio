@@ -192,7 +192,7 @@ pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Comp
     try self.submitChanges();
 }
 
-pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
+pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     var events: [64]c.Kevent = undefined;
     var timeout_spec: c.timespec = undefined;
     const timeout_ptr: ?*const c.timespec = if (timeout_ms < std.math.maxInt(u64)) blk: {
@@ -209,6 +209,10 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         .INTR => 0, // Interrupted by signal, no events
         else => |err| return posix.unexpectedErrno(err),
     };
+
+    if (n == 0) {
+        return true; // Timed out
+    }
 
     for (events[0..n]) |event| {
         // Check if this is the async wakeup user event
@@ -240,6 +244,8 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 
     // Submit any unregister operations that were queued while processing events
     try self.submitChanges();
+
+    return false; // Did not timeout, woke up due to events
 }
 
 pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, running } {

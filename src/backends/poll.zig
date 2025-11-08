@@ -196,7 +196,7 @@ pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Comp
     }
 }
 
-pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
+pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
     // Check if we have any fds to monitor (network I/O or async_impl)
@@ -205,12 +205,12 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         if (timeout > 0) {
             time.sleep(timeout);
         }
-        return;
+        return true; // Slept for the full timeout
     }
 
     const n = try socket.poll(self.poll_fds.items, timeout);
     if (n == 0) {
-        return;
+        return true; // Timed out
     }
 
     var i: usize = 0;
@@ -255,6 +255,8 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
             i += 1;
         }
     }
+
+    return false; // Did not timeout, woke up due to events
 }
 
 pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {

@@ -234,7 +234,7 @@ pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Comp
     }
 }
 
-pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
+pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
     // Check if we have any fds to monitor (network I/O or async_impl)
@@ -243,7 +243,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         if (timeout > 0) {
             time.sleep(timeout);
         }
-        return;
+        return true; // Slept for the full timeout
     }
 
     var events: [64]std.os.linux.epoll_event = undefined;
@@ -253,6 +253,10 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
         .INTR => 0, // Interrupted by signal, no events
         else => |err| return posix.unexpectedErrno(err),
     };
+
+    if (n == 0) {
+        return true; // Timed out
+    }
 
     for (events[0..n]) |event| {
         const fd = event.data.fd;
@@ -281,6 +285,8 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
             }
         }
     }
+
+    return false; // Did not timeout, woke up due to events
 }
 
 pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
