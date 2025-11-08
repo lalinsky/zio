@@ -40,51 +40,91 @@ test "Loop: empty run(.until_done)" {
     try loop.run(.until_done);
 }
 
-test "Loop: timer iters" {
+test "Loop: timer basic" {
     var loop: Loop = undefined;
     try loop.init();
     defer loop.deinit();
 
-    var timer: Timer = .init(5);
+    const timeout_ms = 50;
+    var timer: Timer = .init(timeout_ms);
     loop.add(&timer.c);
 
-    var n_iter: usize = 0;
-    while (timer.c.state != .completed) {
-        if (n_iter >= 10) {
-            try loop.run(.once);
-        } else {
-            try loop.run(.no_wait);
-        }
-        n_iter += 1;
-    }
-    std.log.info("n_iter={}", .{n_iter});
-    try std.testing.expect(n_iter <= 11);
+    var wall_timer = try std.time.Timer.start();
+    try loop.run(.until_done);
+    const elapsed_ns = wall_timer.read();
+    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+
+    try std.testing.expectEqual(.completed, timer.c.state);
+    // Allow 20ms tolerance (timers can be imprecise, especially with spurious wake-ups)
+    try std.testing.expect(elapsed_ms >= timeout_ms - 5);
+    try std.testing.expect(elapsed_ms <= timeout_ms + 20);
+    std.log.info("timer: expected={}ms, actual={}ms", .{ timeout_ms, elapsed_ms });
 }
 
-test "Loop: timer iters cancel" {
+test "Loop: timer cancel" {
     var loop: Loop = undefined;
     try loop.init();
     defer loop.deinit();
 
-    var timer: Timer = .init(5);
+    const timeout_ms = 100;
+    var timer: Timer = .init(timeout_ms);
     loop.add(&timer.c);
 
     var cancel: Cancel = .init(&timer.c);
+    loop.add(&cancel.c);
 
-    var n_iter: usize = 0;
-    while (timer.c.state != .completed) {
-        if (n_iter >= 10) {
-            try loop.run(.once);
-        } else {
-            if (n_iter == 5) {
-                loop.add(&cancel.c);
-            }
-            try loop.run(.no_wait);
-        }
-        n_iter += 1;
+    var wall_timer = try std.time.Timer.start();
+    try loop.run(.until_done);
+    const elapsed_ns = wall_timer.read();
+    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+
+    // Timer should be canceled immediately, much faster than the timeout
+    try std.testing.expectEqual(.completed, timer.c.state);
+    try std.testing.expectEqual(.completed, cancel.c.state);
+    try std.testing.expectError(error.Canceled, timer.c.getResult(Timer));
+    try std.testing.expect(elapsed_ms < 50);
+    std.log.info("timer cancel: elapsed={}ms", .{elapsed_ms});
+}
+
+test "Loop: multiple timers ordering" {
+    var loop: Loop = undefined;
+    try loop.init();
+    defer loop.deinit();
+
+    var timer1: Timer = .init(20);
+    var timer2: Timer = .init(40);
+    var timer3: Timer = .init(60);
+
+    loop.add(&timer1.c);
+    loop.add(&timer2.c);
+    loop.add(&timer3.c);
+
+    var wall_timer = try std.time.Timer.start();
+
+    // Wait for first timer
+    while (timer1.c.state != .completed) {
+        try loop.run(.once);
     }
-    std.log.info("n_iter={}", .{n_iter});
-    try std.testing.expect(n_iter <= 6);
+    const elapsed1_ms = wall_timer.read() / std.time.ns_per_ms;
+
+    // Wait for second timer
+    while (timer2.c.state != .completed) {
+        try loop.run(.once);
+    }
+    const elapsed2_ms = wall_timer.read() / std.time.ns_per_ms;
+
+    // Wait for third timer
+    while (timer3.c.state != .completed) {
+        try loop.run(.once);
+    }
+    const elapsed3_ms = wall_timer.read() / std.time.ns_per_ms;
+
+    // Verify timers completed in order with approximate timing
+    try std.testing.expect(elapsed1_ms >= 15 and elapsed1_ms <= 35);
+    try std.testing.expect(elapsed2_ms >= 35 and elapsed2_ms <= 55);
+    try std.testing.expect(elapsed3_ms >= 55 and elapsed3_ms <= 75);
+
+    std.log.info("timer ordering: t1={}ms, t2={}ms, t3={}ms", .{ elapsed1_ms, elapsed2_ms, elapsed3_ms });
 }
 
 test "Loop: close" {

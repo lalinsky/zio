@@ -64,7 +64,7 @@ pub const Completion = struct {
         return @fieldParentPtr("c", c);
     }
 
-    pub fn getResult(c: *Completion, comptime T: type) !@FieldType(T, "result") {
+    pub fn getResult(c: *Completion, comptime T: type) @FieldType(T, "result") {
         if (c.canceled != null) return error.Canceled;
         return c.cast(T).result;
     }
