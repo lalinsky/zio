@@ -82,8 +82,8 @@ pub const LoopState = struct {
     work_completions: AtomicStack(Completion) = .{},
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
-        if (completion.canceled) |cancel_c| {
-            self.markCompleted(cancel_c);
+        if (completion.canceled) |cancel| {
+            self.markCompleted(&cancel.c);
         }
         completion.state = .completed;
         self.active -= 1;
@@ -187,50 +187,96 @@ pub const Loop = struct {
         }
     }
 
-    pub fn add(self: *Loop, c: *Completion) void {
-        switch (c.op) {
+    pub fn add(self: *Loop, completion: *Completion) void {
+        std.debug.assert(completion.state == .new);
+
+        if (completion.canceled) |cancel| {
+            // Directly mark it as canceled
+            cancel.result = {};
+            self.state.active += 1;
+            self.state.markCompleted(completion);
+            return;
+        }
+
+        switch (completion.op) {
             .timer => {
-                const timer = c.cast(Timer);
+                const timer = completion.cast(Timer);
                 self.state.setTimer(timer);
                 return;
             },
             .async => {
-                const async_handle = c.cast(Async);
-                // Set loop reference and add to async_handles queue
-                async_handle.loop = self;
-                async_handle.c.state = .running;
+                const async = completion.cast(Async);
+                async.loop = self;
+                async.c.state = .running;
                 self.state.active += 1;
-                self.state.async_handles.push(&async_handle.c);
+                self.state.async_handles.push(&async.c);
                 return;
             },
             .work => {
-                const work = c.cast(Work);
+                const work = completion.cast(Work);
+                work.loop = self;
+                work.c.state = .running;
+                self.state.active += 1;
                 if (self.thread_pool) |thread_pool| {
-                    work.loop = self;
-                    work.c.state = .adding;
-                    self.state.active += 1;
                     thread_pool.submit(work);
                 } else {
-                    work.loop = self;
-                    work.c.state = .running;
-                    work.result = error.NoThreadPool;
-                    self.state.active += 1;
                     work.state.store(.completed, .release);
+                    work.result = error.NoThreadPool;
                     self.state.markCompleted(&work.c);
                 }
                 return;
             },
             else => {
-                if (c.op == .cancel) {
-                    const cancel = c.cast(Cancel);
+                if (completion.op == .cancel) {
+                    const cancel = completion.cast(Cancel);
+
+                    if (cancel.cancel_c.canceled != null) {
+                        cancel.result = error.AlreadyCanceled;
+                        self.state.active += 1;
+                        self.state.markCompleted(completion);
+                        return;
+                    }
+
+                    if (cancel.cancel_c.state == .completed) {
+                        cancel.result = error.AlreadyCompleted;
+                        self.state.active += 1;
+                        self.state.markCompleted(completion);
+                        return;
+                    }
+
+                    cancel.cancel_c.canceled = cancel;
+
+                    if (cancel.cancel_c.state == .new) {
+                        // Completion hasn't been added yet - just mark it as canceled
+                        // When it gets added, the early-exit check at the start of add() will catch it
+                        // and complete both the target and this cancel operation
+                        self.state.active += 1;
+                        return;
+                    }
+
+                    if (cancel.cancel_c.state == .adding) {
+                        // Completion is in the submissions queue being processed
+                        // The backend will catch it in processSubmissions via the canceled field check
+                        // and complete both the target and this cancel operation
+                        self.state.active += 1;
+                        return;
+                    }
+
                     switch (cancel.cancel_c.op) {
                         .timer => {
                             const timer = cancel.cancel_c.cast(Timer);
                             self.state.active += 1; // Count the cancel operation
-                            timer.c.canceled = &cancel.c;
                             cancel.result = {};
                             self.state.clearTimer(timer);
                             self.state.markCompleted(&timer.c);
+                            return;
+                        },
+                        .async => {
+                            const async_handle = cancel.cancel_c.cast(Async);
+                            self.state.active += 1; // Count the cancel operation
+                            cancel.result = {};
+                            _ = self.state.async_handles.remove(&async_handle.c);
+                            self.state.markCompleted(&async_handle.c);
                             return;
                         },
                         .work => {
@@ -248,22 +294,17 @@ pub const Loop = struct {
                                 // If cancel failed, work is already running/completed
                                 // The thread pool will complete it and the cancel completion
                             } else {
-                                // No thread pool
-                                if (work.c.state == .completed) {
-                                    cancel.result = error.AlreadyCompleted;
-                                    self.state.markCompleted(&cancel.c);
-                                } else {
-                                    cancel.result = {};
-                                    work.result = error.Canceled;
-                                    self.state.markCompleted(&work.c);
-                                }
+                                // No thread pool - work is always immediately completed with error.NoThreadPool
+                                std.debug.assert(work.c.state == .completed);
+                                cancel.result = error.AlreadyCompleted;
+                                self.state.markCompleted(&cancel.c);
                             }
                             return;
                         },
                         else => {},
                     }
                 }
-                self.state.submit(c);
+                self.state.submit(completion);
                 return;
             },
         }
@@ -329,6 +370,32 @@ pub const Loop = struct {
                 timeout_ms = self.max_wait_ms;
             }
         }
+
+        // Process submissions - separate cancels from regular submissions
+        var cancels: Queue(Completion) = .{};
+        var submissions: Queue(Completion) = .{};
+
+        while (self.state.submissions.pop()) |completion| {
+            // Handle already-canceled completions
+            if (completion.canceled) |cancel| {
+                cancel.result = {};
+                self.state.markCompleted(completion);
+                continue;
+            }
+            // Separate cancel operations
+            if (completion.op == .cancel) {
+                cancels.push(completion);
+                continue;
+            }
+            // Regular submissions
+            submissions.push(completion);
+        }
+
+        // Process regular submissions through backend
+        try self.backend.processSubmissions(&self.state, &submissions);
+
+        // Process cancellations through backend
+        try self.backend.processCancellations(&self.state, &cancels);
 
         try self.backend.tick(&self.state, timeout_ms);
 

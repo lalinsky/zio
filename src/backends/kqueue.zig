@@ -164,55 +164,27 @@ fn getHandle(completion: *Completion) NetHandle {
     };
 }
 
-fn processSubmissions(self: *Self, state: *LoopState) !void {
-    var submissions = state.submissions;
-    state.submissions = .{};
-
-    var operations: Queue(Completion) = .{};
-    var cancels: Queue(Completion) = .{};
-
-    // First go over cancelations and mark operations as canceled
+pub fn processSubmissions(self: *Self, state: *LoopState, submissions: *Queue(Completion)) !void {
     while (submissions.pop()) |completion| {
-        if (completion.op == .cancel) {
-            var data = completion.cast(Cancel);
-            if (data.cancel_c.canceled == null) {
-                data.cancel_c.canceled = completion;
-                cancels.push(completion);
-            } else {
-                data.result = error.AlreadyCanceled;
-                state.markCompleted(completion);
-            }
-        } else {
-            operations.push(completion);
+        switch (try self.startCompletion(completion)) {
+            .completed => state.markCompleted(completion),
+            .running => state.markRunning(completion),
         }
     }
 
-    // Now start normal operations, ignoring the canceled ones
-    // This will queue kevent changes in the buffer
-    while (operations.pop()) |completion| {
-        if (completion.state == .completed) continue;
-        if (completion.canceled != null) {
-            state.markCompleted(completion);
-        } else {
-            switch (try self.startCompletion(completion)) {
-                .completed => state.markCompleted(completion),
-                .running => state.markRunning(completion),
-            }
-        }
-    }
+    // Submit all queued changes in batches (non-blocking)
+    try self.submitChanges();
+}
 
-    // And now go over remaining cancelations and queue unregister operations
+pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Completion)) !void {
     while (cancels.pop()) |completion| {
         if (completion.state == .completed) continue;
         const cancel = completion.cast(Cancel);
+
         const fd = getHandle(cancel.cancel_c);
         try self.queueUnregister(fd, cancel.cancel_c);
 
-        // Set cancel result to success
-        // The canceled operation's result will be error.Canceled via getResult()
         cancel.result = {};
-
-        // Mark the canceled operation as completed, which will recursively mark the cancel as completed
         state.markCompleted(cancel.cancel_c);
     }
 
@@ -221,9 +193,6 @@ fn processSubmissions(self: *Self, state: *LoopState) !void {
 }
 
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
-    // Process incoming submissions, handle cancelations
-    try self.processSubmissions(state);
-
     var events: [64]c.Kevent = undefined;
     var timeout_spec: c.timespec = undefined;
     const timeout_ptr: ?*const c.timespec = if (timeout_ms < std.math.maxInt(u64)) blk: {
@@ -276,12 +245,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, running } {
     switch (comp.op) {
         .timer, .async, .work => unreachable, // Manged by the loop
-
-        .cancel => {
-            const data = comp.cast(Cancel);
-            data.cancel_c.canceled = comp;
-            return .running; // Cancel waits until target is actually cancelled
-        },
+        .cancel => return .running, // Cancel was marked by loop and waits until the target completes
 
         // Synchronous operations - complete immediately
         .net_open => {

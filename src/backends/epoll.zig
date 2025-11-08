@@ -212,62 +212,29 @@ fn getHandle(completion: *Completion) NetHandle {
     };
 }
 
-fn processSubmissions(self: *Self, state: *LoopState) !void {
-    var submissions = state.submissions;
-    state.submissions = .{};
-
-    var operations: Queue(Completion) = .{};
-    var cancels: Queue(Completion) = .{};
-
-    // First go over cancelations and mark operations as canceled
+pub fn processSubmissions(self: *Self, state: *LoopState, submissions: *Queue(Completion)) !void {
     while (submissions.pop()) |completion| {
-        if (completion.op == .cancel) {
-            var data = completion.cast(Cancel);
-            if (data.cancel_c.canceled == null) {
-                data.cancel_c.canceled = completion;
-                cancels.push(completion);
-            } else {
-                data.result = error.AlreadyCanceled;
-                state.markCompleted(completion);
-            }
-        } else {
-            operations.push(completion);
+        switch (try self.startCompletion(completion)) {
+            .completed => state.markCompleted(completion),
+            .running => state.markRunning(completion),
         }
     }
+}
 
-    // Now start normal operations, ignoring the canceled ones
-    while (operations.pop()) |completion| {
-        if (completion.state == .completed) continue;
-        if (completion.canceled != null) {
-            state.markCompleted(completion);
-        } else {
-            switch (try self.startCompletion(completion)) {
-                .completed => state.markCompleted(completion),
-                .running => state.markRunning(completion),
-            }
-        }
-    }
-
-    // And now go over remaining cancelations and remove the operations from the poll queue
+pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Completion)) !void {
     while (cancels.pop()) |completion| {
         if (completion.state == .completed) continue;
         const cancel = completion.cast(Cancel);
+
         const fd = getHandle(cancel.cancel_c);
         try self.removeFromPollQueue(fd, cancel.cancel_c);
 
-        // Set cancel result to success
-        // The canceled operation's result will be error.Canceled via getResult()
         cancel.result = {};
-
-        // Mark the canceled operation as completed, which will recursively mark the cancel as completed
         state.markCompleted(cancel.cancel_c);
     }
 }
 
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
-    // Process incoming submissions, handle cancelations
-    try self.processSubmissions(state);
-
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
     // Check if we have any fds to monitor (network I/O or async_impl)
@@ -319,12 +286,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !void {
 pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
     switch (c.op) {
         .timer, .async, .work => unreachable, // Manged by the loop
-
-        .cancel => {
-            const data = c.cast(Cancel);
-            data.cancel_c.canceled = c;
-            return .running; // Cancel waits until target is actually cancelled
-        },
+        .cancel => return .running, // Cancel was marked by loop and waits until the target completes
 
         // Synchronous operations - complete immediately
         .net_open => {
