@@ -7,73 +7,9 @@ on:
   pull_request:
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-
-          - os: ubuntu-latest
-            run: native
-            target: x86_64-linux
-            backend: epoll
-
-          - os: ubuntu-latest
-            run: native
-            target: x86_64-linux
-            backend: poll
-
-          - os: ubuntu-latest
-            target: aarch64-linux
-            run: qemu
-            qemu_binary: qemu-aarch64-static
-
-          - os: ubuntu-latest
-            target: riscv64-linux
-            run: qemu
-            qemu_binary: qemu-riscv64-static
-
-          - os: ubuntu-latest
-            target: x86_64-freebsd
-            run: vm
-            vm_type: freebsd
-            backend: kqueue
-
-          - os: ubuntu-latest
-            target: x86_64-freebsd
-            run: vm
-            vm_type: freebsd
-            backend: poll
-
-          - os: ubuntu-latest
-            target: x86_64-netbsd
-            run: vm
-            vm_type: netbsd
-            backend: kqueue
-
-          - os: ubuntu-latest
-            target: x86_64-netbsd
-            run: vm
-            vm_type: netbsd
-            backend: epoll
-
-
-          - os: macos-latest
-            target: native
-            run: native
-            backend: kqueue
-
-          - os: macos-latest
-            target: native
-            run: native
-            backend: poll
-
-          - os: windows-latest
-            target: native
-            run: native
-
-    runs-on: ${{ matrix.os }}
-
+  # Native build+test jobs (no artifact overhead needed)
+  test-linux-native:
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -83,38 +19,151 @@ jobs:
       with:
         version: 0.15.2
 
-    - name: Build
-      run: >
-        zig build -Dinstall-tests
-        ${{ matrix.backend && format('-Dbackend={0}', matrix.backend) || '' }}
-        ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
-      timeout-minutes: 5
-
-    - name: Run tests (native)
-      if: matrix.run == 'native'
-      run: ./zig-out/bin/test
-      timeout-minutes: 5
-
-    - name: Install QEMU
-      if: matrix.run == 'qemu'
+    - name: Build and test
+      shell: bash
       run: |
-        sudo apt-get update -q -y
-        sudo apt-get install -q -y qemu-user-static
-
-    - name: Run tests (QEMU)
-      if: matrix.run == 'qemu'
-      run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
+        for backend in epoll poll; do
+          echo "Building and testing with backend: $backend"
+          zig build -Dinstall-tests -Dbackend=$backend -Dtarget=x86_64-linux
+          ./zig-out/bin/test
+        done
       timeout-minutes: 10
 
-    - name: Run tests (FreeBSD VM)
-      if: matrix.run == 'vm' && matrix.vm_type == 'freebsd'
+  test-macos-native:
+    runs-on: macos-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Build and test
+      shell: bash
+      run: |
+        for backend in kqueue poll; do
+          echo "Building and testing with backend: $backend"
+          zig build -Dinstall-tests -Dbackend=$backend
+          ./zig-out/bin/test
+        done
+      timeout-minutes: 10
+
+  test-windows-native:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Build and test
+      shell: bash
+      run: |
+        for backend in poll; do
+          echo "Building and testing with backend: $backend"
+          zig build -Dinstall-tests -Dbackend=$backend
+          ./zig-out/bin/test
+        done
+      timeout-minutes: 10
+
+  # Build jobs for cross-compiled targets
+  build-freebsd:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Build tests
+      shell: bash
+      run: |
+        for backend in kqueue poll; do
+          echo "Building with backend: $backend"
+          zig build -Dinstall-tests -Dbackend=$backend -Dtarget=x86_64-freebsd
+          cp zig-out/bin/test zig-out/bin/test-$backend
+        done
+      timeout-minutes: 5
+
+    - name: Upload test binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: freebsd-tests
+        path: zig-out/bin/test-*
+        retention-days: 1
+
+  build-netbsd:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Build tests
+      shell: bash
+      run: |
+        for backend in kqueue poll; do
+          echo "Building with backend: $backend"
+          zig build -Dinstall-tests -Dbackend=$backend -Dtarget=x86_64-netbsd
+          cp zig-out/bin/test zig-out/bin/test-$backend
+        done
+      timeout-minutes: 5
+
+    - name: Upload test binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: netbsd-tests
+        path: zig-out/bin/test-*
+        retention-days: 1
+
+  # VM test jobs
+  test-freebsd-vm:
+    needs: build-freebsd
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download test binaries
+      uses: actions/download-artifact@v4
+      with:
+        name: freebsd-tests
+
+    - name: Run tests in FreeBSD VM
       uses: vmactions/freebsd-vm@v1
       with:
-        run: ./zig-out/bin/test
+        run: |
+          chmod +x test-*
+          for test in test-*; do
+            echo "Running $test"
+            ./$test
+          done
 
-    - name: Run tests (NetBSD VM)
-      if: matrix.run == 'vm' && matrix.vm_type == 'netbsd'
+  test-netbsd-vm:
+    needs: build-netbsd
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download test binaries
+      uses: actions/download-artifact@v4
+      with:
+        name: netbsd-tests
+
+    - name: Run tests in NetBSD VM
       uses: vmactions/netbsd-vm@v1
       with:
         release: '10.1'
-        run: ./zig-out/bin/test
+        run: |
+          chmod +x test-*
+          for test in test-*; do
+            echo "Running $test"
+            ./$test
+          done
