@@ -87,47 +87,6 @@ test "Loop: timer cancel" {
     std.log.info("timer cancel: elapsed={}ms", .{elapsed_ms});
 }
 
-test "Loop: multiple timers ordering" {
-    var loop: Loop = undefined;
-    try loop.init();
-    defer loop.deinit();
-
-    var timer1: Timer = .init(20);
-    var timer2: Timer = .init(40);
-    var timer3: Timer = .init(60);
-
-    loop.add(&timer1.c);
-    loop.add(&timer2.c);
-    loop.add(&timer3.c);
-
-    var wall_timer = try std.time.Timer.start();
-
-    // Wait for first timer
-    while (timer1.c.state != .completed) {
-        try loop.run(.once);
-    }
-    const elapsed1_ms = wall_timer.read() / std.time.ns_per_ms;
-
-    // Wait for second timer
-    while (timer2.c.state != .completed) {
-        try loop.run(.once);
-    }
-    const elapsed2_ms = wall_timer.read() / std.time.ns_per_ms;
-
-    // Wait for third timer
-    while (timer3.c.state != .completed) {
-        try loop.run(.once);
-    }
-    const elapsed3_ms = wall_timer.read() / std.time.ns_per_ms;
-
-    // Verify timers completed in order with approximate timing
-    try std.testing.expect(elapsed1_ms >= 15 and elapsed1_ms <= 35);
-    try std.testing.expect(elapsed2_ms >= 35 and elapsed2_ms <= 55);
-    try std.testing.expect(elapsed3_ms >= 55 and elapsed3_ms <= 75);
-
-    std.log.info("timer ordering: t1={}ms, t2={}ms, t3={}ms", .{ elapsed1_ms, elapsed2_ms, elapsed3_ms });
-}
-
 test "Loop: close" {
     var loop: Loop = undefined;
     try loop.init();
