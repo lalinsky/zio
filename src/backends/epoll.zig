@@ -263,7 +263,7 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
         // Check if this is the async wakeup fd
         if (self.async_impl) |*impl| {
-            if (fd == impl.eventfd) {
+            if (fd == impl.eventfd_fd) {
                 state.loop.processAsyncHandles();
                 continue;
             }
@@ -455,13 +455,11 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
 
 /// Async notification implementation using eventfd
 pub const AsyncImpl = struct {
-    const linux = @import("../os/linux.zig");
-
-    eventfd: i32 = -1,
+    eventfd_fd: i32 = -1,
     epoll_fd: i32,
 
     pub fn init(self: *AsyncImpl, epoll_fd: i32) !void {
-        const efd = try linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
+        const efd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
         errdefer _ = std.os.linux.close(efd);
 
         // Register eventfd with epoll
@@ -475,30 +473,30 @@ pub const AsyncImpl = struct {
         }
 
         self.* = .{
-            .eventfd = efd,
+            .eventfd_fd = efd,
             .epoll_fd = epoll_fd,
         };
     }
 
     pub fn deinit(self: *AsyncImpl) void {
-        if (self.eventfd != -1) {
+        if (self.eventfd_fd != -1) {
             // Remove from epoll
-            _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, self.eventfd, null);
-            _ = std.os.linux.close(self.eventfd);
-            self.eventfd = -1;
+            _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, self.eventfd_fd, null);
+            _ = std.os.linux.close(self.eventfd_fd);
+            self.eventfd_fd = -1;
         }
     }
 
     /// Notify the event loop (thread-safe)
     pub fn notify(self: *AsyncImpl) void {
-        linux.eventfd_write(self.eventfd, 1) catch |err| {
+        posix.eventfd_write(self.eventfd_fd, 1) catch |err| {
             log.err("Failed to write to eventfd: {}", .{err});
         };
     }
 
     /// Drain the eventfd counter (called by event loop when EPOLLIN is ready)
     pub fn drain(self: *AsyncImpl) void {
-        _ = linux.eventfd_read(self.eventfd) catch |err| {
+        _ = posix.eventfd_read(self.eventfd_fd) catch |err| {
             log.err("Failed to read from eventfd: {}", .{err});
         };
     }

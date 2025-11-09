@@ -6,6 +6,12 @@ pub const Loop = @import("loop.zig").Loop;
 pub const RunMode = @import("loop.zig").RunMode;
 pub const Completion = @import("completion.zig").Completion;
 
+/// Low level system APIs
+pub const system = @import("system.zig");
+
 test {
     std.testing.refAllDecls(@This());
+    _ = system.time;
+    _ = system.socket;
+    _ = system.posix;
 }
