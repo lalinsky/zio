@@ -83,6 +83,8 @@ pub const LoopState = struct {
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
         if (completion.canceled) |cancel| {
+            // Cancel should NEVER be completed before the target operation
+            std.debug.assert(cancel.c.state != .completed);
             self.markCompleted(&cancel.c);
         }
         completion.state = .completed;

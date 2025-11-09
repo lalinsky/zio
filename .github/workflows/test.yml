@@ -22,7 +22,7 @@ jobs:
     - name: Build and test
       shell: bash
       run: |
-        for backend in epoll poll; do
+        for backend in io_uring epoll poll; do
           echo "Building and testing with backend: $backend"
           zig build -Dinstall-tests -Dbackend=$backend -Dtarget=x86_64-linux
           ./zig-out/bin/test

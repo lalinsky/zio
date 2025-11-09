@@ -6,6 +6,7 @@ pub const BackendType = enum {
     poll,
     epoll,
     kqueue,
+    io_uring,
 };
 
 pub const backend = blk: {
@@ -16,13 +17,15 @@ pub const backend = blk: {
             break :blk BackendType.poll;
         } else if (std.mem.eql(u8, backend_name, "kqueue")) {
             break :blk BackendType.kqueue;
+        } else if (std.mem.eql(u8, backend_name, "io_uring")) {
+            break :blk BackendType.io_uring;
         } else {
             @compileError("Unknown backend: " ++ backend_name);
         }
     }
 
     switch (builtin.os.tag) {
-        .linux => break :blk BackendType.epoll,
+        .linux => break :blk BackendType.io_uring,
         .macos, .ios, .tvos, .visionos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => break :blk BackendType.kqueue,
         else => break :blk BackendType.poll,
     }
@@ -32,4 +35,5 @@ pub const Backend = switch (backend) {
     .poll => @import("backends/poll.zig"),
     .epoll => @import("backends/epoll.zig"),
     .kqueue => @import("backends/kqueue.zig"),
+    .io_uring => @import("backends/io_uring.zig"),
 };
