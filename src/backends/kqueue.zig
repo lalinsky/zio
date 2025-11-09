@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const posix = @import("../os/posix.zig");
 const socket = @import("../os/posix/socket.zig");
 const time = @import("../time.zig");
+const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const OperationType = @import("../completion.zig").OperationType;
@@ -248,45 +249,23 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
 
         // Synchronous operations - complete immediately
         .net_open => {
-            const data = comp.cast(NetOpen);
-            if (socket.socket(data.domain, data.socket_type, data.protocol, data.flags)) |handle| {
-                comp.setResult(.net_open, handle);
-            } else |err| {
-                comp.setError(err);
-            }
+            common.handleNetOpen(comp);
             return .completed;
         },
         .net_bind => {
-            const data = comp.cast(NetBind);
-            if (socket.bind(data.handle, data.addr, data.addr_len)) |_| {
-                comp.setResult(.net_bind, {});
-            } else |err| {
-                comp.setError(err);
-            }
+            common.handleNetBind(comp);
             return .completed;
         },
         .net_listen => {
-            const data = comp.cast(NetListen);
-            if (socket.listen(data.handle, data.backlog)) |_| {
-                comp.setResult(.net_listen, {});
-            } else |err| {
-                comp.setError(err);
-            }
+            common.handleNetListen(comp);
             return .completed;
         },
         .net_close => {
-            const data = comp.cast(NetClose);
-            socket.close(data.handle);
-            comp.setResult(.net_close, {});
+            common.handleNetClose(comp);
             return .completed;
         },
         .net_shutdown => {
-            const data = comp.cast(NetShutdown);
-            if (socket.shutdown(data.handle, data.how)) |_| {
-                comp.setResult(.net_shutdown, {});
-            } else |err| {
-                comp.setError(err);
-            }
+            common.handleNetShutdown(comp);
             return .completed;
         },
 

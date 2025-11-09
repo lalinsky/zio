@@ -302,12 +302,12 @@ pub const NetBind = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
     handle: Backend.NetHandle,
-    addr: *const socket.sockaddr,
-    addr_len: socket.socklen_t,
+    addr: *socket.sockaddr,
+    addr_len: *socket.socklen_t,
 
     pub const Error = socket.BindError || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, addr: *const socket.sockaddr, addr_len: socket.socklen_t) NetBind {
+    pub fn init(handle: Backend.NetHandle, addr: *socket.sockaddr, addr_len: *socket.socklen_t) NetBind {
         return .{
             .c = .init(.net_bind),
             .handle = handle,

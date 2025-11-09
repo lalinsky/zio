@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = @import("../os/posix.zig");
 const socket = @import("../os/posix/socket.zig");
 const time = @import("../time.zig");
+const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const OperationType = @import("../completion.zig").OperationType;
@@ -251,45 +252,23 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
 
         // Synchronous operations - complete immediately
         .net_open => {
-            const data = c.cast(NetOpen);
-            if (socket.socket(data.domain, data.socket_type, data.protocol, data.flags)) |handle| {
-                c.setResult(.net_open, handle);
-            } else |err| {
-                c.setError(err);
-            }
+            common.handleNetOpen(c);
             return .completed;
         },
         .net_bind => {
-            const data = c.cast(NetBind);
-            if (socket.bind(data.handle, data.addr, data.addr_len)) |_| {
-                c.setResult(.net_bind, {});
-            } else |err| {
-                c.setError(err);
-            }
+            common.handleNetBind(c);
             return .completed;
         },
         .net_listen => {
-            const data = c.cast(NetListen);
-            if (socket.listen(data.handle, data.backlog)) |_| {
-                c.setResult(.net_listen, {});
-            } else |err| {
-                c.setError(err);
-            }
+            common.handleNetListen(c);
             return .completed;
         },
         .net_close => {
-            const data = c.cast(NetClose);
-            socket.close(data.handle);
-            c.setResult(.net_close, {});
+            common.handleNetClose(c);
             return .completed;
         },
         .net_shutdown => {
-            const data = c.cast(NetShutdown);
-            if (socket.shutdown(data.handle, data.how)) |_| {
-                c.setResult(.net_shutdown, {});
-            } else |err| {
-                c.setError(err);
-            }
+            common.handleNetShutdown(c);
             return .completed;
         },
 
