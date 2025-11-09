@@ -20,8 +20,8 @@ test "ThreadPool: one task" {
 
     const TestFn = struct {
         called: usize = 0,
-        pub fn main(userdata: ?*anyopaque, _: *Loop, _: *Completion) void {
-            var self: *@This() = @ptrCast(@alignCast(userdata));
+        pub fn main(_: *Loop, work: *Work) void {
+            var self: *@This() = @ptrCast(@alignCast(work.userdata));
             self.called += 1;
         }
     };
@@ -53,8 +53,8 @@ test "ThreadPool: many tasks" {
 
     const TestFn = struct {
         called: usize = 0,
-        pub fn main(userdata: ?*anyopaque, _: *Loop, _: *Completion) void {
-            var self: *@This() = @ptrCast(@alignCast(userdata));
+        pub fn main(_: *Loop, work: *Work) void {
+            var self: *@This() = @ptrCast(@alignCast(work.userdata));
             self.called += 1;
         }
     };

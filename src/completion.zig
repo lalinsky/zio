@@ -45,7 +45,6 @@ pub const Completion = struct {
     pub const State = enum { new, adding, running, completed };
 
     pub const CallbackFn = fn (
-        userdata: ?*anyopaque,
         loop: *Loop,
         completion: *Completion,
     ) void;
@@ -56,7 +55,7 @@ pub const Completion = struct {
 
     pub fn call(c: *Completion, loop: *Loop) void {
         if (c.callback) |func| {
-            func(c.userdata, loop, c);
+            func(loop, c);
         }
     }
 
@@ -200,7 +199,7 @@ pub const Work = struct {
         canceled,
     };
 
-    pub const WorkFn = fn (userdata: ?*anyopaque, loop: *Loop, completion: *Completion) void;
+    pub const WorkFn = fn (loop: *Loop, work: *Work) void;
 
     pub fn init(func: *const WorkFn, userdata: ?*anyopaque) Work {
         return .{
