@@ -23,6 +23,7 @@ pub const Timeoutable = common.Timeoutable;
 
 // Re-export I/O functionality
 pub const File = @import("io/file.zig").File;
+pub const Pipe = @import("io/pipe.zig").Pipe;
 pub const fs = @import("fs.zig");
 
 // Re-export network functionality
