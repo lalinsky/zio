@@ -52,7 +52,7 @@ const NOTE_TRIGGER: u32 = 0x01000000;
 
 allocator: std.mem.Allocator,
 kqueue_fd: i32 = -1,
-async_impl: ?AsyncImpl = null,
+waker: Waker,
 change_buffer: std.ArrayListUnmanaged(c.Kevent) = .{},
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
@@ -66,20 +66,16 @@ pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     self.* = .{
         .allocator = allocator,
         .kqueue_fd = kqueue_fd,
-        .async_impl = null,
+        .waker = undefined,
         .change_buffer = .{},
     };
 
-    // Initialize AsyncImpl
-    var async_impl: AsyncImpl = undefined;
-    try async_impl.init(kqueue_fd);
-    self.async_impl = async_impl;
+    // Initialize Waker
+    try self.waker.init(kqueue_fd);
 }
 
 pub fn deinit(self: *Self) void {
-    if (self.async_impl) |*impl| {
-        impl.deinit();
-    }
+    self.waker.deinit();
     self.change_buffer.deinit(self.allocator);
     if (self.kqueue_fd != -1) {
         _ = c.close(self.kqueue_fd);
@@ -87,9 +83,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn wake(self: *Self) void {
-    if (self.async_impl) |*impl| {
-        impl.notify();
-    }
+    self.waker.notify();
 }
 
 fn getFilter(op: OperationType) i16 {
@@ -216,12 +210,10 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
     for (events[0..n]) |event| {
         // Check if this is the async wakeup user event
-        if (self.async_impl) |*impl| {
-            if (event.filter == EVFILT_USER and event.ident == impl.ident) {
-                state.loop.processAsyncHandles();
-                impl.drain();
-                continue;
-            }
+        if (event.filter == EVFILT_USER and event.ident == self.waker.ident) {
+            state.loop.processAsyncHandles();
+            self.waker.drain();
+            continue;
         }
 
         // Get completion pointer from udata
@@ -420,11 +412,11 @@ pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
 }
 
 /// Async notification implementation using EVFILT_USER
-pub const AsyncImpl = struct {
+pub const Waker = struct {
     kqueue_fd: i32,
     ident: usize,
 
-    pub fn init(self: *AsyncImpl, kqueue_fd: i32) !void {
+    pub fn init(self: *Waker, kqueue_fd: i32) !void {
         var changes: [1]c.Kevent = .{.{
             .ident = @intFromPtr(self),
             .filter = EVFILT_USER,
@@ -448,7 +440,7 @@ pub const AsyncImpl = struct {
         };
     }
 
-    pub fn deinit(self: *AsyncImpl) void {
+    pub fn deinit(self: *Waker) void {
         var changes: [1]c.Kevent = .{.{
             .ident = self.ident,
             .filter = EVFILT_USER,
@@ -467,7 +459,7 @@ pub const AsyncImpl = struct {
     }
 
     /// Notify the event loop (thread-safe)
-    pub fn notify(self: *AsyncImpl) void {
+    pub fn notify(self: *Waker) void {
         var changes: [1]c.Kevent = .{.{
             .ident = self.ident,
             .filter = EVFILT_USER,
@@ -487,7 +479,7 @@ pub const AsyncImpl = struct {
     }
 
     /// No draining needed for EVFILT_USER
-    pub fn drain(self: *AsyncImpl) void {
+    pub fn drain(self: *Waker) void {
         _ = self;
     }
 };

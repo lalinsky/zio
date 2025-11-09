@@ -49,7 +49,7 @@ const log = std.log.scoped(.zio_epoll);
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 epoll_fd: i32 = -1,
-async_impl: ?AsyncImpl = null,
+waker: Waker,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
@@ -62,18 +62,15 @@ pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     self.* = .{
         .allocator = allocator,
         .epoll_fd = epoll_fd,
+        .waker = undefined,
     };
 
-    // Initialize AsyncImpl
-    var async_impl: AsyncImpl = undefined;
-    try async_impl.init(epoll_fd);
-    self.async_impl = async_impl;
+    // Initialize Waker
+    try self.waker.init(epoll_fd);
 }
 
 pub fn deinit(self: *Self) void {
-    if (self.async_impl) |*impl| {
-        impl.deinit();
-    }
+    self.waker.deinit();
     self.poll_queue.deinit(self.allocator);
     if (self.epoll_fd != -1) {
         _ = std.os.linux.close(self.epoll_fd);
@@ -81,9 +78,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn wake(self: *Self) void {
-    if (self.async_impl) |*impl| {
-        impl.notify();
-    }
+    self.waker.notify();
 }
 
 fn getEvents(op: OperationType) u32 {
@@ -237,15 +232,6 @@ pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Comp
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
-    // Check if we have any fds to monitor (network I/O or async_impl)
-    const has_fds = self.poll_queue.count() > 0 or self.async_impl != null;
-    if (!has_fds) {
-        if (timeout > 0) {
-            time.sleep(timeout);
-        }
-        return true; // Slept for the full timeout
-    }
-
     var events: [64]std.os.linux.epoll_event = undefined;
     const rc = std.os.linux.epoll_wait(self.epoll_fd, &events, events.len, timeout);
     const n: usize = switch (posix.errno(rc)) {
@@ -262,11 +248,10 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         const fd = event.data.fd;
 
         // Check if this is the async wakeup fd
-        if (self.async_impl) |*impl| {
-            if (fd == impl.eventfd_fd) {
-                state.loop.processAsyncHandles();
-                continue;
-            }
+        if (fd == self.waker.eventfd_fd) {
+            state.loop.processAsyncHandles();
+            self.waker.drain();
+            continue;
         }
 
         const entry = self.poll_queue.get(fd) orelse continue;
@@ -454,11 +439,11 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
 }
 
 /// Async notification implementation using eventfd
-pub const AsyncImpl = struct {
+pub const Waker = struct {
     eventfd_fd: i32 = -1,
     epoll_fd: i32,
 
-    pub fn init(self: *AsyncImpl, epoll_fd: i32) !void {
+    pub fn init(self: *Waker, epoll_fd: i32) !void {
         const efd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
         errdefer _ = std.os.linux.close(efd);
 
@@ -478,7 +463,7 @@ pub const AsyncImpl = struct {
         };
     }
 
-    pub fn deinit(self: *AsyncImpl) void {
+    pub fn deinit(self: *Waker) void {
         if (self.eventfd_fd != -1) {
             // Remove from epoll
             _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, self.eventfd_fd, null);
@@ -488,14 +473,14 @@ pub const AsyncImpl = struct {
     }
 
     /// Notify the event loop (thread-safe)
-    pub fn notify(self: *AsyncImpl) void {
+    pub fn notify(self: *Waker) void {
         posix.eventfd_write(self.eventfd_fd, 1) catch |err| {
             log.err("Failed to write to eventfd: {}", .{err});
         };
     }
 
     /// Drain the eventfd counter (called by event loop when EPOLLIN is ready)
-    pub fn drain(self: *AsyncImpl) void {
+    pub fn drain(self: *Waker) void {
         _ = posix.eventfd_read(self.eventfd_fd) catch |err| {
             log.err("Failed to read from eventfd: {}", .{err});
         };

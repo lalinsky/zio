@@ -49,31 +49,26 @@ const log = std.log.scoped(.zio_poll);
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 poll_fds: std.ArrayList(socket.pollfd) = .empty,
-async_impl: ?AsyncImpl = null,
+waker: Waker,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
     self.* = .{
         .allocator = allocator,
+        .waker = undefined,
     };
 
-    // Initialize AsyncImpl
-    var async_impl: AsyncImpl = undefined;
-    try async_impl.init(self);
-    self.async_impl = async_impl;
+    // Initialize Waker
+    try self.waker.init(self);
 }
 
 pub fn deinit(self: *Self) void {
-    if (self.async_impl) |*impl| {
-        impl.deinit();
-    }
+    self.waker.deinit();
     self.poll_queue.deinit(self.allocator);
     self.poll_fds.deinit(self.allocator);
 }
 
 pub fn wake(self: *Self) void {
-    if (self.async_impl) |*impl| {
-        impl.notify();
-    }
+    self.waker.notify();
 }
 
 fn getEvents(op: OperationType) @FieldType(socket.pollfd, "events") {
@@ -199,15 +194,6 @@ pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Comp
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
-    // Check if we have any fds to monitor (network I/O or async_impl)
-    const has_fds = self.poll_queue.count() > 0 or self.async_impl != null;
-    if (!has_fds) {
-        if (timeout > 0) {
-            time.sleep(timeout);
-        }
-        return true; // Slept for the full timeout
-    }
-
     const n = try socket.poll(self.poll_fds.items, timeout);
     if (n == 0) {
         return true; // Timed out
@@ -224,13 +210,11 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         const fd = item.fd;
 
         // Check if this is the async wakeup fd
-        if (self.async_impl) |*impl| {
-            if (fd == impl.read_fd) {
-                state.loop.processAsyncHandles();
-                impl.drain();
-                i += 1;
-                continue;
-            }
+        if (fd == self.waker.read_fd) {
+            state.loop.processAsyncHandles();
+            self.waker.drain();
+            i += 1;
+            continue;
         }
 
         const entry = self.poll_queue.get(fd) orelse unreachable;
@@ -424,14 +408,14 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
 }
 
 /// Async notification implementation using pipe (POSIX) or loopback socket (Windows)
-pub const AsyncImpl = struct {
+pub const Waker = struct {
     const builtin = @import("builtin");
 
     read_fd: socket.fd_t = undefined,
     write_fd: socket.fd_t = undefined,
     backend: *Self,
 
-    pub fn init(self: *AsyncImpl, backend: *Self) !void {
+    pub fn init(self: *Waker, backend: *Self) !void {
         socket.ensureWSAInitialized();
 
         switch (builtin.os.tag) {
@@ -464,7 +448,7 @@ pub const AsyncImpl = struct {
         });
     }
 
-    pub fn deinit(self: *AsyncImpl) void {
+    pub fn deinit(self: *Waker) void {
         // Remove from poll_fds by finding its index
         for (self.backend.poll_fds.items, 0..) |pfd, i| {
             if (pfd.fd == self.read_fd) {
@@ -478,7 +462,7 @@ pub const AsyncImpl = struct {
     }
 
     /// Notify the event loop (thread-safe)
-    pub fn notify(self: *AsyncImpl) void {
+    pub fn notify(self: *Waker) void {
         const byte: [1]u8 = .{1};
         switch (builtin.os.tag) {
             .windows => {
@@ -495,7 +479,7 @@ pub const AsyncImpl = struct {
     }
 
     /// Drain the pipe/socket (called by event loop when POLLIN is ready)
-    pub fn drain(self: *AsyncImpl) void {
+    pub fn drain(self: *Waker) void {
         var buf: [64]u8 = undefined;
         switch (builtin.os.tag) {
             .windows => {

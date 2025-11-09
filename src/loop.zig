@@ -324,11 +324,6 @@ pub const Loop = struct {
     }
 
     pub fn processAsyncHandles(self: *Loop) void {
-        // Drain the async_impl wakeup fd if it was triggered
-        if (self.backend.async_impl) |*impl| {
-            impl.drain();
-        }
-
         // Check all async handles for pending notifications
         var c = self.state.async_handles.head;
         while (c) |completion| {
