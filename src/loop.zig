@@ -194,7 +194,8 @@ pub const Loop = struct {
 
         if (completion.canceled) |cancel| {
             // Directly mark it as canceled
-            cancel.result = {};
+            cancel.c.setResult(.cancel, {});
+            completion.setError(error.Canceled);
             self.state.active += 1;
             self.state.markCompleted(completion);
             return;
@@ -223,7 +224,7 @@ pub const Loop = struct {
                     thread_pool.submit(work);
                 } else {
                     work.state.store(.completed, .release);
-                    work.result = error.NoThreadPool;
+                    work.c.setError(error.NoThreadPool);
                     self.state.markCompleted(&work.c);
                 }
                 return;
@@ -233,14 +234,14 @@ pub const Loop = struct {
                     const cancel = completion.cast(Cancel);
 
                     if (cancel.cancel_c.canceled != null) {
-                        cancel.result = error.AlreadyCanceled;
+                        completion.setError(error.AlreadyCanceled);
                         self.state.active += 1;
                         self.state.markCompleted(completion);
                         return;
                     }
 
                     if (cancel.cancel_c.state == .completed) {
-                        cancel.result = error.AlreadyCompleted;
+                        completion.setError(error.AlreadyCompleted);
                         self.state.active += 1;
                         self.state.markCompleted(completion);
                         return;
@@ -268,7 +269,8 @@ pub const Loop = struct {
                         .timer => {
                             const timer = cancel.cancel_c.cast(Timer);
                             self.state.active += 1; // Count the cancel operation
-                            cancel.result = {};
+                            completion.setResult(.cancel, {});
+                            timer.c.setError(error.Canceled);
                             self.state.clearTimer(timer);
                             self.state.markCompleted(&timer.c);
                             return;
@@ -276,7 +278,8 @@ pub const Loop = struct {
                         .async => {
                             const async_handle = cancel.cancel_c.cast(Async);
                             self.state.active += 1; // Count the cancel operation
-                            cancel.result = {};
+                            completion.setResult(.cancel, {});
+                            async_handle.c.setError(error.Canceled);
                             _ = self.state.async_handles.remove(&async_handle.c);
                             self.state.markCompleted(&async_handle.c);
                             return;
@@ -290,7 +293,8 @@ pub const Loop = struct {
                                 // This will CAS from .pending to .canceled if work hasn't started
                                 if (thread_pool.cancel(work)) {
                                     // Successfully canceled, work was removed from queue
-                                    work.result = error.Canceled;
+                                    completion.setResult(.cancel, {});
+                                    work.c.setError(error.Canceled);
                                     self.state.markCompleted(&work.c);
                                 }
                                 // If cancel failed, work is already running/completed
@@ -298,7 +302,7 @@ pub const Loop = struct {
                             } else {
                                 // No thread pool - work is always immediately completed with error.NoThreadPool
                                 std.debug.assert(work.c.state == .completed);
-                                cancel.result = error.AlreadyCompleted;
+                                completion.setError(error.AlreadyCompleted);
                                 self.state.markCompleted(&cancel.c);
                             }
                             return;
@@ -318,7 +322,7 @@ pub const Loop = struct {
             if (timer.deadline_ms > self.state.now_ms) {
                 return timer.deadline_ms - self.state.now_ms;
             }
-            timer.result = {};
+            timer.c.setResult(.timer, {});
             self.state.clearTimer(timer);
             self.state.markCompleted(&timer.c);
         }
@@ -335,7 +339,7 @@ pub const Loop = struct {
             if (was_pending != 0) {
                 // This handle was notified - remove from queue and complete it
                 _ = self.state.async_handles.remove(completion);
-                async_handle.result = {};
+                completion.setResult(.async, {});
                 self.state.markCompleted(&async_handle.c);
             }
             c = next;
@@ -375,7 +379,8 @@ pub const Loop = struct {
         while (self.state.submissions.pop()) |completion| {
             // Handle already-canceled completions
             if (completion.canceled) |cancel| {
-                cancel.result = {};
+                cancel.c.setResult(.cancel, {});
+                completion.setError(error.Canceled);
                 self.state.markCompleted(completion);
                 continue;
             }

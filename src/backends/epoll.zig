@@ -224,7 +224,8 @@ pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Comp
         const fd = getHandle(cancel.cancel_c);
         try self.removeFromPollQueue(fd, cancel.cancel_c);
 
-        cancel.result = {};
+        completion.setResult(.cancel, {});
+        cancel.cancel_c.setError(error.Canceled);
         state.markCompleted(cancel.cancel_c);
     }
 }
@@ -282,41 +283,53 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
         // Synchronous operations - complete immediately
         .net_open => {
             const data = c.cast(NetOpen);
-            data.result = socket.socket(
-                data.domain,
-                data.socket_type,
-                data.protocol,
-                data.flags,
-            );
+            if (socket.socket(data.domain, data.socket_type, data.protocol, data.flags)) |handle| {
+                c.setResult(.net_open, handle);
+            } else |err| {
+                c.setError(err);
+            }
             return .completed;
         },
         .net_bind => {
             const data = c.cast(NetBind);
-            data.result = socket.bind(data.handle, data.addr, data.addr_len);
+            if (socket.bind(data.handle, data.addr, data.addr_len)) |_| {
+                c.setResult(.net_bind, {});
+            } else |err| {
+                c.setError(err);
+            }
             return .completed;
         },
         .net_listen => {
             const data = c.cast(NetListen);
-            data.result = socket.listen(data.handle, data.backlog);
+            if (socket.listen(data.handle, data.backlog)) |_| {
+                c.setResult(.net_listen, {});
+            } else |err| {
+                c.setError(err);
+            }
             return .completed;
         },
         .net_close => {
             const data = c.cast(NetClose);
-            data.result = socket.close(data.handle);
+            socket.close(data.handle);
+            c.setResult(.net_close, {});
             return .completed;
         },
         .net_shutdown => {
             const data = c.cast(NetShutdown);
-            data.result = socket.shutdown(data.handle, data.how);
+            if (socket.shutdown(data.handle, data.how)) |_| {
+                c.setResult(.net_shutdown, {});
+            } else |err| {
+                c.setError(err);
+            }
             return .completed;
         },
 
         // Potentially async operations - try first, register if WouldBlock
         .net_connect => {
             const data = c.cast(NetConnect);
-            data.result = socket.connect(data.handle, data.addr, data.addr_len);
-            if (data.result) |_| {
+            if (socket.connect(data.handle, data.addr, data.addr_len)) |_| {
                 // Connected immediately (e.g., localhost)
+                c.setResult(.net_connect, {});
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock, error.ConnectionPending => {
@@ -324,7 +337,10 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
                     try self.addToPollQueue(data.handle, c);
                     return .running;
                 },
-                else => return .completed, // Error, complete immediately
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
             }
         },
         .net_accept => {
@@ -379,58 +395,97 @@ fn checkSpuriousWakeup(result: anytype) CheckResult {
 pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) CheckResult {
     switch (c.op) {
         .net_connect => {
-            const data = c.cast(NetConnect);
             if (handleEpollError(event, socket.errnoToConnectError)) |err| {
-                data.result = @errorCast(err);
+                c.setError(err);
             } else {
-                data.result = {};
+                c.setResult(.net_connect, {});
             }
             return .completed;
         },
         .net_accept => {
             const data = c.cast(NetAccept);
             if (handleEpollError(event, socket.errnoToAcceptError)) |err| {
-                data.result = @errorCast(err);
+                c.setError(err);
                 return .completed;
             }
-            data.result = socket.accept(data.handle, data.addr, data.addr_len, data.flags);
-            return checkSpuriousWakeup(data.result);
+            if (socket.accept(data.handle, data.addr, data.addr_len, data.flags)) |handle| {
+                c.setResult(.net_accept, handle);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
         },
         .net_recv => {
             const data = c.cast(NetRecv);
             if (handleEpollError(event, socket.errnoToRecvError)) |err| {
-                data.result = @errorCast(err);
+                c.setError(err);
                 return .completed;
             }
-            data.result = socket.recv(data.handle, data.buffers, data.flags);
-            return checkSpuriousWakeup(data.result);
+            if (socket.recv(data.handle, data.buffers, data.flags)) |n| {
+                c.setResult(.net_recv, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
         },
         .net_send => {
             const data = c.cast(NetSend);
             if (handleEpollError(event, socket.errnoToSendError)) |err| {
-                data.result = @errorCast(err);
+                c.setError(err);
                 return .completed;
             }
-            data.result = socket.send(data.handle, data.buffers, data.flags);
-            return checkSpuriousWakeup(data.result);
+            if (socket.send(data.handle, data.buffers, data.flags)) |n| {
+                c.setResult(.net_send, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
             if (handleEpollError(event, socket.errnoToRecvError)) |err| {
-                data.result = @errorCast(err);
+                c.setError(err);
                 return .completed;
             }
-            data.result = socket.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len);
-            return checkSpuriousWakeup(data.result);
+            if (socket.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+                c.setResult(.net_recvfrom, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
             if (handleEpollError(event, socket.errnoToSendError)) |err| {
-                data.result = @errorCast(err);
+                c.setError(err);
                 return .completed;
             }
-            data.result = socket.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len);
-            return checkSpuriousWakeup(data.result);
+            if (socket.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+                c.setResult(.net_sendto, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
         },
         else => {
             std.debug.panic("unexpected completion type in complete: {}", .{c.op});

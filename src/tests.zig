@@ -86,7 +86,7 @@ test "Loop: timer cancel" {
     // Timer should be canceled immediately, much faster than the timeout
     try std.testing.expectEqual(.completed, timer.c.state);
     try std.testing.expectEqual(.completed, cancel.c.state);
-    try std.testing.expectError(error.Canceled, timer.c.getResult(Timer));
+    try std.testing.expectError(error.Canceled, timer.c.getResult(.timer));
     try std.testing.expect(elapsed_ms < 50);
     std.log.info("timer cancel: elapsed={}ms", .{elapsed_ms});
 }
@@ -100,7 +100,7 @@ test "Loop: close" {
     var open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&open.c);
     try loop.run(.until_done);
-    const sock = try open.result;
+    const sock = try open.c.getResult(.net_open);
 
     // Now close it
     var close: NetClose = .init(sock);
@@ -118,7 +118,7 @@ test "Loop: socket create and bind" {
     loop.add(&open.c);
     try loop.run(.until_done);
 
-    const sock = try open.result;
+    const sock = try open.c.getResult(.net_open);
 
     // Bind to localhost
     var addr = socket.sockaddr.in{
@@ -131,7 +131,7 @@ test "Loop: socket create and bind" {
     loop.add(&bind.c);
     try loop.run(.until_done);
 
-    try bind.result;
+    try bind.c.getResult(.net_bind);
 
     // Close socket
     var close: NetClose = .init(sock);
@@ -148,7 +148,7 @@ test "Loop: listen and accept" {
     var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
-    const server_sock = try server_open.result;
+    const server_sock = try server_open.c.getResult(.net_open);
 
     var addr = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -159,7 +159,7 @@ test "Loop: listen and accept" {
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
-    try server_bind.result;
+    try server_bind.c.getResult(.net_bind);
 
     // Get the actual port that was bound
     var bound_addr: socket.sockaddr.in = undefined;
@@ -171,13 +171,13 @@ test "Loop: listen and accept" {
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
     try loop.run(.until_done);
-    try server_listen.result;
+    try server_listen.c.getResult(.net_listen);
 
     // Create client socket
     var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
-    const client_sock = try client_open.result;
+    const client_sock = try client_open.c.getResult(.net_open);
 
     // Start accept and connect concurrently
     var accept_comp: NetAccept = .init(server_sock, null, null);
@@ -195,8 +195,8 @@ test "Loop: listen and accept" {
     // Run until both complete
     try loop.run(.until_done);
 
-    const accepted_sock = try accept_comp.result;
-    try connect.result;
+    const accepted_sock = try accept_comp.getResult();
+    try connect.getResult();
 
     // Close all sockets
     var close_accepted: NetClose = .init(accepted_sock);
@@ -217,7 +217,7 @@ test "Loop: send and recv" {
     var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
-    const server_sock = try server_open.result;
+    const server_sock = try server_open.c.getResult(.net_open);
 
     var addr = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -228,7 +228,7 @@ test "Loop: send and recv" {
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
-    try server_bind.result;
+    try server_bind.c.getResult(.net_bind);
 
     // Get the actual port
     var bound_addr: socket.sockaddr.in = undefined;
@@ -240,13 +240,13 @@ test "Loop: send and recv" {
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
     try loop.run(.until_done);
-    try server_listen.result;
+    try server_listen.c.getResult(.net_listen);
 
     // Create client socket and connect
     var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
-    const client_sock = try client_open.result;
+    const client_sock = try client_open.c.getResult(.net_open);
 
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
@@ -261,8 +261,8 @@ test "Loop: send and recv" {
     loop.add(&connect.c);
 
     try loop.run(.until_done);
-    const accepted_sock = try accept_comp.result;
-    try connect.result;
+    const accepted_sock = try accept_comp.getResult();
+    try connect.getResult();
 
     // Send data from client
     const msg = "Hello, World!";
@@ -270,7 +270,7 @@ test "Loop: send and recv" {
     var send: NetSend = .init(client_sock, &send_iov, .{});
     loop.add(&send.c);
     try loop.run(.until_done);
-    const sent = try send.result;
+    const sent = try send.getResult();
     try std.testing.expectEqual(msg.len, sent);
 
     // Recv data on server
@@ -279,7 +279,7 @@ test "Loop: send and recv" {
     var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
     try loop.run(.until_done);
-    const recvd = try recv.result;
+    const recvd = try recv.getResult();
     try std.testing.expectEqual(msg.len, recvd);
     try std.testing.expectEqualStrings(msg, recv_buf[0..recvd]);
 
@@ -302,7 +302,7 @@ test "Loop: cancel net_accept" {
     var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
-    const server_sock = try server_open.result;
+    const server_sock = try server_open.c.getResult(.net_open);
 
     var addr = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -313,13 +313,13 @@ test "Loop: cancel net_accept" {
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
-    try server_bind.result;
+    try server_bind.c.getResult(.net_bind);
 
     // Listen
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
     try loop.run(.until_done);
-    try server_listen.result;
+    try server_listen.c.getResult(.net_listen);
 
     // Start accept (will block waiting for connection)
     var accept_comp: NetAccept = .init(server_sock, null, null);
@@ -358,7 +358,7 @@ test "Loop: cancel net_recv" {
     var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
-    const server_sock = try server_open.result;
+    const server_sock = try server_open.c.getResult(.net_open);
 
     var addr = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -369,7 +369,7 @@ test "Loop: cancel net_recv" {
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
-    try server_bind.result;
+    try server_bind.c.getResult(.net_bind);
 
     var bound_addr: socket.sockaddr.in = undefined;
     var bound_addr_len: socket.socklen_t = @sizeOf(@TypeOf(bound_addr));
@@ -379,13 +379,13 @@ test "Loop: cancel net_recv" {
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
     try loop.run(.until_done);
-    try server_listen.result;
+    try server_listen.c.getResult(.net_listen);
 
     // Create client and connect
     var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
-    const client_sock = try client_open.result;
+    const client_sock = try client_open.c.getResult(.net_open);
 
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
@@ -400,8 +400,8 @@ test "Loop: cancel net_recv" {
     loop.add(&connect.c);
 
     try loop.run(.until_done);
-    const accepted_sock = try accept_comp.result;
-    try connect.result;
+    const accepted_sock = try accept_comp.getResult();
+    try connect.getResult();
 
     // Start recv (will block waiting for data)
     var recv_buf: [128]u8 = undefined;
@@ -451,7 +451,7 @@ test "Loop: shutdown" {
     var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
-    const server_sock = try server_open.result;
+    const server_sock = try server_open.c.getResult(.net_open);
 
     var addr = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -462,7 +462,7 @@ test "Loop: shutdown" {
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
-    try server_bind.result;
+    try server_bind.c.getResult(.net_bind);
 
     // Get the actual port
     var bound_addr: socket.sockaddr.in = undefined;
@@ -474,13 +474,13 @@ test "Loop: shutdown" {
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
     try loop.run(.until_done);
-    try server_listen.result;
+    try server_listen.c.getResult(.net_listen);
 
     // Create client socket and connect
     var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
-    const client_sock = try client_open.result;
+    const client_sock = try client_open.c.getResult(.net_open);
 
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
@@ -495,8 +495,8 @@ test "Loop: shutdown" {
     loop.add(&connect.c);
 
     try loop.run(.until_done);
-    const accepted_sock = try accept_comp.result;
-    try connect.result;
+    const accepted_sock = try accept_comp.getResult();
+    try connect.getResult();
 
     // Send data from client
     const msg = "Hello, World!";
@@ -504,14 +504,14 @@ test "Loop: shutdown" {
     var send: NetSend = .init(client_sock, &send_iov, .{});
     loop.add(&send.c);
     try loop.run(.until_done);
-    const sent = try send.result;
+    const sent = try send.getResult();
     try std.testing.expectEqual(msg.len, sent);
 
     // Shutdown send side of client
     var shutdown: NetShutdown = .init(client_sock, .send);
     loop.add(&shutdown.c);
     try loop.run(.until_done);
-    try shutdown.result;
+    try shutdown.c.getResult(.net_shutdown);
 
     // Recv data on server (should get the message)
     var recv_buf: [128]u8 = undefined;
@@ -519,7 +519,7 @@ test "Loop: shutdown" {
     var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
     try loop.run(.until_done);
-    const recvd = try recv.result;
+    const recvd = try recv.getResult();
     try std.testing.expectEqual(msg.len, recvd);
     try std.testing.expectEqualStrings(msg, recv_buf[0..recvd]);
 
@@ -528,7 +528,7 @@ test "Loop: shutdown" {
     var recv2: NetRecv = .init(accepted_sock, &recv2_iov, .{});
     loop.add(&recv2.c);
     try loop.run(.until_done);
-    if (recv2.result) |recvd2| {
+    if (recv2.getResult()) |recvd2| {
         try std.testing.expectEqual(0, recvd2);
     } else |err| {
         // Windows may return ConnectionResetByPeer after shutdown
@@ -554,7 +554,7 @@ test "Loop: UDP sendto and recvfrom" {
     var sock1_open: NetOpen = .init(.ipv4, .dgram, .udp);
     loop.add(&sock1_open.c);
     try loop.run(.until_done);
-    const sock1 = try sock1_open.result;
+    const sock1 = try sock1_open.c.getResult(.net_open);
 
     // Bind first socket to any port
     var addr1 = socket.sockaddr.in{
@@ -566,7 +566,7 @@ test "Loop: UDP sendto and recvfrom" {
     var bind1: NetBind = .init(sock1, @ptrCast(&addr1), @sizeOf(@TypeOf(addr1)));
     loop.add(&bind1.c);
     try loop.run(.until_done);
-    try bind1.result;
+    try bind1.c.getResult(.net_bind);
 
     // Get the actual port that was bound
     var bound_addr1: socket.sockaddr.in = undefined;
@@ -578,7 +578,7 @@ test "Loop: UDP sendto and recvfrom" {
     var sock2_open: NetOpen = .init(.ipv4, .dgram, .udp);
     loop.add(&sock2_open.c);
     try loop.run(.until_done);
-    const sock2 = try sock2_open.result;
+    const sock2 = try sock2_open.c.getResult(.net_open);
 
     // Bind second socket to any port
     var addr2 = socket.sockaddr.in{
@@ -590,7 +590,7 @@ test "Loop: UDP sendto and recvfrom" {
     var bind2: NetBind = .init(sock2, @ptrCast(&addr2), @sizeOf(@TypeOf(addr2)));
     loop.add(&bind2.c);
     try loop.run(.until_done);
-    try bind2.result;
+    try bind2.c.getResult(.net_bind);
 
     // Get the actual port that was bound
     var bound_addr2: socket.sockaddr.in = undefined;
@@ -610,7 +610,7 @@ test "Loop: UDP sendto and recvfrom" {
     var sendto: NetSendTo = .init(sock1, &sendto_iov, .{}, @ptrCast(&dest_addr), @sizeOf(@TypeOf(dest_addr)));
     loop.add(&sendto.c);
     try loop.run(.until_done);
-    const sent = try sendto.result;
+    const sent = try sendto.getResult();
     try std.testing.expectEqual(msg.len, sent);
 
     // Receive data on sock2
@@ -621,7 +621,7 @@ test "Loop: UDP sendto and recvfrom" {
     var recvfrom: NetRecvFrom = .init(sock2, &recvfrom_iov, .{}, @ptrCast(&src_addr), &src_addr_len);
     loop.add(&recvfrom.c);
     try loop.run(.until_done);
-    const recvd = try recvfrom.result;
+    const recvd = try recvfrom.getResult();
     try std.testing.expectEqual(msg.len, recvd);
     try std.testing.expectEqualStrings(msg, recv_buf[0..recvd]);
 
@@ -647,7 +647,7 @@ test "Loop: vectored send and recv" {
     var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&server_open.c);
     try loop.run(.until_done);
-    const server_sock = try server_open.result;
+    const server_sock = try server_open.c.getResult(.net_open);
 
     var addr = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -658,7 +658,7 @@ test "Loop: vectored send and recv" {
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
     loop.add(&server_bind.c);
     try loop.run(.until_done);
-    try server_bind.result;
+    try server_bind.c.getResult(.net_bind);
 
     // Get the actual port
     var bound_addr: socket.sockaddr.in = undefined;
@@ -670,13 +670,13 @@ test "Loop: vectored send and recv" {
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
     try loop.run(.until_done);
-    try server_listen.result;
+    try server_listen.c.getResult(.net_listen);
 
     // Create client socket and connect
     var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
     loop.add(&client_open.c);
     try loop.run(.until_done);
-    const client_sock = try client_open.result;
+    const client_sock = try client_open.c.getResult(.net_open);
 
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
@@ -691,8 +691,8 @@ test "Loop: vectored send and recv" {
     loop.add(&connect.c);
 
     try loop.run(.until_done);
-    const accepted_sock = try accept_comp.result;
-    try connect.result;
+    const accepted_sock = try accept_comp.getResult();
+    try connect.getResult();
 
     // Send data from client using multiple buffers
     const msg1 = "Hello, ";
@@ -706,7 +706,7 @@ test "Loop: vectored send and recv" {
     var send: NetSend = .init(client_sock, &send_iov, .{});
     loop.add(&send.c);
     try loop.run(.until_done);
-    const sent = try send.result;
+    const sent = try send.getResult();
     const expected_len = msg1.len + msg2.len + msg3.len;
     try std.testing.expectEqual(expected_len, sent);
 
@@ -722,7 +722,7 @@ test "Loop: vectored send and recv" {
     var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
     try loop.run(.until_done);
-    const recvd = try recv.result;
+    const recvd = try recv.getResult();
     try std.testing.expectEqual(expected_len, recvd);
 
     // Verify the received data
@@ -757,7 +757,7 @@ test "Loop: vectored sendto and recvfrom" {
     var sock1_open: NetOpen = .init(.ipv4, .dgram, .udp);
     loop.add(&sock1_open.c);
     try loop.run(.until_done);
-    const sock1 = try sock1_open.result;
+    const sock1 = try sock1_open.c.getResult(.net_open);
 
     var addr1 = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -768,7 +768,7 @@ test "Loop: vectored sendto and recvfrom" {
     var bind1: NetBind = .init(sock1, @ptrCast(&addr1), @sizeOf(@TypeOf(addr1)));
     loop.add(&bind1.c);
     try loop.run(.until_done);
-    try bind1.result;
+    try bind1.c.getResult(.net_bind);
 
     var bound_addr1: socket.sockaddr.in = undefined;
     var bound_addr_len1: socket.socklen_t = @sizeOf(@TypeOf(bound_addr1));
@@ -779,7 +779,7 @@ test "Loop: vectored sendto and recvfrom" {
     var sock2_open: NetOpen = .init(.ipv4, .dgram, .udp);
     loop.add(&sock2_open.c);
     try loop.run(.until_done);
-    const sock2 = try sock2_open.result;
+    const sock2 = try sock2_open.c.getResult(.net_open);
 
     var addr2 = socket.sockaddr.in{
         .family = socket.AF.INET,
@@ -790,7 +790,7 @@ test "Loop: vectored sendto and recvfrom" {
     var bind2: NetBind = .init(sock2, @ptrCast(&addr2), @sizeOf(@TypeOf(addr2)));
     loop.add(&bind2.c);
     try loop.run(.until_done);
-    try bind2.result;
+    try bind2.c.getResult(.net_bind);
 
     var bound_addr2: socket.sockaddr.in = undefined;
     var bound_addr_len2: socket.socklen_t = @sizeOf(@TypeOf(bound_addr2));
@@ -813,7 +813,7 @@ test "Loop: vectored sendto and recvfrom" {
     var sendto: NetSendTo = .init(sock1, &sendto_iov, .{}, @ptrCast(&dest_addr), @sizeOf(@TypeOf(dest_addr)));
     loop.add(&sendto.c);
     try loop.run(.until_done);
-    const sent = try sendto.result;
+    const sent = try sendto.getResult();
     const expected_len = msg1.len + msg2.len;
     try std.testing.expectEqual(expected_len, sent);
 
@@ -829,7 +829,7 @@ test "Loop: vectored sendto and recvfrom" {
     var recvfrom: NetRecvFrom = .init(sock2, &recvfrom_iov, .{}, @ptrCast(&src_addr), &src_addr_len);
     loop.add(&recvfrom.c);
     try loop.run(.until_done);
-    const recvd = try recvfrom.result;
+    const recvd = try recvfrom.getResult();
     try std.testing.expectEqual(expected_len, recvd);
 
     // Verify the received data
@@ -871,7 +871,7 @@ test "Loop: async notification - same thread" {
     // Run loop - async should complete
     try loop.run(.until_done);
     try std.testing.expectEqual(.completed, async_handle.c.state);
-    try async_handle.result;
+    try async_handle.c.getResult(.async);
 }
 
 test "Loop: async notification - cross-thread" {
@@ -898,7 +898,7 @@ test "Loop: async notification - cross-thread" {
     // Run loop - should block until notified
     try loop.run(.until_done);
     try std.testing.expectEqual(.completed, async_handle.c.state);
-    try async_handle.result;
+    try async_handle.c.getResult(.async);
 
     thread.join();
 }

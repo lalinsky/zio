@@ -190,11 +190,11 @@ pub const ThreadPool = struct {
             if (work.state.cmpxchgStrong(.pending, .running, .acq_rel, .acquire)) |state| {
                 // Work was canceled before we could start it
                 std.debug.assert(state == .canceled);
-                work.result = error.Canceled;
+                work.c.setError(error.Canceled);
             } else {
                 // We successfully claimed it, execute the work
                 work.func(loop, work);
-                work.result = {};
+                work.c.setResult(.work, {});
                 work.state.store(.completed, .release);
             }
 

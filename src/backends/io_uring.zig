@@ -162,7 +162,7 @@ pub fn processCancellations(
             .completed => {
                 // Target already completed before cancel was processed.
                 // No CQEs will arrive. Complete cancel immediately.
-                cancel_op.result = error.AlreadyCompleted;
+                cancel_c.setError(error.AlreadyCompleted);
                 state.markCompleted(cancel_c);
             },
         }
@@ -259,22 +259,34 @@ fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
         // Synchronous operations (no io_uring support or always immediate)
         .net_open => {
             const data = c.cast(NetOpen);
-            data.result = socket.socket(
+            if (socket.socket(
                 data.domain,
                 data.socket_type,
                 data.protocol,
                 data.flags,
-            );
+            )) |handle| {
+                c.setResult(.net_open, handle);
+            } else |err| {
+                c.setError(err);
+            }
             return .completed;
         },
         .net_bind => {
             const data = c.cast(NetBind);
-            data.result = socket.bind(data.handle, data.addr, data.addr_len);
+            if (socket.bind(data.handle, data.addr, data.addr_len)) |_| {
+                c.setResult(.net_bind, {});
+            } else |err| {
+                c.setError(err);
+            }
             return .completed;
         },
         .net_listen => {
             const data = c.cast(NetListen);
-            data.result = socket.listen(data.handle, data.backlog);
+            if (socket.listen(data.handle, data.backlog)) |_| {
+                c.setResult(.net_listen, {});
+            } else |err| {
+                c.setError(err);
+            }
             return .completed;
         },
 
@@ -410,101 +422,91 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
 
     switch (c.op) {
         .net_connect => {
-            const data = c.cast(NetConnect);
             if (res < 0) {
                 if (-res == ECANCELED) {
-                    data.result = error.Canceled;
+                    c.setError(error.Canceled);
                 } else {
-                    data.result = socket.errnoToConnectError(-res);
+                    c.setError(socket.errnoToConnectError(-res));
                 }
             } else {
-                data.result = {};
+                c.setResult(.net_connect, {});
             }
         },
         .net_accept => {
-            const data = c.cast(NetAccept);
             if (res < 0) {
                 if (-res == ECANCELED) {
-                    data.result = error.Canceled;
+                    c.setError(error.Canceled);
                 } else {
-                    data.result = socket.errnoToAcceptError(-res);
+                    c.setError(socket.errnoToAcceptError(-res));
                 }
             } else {
-                data.result = @intCast(res);
+                c.setResult(.net_accept, @as(socket.fd_t, @intCast(res)));
             }
         },
         .net_recv => {
-            const data = c.cast(NetRecv);
             if (res < 0) {
                 if (-res == ECANCELED) {
-                    data.result = error.Canceled;
+                    c.setError(error.Canceled);
                 } else {
-                    data.result = socket.errnoToRecvError(-res);
+                    c.setError(socket.errnoToRecvError(-res));
                 }
             } else {
-                data.result = @intCast(res);
+                c.setResult(.net_recv, @as(usize, @intCast(res)));
             }
         },
         .net_send => {
-            const data = c.cast(NetSend);
             if (res < 0) {
                 if (-res == ECANCELED) {
-                    data.result = error.Canceled;
+                    c.setError(error.Canceled);
                 } else {
-                    data.result = socket.errnoToSendError(-res);
+                    c.setError(socket.errnoToSendError(-res));
                 }
             } else {
-                data.result = @intCast(res);
+                c.setResult(.net_send, @as(usize, @intCast(res)));
             }
         },
         .net_recvfrom => {
-            const data = c.cast(NetRecvFrom);
             if (res < 0) {
                 if (-res == ECANCELED) {
-                    data.result = error.Canceled;
+                    c.setError(error.Canceled);
                 } else {
-                    data.result = socket.errnoToRecvError(-res);
+                    c.setError(socket.errnoToRecvError(-res));
                 }
             } else {
-                data.result = @intCast(res);
+                c.setResult(.net_recvfrom, @as(usize, @intCast(res)));
                 // Propagate the peer address length filled in by the kernel
+                const data = c.cast(NetRecvFrom);
                 if (data.addr_len) |len_ptr| {
                     len_ptr.* = c.internal.msg_recv.namelen;
                 }
             }
         },
         .net_sendto => {
-            const data = c.cast(NetSendTo);
             if (res < 0) {
                 if (-res == ECANCELED) {
-                    data.result = error.Canceled;
+                    c.setError(error.Canceled);
                 } else {
-                    data.result = socket.errnoToSendError(-res);
+                    c.setError(socket.errnoToSendError(-res));
                 }
             } else {
-                data.result = @intCast(res);
+                c.setResult(.net_sendto, @as(usize, @intCast(res)));
             }
         },
         .net_shutdown => {
-            const data = c.cast(NetShutdown);
             if (res < 0) {
                 if (-res == ECANCELED) {
-                    data.result = error.Canceled;
+                    c.setError(error.Canceled);
                 } else {
-                    data.result = errnoToShutdownError(-res);
+                    c.setError(errnoToShutdownError(-res));
                 }
             } else {
-                data.result = {};
+                c.setResult(.net_shutdown, {});
             }
         },
         .net_close => {
-            const data = c.cast(NetClose);
-            if (res < 0) {
-                // Close errors are generally ignored, but we store them
-                data.result = {};
-            } else {
-                data.result = {};
-            }
+            // Close errors and cancelations are generally ignored
+            // But we still need to use setResult to handle cancelation race conditions
+            c.setResult(.net_close, {});
         },
         // Cancel CQEs are always skipped in tick(), so cancel should never reach storeResult
         else => unreachable,

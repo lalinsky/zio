@@ -34,6 +34,13 @@ pub const Completion = struct {
 
     canceled: ?*Cancel = null,
 
+    /// Error result - null means success, error means failure.
+    /// Stored here instead of in each operation type to simplify error handling.
+    err: ?anyerror = null,
+
+    /// Whether a result has been set (for debugging/assertions).
+    has_result: bool = false,
+
     /// Intrusive linked list of completions.
     /// Used for submission queue OR poll queue (mutually exclusive).
     prev: ?*Completion = null,
@@ -64,19 +71,44 @@ pub const Completion = struct {
         return @fieldParentPtr("c", c);
     }
 
-    pub fn getResult(c: *Completion, comptime T: type) @FieldType(T, "result") {
-        if (c.canceled != null) return error.Canceled;
-        return c.cast(T).result;
+    pub fn getResult(c: *const Completion, comptime op: OperationType) (CompletionType(op).Error)!@FieldType(CompletionType(op), "result_private_do_not_touch") {
+        std.debug.assert(c.has_result);
+        std.debug.assert(c.op == op);
+        if (c.err) |err| return @errorCast(err);
+        const T = CompletionType(op);
+        const parent: *const T = @fieldParentPtr("c", c);
+        return parent.result_private_do_not_touch;
     }
 
-    pub fn setResult(c: *Completion, result: anytype) void {
-        switch (c.op) {
-            .cancel => unreachable,
-            inline else => |op| {
-                const T = CompletionType(op);
-                c.cast(T).result = result;
-            },
+    pub fn setError(c: *Completion, err: anyerror) void {
+        std.debug.assert(!c.has_result);
+        // If this operation was canceled but got a different error (race condition),
+        // we need to mark the cancel as AlreadyCompleted.
+        // If err is error.Canceled, the normal cancelation flow handles the cancel.
+        if (c.canceled) |cancel| {
+            if (err != error.Canceled) {
+                cancel.c.err = error.AlreadyCompleted;
+                cancel.c.has_result = true;
+            }
         }
+
+        c.err = err;
+        c.has_result = true;
+    }
+
+    pub fn setResult(c: *Completion, comptime op: OperationType, result: @FieldType(CompletionType(op), "result_private_do_not_touch")) void {
+        std.debug.assert(!c.has_result);
+        std.debug.assert(c.op == op);
+        // If this operation was canceled but completed successfully (race condition),
+        // we need to mark the cancel as AlreadyCompleted.
+        if (c.canceled) |cancel| {
+            cancel.c.err = error.AlreadyCompleted;
+            cancel.c.has_result = true;
+        }
+
+        const T = CompletionType(op);
+        c.cast(T).result_private_do_not_touch = result;
+        c.has_result = true;
     }
 };
 
@@ -126,7 +158,7 @@ pub const Cancelable = error{Canceled};
 pub const Cancel = struct {
     c: Completion,
     cancel_c: *Completion,
-    result: Error!void = {},
+    result_private_do_not_touch: void = {},
 
     pub const Error = error{ AlreadyCanceled, AlreadyCompleted };
 
@@ -140,7 +172,7 @@ pub const Cancel = struct {
 
 pub const Timer = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
     delay_ms: u64,
     deadline_ms: u64 = 0,
     heap: HeapNode(Timer) = .{},
@@ -157,7 +189,7 @@ pub const Timer = struct {
 
 pub const Async = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
     pending: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     loop: *Loop = undefined,
 
@@ -182,7 +214,7 @@ pub const Async = struct {
 
 pub const Work = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
 
     func: *const WorkFn,
     userdata: ?*anyopaque,
@@ -212,7 +244,7 @@ pub const Work = struct {
 
 pub const NetClose = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
     handle: Backend.NetHandle,
 
     pub const Error = Cancelable;
@@ -227,7 +259,7 @@ pub const NetClose = struct {
 
 pub const NetShutdown = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
     handle: Backend.NetHandle,
     how: socket.ShutdownHow,
 
@@ -244,7 +276,7 @@ pub const NetShutdown = struct {
 
 pub const NetOpen = struct {
     c: Completion,
-    result: Error!Backend.NetHandle = error.Canceled,
+    result_private_do_not_touch: Backend.NetHandle = undefined,
     domain: socket.Domain,
     socket_type: socket.Type,
     protocol: socket.Protocol,
@@ -268,7 +300,7 @@ pub const NetOpen = struct {
 
 pub const NetBind = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
     handle: Backend.NetHandle,
     addr: *const socket.sockaddr,
     addr_len: socket.socklen_t,
@@ -287,7 +319,7 @@ pub const NetBind = struct {
 
 pub const NetListen = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
     handle: Backend.NetHandle,
     backlog: u31,
 
@@ -304,7 +336,7 @@ pub const NetListen = struct {
 
 pub const NetConnect = struct {
     c: Completion,
-    result: Error!void = error.Canceled,
+    result_private_do_not_touch: void = {},
     handle: Backend.NetHandle,
     addr: *const socket.sockaddr,
     addr_len: socket.socklen_t,
@@ -321,14 +353,13 @@ pub const NetConnect = struct {
     }
 
     pub fn getResult(self: *const NetConnect) Error!void {
-        if (self.c.canceled != null) return error.Canceled;
-        return self.result;
+        return self.c.getResult(.net_connect);
     }
 };
 
 pub const NetAccept = struct {
     c: Completion,
-    result: Error!Backend.NetHandle = error.Canceled,
+    result_private_do_not_touch: Backend.NetHandle = undefined,
     handle: Backend.NetHandle,
     addr: ?*socket.sockaddr,
     addr_len: ?*socket.socklen_t,
@@ -350,14 +381,13 @@ pub const NetAccept = struct {
     }
 
     pub fn getResult(self: *const NetAccept) Error!Backend.NetHandle {
-        if (self.c.canceled != null) return error.Canceled;
-        return self.result;
+        return self.c.getResult(.net_accept);
     }
 };
 
 pub const NetRecv = struct {
     c: Completion,
-    result: Error!usize = error.Canceled,
+    result_private_do_not_touch: usize = undefined,
     handle: Backend.NetHandle,
     buffers: []socket.iovec,
     flags: socket.RecvFlags,
@@ -374,14 +404,13 @@ pub const NetRecv = struct {
     }
 
     pub fn getResult(self: *const NetRecv) Error!usize {
-        if (self.c.canceled != null) return error.Canceled;
-        return self.result;
+        return self.c.getResult(.net_recv);
     }
 };
 
 pub const NetSend = struct {
     c: Completion,
-    result: Error!usize = error.Canceled,
+    result_private_do_not_touch: usize = undefined,
     handle: Backend.NetHandle,
     buffers: []const socket.iovec_const,
     flags: socket.SendFlags,
@@ -398,14 +427,13 @@ pub const NetSend = struct {
     }
 
     pub fn getResult(self: *const NetSend) Error!usize {
-        if (self.c.canceled != null) return error.Canceled;
-        return self.result;
+        return self.c.getResult(.net_send);
     }
 };
 
 pub const NetRecvFrom = struct {
     c: Completion,
-    result: Error!usize = error.Canceled,
+    result_private_do_not_touch: usize = undefined,
     handle: Backend.NetHandle,
     buffers: []socket.iovec,
     flags: socket.RecvFlags,
@@ -432,14 +460,13 @@ pub const NetRecvFrom = struct {
     }
 
     pub fn getResult(self: *const NetRecvFrom) Error!usize {
-        if (self.c.canceled != null) return error.Canceled;
-        return self.result;
+        return self.c.getResult(.net_recvfrom);
     }
 };
 
 pub const NetSendTo = struct {
     c: Completion,
-    result: Error!usize = error.Canceled,
+    result_private_do_not_touch: usize = undefined,
     handle: Backend.NetHandle,
     buffers: []const socket.iovec_const,
     flags: socket.SendFlags,
@@ -466,7 +493,6 @@ pub const NetSendTo = struct {
     }
 
     pub fn getResult(self: *const NetSendTo) Error!usize {
-        if (self.c.canceled != null) return error.Canceled;
-        return self.result;
+        return self.c.getResult(.net_sendto);
     }
 };
