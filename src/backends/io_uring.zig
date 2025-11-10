@@ -86,16 +86,16 @@ allocator: std.mem.Allocator,
 ring: linux.IoUring,
 waker: Waker,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
-    // Initialize io_uring with 256 entries
-    // This is a reasonable default - the kernel will round up to next power of 2
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
+    // Initialize io_uring with specified queue size
+    // The kernel will round up to next power of 2
 
     var flags: u32 = 0;
     flags |= linux.IORING_SETUP_SINGLE_ISSUER;
     flags |= linux.IORING_SETUP_DEFER_TASKRUN;
     flags |= linux.IORING_SETUP_COOP_TASKRUN;
 
-    var ring = try linux.IoUring.init(256, flags);
+    var ring = try linux.IoUring.init(queue_size, flags);
     errdefer ring.deinit();
 
     self.* = .{
@@ -117,83 +117,288 @@ pub fn wake(self: *Self) void {
     self.waker.notify();
 }
 
-pub fn processSubmissions(
-    self: *Self,
-    state: *LoopState,
-    submissions: *Queue(Completion),
-) !void {
-    // Process all submissions in the queue
-    while (submissions.pop()) |c| {
-        // Start the completion - this will either:
-        // 1. Complete synchronously (socket/bind/listen)
-        // 2. Submit to io_uring and return .running
-        const result = try self.startCompletion(c);
-        switch (result) {
-            .completed => state.markCompleted(c),
-            .running => state.markRunning(c),
-        }
-    }
+/// Submit a completion to the backend - infallible.
+/// On error, completes the operation immediately with error.Unexpected.
+pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
+    c.state = .running;
+    state.active += 1;
 
-    // Submit all queued SQEs to the kernel
-    // io_uring batches all the operations we just prepared
-    _ = try self.ring.submit();
+    switch (c.op) {
+        .timer, .async, .work => unreachable, // Managed by the loop
+        .cancel => unreachable, // Handled separately via cancel() method
+
+        // Synchronous operations (no io_uring support or always immediate)
+        .net_open => {
+            const data = c.cast(NetOpen);
+            if (net.socket(
+                data.domain,
+                data.socket_type,
+                data.protocol,
+                data.flags,
+            )) |handle| {
+                c.setResult(.net_open, handle);
+            } else |err| {
+                c.setError(err);
+            }
+            state.markCompleted(c);
+        },
+        .net_bind => {
+            common.handleNetBind(c);
+            state.markCompleted(c);
+        },
+        .net_listen => {
+            common.handleNetListen(c);
+            state.markCompleted(c);
+        },
+
+        // Async operations through io_uring
+        .net_connect => {
+            const data = c.cast(NetConnect);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for connect", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_connect(data.handle, data.addr, data.addr_len);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_accept => {
+            const data = c.cast(NetAccept);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for accept", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_accept(data.handle, data.addr, data.addr_len, 0);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_recv => {
+            const data = c.cast(NetRecv);
+            // Store msghdr in completion internal data so it remains valid
+            data.internal.msg = .{
+                .name = null,
+                .namelen = 0,
+                .iov = data.buffers.ptr,
+                .iovlen = data.buffers.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for recvmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_send => {
+            const data = c.cast(NetSend);
+            // Store msghdr in completion internal data so it remains valid
+            data.internal.msg = .{
+                .name = null,
+                .namelen = 0,
+                .iov = data.buffers.ptr,
+                .iovlen = data.buffers.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for sendmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_recvfrom => {
+            const data = c.cast(NetRecvFrom);
+            // Store msghdr in completion internal data so it remains valid
+            data.internal.msg = .{
+                .name = @ptrCast(data.addr),
+                .namelen = if (data.addr_len) |len| len.* else 0,
+                .iov = data.buffers.ptr,
+                .iovlen = data.buffers.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for recvmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_sendto => {
+            const data = c.cast(NetSendTo);
+            // Store msghdr in completion internal data so it remains valid
+            data.internal.msg = .{
+                .name = @ptrCast(data.addr),
+                .namelen = data.addr_len,
+                .iov = data.buffers.ptr,
+                .iovlen = data.buffers.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for sendmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_shutdown => {
+            const data = c.cast(NetShutdown);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for shutdown", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_shutdown(data.handle, @intFromEnum(data.how));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_close => {
+            const data = c.cast(NetClose);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for close", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_close(data.handle);
+            sqe.user_data = @intFromPtr(c);
+        },
+
+        .file_open => {
+            const data = c.cast(FileOpen);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for file_open", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            const flags = linux.O{
+                .APPEND = data.flags.append,
+                .CREAT = data.flags.create,
+                .TRUNC = data.flags.truncate,
+                .EXCL = data.flags.exclusive,
+            };
+            sqe.prep_openat(data.dir, path, flags, data.mode);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+        .file_close => {
+            const data = c.cast(FileClose);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_close", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_close(data.handle);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_read => {
+            const data = c.cast(FileRead);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_read", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_readv(data.handle, data.buffers, data.offset);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_write => {
+            const data = c.cast(FileWrite);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_write", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_writev(data.handle, data.buffers, data.offset);
+            sqe.user_data = @intFromPtr(c);
+        },
+    }
 }
 
-pub fn processCancellations(
-    self: *Self,
-    state: *LoopState,
-    cancels: *Queue(Completion),
-) !void {
-    while (cancels.pop()) |cancel_c| {
-        const cancel_op = cancel_c.cast(Cancel);
-        const target = cancel_op.cancel_c;
+/// Cancel a completion - infallible.
+/// Note: target.canceled is already set by loop.add() before this is called.
+pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
+    // Mark cancel operation as running
+    c.state = .running;
+    state.active += 1;
 
-        switch (target.state) {
-            .new => {
-                // UNREACHABLE: When cancel is added via loop.add() and target.state == .new,
-                // the cancel is not submitted to the queue (loop.add returns early).
-                // Therefore processCancellations never sees this case.
-                unreachable;
-            },
-            .adding => {
-                // UNREACHABLE: When cancel is added via loop.add() and target.state == .adding,
-                // the cancel is not submitted to the queue (loop.add returns early).
-                // By the time processCancellations runs, processSubmissions has already
-                // transitioned all .adding operations to .running or .completed.
-                unreachable;
-            },
-            .running => {
-                // Target is executing in io_uring. Submit a cancel SQE.
-                // This will generate TWO CQEs:
-                // 1. Cancel CQE (user_data=cancel_c, res=0 or -ENOENT)
-                // 2. Target CQE (user_data=target, res=-ECANCELED or success if cancel was too late)
-                //
-                // In tick(), we:
-                // - Skip cancel CQEs (they never complete the cancel directly)
-                // - Process target CQE and mark target complete
-                // - markCompleted(target) recursively completes the cancel via target.canceled link
-                const sqe = try self.ring.cancel(
-                    @intFromPtr(cancel_c),
-                    @intFromPtr(target),
-                    0,
-                );
-                _ = sqe;
-                state.markRunning(cancel_c);
-            },
-            .completed => {
-                // Target already completed before cancel was processed.
-                // No CQEs will arrive. Complete cancel immediately.
-                cancel_c.setError(error.AlreadyCompleted);
-                state.markCompleted(cancel_c);
-            },
-        }
+    const cancel_op = c.cast(Cancel);
+    const target = cancel_op.cancel_c;
+
+    switch (target.state) {
+        .new => {
+            // UNREACHABLE: When cancel is added via loop.add() and target.state == .new,
+            // loop.add() handles it directly and doesn't call backend.cancel().
+            unreachable;
+        },
+        .running => {
+            // Target is executing in io_uring. Submit a cancel SQE.
+            // This will generate TWO CQEs:
+            // 1. Cancel CQE (user_data=cancel_c, res=0 or -ENOENT)
+            // 2. Target CQE (user_data=target, res=-ECANCELED or success if cancel was too late)
+            //
+            // In tick(), we:
+            // - Skip cancel CQEs (they never complete the cancel directly)
+            // - Process target CQE and mark target complete
+            // - markCompleted(target) recursively completes the cancel via target.canceled link
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for cancel", .{});
+                // Cancel SQE failed - do nothing, let target complete naturally
+                // When target completes, markCompleted(target) will recursively complete cancel
+                return;
+            };
+            sqe.prep_cancel(@intFromPtr(target), 0);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .completed => {
+            // Target already completed before cancel was processed.
+            // No CQEs will arrive. Complete cancel immediately.
+            c.setError(error.AlreadyCompleted);
+            state.markCompleted(c);
+        },
     }
-
-    // Submit the cancel operations
-    _ = try self.ring.submit();
 }
 
-pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
+/// Get an SQE, flushing the queue with non-blocking poll if full
+fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
+    return self.ring.get_sqe() catch |err| {
+        if (err == error.SubmissionQueueFull) {
+            // Queue full - flush with non-blocking poll to drain completions
+            _ = try self.poll(state, 0);
+            // Retry after flush
+            return self.ring.get_sqe();
+        }
+        return err;
+    };
+}
+
+pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const linux_os = @import("../os/linux.zig");
 
     // Re-arm waker if needed (after drain() in previous tick)
@@ -273,197 +478,6 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     }
 
     return false; // Did not timeout, woke up due to events
-}
-
-fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
-    switch (c.op) {
-        .timer, .async, .work, .cancel => unreachable,
-
-        // Synchronous operations (no io_uring support or always immediate)
-        .net_open => {
-            const data = c.cast(NetOpen);
-            if (net.socket(
-                data.domain,
-                data.socket_type,
-                data.protocol,
-                data.flags,
-            )) |handle| {
-                c.setResult(.net_open, handle);
-            } else |err| {
-                c.setError(err);
-            }
-            return .completed;
-        },
-        .net_bind => {
-            common.handleNetBind(c);
-            return .completed;
-        },
-        .net_listen => {
-            common.handleNetListen(c);
-            return .completed;
-        },
-
-        // Async operations through io_uring
-        .net_connect => {
-            const data = c.cast(NetConnect);
-            _ = try self.ring.connect(
-                @intFromPtr(c),
-                data.handle,
-                data.addr,
-                data.addr_len,
-            );
-            return .running;
-        },
-        .net_accept => {
-            const data = c.cast(NetAccept);
-            _ = try self.ring.accept(
-                @intFromPtr(c),
-                data.handle,
-                data.addr,
-                data.addr_len,
-                0, // flags
-            );
-            return .running;
-        },
-        .net_recv => {
-            const data = c.cast(NetRecv);
-            // Store msghdr in completion internal data so it remains valid
-            data.internal.msg = .{
-                .name = null,
-                .namelen = 0,
-                .iov = data.buffers.ptr,
-                .iovlen = data.buffers.len,
-                .control = null,
-                .controllen = 0,
-                .flags = 0,
-            };
-            _ = try self.ring.recvmsg(
-                @intFromPtr(c),
-                data.handle,
-                &data.internal.msg,
-                recvFlagsToMsg(data.flags),
-            );
-            return .running;
-        },
-        .net_send => {
-            const data = c.cast(NetSend);
-            // Store msghdr in completion internal data so it remains valid
-            data.internal.msg = .{
-                .name = null,
-                .namelen = 0,
-                .iov = data.buffers.ptr,
-                .iovlen = data.buffers.len,
-                .control = null,
-                .controllen = 0,
-                .flags = 0,
-            };
-            _ = try self.ring.sendmsg(
-                @intFromPtr(c),
-                data.handle,
-                &data.internal.msg,
-                sendFlagsToMsg(data.flags),
-            );
-            return .running;
-        },
-        .net_recvfrom => {
-            const data = c.cast(NetRecvFrom);
-            // Store msghdr in completion internal data so it remains valid
-            data.internal.msg = .{
-                .name = @ptrCast(data.addr),
-                .namelen = if (data.addr_len) |len| len.* else 0,
-                .iov = data.buffers.ptr,
-                .iovlen = data.buffers.len,
-                .control = null,
-                .controllen = 0,
-                .flags = 0,
-            };
-            _ = try self.ring.recvmsg(
-                @intFromPtr(c),
-                data.handle,
-                &data.internal.msg,
-                recvFlagsToMsg(data.flags),
-            );
-            return .running;
-        },
-        .net_sendto => {
-            const data = c.cast(NetSendTo);
-            // Store msghdr in completion internal data so it remains valid
-            data.internal.msg = .{
-                .name = @ptrCast(data.addr),
-                .namelen = data.addr_len,
-                .iov = data.buffers.ptr,
-                .iovlen = data.buffers.len,
-                .control = null,
-                .controllen = 0,
-                .flags = 0,
-            };
-            _ = try self.ring.sendmsg(
-                @intFromPtr(c),
-                data.handle,
-                &data.internal.msg,
-                sendFlagsToMsg(data.flags),
-            );
-            return .running;
-        },
-        .net_shutdown => {
-            const data = c.cast(NetShutdown);
-            _ = try self.ring.shutdown(
-                @intFromPtr(c),
-                data.handle,
-                @intFromEnum(data.how),
-            );
-            return .running;
-        },
-        .net_close => {
-            const data = c.cast(NetClose);
-            _ = try self.ring.close(
-                @intFromPtr(c),
-                data.handle,
-            );
-            return .running;
-        },
-
-        .file_open => {
-            const data = c.cast(FileOpen);
-            const path = self.allocator.dupeZ(u8, data.path) catch {
-                c.setError(error.SystemResources);
-                return .completed;
-            };
-            errdefer self.allocator.free(path);
-            const sqe = try self.ring.get_sqe();
-            const flags = linux.O{
-                .APPEND = data.flags.append,
-                .CREAT = data.flags.create,
-                .TRUNC = data.flags.truncate,
-                .EXCL = data.flags.exclusive,
-            };
-            sqe.prep_openat(data.dir, path, flags, data.mode);
-            sqe.user_data = @intFromPtr(c);
-            data.internal.path = path;
-            return .running;
-        },
-        .file_close => {
-            const data = c.cast(FileClose);
-            const sqe = try self.ring.get_sqe();
-            sqe.prep_close(data.handle);
-            sqe.user_data = @intFromPtr(c);
-            return .running;
-        },
-        .file_read => {
-            const data = c.cast(FileRead);
-            const sqe = try self.ring.get_sqe();
-            sqe.prep_readv(data.handle, data.buffers, data.offset);
-            sqe.user_data = @intFromPtr(c);
-            return .running;
-        },
-        .file_write => {
-            const data = c.cast(FileWrite);
-            const sqe = try self.ring.get_sqe();
-            sqe.prep_writev(data.handle, data.buffers, data.offset);
-            sqe.user_data = @intFromPtr(c);
-            return .running;
-        },
-    }
 }
 
 fn storeResult(self: *Self, c: *Completion, res: i32) void {

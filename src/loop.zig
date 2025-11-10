@@ -17,6 +17,8 @@ const time = @import("os/time.zig");
 const net = @import("os/net.zig");
 const common = @import("backends/common.zig");
 
+const log = std.log.scoped(.zevent_loop);
+
 pub const RunMode = enum {
     no_wait,
     once,
@@ -81,17 +83,29 @@ pub const LoopState = struct {
     now_ms: u64 = 0,
     timers: TimerHeap = .{ .context = {} },
 
-    submissions: Queue(Completion) = .{},
     async_handles: Queue(Completion) = .{},
 
     work_completions: AtomicStack(Completion) = .{},
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
+        std.debug.assert(completion.state != .completed);
+        std.debug.assert(completion.has_result);
+
         if (completion.canceled) |cancel| {
-            // Cancel should NEVER be completed before the target operation
-            std.debug.assert(cancel.c.state != .completed);
+            std.debug.assert(!cancel.c.has_result);
+            var set = false;
+            if (completion.err) |err| {
+                if (err == error.Canceled) {
+                    cancel.c.setResult(.cancel, {});
+                    set = true;
+                }
+            }
+            if (!set) {
+                cancel.c.setError(error.AlreadyCompleted);
+            }
             self.markCompleted(&cancel.c);
         }
+
         completion.state = .completed;
         self.active -= 1;
         completion.call(self.loop);
@@ -100,12 +114,6 @@ pub const LoopState = struct {
     pub fn markRunning(self: *LoopState, completion: *Completion) void {
         _ = self;
         completion.state = .running;
-    }
-
-    pub fn submit(self: *LoopState, completion: *Completion) void {
-        completion.state = .adding;
-        self.active += 1;
-        self.submissions.push(completion);
     }
 
     pub fn updateNow(self: *LoopState) void {
@@ -142,9 +150,12 @@ pub const Loop = struct {
 
     max_wait_ms: u64 = 60 * std.time.ms_per_s,
 
+    const default_queue_size = 256;
+
     pub const Options = struct {
         allocator: std.mem.Allocator = std.heap.page_allocator,
         thread_pool: ?*ThreadPool = null,
+        queue_size: u16 = default_queue_size,
     };
 
     pub fn init(self: *Loop, options: Options) !void {
@@ -155,10 +166,14 @@ pub const Loop = struct {
             .thread_pool = options.thread_pool,
         };
 
+        if (options.queue_size == 0) {
+            return error.InvalidQueueSize;
+        }
+
         net.ensureWSAInitialized();
         self.state.updateNow();
 
-        try self.backend.init(options.allocator);
+        try self.backend.init(options.allocator, options.queue_size);
         errdefer self.backend.deinit();
 
         self.state.initialized = true;
@@ -177,7 +192,7 @@ pub const Loop = struct {
     }
 
     pub fn done(self: *const Loop) bool {
-        return self.state.stopped or (self.state.active == 0 and self.state.submissions.empty());
+        return self.state.stopped or self.state.active == 0;
     }
 
     /// Wake up the loop from blocking poll/epoll (thread-safe)
@@ -200,9 +215,8 @@ pub const Loop = struct {
     pub fn add(self: *Loop, completion: *Completion) void {
         std.debug.assert(completion.state == .new);
 
-        if (completion.canceled) |cancel| {
+        if (completion.canceled != null) {
             // Directly mark it as canceled
-            cancel.c.setResult(.cancel, {});
             completion.setError(error.Canceled);
             self.state.active += 1;
             self.state.markCompleted(completion);
@@ -265,19 +279,10 @@ pub const Loop = struct {
                         return;
                     }
 
-                    if (cancel.cancel_c.state == .adding) {
-                        // Completion is in the submissions queue being processed
-                        // The backend will catch it in processSubmissions via the canceled field check
-                        // and complete both the target and this cancel operation
-                        self.state.active += 1;
-                        return;
-                    }
-
                     switch (cancel.cancel_c.op) {
                         .timer => {
                             const timer = cancel.cancel_c.cast(Timer);
                             self.state.active += 1; // Count the cancel operation
-                            completion.setResult(.cancel, {});
                             timer.c.setError(error.Canceled);
                             self.state.clearTimer(timer);
                             self.state.markCompleted(&timer.c);
@@ -286,7 +291,6 @@ pub const Loop = struct {
                         .async => {
                             const async_handle = cancel.cancel_c.cast(Async);
                             self.state.active += 1; // Count the cancel operation
-                            completion.setResult(.cancel, {});
                             async_handle.c.setError(error.Canceled);
                             _ = self.state.async_handles.remove(&async_handle.c);
                             self.state.markCompleted(&async_handle.c);
@@ -302,7 +306,6 @@ pub const Loop = struct {
                                 // This will CAS from .pending to .canceled if work hasn't started
                                 if (thread_pool.cancel(work)) {
                                     // Successfully canceled, work was removed from queue
-                                    completion.setResult(.cancel, {});
                                     work.c.setError(error.Canceled);
                                     self.state.markCompleted(&work.c);
                                 }
@@ -332,7 +335,6 @@ pub const Loop = struct {
                                 if (self.thread_pool) |thread_pool| {
                                     if (thread_pool.cancel(work)) {
                                         // Successfully canceled the internal work
-                                        completion.setResult(.cancel, {});
                                         cancel.cancel_c.setError(error.Canceled);
                                         self.state.markCompleted(cancel.cancel_c);
                                     }
@@ -348,8 +350,25 @@ pub const Loop = struct {
                         },
                         else => {},
                     }
+
+                    // Cancel operation for backend operation
+                    self.backend.cancel(&self.state, completion);
+                    return;
                 }
-                self.state.submit(completion);
+
+                // Regular backend operation
+                // Route file operations to thread pool for backends without native support
+                if (!Backend.supports_file_ops) {
+                    switch (completion.op) {
+                        .file_open, .file_close, .file_read, .file_write => {
+                            self.submitFileOpToThreadPool(completion);
+                            return;
+                        },
+                        else => {},
+                    }
+                }
+
+                self.backend.submit(&self.state, completion);
                 return;
             },
         }
@@ -392,8 +411,19 @@ pub const Loop = struct {
         }
     }
 
-    fn submitFileOpToThreadPool(self: *Loop, completion: *Completion) error{NoThreadPool}!void {
-        const tp = self.thread_pool orelse return error.NoThreadPool;
+    fn submitFileOpToThreadPool(self: *Loop, completion: *Completion) void {
+        const tp = self.thread_pool orelse {
+            // No thread pool - complete with error
+            log.err("No thread pool available for file operation", .{});
+            completion.state = .running;
+            self.state.active += 1;
+            completion.setError(error.Unexpected);
+            self.state.markCompleted(completion);
+            return;
+        };
+
+        completion.state = .running;
+        self.state.active += 1;
 
         switch (completion.op) {
             .file_open => {
@@ -436,10 +466,7 @@ pub const Loop = struct {
 
         var timeout_ms: u64 = 0;
         if (wait) {
-            // If we have submissions pending, process them immediately
-            if (!self.state.submissions.empty()) {
-                timeout_ms = 0;
-            } else if (timer_timeout_ms) |t| {
+            if (timer_timeout_ms) |t| {
                 // Use timer timeout, capped at max_wait_ms
                 timeout_ms = @min(t, self.max_wait_ms);
             } else {
@@ -448,54 +475,7 @@ pub const Loop = struct {
             }
         }
 
-        // Process submissions - separate cancels from regular submissions
-        var cancels: Queue(Completion) = .{};
-        var submissions: Queue(Completion) = .{};
-
-        while (self.state.submissions.pop()) |completion| {
-            // Handle already-canceled completions
-            if (completion.canceled) |cancel| {
-                cancel.c.setResult(.cancel, {});
-                completion.setError(error.Canceled);
-                self.state.markCompleted(completion);
-                continue;
-            }
-            // Separate cancel operations
-            if (completion.op == .cancel) {
-                cancels.push(completion);
-                continue;
-            }
-
-            // For backends without native file ops support, route to thread pool
-            if (!Backend.supports_file_ops) {
-                const is_file_op = switch (completion.op) {
-                    .file_open, .file_close, .file_read, .file_write => true,
-                    else => false,
-                };
-
-                if (is_file_op) {
-                    self.submitFileOpToThreadPool(completion) catch {
-                        // No thread pool configured
-                        completion.setError(error.Unexpected);
-                        self.state.markCompleted(completion);
-                        continue;
-                    };
-                    self.state.markRunning(completion);
-                    continue;
-                }
-            }
-
-            // Regular submissions
-            submissions.push(completion);
-        }
-
-        // Process regular submissions through backend
-        try self.backend.processSubmissions(&self.state, &submissions);
-
-        // Process cancellations through backend
-        try self.backend.processCancellations(&self.state, &cancels);
-
-        const timed_out = try self.backend.tick(&self.state, timeout_ms);
+        const timed_out = try self.backend.poll(&self.state, timeout_ms);
 
         // Process any work completions from thread pool
         self.processWorkCompletions();

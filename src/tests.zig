@@ -172,8 +172,8 @@ test "Loop: cancel net_accept" {
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
-    // Run once to get accept into poll queue
-    try loop.run(.once);
+    // Run once to get accept into poll queue (use no_wait since operations are submitted immediately now)
+    try loop.run(.no_wait);
     try std.testing.expectEqual(.running, accept_comp.c.state);
 
     // Cancel the accept
@@ -254,8 +254,8 @@ test "Loop: cancel net_recv" {
     var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
 
-    // Run once to get recv into poll queue
-    try loop.run(.once);
+    // Run once to get recv into poll queue (use no_wait since operations are submitted immediately now)
+    try loop.run(.no_wait);
 
     // Only test cancellation if recv is actually waiting
     if (recv.c.state == .running) {

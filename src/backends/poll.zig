@@ -54,11 +54,17 @@ poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 poll_fds: std.ArrayList(net.pollfd) = .empty,
 waker: Waker,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
     self.* = .{
         .allocator = allocator,
         .waker = undefined,
     };
+
+    try self.poll_fds.ensureTotalCapacity(self.allocator, queue_size);
+    errdefer self.poll_fds.deinit(self.allocator);
+
+    try self.poll_queue.ensureTotalCapacity(self.allocator, queue_size);
+    errdefer self.poll_queue.deinit(self.allocator);
 
     // Initialize Waker
     try self.waker.init(self);
@@ -98,19 +104,30 @@ fn getPollType(op: OperationType) PollEntryType {
     };
 }
 
-/// Add a completion to the poll queue, merging with existing fd if present
-fn addToPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
+/// Add a completion to the poll queue, merging with existing fd if present.
+/// If queuing fails, completes the completion with error.Unexpected.
+fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
     completion.prev = null;
     completion.next = null;
 
-    const gop = try self.poll_queue.getOrPut(self.allocator, fd);
-    errdefer if (!gop.found_existing) self.poll_queue.removeByPtr(gop.key_ptr);
+    const gop = self.poll_queue.getOrPut(self.allocator, fd) catch {
+        log.err("Failed to add to poll queue: OutOfMemory", .{});
+        completion.setError(error.Unexpected);
+        state.markCompleted(completion);
+        return;
+    };
 
     var entry = gop.value_ptr;
     const op_events = getEvents(completion.op);
 
     if (!gop.found_existing) {
-        try self.poll_fds.append(self.allocator, .{ .fd = fd, .events = op_events, .revents = 0 });
+        self.poll_fds.append(self.allocator, .{ .fd = fd, .events = op_events, .revents = 0 }) catch {
+            log.err("Failed to append to poll_fds: OutOfMemory", .{});
+            _ = self.poll_queue.remove(fd);
+            completion.setError(error.Unexpected);
+            state.markCompleted(completion);
+            return;
+        };
         entry.* = .{
             .completions = .{},
             .type = getPollType(completion.op),
@@ -172,30 +189,110 @@ fn getHandle(completion: *Completion) NetHandle {
     };
 }
 
-pub fn processSubmissions(self: *Self, state: *LoopState, submissions: *Queue(Completion)) !void {
-    while (submissions.pop()) |completion| {
-        switch (try self.startCompletion(completion)) {
-            .completed => state.markCompleted(completion),
-            .running => state.markRunning(completion),
-        }
+/// Submit a completion to the backend - infallible.
+/// On error, completes the operation immediately with error.Unexpected.
+pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
+    c.state = .running;
+    state.active += 1;
+
+    switch (c.op) {
+        .timer, .async, .work => unreachable, // Managed by the loop
+        .cancel => unreachable, // Handled separately via cancel() method
+
+        // Synchronous operations - complete immediately
+        .net_open => {
+            common.handleNetOpen(c);
+            state.markCompleted(c);
+        },
+        .net_bind => {
+            common.handleNetBind(c);
+            state.markCompleted(c);
+        },
+        .net_listen => {
+            common.handleNetListen(c);
+            state.markCompleted(c);
+        },
+        .net_close => {
+            common.handleNetClose(c);
+            state.markCompleted(c);
+        },
+        .net_shutdown => {
+            common.handleNetShutdown(c);
+            state.markCompleted(c);
+        },
+
+        // Connect - must call connect() first
+        .net_connect => {
+            const data = c.cast(NetConnect);
+            if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
+                // Connected immediately (e.g., localhost)
+                c.setResult(.net_connect, {});
+                state.markCompleted(c);
+            } else |err| switch (err) {
+                error.WouldBlock, error.ConnectionPending => {
+                    // Queue for completion - addToPollQueue handles errors
+                    self.addToPollQueue(state, data.handle, c);
+                },
+                else => {
+                    c.setError(err);
+                    state.markCompleted(c);
+                },
+            }
+        },
+
+        // Other async operations - queue and try on wakeup
+        .net_accept => {
+            const data = c.cast(NetAccept);
+            self.addToPollQueue(state, data.handle, c);
+        },
+        .net_recv => {
+            const data = c.cast(NetRecv);
+            self.addToPollQueue(state, data.handle, c);
+        },
+        .net_send => {
+            const data = c.cast(NetSend);
+            self.addToPollQueue(state, data.handle, c);
+        },
+        .net_recvfrom => {
+            const data = c.cast(NetRecvFrom);
+            self.addToPollQueue(state, data.handle, c);
+        },
+        .net_sendto => {
+            const data = c.cast(NetSendTo);
+            self.addToPollQueue(state, data.handle, c);
+        },
+
+        // File operations are handled by Loop via thread pool
+        .file_open, .file_close, .file_read, .file_write => unreachable,
     }
 }
 
-pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Completion)) !void {
-    while (cancels.pop()) |completion| {
-        if (completion.state == .completed) continue;
-        const cancel = completion.cast(Cancel);
+/// Cancel a completion - infallible.
+/// Note: target.canceled is already set by loop.add() before this is called.
+pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
+    // Mark cancel operation as running
+    c.state = .running;
+    state.active += 1;
 
-        const fd = getHandle(cancel.cancel_c);
-        try self.removeFromPollQueue(fd, cancel.cancel_c);
+    const cancel_data = c.cast(Cancel);
+    const target = cancel_data.cancel_c;
 
-        completion.setResult(.cancel, {});
-        cancel.cancel_c.setError(error.Canceled);
-        state.markCompleted(cancel.cancel_c);
-    }
+    // Try to remove from queue
+    const fd = getHandle(target);
+    self.removeFromPollQueue(fd, target) catch {
+        // Removal failed - target is still in queue with target.canceled set
+        // When target completes, markCompleted(target) will recursively complete cancel
+        log.err("Failed to remove completion from poll queue during cancel", .{});
+        return; // Do nothing, let target complete naturally
+    };
+
+    // Successfully removed - complete target with error.Canceled
+    // markCompleted(target) will recursively complete the cancel operation
+    target.setError(error.Canceled);
+    state.markCompleted(target);
 }
 
-pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
+pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
     const n = try net.poll(self.poll_fds.items, timeout);
@@ -245,83 +342,6 @@ pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     }
 
     return false; // Did not timeout, woke up due to events
-}
-
-pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running } {
-    switch (c.op) {
-        .timer, .async, .work => unreachable, // Manged by the loop
-        .cancel => return .running, // Cancel was marked by loop and waits until the target completes
-
-        // Synchronous operations - complete immediately
-        .net_open => {
-            common.handleNetOpen(c);
-            return .completed;
-        },
-        .net_bind => {
-            common.handleNetBind(c);
-            return .completed;
-        },
-        .net_listen => {
-            common.handleNetListen(c);
-            return .completed;
-        },
-        .net_close => {
-            common.handleNetClose(c);
-            return .completed;
-        },
-        .net_shutdown => {
-            common.handleNetShutdown(c);
-            return .completed;
-        },
-
-        // Potentially async operations - try first, register if WouldBlock
-        .net_connect => {
-            const data = c.cast(NetConnect);
-            if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
-                // Connected immediately (e.g., localhost)
-                c.setResult(.net_connect, {});
-                return .completed;
-            } else |err| switch (err) {
-                error.WouldBlock, error.ConnectionPending => {
-                    // Register for POLLOUT to detect when connection completes
-                    try self.addToPollQueue(data.handle, c);
-                    return .running;
-                },
-                else => {
-                    c.setError(err);
-                    return .completed;
-                },
-            }
-        },
-        .net_accept => {
-            const data = c.cast(NetAccept);
-            try self.addToPollQueue(data.handle, c);
-            return .running;
-        },
-        .net_recv => {
-            const data = c.cast(NetRecv);
-            try self.addToPollQueue(data.handle, c);
-            return .running;
-        },
-        .net_send => {
-            const data = c.cast(NetSend);
-            try self.addToPollQueue(data.handle, c);
-            return .running;
-        },
-        .net_recvfrom => {
-            const data = c.cast(NetRecvFrom);
-            try self.addToPollQueue(data.handle, c);
-            return .running;
-        },
-        .net_sendto => {
-            const data = c.cast(NetSendTo);
-            try self.addToPollQueue(data.handle, c);
-            return .running;
-        },
-
-        // File operations are handled by Loop via thread pool
-        .file_open, .file_close, .file_read, .file_write => unreachable,
-    }
 }
 
 const CheckResult = enum { completed, requeue };
