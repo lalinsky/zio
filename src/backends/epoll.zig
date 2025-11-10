@@ -54,6 +54,8 @@ poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 epoll_fd: i32 = -1,
 waker: Waker,
 events: []std.os.linux.epoll_event,
+queue_size: u16,
+pending_changes: usize = 0,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
@@ -68,6 +70,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
         .epoll_fd = epoll_fd,
         .waker = undefined,
         .events = undefined,
+        .queue_size = queue_size,
     };
 
     self.events = try allocator.alloc(std.os.linux.epoll_event, queue_size);
@@ -120,6 +123,14 @@ fn getPollType(op: OperationType) PollEntryType {
 /// Add a completion to the poll queue, merging with existing fd if present.
 /// If queuing fails, completes the completion with error.Unexpected.
 fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
+    // If at capacity, flush with non-blocking poll to drain completions
+    if (self.pending_changes >= self.queue_size) {
+        _ = self.poll(state, 0) catch {
+            log.err("Failed to do no-wait poll during addToPollQueue", .{});
+        };
+    }
+    self.pending_changes += 1;
+
     completion.prev = null;
     completion.next = null;
 
@@ -340,6 +351,9 @@ pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
 
 pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
+
+    // Reset pending changes counter before poll (less aggressive)
+    self.pending_changes = 0;
 
     const rc = std.os.linux.epoll_wait(self.epoll_fd, self.events.ptr, @intCast(self.events.len), timeout);
     const n: usize = switch (posix.errno(rc)) {

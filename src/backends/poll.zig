@@ -53,11 +53,14 @@ allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 poll_fds: std.ArrayList(net.pollfd) = .empty,
 waker: Waker,
+queue_size: u16,
+pending_changes: usize = 0,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
     self.* = .{
         .allocator = allocator,
         .waker = undefined,
+        .queue_size = queue_size,
     };
 
     try self.poll_fds.ensureTotalCapacity(self.allocator, queue_size);
@@ -107,6 +110,14 @@ fn getPollType(op: OperationType) PollEntryType {
 /// Add a completion to the poll queue, merging with existing fd if present.
 /// If queuing fails, completes the completion with error.Unexpected.
 fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
+    // If at capacity, flush with non-blocking poll to drain completions
+    if (self.pending_changes >= self.queue_size) {
+        _ = self.poll(state, 0) catch {
+            log.err("Failed to do no-wait poll during addToPollQueue", .{});
+        };
+    }
+    self.pending_changes += 1;
+
     completion.prev = null;
     completion.next = null;
 
@@ -295,7 +306,11 @@ pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
 pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
+    // Reset pending changes counter before poll (less aggressive)
+    self.pending_changes = 0;
+
     const n = try net.poll(self.poll_fds.items, timeout);
+
     if (n == 0) {
         return true; // Timed out
     }
