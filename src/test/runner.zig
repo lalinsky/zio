@@ -176,7 +176,11 @@ pub fn main() !void {
 
                 Printer.fmt("{s}\n", .{BORDER});
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
+                    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                        std.debug.dumpStackTrace(trace.*);
+                    } else {
+                        std.debug.dumpStackTrace(trace);
+                    }
                 }
                 if (env.fail_first) {
                     break;
