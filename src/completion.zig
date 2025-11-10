@@ -167,15 +167,15 @@ pub const Cancelable = error{Canceled};
 
 pub const Cancel = struct {
     c: Completion,
-    cancel_c: *Completion,
+    target: *Completion,
     result_private_do_not_touch: void = {},
 
     pub const Error = error{ AlreadyCanceled, AlreadyCompleted };
 
-    pub fn init(cancel_c: *Completion) Cancel {
+    pub fn init(target: *Completion) Cancel {
         return .{
             .c = .init(.cancel),
-            .cancel_c = cancel_c,
+            .target = target,
         };
     }
 };

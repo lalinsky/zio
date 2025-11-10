@@ -313,7 +313,7 @@ pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
     state.active += 1;
 
     const cancel_op = c.cast(Cancel);
-    const target = cancel_op.cancel_c;
+    const target = cancel_op.target;
 
     switch (target.state) {
         .new => {
@@ -324,7 +324,7 @@ pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
         .running => {
             // Target is executing in io_uring. Submit a cancel SQE.
             // This will generate TWO CQEs:
-            // 1. Cancel CQE (user_data=cancel_c, res=0 or -ENOENT)
+            // 1. Cancel CQE (user_data=target, res=0 or -ENOENT)
             // 2. Target CQE (user_data=target, res=-ECANCELED or success if cancel was too late)
             //
             // In tick(), we:

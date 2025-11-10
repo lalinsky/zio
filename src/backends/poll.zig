@@ -286,7 +286,7 @@ pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
     state.active += 1;
 
     const cancel_data = c.cast(Cancel);
-    const target = cancel_data.cancel_c;
+    const target = cancel_data.target;
 
     // Try to remove from queue
     const fd = getHandle(target);
