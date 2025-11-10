@@ -10,12 +10,14 @@ const NetListen = @import("completion.zig").NetListen;
 const NetAccept = @import("completion.zig").NetAccept;
 const NetConnect = @import("completion.zig").NetConnect;
 const NetRecv = @import("completion.zig").NetRecv;
-const socket = @import("os/posix/socket.zig");
+const net = @import("os/net.zig");
+const time = @import("os/time.zig");
 
 test {
     _ = @import("test/thread_pool.zig");
     _ = @import("test/stream_server.zig");
     _ = @import("test/dgram_server.zig");
+    _ = @import("test/fs.zig");
 }
 
 test "Loop: empty run(.no_wait)" {
@@ -118,13 +120,13 @@ test "Loop: socket create and bind" {
     const sock = try open.c.getResult(.net_open);
 
     // Bind to localhost
-    var addr = socket.sockaddr.in{
-        .family = socket.AF.INET,
+    var addr = net.sockaddr.in{
+        .family = net.AF.INET,
         .port = 0,
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
         .zero = [_]u8{0} ** 8,
     };
-    var addr_len: socket.socklen_t = @sizeOf(@TypeOf(addr));
+    var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var bind: NetBind = .init(sock, @ptrCast(&addr), &addr_len);
     loop.add(&bind.c);
     try loop.run(.until_done);
@@ -148,13 +150,13 @@ test "Loop: cancel net_accept" {
     try loop.run(.until_done);
     const server_sock = try server_open.c.getResult(.net_open);
 
-    var addr = socket.sockaddr.in{
-        .family = socket.AF.INET,
+    var addr = net.sockaddr.in{
+        .family = net.AF.INET,
         .port = 0,
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
         .zero = [_]u8{0} ** 8,
     };
-    var addr_len: socket.socklen_t = @sizeOf(@TypeOf(addr));
+    var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), &addr_len);
     loop.add(&server_bind.c);
     try loop.run(.until_done);
@@ -205,13 +207,13 @@ test "Loop: cancel net_recv" {
     try loop.run(.until_done);
     const server_sock = try server_open.c.getResult(.net_open);
 
-    var addr = socket.sockaddr.in{
-        .family = socket.AF.INET,
+    var addr = net.sockaddr.in{
+        .family = net.AF.INET,
         .port = 0,
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
         .zero = [_]u8{0} ** 8,
     };
-    var addr_len: socket.socklen_t = @sizeOf(@TypeOf(addr));
+    var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), &addr_len);
     loop.add(&server_bind.c);
     try loop.run(.until_done);
@@ -233,8 +235,8 @@ test "Loop: cancel net_recv" {
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
-    const connect_addr = socket.sockaddr.in{
-        .family = socket.AF.INET,
+    const connect_addr = net.sockaddr.in{
+        .family = net.AF.INET,
         .port = std.mem.nativeToBig(u16, port),
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
         .zero = [_]u8{0} ** 8,
@@ -248,7 +250,7 @@ test "Loop: cancel net_recv" {
 
     // Start recv (will block waiting for data)
     var recv_buf: [128]u8 = undefined;
-    var recv_iov = [_]socket.iovec{socket.iovecFromSlice(&recv_buf)};
+    var recv_iov = [_]net.iovec{net.iovecFromSlice(&recv_buf)};
     var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
 
@@ -303,7 +305,6 @@ test "Loop: async notification - same thread" {
 }
 
 test "Loop: async notification - cross-thread" {
-    const time = @import("time.zig");
     const Context = struct {
         async_handle: *Async,
     };

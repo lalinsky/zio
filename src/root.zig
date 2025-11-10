@@ -12,6 +12,7 @@ pub const system = @import("system.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = system.time;
-    _ = system.socket;
+    _ = system.net;
+    _ = system.fs;
     _ = system.posix;
 }

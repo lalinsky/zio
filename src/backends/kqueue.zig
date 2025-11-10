@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("../os/posix.zig");
-const socket = @import("../os/posix/socket.zig");
-const time = @import("../time.zig");
+const net = @import("../os/net.zig");
+const time = @import("../os/time.zig");
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
@@ -21,13 +21,15 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 
-pub const NetHandle = socket.fd_t;
+pub const NetHandle = net.fd_t;
+
+pub const supports_file_ops = false;
 
 pub const NetOpenError = error{
     Unexpected,
 };
 
-pub const NetShutdownHow = socket.ShutdownHow;
+pub const NetShutdownHow = net.ShutdownHow;
 pub const NetShutdownError = error{
     Unexpected,
 };
@@ -272,7 +274,7 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
         // Potentially async operations - try first, register if WouldBlock
         .net_connect => {
             const data = comp.cast(NetConnect);
-            if (socket.connect(data.handle, data.addr, data.addr_len)) |_| {
+            if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
                 // Connected immediately (e.g., localhost)
                 comp.setResult(.net_connect, {});
                 return .completed;
@@ -313,6 +315,9 @@ pub fn startCompletion(self: *Self, comp: *Completion) !enum { completed, runnin
             try self.queueRegister(data.handle, comp);
             return .running;
         },
+
+        // File operations are handled by Loop via thread pool
+        .file_open, .file_close, .file_read, .file_write => unreachable,
     }
 }
 
@@ -330,7 +335,7 @@ fn handleKqueueError(event: *const c.Kevent, comptime errnoToError: fn (i32) any
         }
     }
 
-    const sock_err = socket.getSockError(@intCast(event.ident)) catch return error.Unexpected;
+    const sock_err = net.getSockError(@intCast(event.ident)) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
     return errnoToError(sock_err);
 }
@@ -347,7 +352,7 @@ fn checkSpuriousWakeup(result: anytype) CheckResult {
 pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
     switch (comp.op) {
         .net_connect => {
-            if (handleKqueueError(event, socket.errnoToConnectError)) |err| {
+            if (handleKqueueError(event, net.errnoToConnectError)) |err| {
                 comp.setError(err);
             } else {
                 comp.setResult(.net_connect, {});
@@ -356,11 +361,11 @@ pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
         },
         .net_accept => {
             const data = comp.cast(NetAccept);
-            if (handleKqueueError(event, socket.errnoToAcceptError)) |err| {
+            if (handleKqueueError(event, net.errnoToAcceptError)) |err| {
                 comp.setError(err);
                 return .completed;
             }
-            if (socket.accept(data.handle, data.addr, data.addr_len, data.flags)) |handle| {
+            if (net.accept(data.handle, data.addr, data.addr_len, data.flags)) |handle| {
                 comp.setResult(.net_accept, handle);
                 return .completed;
             } else |err| switch (err) {
@@ -373,11 +378,11 @@ pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
         },
         .net_recv => {
             const data = comp.cast(NetRecv);
-            if (handleKqueueError(event, socket.errnoToRecvError)) |err| {
+            if (handleKqueueError(event, net.errnoToRecvError)) |err| {
                 comp.setError(err);
                 return .completed;
             }
-            if (socket.recv(data.handle, data.buffers, data.flags)) |n| {
+            if (net.recv(data.handle, data.buffers, data.flags)) |n| {
                 comp.setResult(.net_recv, n);
                 return .completed;
             } else |err| switch (err) {
@@ -390,11 +395,11 @@ pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
         },
         .net_send => {
             const data = comp.cast(NetSend);
-            if (handleKqueueError(event, socket.errnoToSendError)) |err| {
+            if (handleKqueueError(event, net.errnoToSendError)) |err| {
                 comp.setError(err);
                 return .completed;
             }
-            if (socket.send(data.handle, data.buffers, data.flags)) |n| {
+            if (net.send(data.handle, data.buffers, data.flags)) |n| {
                 comp.setResult(.net_send, n);
                 return .completed;
             } else |err| switch (err) {
@@ -407,11 +412,11 @@ pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
         },
         .net_recvfrom => {
             const data = comp.cast(NetRecvFrom);
-            if (handleKqueueError(event, socket.errnoToRecvError)) |err| {
+            if (handleKqueueError(event, net.errnoToRecvError)) |err| {
                 comp.setError(err);
                 return .completed;
             }
-            if (socket.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+            if (net.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
                 comp.setResult(.net_recvfrom, n);
                 return .completed;
             } else |err| switch (err) {
@@ -424,11 +429,11 @@ pub fn checkCompletion(comp: *Completion, event: *const c.Kevent) CheckResult {
         },
         .net_sendto => {
             const data = comp.cast(NetSendTo);
-            if (handleKqueueError(event, socket.errnoToSendError)) |err| {
+            if (handleKqueueError(event, net.errnoToSendError)) |err| {
                 comp.setError(err);
                 return .completed;
             }
-            if (socket.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+            if (net.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
                 comp.setResult(.net_sendto, n);
                 return .completed;
             } else |err| switch (err) {

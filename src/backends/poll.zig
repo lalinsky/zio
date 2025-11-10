@@ -1,7 +1,7 @@
 const std = @import("std");
 const posix = @import("../os/posix.zig");
-const socket = @import("../os/posix/socket.zig");
-const time = @import("../time.zig");
+const net = @import("../os/net.zig");
+const time = @import("../os/time.zig");
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
@@ -20,13 +20,15 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 
-pub const NetHandle = socket.fd_t;
+pub const NetHandle = net.fd_t;
+
+pub const supports_file_ops = false;
 
 pub const NetOpenError = error{
     Unexpected,
 };
 
-pub const NetShutdownHow = socket.ShutdownHow;
+pub const NetShutdownHow = net.ShutdownHow;
 pub const NetShutdownError = error{
     Unexpected,
 };
@@ -49,7 +51,7 @@ const log = std.log.scoped(.zio_poll);
 
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
-poll_fds: std.ArrayList(socket.pollfd) = .empty,
+poll_fds: std.ArrayList(net.pollfd) = .empty,
 waker: Waker,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator) !void {
@@ -72,14 +74,14 @@ pub fn wake(self: *Self) void {
     self.waker.notify();
 }
 
-fn getEvents(op: OperationType) @FieldType(socket.pollfd, "events") {
+fn getEvents(op: OperationType) @FieldType(net.pollfd, "events") {
     return switch (op) {
-        .net_connect => socket.POLL.OUT,
-        .net_accept => socket.POLL.IN,
-        .net_recv => socket.POLL.IN,
-        .net_send => socket.POLL.OUT,
-        .net_recvfrom => socket.POLL.IN,
-        .net_sendto => socket.POLL.OUT,
+        .net_connect => net.POLL.OUT,
+        .net_accept => net.POLL.IN,
+        .net_recv => net.POLL.IN,
+        .net_send => net.POLL.OUT,
+        .net_recvfrom => net.POLL.IN,
+        .net_sendto => net.POLL.OUT,
         else => unreachable,
     };
 }
@@ -149,7 +151,7 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
     }
 
     // Recalculate events from remaining completions
-    var new_events: @FieldType(socket.pollfd, "events") = 0;
+    var new_events: @FieldType(net.pollfd, "events") = 0;
     var iter: ?*Completion = entry.completions.head;
     while (iter) |c| : (iter = c.next) {
         new_events |= getEvents(c.op);
@@ -196,7 +198,7 @@ pub fn processCancellations(self: *Self, state: *LoopState, cancels: *Queue(Comp
 pub fn tick(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
 
-    const n = try socket.poll(self.poll_fds.items, timeout);
+    const n = try net.poll(self.poll_fds.items, timeout);
     if (n == 0) {
         return true; // Timed out
     }
@@ -275,7 +277,7 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
         // Potentially async operations - try first, register if WouldBlock
         .net_connect => {
             const data = c.cast(NetConnect);
-            if (socket.connect(data.handle, data.addr, data.addr_len)) |_| {
+            if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
                 // Connected immediately (e.g., localhost)
                 c.setResult(.net_connect, {});
                 return .completed;
@@ -316,17 +318,20 @@ pub fn startCompletion(self: *Self, c: *Completion) !enum { completed, running }
             try self.addToPollQueue(data.handle, c);
             return .running;
         },
+
+        // File operations are handled by Loop via thread pool
+        .file_open, .file_close, .file_read, .file_write => unreachable,
     }
 }
 
 const CheckResult = enum { completed, requeue };
 
-fn handlePollError(item: *const socket.pollfd, comptime errnoToError: fn (i32) anyerror) ?anyerror {
-    const has_error = (item.revents & socket.POLL.ERR) != 0;
-    const has_hup = (item.revents & socket.POLL.HUP) != 0;
+fn handlePollError(item: *const net.pollfd, comptime errnoToError: fn (i32) anyerror) ?anyerror {
+    const has_error = (item.revents & net.POLL.ERR) != 0;
+    const has_hup = (item.revents & net.POLL.HUP) != 0;
     if (!has_error and !has_hup) return null;
 
-    const sock_err = socket.getSockError(item.fd) catch return error.Unexpected;
+    const sock_err = net.getSockError(item.fd) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
     return errnoToError(sock_err);
 }
@@ -340,10 +345,10 @@ fn checkSpuriousWakeup(result: anytype) CheckResult {
     }
 }
 
-pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
+pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
     switch (c.op) {
         .net_connect => {
-            if (handlePollError(item, socket.errnoToConnectError)) |err| {
+            if (handlePollError(item, net.errnoToConnectError)) |err| {
                 c.setError(err);
             } else {
                 c.setResult(.net_connect, {});
@@ -352,11 +357,11 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_accept => {
             const data = c.cast(NetAccept);
-            if (handlePollError(item, socket.errnoToAcceptError)) |err| {
+            if (handlePollError(item, net.errnoToAcceptError)) |err| {
                 c.setError(err);
                 return .completed;
             }
-            if (socket.accept(data.handle, data.addr, data.addr_len, data.flags)) |handle| {
+            if (net.accept(data.handle, data.addr, data.addr_len, data.flags)) |handle| {
                 c.setResult(.net_accept, handle);
                 return .completed;
             } else |err| switch (err) {
@@ -369,11 +374,11 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_recv => {
             const data = c.cast(NetRecv);
-            if (handlePollError(item, socket.errnoToRecvError)) |err| {
+            if (handlePollError(item, net.errnoToRecvError)) |err| {
                 c.setError(err);
                 return .completed;
             }
-            if (socket.recv(data.handle, data.buffers, data.flags)) |n| {
+            if (net.recv(data.handle, data.buffers, data.flags)) |n| {
                 c.setResult(.net_recv, n);
                 return .completed;
             } else |err| switch (err) {
@@ -386,11 +391,11 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_send => {
             const data = c.cast(NetSend);
-            if (handlePollError(item, socket.errnoToSendError)) |err| {
+            if (handlePollError(item, net.errnoToSendError)) |err| {
                 c.setError(err);
                 return .completed;
             }
-            if (socket.send(data.handle, data.buffers, data.flags)) |n| {
+            if (net.send(data.handle, data.buffers, data.flags)) |n| {
                 c.setResult(.net_send, n);
                 return .completed;
             } else |err| switch (err) {
@@ -403,11 +408,11 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
-            if (handlePollError(item, socket.errnoToRecvError)) |err| {
+            if (handlePollError(item, net.errnoToRecvError)) |err| {
                 c.setError(err);
                 return .completed;
             }
-            if (socket.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+            if (net.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
                 c.setResult(.net_recvfrom, n);
                 return .completed;
             } else |err| switch (err) {
@@ -420,11 +425,11 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
-            if (handlePollError(item, socket.errnoToSendError)) |err| {
+            if (handlePollError(item, net.errnoToSendError)) |err| {
                 c.setError(err);
                 return .completed;
             }
-            if (socket.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+            if (net.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
                 c.setResult(.net_sendto, n);
                 return .completed;
             } else |err| switch (err) {
@@ -445,17 +450,17 @@ pub fn checkCompletion(c: *Completion, item: *const socket.pollfd) CheckResult {
 pub const Waker = struct {
     const builtin = @import("builtin");
 
-    read_fd: socket.fd_t = undefined,
-    write_fd: socket.fd_t = undefined,
+    read_fd: net.fd_t = undefined,
+    write_fd: net.fd_t = undefined,
     backend: *Self,
 
     pub fn init(self: *Waker, backend: *Self) !void {
-        socket.ensureWSAInitialized();
+        net.ensureWSAInitialized();
 
         switch (builtin.os.tag) {
             .windows => {
                 // Windows: use loopback socket pair
-                const pair = try socket.createLoopbackSocketPair();
+                const pair = try net.createLoopbackSocketPair();
                 self.* = .{
                     .read_fd = pair[0],
                     .write_fd = pair[1],
@@ -477,7 +482,7 @@ pub const Waker = struct {
         // Add read fd to poll_fds
         try backend.poll_fds.append(backend.allocator, .{
             .fd = self.read_fd,
-            .events = socket.POLL.IN,
+            .events = net.POLL.IN,
             .revents = 0,
         });
     }
@@ -491,8 +496,8 @@ pub const Waker = struct {
             }
         }
 
-        socket.close(self.read_fd);
-        socket.close(self.write_fd);
+        net.close(self.read_fd);
+        net.close(self.write_fd);
     }
 
     /// Notify the event loop (thread-safe)
@@ -500,7 +505,7 @@ pub const Waker = struct {
         const byte: [1]u8 = .{1};
         switch (builtin.os.tag) {
             .windows => {
-                _ = socket.send(self.write_fd, &[_]socket.iovec_const{socket.iovecConstFromSlice(&byte)}, .{}) catch |err| {
+                _ = net.send(self.write_fd, &[_]net.iovec_const{net.iovecConstFromSlice(&byte)}, .{}) catch |err| {
                     log.err("Failed to send to wakeup socket: {}", .{err});
                 };
             },
@@ -517,8 +522,8 @@ pub const Waker = struct {
         var buf: [64]u8 = undefined;
         switch (builtin.os.tag) {
             .windows => {
-                var bufs: [1]socket.iovec = .{socket.iovecFromSlice(&buf)};
-                _ = socket.recv(self.read_fd, &bufs, .{}) catch {};
+                var bufs: [1]net.iovec = .{net.iovecFromSlice(&buf)};
+                _ = net.recv(self.read_fd, &bufs, .{}) catch {};
             },
             else => {
                 _ = std.posix.read(self.read_fd, &buf) catch {};

@@ -12,10 +12,10 @@ const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 const NetClose = @import("../completion.zig").NetClose;
-const socket = @import("../os/posix/socket.zig");
-const time = @import("../time.zig");
+const net = @import("../os/net.zig");
+const time = @import("../os/time.zig");
 
-pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type {
+pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
     return struct {
         state: State = .init,
         loop: *Loop,
@@ -23,7 +23,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
         // Server socket
         server_sock: Backend.NetHandle = undefined,
         server_addr: sockaddr,
-        server_addr_len: socket.socklen_t,
+        server_addr_len: net.socklen_t,
 
         // Client socket
         client_sock: ?Backend.NetHandle = null,
@@ -42,8 +42,8 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
 
         // Buffer for echo
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]socket.iovec = undefined,
-        send_iov: [1]socket.iovec_const = undefined,
+        recv_iov: [1]net.iovec = undefined,
+        send_iov: [1]net.iovec_const = undefined,
         bytes_received: usize = 0,
         bytes_sent: usize = 0,
 
@@ -74,7 +74,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
             switch (domain) {
                 .ipv4 => {
                     self.server_addr = .{
-                        .family = socket.AF.INET,
+                        .family = net.AF.INET,
                         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
                         .port = 0,
                         .zero = [_]u8{0} ** 8,
@@ -82,7 +82,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
                 },
                 .ipv6 => {
                     self.server_addr = .{
-                        .family = socket.AF.INET6,
+                        .family = net.AF.INET6,
                         .addr = [_]u8{0} ** 15 ++ [_]u8{1},
                         .port = 0,
                         .flowinfo = 0,
@@ -91,7 +91,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
                 },
                 .unix => {
                     self.server_addr = .{
-                        .family = socket.AF.UNIX,
+                        .family = net.AF.UNIX,
                         .path = undefined,
                     };
                     const timestamp = time.now(.realtime);
@@ -104,7 +104,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
 
         pub fn start(self: *Self) void {
             self.state = .opening;
-            const protocol: socket.Protocol = if (domain == .unix) .default else .tcp;
+            const protocol: net.Protocol = if (domain == .unix) .default else .tcp;
             self.comp = .{ .open = NetOpen.init(domain, .stream, protocol) };
             self.comp.open.c.callback = openCallback;
             self.comp.open.c.userdata = self;
@@ -173,7 +173,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
             };
 
             self.state = .receiving;
-            self.recv_iov = [_]socket.iovec{socket.iovecFromSlice(&self.recv_buf)};
+            self.recv_iov = [_]net.iovec{net.iovecFromSlice(&self.recv_buf)};
             self.comp = .{ .recv = NetRecv.init(self.client_sock.?, &self.recv_iov, .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
@@ -202,7 +202,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
             self.state = .sending;
             self.bytes_sent = 0;
             const send_buf = self.recv_buf[0..self.bytes_received];
-            self.send_iov = [_]socket.iovec_const{socket.iovecConstFromSlice(send_buf)};
+            self.send_iov = [_]net.iovec_const{net.iovecConstFromSlice(send_buf)};
             self.comp = .{ .send = NetSend.init(self.client_sock.?, &self.send_iov, .{}) };
             self.comp.send.c.callback = sendCallback;
             self.comp.send.c.userdata = self;
@@ -224,7 +224,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
             if (self.bytes_sent < self.bytes_received) {
                 // Partial write - continue sending remaining data
                 const remaining = self.recv_buf[self.bytes_sent..self.bytes_received];
-                self.send_iov = [_]socket.iovec_const{socket.iovecConstFromSlice(remaining)};
+                self.send_iov = [_]net.iovec_const{net.iovecConstFromSlice(remaining)};
                 self.comp = .{ .send = NetSend.init(self.client_sock.?, &self.send_iov, .{}) };
                 self.comp.send.c.callback = sendCallback;
                 self.comp.send.c.userdata = self;
@@ -234,7 +234,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
 
             // Full message sent - go back to receiving to check for EOF or more data
             self.state = .receiving;
-            self.recv_iov = [_]socket.iovec{socket.iovecFromSlice(&self.recv_buf)};
+            self.recv_iov = [_]net.iovec{net.iovecFromSlice(&self.recv_buf)};
             self.comp = .{ .recv = NetRecv.init(self.client_sock.?, &self.recv_iov, .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
@@ -271,7 +271,7 @@ pub fn EchoServer(comptime domain: socket.Domain, comptime sockaddr: type) type 
     };
 }
 
-pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type {
+pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
     return struct {
         state: State = .init,
         loop: *Loop,
@@ -291,9 +291,9 @@ pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type 
 
         // Buffers
         send_buf: []const u8,
-        send_iov: [1]socket.iovec_const = undefined,
+        send_iov: [1]net.iovec_const = undefined,
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]socket.iovec = undefined,
+        recv_iov: [1]net.iovec = undefined,
         bytes_sent: usize = 0,
         bytes_received: usize = 0,
 
@@ -319,7 +319,7 @@ pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type 
                 .comp = undefined,
             };
 
-            const protocol: socket.Protocol = if (domain == .unix) .default else .tcp;
+            const protocol: net.Protocol = if (domain == .unix) .default else .tcp;
             self.comp = .{ .open = NetOpen.init(domain, .stream, protocol) };
 
             return self;
@@ -363,7 +363,7 @@ pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type 
 
             self.state = .sending;
             self.bytes_sent = 0;
-            self.send_iov = [_]socket.iovec_const{socket.iovecConstFromSlice(self.send_buf)};
+            self.send_iov = [_]net.iovec_const{net.iovecConstFromSlice(self.send_buf)};
             self.comp = .{ .send = NetSend.init(self.client_sock, &self.send_iov, .{}) };
             self.comp.send.c.callback = sendCallback;
             self.comp.send.c.userdata = self;
@@ -385,7 +385,7 @@ pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type 
             if (self.bytes_sent < self.send_buf.len) {
                 // Partial write - continue sending remaining data
                 const remaining = self.send_buf[self.bytes_sent..];
-                self.send_iov = [_]socket.iovec_const{socket.iovecConstFromSlice(remaining)};
+                self.send_iov = [_]net.iovec_const{net.iovecConstFromSlice(remaining)};
                 self.comp = .{ .send = NetSend.init(self.client_sock, &self.send_iov, .{}) };
                 self.comp.send.c.callback = sendCallback;
                 self.comp.send.c.userdata = self;
@@ -413,7 +413,7 @@ pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type 
             self.state = .receiving;
             self.bytes_received = 0;
             // Start reading into the beginning of recv_buf
-            self.recv_iov = [_]socket.iovec{socket.iovecFromSlice(&self.recv_buf)};
+            self.recv_iov = [_]net.iovec{net.iovecFromSlice(&self.recv_buf)};
             self.comp = .{ .recv = NetRecv.init(self.client_sock, &self.recv_iov, .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
@@ -445,7 +445,7 @@ pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type 
             // Continue reading - re-arm NetRecv to drain the full echo
             // Read into the buffer starting after what we've already received
             const remaining_buf = self.recv_buf[self.bytes_received..];
-            self.recv_iov = [_]socket.iovec{socket.iovecFromSlice(remaining_buf)};
+            self.recv_iov = [_]net.iovec{net.iovecFromSlice(remaining_buf)};
             self.comp = .{ .recv = NetRecv.init(self.client_sock, &self.recv_iov, .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
@@ -466,7 +466,7 @@ pub fn EchoClient(comptime domain: socket.Domain, comptime sockaddr: type) type 
     };
 }
 
-fn testEcho(comptime domain: socket.Domain, comptime sockaddr: type) !void {
+fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -514,14 +514,14 @@ fn testEcho(comptime domain: socket.Domain, comptime sockaddr: type) !void {
 }
 
 test "Echo server and client - IPv4 TCP" {
-    try testEcho(.ipv4, socket.sockaddr.in);
+    try testEcho(.ipv4, net.sockaddr.in);
 }
 
 test "Echo server and client - IPv6 TCP" {
-    try testEcho(.ipv6, socket.sockaddr.in6);
+    try testEcho(.ipv6, net.sockaddr.in6);
 }
 
 test "Echo server and client - Unix stream" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
-    try testEcho(.unix, socket.sockaddr.un);
+    try testEcho(.unix, net.sockaddr.un);
 }

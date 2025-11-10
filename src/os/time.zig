@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = @import("os/posix.zig");
+const posix = @import("posix.zig");
 
 pub const Clock = enum {
     monotonic,

@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = @import("../posix.zig");
-const time = @import("../../time.zig");
+const posix = @import("posix.zig");
+const time = @import("time.zig");
 
 const log = std.log.scoped(.zio_socket);
 
@@ -51,16 +51,8 @@ pub const socklen_t = if (builtin.os.tag == .windows) i32 else posix.system.sock
 pub const SOL = posix.system.SOL;
 pub const SO = posix.system.SO;
 
-// Vectored I/O types
-pub const iovec = switch (builtin.os.tag) {
-    .windows => std.os.windows.ws2_32.WSABUF,
-    else => std.posix.iovec,
-};
-
-pub const iovec_const = switch (builtin.os.tag) {
-    .windows => std.os.windows.ws2_32.WSABUF,
-    else => std.posix.iovec_const,
-};
+pub const iovec = @import("base.zig").iovec;
+pub const iovec_const = @import("base.zig").iovec_const;
 
 // Helper functions for single buffer conversion
 pub inline fn iovecFromSlice(buffer: []u8) iovec {

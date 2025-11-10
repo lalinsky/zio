@@ -8,9 +8,14 @@ const Async = @import("completion.zig").Async;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
+const FileOpen = @import("completion.zig").FileOpen;
+const FileClose = @import("completion.zig").FileClose;
+const FileRead = @import("completion.zig").FileRead;
+const FileWrite = @import("completion.zig").FileWrite;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
-const time = @import("time.zig");
-const socket = @import("os/posix/socket.zig");
+const time = @import("os/time.zig");
+const net = @import("os/net.zig");
+const common = @import("backends/common.zig");
 
 pub const RunMode = enum {
     no_wait,
@@ -132,11 +137,13 @@ pub const Loop = struct {
     state: LoopState,
     backend: Backend,
 
+    allocator: std.mem.Allocator,
     thread_pool: ?*ThreadPool = null,
 
     max_wait_ms: u64 = 60 * std.time.ms_per_s,
 
     pub const Options = struct {
+        allocator: std.mem.Allocator = std.heap.page_allocator,
         thread_pool: ?*ThreadPool = null,
     };
 
@@ -144,13 +151,14 @@ pub const Loop = struct {
         self.* = .{
             .state = .{ .loop = self },
             .backend = undefined,
+            .allocator = options.allocator,
             .thread_pool = options.thread_pool,
         };
 
-        socket.ensureWSAInitialized();
+        net.ensureWSAInitialized();
         self.state.updateNow();
 
-        try self.backend.init(std.heap.page_allocator);
+        try self.backend.init(options.allocator);
         errdefer self.backend.deinit();
 
         self.state.initialized = true;
@@ -286,6 +294,7 @@ pub const Loop = struct {
                         },
                         .work => {
                             const work = cancel.cancel_c.cast(Work);
+                            std.debug.assert(work.linked == null); // User Work should never have linked set
                             self.state.active += 1; // Count the cancel operation
 
                             if (self.thread_pool) |thread_pool| {
@@ -306,6 +315,36 @@ pub const Loop = struct {
                                 self.state.markCompleted(&cancel.c);
                             }
                             return;
+                        },
+                        .file_open, .file_close, .file_read, .file_write => {
+                            // File ops on backends without native support use internal Work
+                            if (!Backend.supports_file_ops) {
+                                self.state.active += 1; // Count the cancel operation
+
+                                const work = switch (cancel.cancel_c.op) {
+                                    .file_open => &cancel.cancel_c.cast(FileOpen).internal.work,
+                                    .file_close => &cancel.cancel_c.cast(FileClose).internal.work,
+                                    .file_read => &cancel.cancel_c.cast(FileRead).internal.work,
+                                    .file_write => &cancel.cancel_c.cast(FileWrite).internal.work,
+                                    else => unreachable,
+                                };
+
+                                if (self.thread_pool) |thread_pool| {
+                                    if (thread_pool.cancel(work)) {
+                                        // Successfully canceled the internal work
+                                        completion.setResult(.cancel, {});
+                                        cancel.cancel_c.setError(error.Canceled);
+                                        self.state.markCompleted(cancel.cancel_c);
+                                    }
+                                    // If cancel failed, work is running/completed and will complete normally
+                                } else {
+                                    // No thread pool - file op should already be completed with error.Unexpected
+                                    std.debug.assert(cancel.cancel_c.state == .completed);
+                                    completion.setError(error.AlreadyCompleted);
+                                    self.state.markCompleted(completion);
+                                }
+                                return;
+                            }
                         },
                         else => {},
                     }
@@ -353,6 +392,43 @@ pub const Loop = struct {
         }
     }
 
+    fn submitFileOpToThreadPool(self: *Loop, completion: *Completion) error{NoThreadPool}!void {
+        const tp = self.thread_pool orelse return error.NoThreadPool;
+
+        switch (completion.op) {
+            .file_open => {
+                const file_open = completion.cast(FileOpen);
+                file_open.internal.allocator = self.allocator;
+                file_open.internal.work = Work.init(common.fileOpenWork, null);
+                file_open.internal.work.loop = self;
+                file_open.internal.work.linked = completion;
+                tp.submit(&file_open.internal.work);
+            },
+            .file_close => {
+                const file_close = completion.cast(FileClose);
+                file_close.internal.work = Work.init(common.fileCloseWork, null);
+                file_close.internal.work.loop = self;
+                file_close.internal.work.linked = completion;
+                tp.submit(&file_close.internal.work);
+            },
+            .file_read => {
+                const file_read = completion.cast(FileRead);
+                file_read.internal.work = Work.init(common.fileReadWork, null);
+                file_read.internal.work.loop = self;
+                file_read.internal.work.linked = completion;
+                tp.submit(&file_read.internal.work);
+            },
+            .file_write => {
+                const file_write = completion.cast(FileWrite);
+                file_write.internal.work = Work.init(common.fileWriteWork, null);
+                file_write.internal.work.loop = self;
+                file_write.internal.work.linked = completion;
+                tp.submit(&file_write.internal.work);
+            },
+            else => unreachable,
+        }
+    }
+
     pub fn tick(self: *Loop, wait: bool) !void {
         if (self.done()) return;
 
@@ -389,6 +465,26 @@ pub const Loop = struct {
                 cancels.push(completion);
                 continue;
             }
+
+            // For backends without native file ops support, route to thread pool
+            if (!Backend.supports_file_ops) {
+                const is_file_op = switch (completion.op) {
+                    .file_open, .file_close, .file_read, .file_write => true,
+                    else => false,
+                };
+
+                if (is_file_op) {
+                    self.submitFileOpToThreadPool(completion) catch {
+                        // No thread pool configured
+                        completion.setError(error.Unexpected);
+                        self.state.markCompleted(completion);
+                        continue;
+                    };
+                    self.state.markRunning(completion);
+                    continue;
+                }
+            }
+
             // Regular submissions
             submissions.push(completion);
         }

@@ -199,7 +199,9 @@ pub const ThreadPool = struct {
             }
 
             // Notify the event loop
-            loop.state.work_completions.push(c);
+            // If this work has a linked completion, push that instead
+            const completion_to_push = work.linked orelse c;
+            loop.state.work_completions.push(completion_to_push);
             loop.wake();
         }
         return true;
