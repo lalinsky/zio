@@ -1,18 +1,15 @@
 const std = @import("std");
-const ThreadPool = @import("../thread_pool.zig").ThreadPool;
-const Completion = @import("../completion.zig").Completion;
-const Work = @import("../completion.zig").Work;
-const Loop = @import("../loop.zig").Loop;
+const aio = @import("../root.zig");
 
-test "ThreadPool: one task" {
-    var thread_pool: ThreadPool = undefined;
+test "aio.ThreadPool: one task" {
+    var thread_pool: aio.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
         .max_threads = 1,
     });
     defer thread_pool.deinit();
 
-    var loop: Loop = undefined;
+    var loop: aio.Loop = undefined;
     try loop.init(.{
         .thread_pool = &thread_pool,
     });
@@ -20,14 +17,14 @@ test "ThreadPool: one task" {
 
     const TestFn = struct {
         called: usize = 0,
-        pub fn main(_: *Loop, work: *Work) void {
+        pub fn main(_: *aio.Loop, work: *aio.Work) void {
             var self: *@This() = @ptrCast(@alignCast(work.userdata));
             self.called += 1;
         }
     };
 
     var test_fn: TestFn = .{};
-    var work = Work.init(&TestFn.main, @ptrCast(&test_fn));
+    var work = aio.Work.init(&TestFn.main, @ptrCast(&test_fn));
 
     loop.add(&work.c);
 
@@ -37,15 +34,15 @@ test "ThreadPool: one task" {
     try std.testing.expectEqual(1, test_fn.called);
 }
 
-test "ThreadPool: many tasks" {
-    var thread_pool: ThreadPool = undefined;
+test "aio.ThreadPool: many tasks" {
+    var thread_pool: aio.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
         .max_threads = 10,
     });
     defer thread_pool.deinit();
 
-    var loop: Loop = undefined;
+    var loop: aio.Loop = undefined;
     try loop.init(.{
         .thread_pool = &thread_pool,
     });
@@ -53,7 +50,7 @@ test "ThreadPool: many tasks" {
 
     const TestFn = struct {
         called: usize = 0,
-        pub fn main(_: *Loop, work: *Work) void {
+        pub fn main(_: *aio.Loop, work: *aio.Work) void {
             var self: *@This() = @ptrCast(@alignCast(work.userdata));
             self.called += 1;
         }
@@ -62,11 +59,11 @@ test "ThreadPool: many tasks" {
     const num_tasks = 1000;
 
     var test_fn: [num_tasks]TestFn = undefined;
-    var work: [num_tasks]Work = undefined;
+    var work: [num_tasks]aio.Work = undefined;
 
     for (0..num_tasks) |i| {
         test_fn[i] = .{};
-        work[i] = Work.init(&TestFn.main, @ptrCast(&test_fn[i]));
+        work[i] = aio.Work.init(&TestFn.main, @ptrCast(&test_fn[i]));
         loop.add(&work[i].c);
     }
 

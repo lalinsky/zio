@@ -1,9 +1,11 @@
 const std = @import("std");
 
 pub const backend = @import("backend.zig").backend;
+pub const Backend = @import("backend.zig").Backend;
 
 pub const Loop = @import("loop.zig").Loop;
 pub const RunMode = @import("loop.zig").RunMode;
+pub const ThreadPool = @import("thread_pool.zig").ThreadPool;
 
 const completion = @import("completion.zig");
 pub const Completion = completion.Completion;

@@ -1,23 +1,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const Loop = @import("../loop.zig").Loop;
-const Backend = @import("../backend.zig").Backend;
-const Completion = @import("../completion.zig").Completion;
-const NetOpen = @import("../completion.zig").NetOpen;
-const NetBind = @import("../completion.zig").NetBind;
-const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
-const NetSendTo = @import("../completion.zig").NetSendTo;
-const NetClose = @import("../completion.zig").NetClose;
-const net = @import("../os/net.zig");
-const time = @import("../os/time.zig");
+const aio = @import("../root.zig");
+const net = aio.system.net;
+const time = aio.system.time;
 
 pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
     return struct {
         state: State = .init,
-        loop: *Loop,
+        loop: *aio.Loop,
 
         // Server socket
-        server_sock: Backend.NetHandle = undefined,
+        server_sock: aio.Backend.NetHandle = undefined,
         server_addr: sockaddr,
         server_addr_len: net.socklen_t,
 
@@ -27,11 +20,11 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         // Union of completions - only one active at a time
         comp: union {
-            open: NetOpen,
-            bind: NetBind,
-            recvfrom: NetRecvFrom,
-            sendto: NetSendTo,
-            close: NetClose,
+            open: aio.NetOpen,
+            bind: aio.NetBind,
+            recvfrom: aio.NetRecvFrom,
+            sendto: aio.NetSendTo,
+            close: aio.NetClose,
         },
 
         // Buffer for echo
@@ -53,7 +46,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         const Self = @This();
 
-        pub fn init(loop: *Loop) Self {
+        pub fn init(loop: *aio.Loop) Self {
             var self: Self = .{
                 .loop = loop,
                 .server_addr = undefined,
@@ -95,13 +88,13 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
         pub fn start(self: *Self) void {
             self.state = .opening;
             const protocol: net.Protocol = if (domain == .unix) .default else .udp;
-            self.comp = .{ .open = NetOpen.init(domain, .dgram, protocol) };
+            self.comp = .{ .open = aio.NetOpen.init(domain, .dgram, protocol) };
             self.comp.open.c.callback = openCallback;
             self.comp.open.c.userdata = self;
             self.loop.add(&self.comp.open.c);
         }
 
-        fn openCallback(loop: *Loop, c: *Completion) void {
+        fn openCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.server_sock = self.comp.open.c.getResult(.net_open) catch {
@@ -111,7 +104,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             };
 
             self.state = .binding;
-            self.comp = .{ .bind = NetBind.init(
+            self.comp = .{ .bind = aio.NetBind.init(
                 self.server_sock,
                 @ptrCast(&self.server_addr),
                 &self.server_addr_len,
@@ -121,7 +114,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             loop.add(&self.comp.bind.c);
         }
 
-        fn bindCallback(loop: *Loop, c: *Completion) void {
+        fn bindCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.comp.bind.c.getResult(.net_bind) catch {
@@ -134,13 +127,13 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             self.state = .receiving;
             self.recv_iov = [_]net.iovec{net.iovecFromSlice(&self.recv_buf)};
             self.client_addr_len = @sizeOf(sockaddr);
-            self.comp = .{ .recvfrom = NetRecvFrom.init(self.server_sock, &self.recv_iov, .{}, @ptrCast(&self.client_addr), &self.client_addr_len) };
+            self.comp = .{ .recvfrom = aio.NetRecvFrom.init(self.server_sock, &self.recv_iov, .{}, @ptrCast(&self.client_addr), &self.client_addr_len) };
             self.comp.recvfrom.c.callback = recvCallback;
             self.comp.recvfrom.c.userdata = self;
             loop.add(&self.comp.recvfrom.c);
         }
 
-        fn recvCallback(loop: *Loop, c: *Completion) void {
+        fn recvCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.bytes_received = self.comp.recvfrom.getResult() catch {
@@ -153,13 +146,13 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             self.state = .sending;
             const send_buf = self.recv_buf[0..self.bytes_received];
             self.send_iov = [_]net.iovec_const{net.iovecConstFromSlice(send_buf)};
-            self.comp = .{ .sendto = NetSendTo.init(self.server_sock, &self.send_iov, .{}, @ptrCast(&self.client_addr), self.client_addr_len) };
+            self.comp = .{ .sendto = aio.NetSendTo.init(self.server_sock, &self.send_iov, .{}, @ptrCast(&self.client_addr), self.client_addr_len) };
             self.comp.sendto.c.callback = sendCallback;
             self.comp.sendto.c.userdata = self;
             loop.add(&self.comp.sendto.c);
         }
 
-        fn sendCallback(loop: *Loop, c: *Completion) void {
+        fn sendCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             _ = self.comp.sendto.getResult() catch {
@@ -170,13 +163,13 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
             // Close server socket
             self.state = .closing;
-            self.comp = .{ .close = NetClose.init(self.server_sock) };
+            self.comp = .{ .close = aio.NetClose.init(self.server_sock) };
             self.comp.close.c.callback = closeCallback;
             self.comp.close.c.userdata = self;
             loop.add(&self.comp.close.c);
         }
 
-        fn closeCallback(loop: *Loop, c: *Completion) void {
+        fn closeCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.comp.close.c.getResult(.net_close) catch {
@@ -193,20 +186,20 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
     return struct {
         state: State = .init,
-        loop: *Loop,
+        loop: *aio.Loop,
 
-        client_sock: Backend.NetHandle = undefined,
+        client_sock: aio.Backend.NetHandle = undefined,
         client_addr: sockaddr = undefined,
         client_addr_len: net.socklen_t = undefined,
         server_addr: sockaddr,
 
         // Union of completions - only one active at a time
         comp: union {
-            open: NetOpen,
-            bind: NetBind,
-            sendto: NetSendTo,
-            recvfrom: NetRecvFrom,
-            close: NetClose,
+            open: aio.NetOpen,
+            bind: aio.NetBind,
+            sendto: aio.NetSendTo,
+            recvfrom: aio.NetRecvFrom,
+            close: aio.NetClose,
         },
 
         // Buffers
@@ -231,7 +224,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         const Self = @This();
 
-        pub fn init(loop: *Loop, server_addr: sockaddr, message: []const u8) Self {
+        pub fn init(loop: *aio.Loop, server_addr: sockaddr, message: []const u8) Self {
             var self: Self = .{
                 .loop = loop,
                 .server_addr = server_addr,
@@ -251,7 +244,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             }
 
             const protocol: net.Protocol = if (domain == .unix) .default else .udp;
-            self.comp = .{ .open = NetOpen.init(domain, .dgram, protocol) };
+            self.comp = .{ .open = aio.NetOpen.init(domain, .dgram, protocol) };
 
             return self;
         }
@@ -263,7 +256,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             self.loop.add(&self.comp.open.c);
         }
 
-        fn openCallback(loop: *Loop, c: *Completion) void {
+        fn openCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.client_sock = self.comp.open.c.getResult(.net_open) catch {
@@ -275,7 +268,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             // For Unix domain sockets, bind client to a path
             if (domain == .unix) {
                 self.state = .binding;
-                self.comp = .{ .bind = NetBind.init(
+                self.comp = .{ .bind = aio.NetBind.init(
                     self.client_sock,
                     @ptrCast(&self.client_addr),
                     &self.client_addr_len,
@@ -287,14 +280,14 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
                 // Start send directly for IP sockets
                 self.state = .sending;
                 self.send_iov = [_]net.iovec_const{net.iovecConstFromSlice(self.send_buf)};
-                self.comp = .{ .sendto = NetSendTo.init(self.client_sock, &self.send_iov, .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
+                self.comp = .{ .sendto = aio.NetSendTo.init(self.client_sock, &self.send_iov, .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
                 self.comp.sendto.c.callback = sendCallback;
                 self.comp.sendto.c.userdata = self;
                 loop.add(&self.comp.sendto.c);
             }
         }
 
-        fn bindCallback(loop: *Loop, c: *Completion) void {
+        fn bindCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.comp.bind.c.getResult(.net_bind) catch {
@@ -306,13 +299,13 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             // Start send
             self.state = .sending;
             self.send_iov = [_]net.iovec_const{net.iovecConstFromSlice(self.send_buf)};
-            self.comp = .{ .sendto = NetSendTo.init(self.client_sock, &self.send_iov, .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
+            self.comp = .{ .sendto = aio.NetSendTo.init(self.client_sock, &self.send_iov, .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
             self.comp.sendto.c.callback = sendCallback;
             self.comp.sendto.c.userdata = self;
             loop.add(&self.comp.sendto.c);
         }
 
-        fn sendCallback(loop: *Loop, c: *Completion) void {
+        fn sendCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             _ = self.comp.sendto.getResult() catch {
@@ -325,13 +318,13 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             self.state = .receiving;
             self.recv_iov = [_]net.iovec{net.iovecFromSlice(&self.recv_buf)};
             self.recv_addr_len = @sizeOf(sockaddr);
-            self.comp = .{ .recvfrom = NetRecvFrom.init(self.client_sock, &self.recv_iov, .{}, @ptrCast(&self.recv_addr), &self.recv_addr_len) };
+            self.comp = .{ .recvfrom = aio.NetRecvFrom.init(self.client_sock, &self.recv_iov, .{}, @ptrCast(&self.recv_addr), &self.recv_addr_len) };
             self.comp.recvfrom.c.callback = recvCallback;
             self.comp.recvfrom.c.userdata = self;
             loop.add(&self.comp.recvfrom.c);
         }
 
-        fn recvCallback(loop: *Loop, c: *Completion) void {
+        fn recvCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.bytes_received = self.comp.recvfrom.getResult() catch {
@@ -342,13 +335,13 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
             // Close socket
             self.state = .closing;
-            self.comp = .{ .close = NetClose.init(self.client_sock) };
+            self.comp = .{ .close = aio.NetClose.init(self.client_sock) };
             self.comp.close.c.callback = closeCallback;
             self.comp.close.c.userdata = self;
             loop.add(&self.comp.close.c);
         }
 
-        fn closeCallback(loop: *Loop, c: *Completion) void {
+        fn closeCallback(loop: *aio.Loop, c: *aio.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
             self.comp.close.c.getResult(.net_close) catch {
@@ -363,7 +356,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 }
 
 fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
-    var loop: Loop = undefined;
+    var loop: aio.Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
 

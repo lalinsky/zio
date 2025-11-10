@@ -1,23 +1,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const backend = @import("../backend.zig").backend;
-const Loop = @import("../loop.zig").Loop;
-const ThreadPool = @import("../thread_pool.zig").ThreadPool;
-const FileOpen = @import("../completion.zig").FileOpen;
-const FileClose = @import("../completion.zig").FileClose;
+const aio = @import("../root.zig");
 
 test "File: open/close" {
-    var thread_pool: ThreadPool = undefined;
+    var thread_pool: aio.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
     defer thread_pool.deinit();
 
-    var loop: Loop = undefined;
+    var loop: aio.Loop = undefined;
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
     const cwd = std.fs.cwd();
 
-    var file_open = FileOpen.init(cwd.fd, "test-file", 0o664, .{ .create = true, .truncate = true });
+    var file_open = aio.FileOpen.init(cwd.fd, "test-file", 0o664, .{ .create = true, .truncate = true });
     loop.add(&file_open.c);
 
     try loop.run(.until_done);
@@ -32,7 +28,7 @@ test "File: open/close" {
         try std.testing.expect(fd > 0);
     }
 
-    var file_close = FileClose.init(fd);
+    var file_close = aio.FileClose.init(fd);
     loop.add(&file_close.c);
 
     try loop.run(.until_done);
