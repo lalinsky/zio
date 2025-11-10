@@ -398,14 +398,14 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
 const CheckResult = enum { completed, requeue };
 
-fn handleEpollError(event: *const std.os.linux.epoll_event, comptime errnoToError: fn (i32) anyerror) ?anyerror {
+fn handleEpollError(event: *const std.os.linux.epoll_event, comptime errnoToError: fn (net.E) anyerror) ?anyerror {
     const has_error = (event.events & std.os.linux.EPOLL.ERR) != 0;
     const has_hup = (event.events & std.os.linux.EPOLL.HUP) != 0;
     if (!has_error and !has_hup) return null;
 
     const sock_err = net.getSockError(event.data.fd) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
-    return errnoToError(sock_err);
+    return errnoToError(@enumFromInt(sock_err));
 }
 
 pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) CheckResult {

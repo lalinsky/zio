@@ -54,42 +54,11 @@ const Self = @This();
 
 const log = std.log.scoped(.zio_uring);
 
-// DESIGN NOTES:
-//
-// io_uring is fundamentally different from epoll/kqueue/poll:
-// - It's completion-based, not readiness-based
-// - We submit the actual operations (connect, recv, send) to the kernel
-// - The kernel completes them and posts results in the completion queue
-// - No need for "try first, register if EAGAIN" pattern
-// - No need for tracking hashmaps - we use CQE.user_data to store completion pointers
-//
-// Ubuntu 22.04 ships with kernel 5.15, which has these io_uring operations:
-// ✅ IORING_OP_CONNECT (5.5)
-// ✅ IORING_OP_ACCEPT (5.5)
-// ✅ IORING_OP_RECV (5.6)
-// ✅ IORING_OP_SEND (5.6)
-// ✅ IORING_OP_RECVMSG (5.3)
-// ✅ IORING_OP_SENDMSG (5.3)
-// ✅ IORING_OP_SHUTDOWN (5.11)
-// ✅ IORING_OP_CLOSE (5.6)
-// ✅ IORING_OP_ASYNC_CANCEL (5.5)
-// ❌ IORING_OP_SOCKET (5.19 - not available)
-// ❌ IORING_OP_BIND (doesn't exist)
-// ❌ IORING_OP_LISTEN (doesn't exist)
-//
-// For socket/bind/listen, we'll use direct syscalls since:
-// 1. They're not available in io_uring on kernel 5.15
-// 2. They always complete synchronously anyway
-// 3. This matches the existing backend pattern
-
 allocator: std.mem.Allocator,
 ring: linux.IoUring,
 waker: Waker,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
-    // Initialize io_uring with specified queue size
-    // The kernel will round up to next power of 2
-
     var flags: u32 = 0;
     flags |= linux.IORING_SETUP_SINGLE_ISSUER;
     flags |= linux.IORING_SETUP_DEFER_TASKRUN;
@@ -104,7 +73,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
         .waker = undefined,
     };
 
-    // Initialize async notification mechanism
     try self.waker.init(&self.ring);
 }
 
@@ -176,7 +144,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_recv => {
             const data = c.cast(NetRecv);
-            // Store msghdr in completion internal data so it remains valid
             data.internal.msg = .{
                 .name = null,
                 .namelen = 0,
@@ -197,7 +164,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_send => {
             const data = c.cast(NetSend);
-            // Store msghdr in completion internal data so it remains valid
             data.internal.msg = .{
                 .name = null,
                 .namelen = 0,
@@ -218,7 +184,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
-            // Store msghdr in completion internal data so it remains valid
             data.internal.msg = .{
                 .name = @ptrCast(data.addr),
                 .namelen = if (data.addr_len) |len| len.* else 0,
@@ -239,7 +204,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
-            // Store msghdr in completion internal data so it remains valid
             data.internal.msg = .{
                 .name = @ptrCast(data.addr),
                 .namelen = data.addr_len,
@@ -481,9 +445,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 }
 
 fn storeResult(self: *Self, c: *Completion, res: i32) void {
-    // ECANCELED (125) is returned by io_uring when an operation is canceled
-    const ECANCELED = 125;
-
     switch (c.op) {
         .timer, .async, .work, .cancel => unreachable,
         .net_open => unreachable,
@@ -492,55 +453,35 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
 
         .net_connect => {
             if (res < 0) {
-                if (-res == ECANCELED) {
-                    c.setError(error.Canceled);
-                } else {
-                    c.setError(net.errnoToConnectError(-res));
-                }
+                c.setError(net.errnoToConnectError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_connect, {});
             }
         },
         .net_accept => {
             if (res < 0) {
-                if (-res == ECANCELED) {
-                    c.setError(error.Canceled);
-                } else {
-                    c.setError(net.errnoToAcceptError(-res));
-                }
+                c.setError(net.errnoToAcceptError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_accept, @as(net.fd_t, @intCast(res)));
             }
         },
         .net_recv => {
             if (res < 0) {
-                if (-res == ECANCELED) {
-                    c.setError(error.Canceled);
-                } else {
-                    c.setError(net.errnoToRecvError(-res));
-                }
+                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_recv, @as(usize, @intCast(res)));
             }
         },
         .net_send => {
             if (res < 0) {
-                if (-res == ECANCELED) {
-                    c.setError(error.Canceled);
-                } else {
-                    c.setError(net.errnoToSendError(-res));
-                }
+                c.setError(net.errnoToSendError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_send, @as(usize, @intCast(res)));
             }
         },
         .net_recvfrom => {
             if (res < 0) {
-                if (-res == ECANCELED) {
-                    c.setError(error.Canceled);
-                } else {
-                    c.setError(net.errnoToRecvError(-res));
-                }
+                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_recvfrom, @as(usize, @intCast(res)));
                 // Propagate the peer address length filled in by the kernel
@@ -552,22 +493,14 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
         },
         .net_sendto => {
             if (res < 0) {
-                if (-res == ECANCELED) {
-                    c.setError(error.Canceled);
-                } else {
-                    c.setError(net.errnoToSendError(-res));
-                }
+                c.setError(net.errnoToSendError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_sendto, @as(usize, @intCast(res)));
             }
         },
         .net_shutdown => {
             if (res < 0) {
-                if (-res == ECANCELED) {
-                    c.setError(error.Canceled);
-                } else {
-                    c.setError(errnoToShutdownError(-res));
-                }
+                c.setError(net.errnoToShutdownError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_shutdown, {});
             }
@@ -612,15 +545,6 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             }
         },
     }
-}
-
-fn errnoToShutdownError(err: i32) net.ShutdownError {
-    const errno_val: linux.E = @enumFromInt(err);
-    return switch (errno_val) {
-        .NOTCONN => error.NotConnected,
-        .NOTSOCK => error.NotSocket,
-        else => posix_os.unexpectedErrno(errno_val) catch error.Unexpected,
-    };
 }
 
 fn recvFlagsToMsg(flags: net.RecvFlags) u32 {

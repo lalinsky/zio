@@ -276,6 +276,7 @@ pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
         .EXIST => error.PathAlreadyExists,
         .BUSY => error.DeviceBusy,
         .TXTBSY => error.FileBusy,
+        .CANCELED => error.Canceled,
         else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
     };
 }

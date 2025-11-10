@@ -361,14 +361,14 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
 const CheckResult = enum { completed, requeue };
 
-fn handlePollError(item: *const net.pollfd, comptime errnoToError: fn (i32) anyerror) ?anyerror {
+fn handlePollError(item: *const net.pollfd, comptime errnoToError: fn (net.E) anyerror) ?anyerror {
     const has_error = (item.revents & net.POLL.ERR) != 0;
     const has_hup = (item.revents & net.POLL.HUP) != 0;
     if (!has_error and !has_hup) return null;
 
     const sock_err = net.getSockError(item.fd) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
-    return errnoToError(sock_err);
+    return errnoToError(@enumFromInt(sock_err));
 }
 
 fn checkSpuriousWakeup(result: anytype) CheckResult {

@@ -339,7 +339,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
 const CheckResult = enum { completed, requeue };
 
-fn handleKqueueError(event: *const std.c.Kevent, comptime errnoToError: fn (i32) anyerror) ?anyerror {
+fn handleKqueueError(event: *const std.c.Kevent, comptime errnoToError: fn (net.E) anyerror) ?anyerror {
     const has_error = (event.flags & EV_ERROR) != 0;
     const has_eof = (event.flags & EV_EOF) != 0;
     if (!has_error and !has_eof) return null;
@@ -347,13 +347,13 @@ fn handleKqueueError(event: *const std.c.Kevent, comptime errnoToError: fn (i32)
     if (has_error) {
         // event.data contains the errno when EV_ERROR is set
         if (event.data != 0) {
-            return errnoToError(@intCast(event.data));
+            return errnoToError(@enumFromInt(@as(i32, @intCast(event.data))));
         }
     }
 
     const sock_err = net.getSockError(@intCast(event.ident)) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
-    return errnoToError(sock_err);
+    return errnoToError(@enumFromInt(sock_err));
 }
 
 pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResult {
