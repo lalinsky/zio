@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("xev");
+
 const StreamReader = @import("../stream.zig").StreamReader;
 const StreamWriter = @import("../stream.zig").StreamWriter;
 const Runtime = @import("../runtime.zig").Runtime;

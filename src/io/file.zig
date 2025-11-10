@@ -3,12 +3,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("xev");
+
+const aio = @import("aio");
 const StreamReader = @import("../stream.zig").StreamReader;
 const StreamWriter = @import("../stream.zig").StreamWriter;
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
-const runIo = @import("base.zig").runIo;
+const waitForIo = @import("base.zig").waitForIo;
+const genericCallback = @import("base.zig").genericCallback;
 
 const Handle = std.fs.File.Handle;
 
@@ -32,29 +34,35 @@ pub const File = struct {
     }
 
     pub fn read(self: *File, rt: *Runtime, buffer: []u8) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pread = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = buffer },
-                .offset = self.position,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_read = try runIo(rt, &completion, "pread");
+        var read_buf = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buffer)};
+        var op = aio.FileRead.init(self.fd, &read_buf, self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_read = try op.getResult();
         self.position += bytes_read;
         return bytes_read;
     }
 
     pub fn write(self: *File, rt: *Runtime, data: []const u8) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pwrite = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = data },
-                .offset = self.position,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_written = try runIo(rt, &completion, "pwrite");
+        var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(data)};
+        var op = aio.FileWrite.init(self.fd, &write_buf, self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_written = try op.getResult();
         self.position += bytes_written;
         return bytes_written;
     }
@@ -84,82 +92,93 @@ pub const File = struct {
     }
 
     pub fn pread(self: *File, rt: *Runtime, buffer: []u8, offset: u64) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pread = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = buffer },
-                .offset = offset,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        return runIo(rt, &completion, "pread");
+        var read_buf = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buffer)};
+        var op = aio.FileRead.init(self.fd, &read_buf, offset);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
     }
 
     pub fn pwrite(self: *File, rt: *Runtime, data: []const u8, offset: u64) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pwrite = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = data },
-                .offset = offset,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        return runIo(rt, &completion, "pwrite");
+        var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(data)};
+        var op = aio.FileWrite.init(self.fd, &write_buf, offset);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
     }
 
-    /// Low-level read function that accepts xev.ReadBuffer directly.
+    /// Low-level read function that accepts aio.ReadBuf slice directly.
     /// Returns std.Io.Reader compatible errors.
-    pub fn readBuf(self: *File, rt: *Runtime, buffer: *xev.ReadBuffer) (Cancelable || std.Io.Reader.Error)!usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pread = .{
-                .fd = self.fd,
-                .buffer = buffer.*,
-                .offset = self.position,
-            },
-        } };
+    pub fn readBuf(self: *File, rt: *Runtime, buffers: []aio.ReadBuf) (Cancelable || std.Io.Reader.Error)!usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_read = runIo(rt, &completion, "pread") catch |err| switch (err) {
-            error.EOF => return error.EndOfStream,
-            else => return error.ReadFailed,
+        var op = aio.FileRead.init(self.fd, buffers, self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        waitForIo(rt, &op.c) catch |err| switch (err) {
+            error.Canceled => return error.ReadFailed,
         };
 
-        // Copy array data back to caller's buffer if needed
-        if (buffer.* == .array) {
-            buffer.array = completion.op.pread.buffer.array;
-        }
+        const bytes_read = op.getResult() catch return error.ReadFailed;
+
+        // EOF is indicated by 0 bytes read
+        if (bytes_read == 0) return error.EndOfStream;
 
         self.position += bytes_read;
         return bytes_read;
     }
 
-    /// Low-level write function that accepts xev.WriteBuffer directly.
+    /// Low-level write function that accepts aio.WriteBuf slice directly.
     /// Returns std.Io.Writer compatible errors.
-    pub fn writeBuf(self: *File, rt: *Runtime, buffer: xev.WriteBuffer) (Cancelable || std.Io.Writer.Error)!usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pwrite = .{
-                .fd = self.fd,
-                .buffer = buffer,
-                .offset = self.position,
-            },
-        } };
+    pub fn writeBuf(self: *File, rt: *Runtime, buffers: []const aio.WriteBuf) (Cancelable || std.Io.Writer.Error)!usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_written = runIo(rt, &completion, "pwrite") catch return error.WriteFailed;
+        var op = aio.FileWrite.init(self.fd, buffers, self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_written = op.getResult() catch return error.WriteFailed;
         self.position += bytes_written;
         return bytes_written;
     }
 
     pub fn close(self: *File, rt: *Runtime) void {
-        var completion: xev.Completion = .{ .op = .{
-            .close = .{
-                .fd = self.fd,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
+
+        var op = aio.FileClose.init(self.fd);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
 
         rt.beginShield();
         defer rt.endShield();
 
+        executor.loop.add(&op.c);
+        waitForIo(rt, &op.c) catch {};
+
         // Ignore close errors, following Zig std lib pattern
-        runIo(rt, &completion, "close") catch {};
+        _ = op.getResult() catch {};
     }
 
     // Zig 0.15+ streaming interface

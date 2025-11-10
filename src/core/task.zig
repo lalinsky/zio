@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const std = @import("std");
-const xev = @import("xev");
+
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("awaitable.zig").Awaitable;

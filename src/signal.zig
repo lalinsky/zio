@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("xev");
+const aio = @import("aio");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
@@ -35,7 +35,7 @@ const MAX_HANDLERS = 32;
 const HandlerEntry = struct {
     kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
     counter: std.atomic.Value(usize) = .init(0),
-    event: xev.Async = undefined,
+    event: aio.Async = undefined,
 };
 
 const HandlerRegistryUnix = struct {
@@ -78,7 +78,7 @@ const HandlerRegistryUnix = struct {
             if (prev == null) {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
 
-                entry.event = try xev.Async.init();
+                entry.event = aio.Async.init();
                 entry.kind.store(signum, .release);
 
                 return entry;
@@ -101,11 +101,7 @@ const HandlerRegistryUnix = struct {
             std.posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
         }
 
-        // Now we can safely deinit the event
-        entry.event.deinit();
-        entry.event = undefined;
-
-        // Finally mark as available
+        // Mark as available
         entry.kind.store(NO_SIGNAL, .release);
     }
 };
@@ -142,7 +138,7 @@ const HandlerRegistryWindows = struct {
             const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, INSTALLING, .acq_rel, .monotonic);
             if (prev == null) {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
-                entry.event = try xev.Async.init();
+                entry.event = aio.Async.init();
                 entry.kind.store(signum, .release);
                 return entry;
             }
@@ -164,11 +160,7 @@ const HandlerRegistryWindows = struct {
             _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 0);
         }
 
-        // Now we can safely deinit the event
-        entry.event.deinit();
-        entry.event = undefined;
-
-        // Finally mark as available
+        // Mark as available
         entry.kind.store(NO_SIGNAL, .release);
     }
 };
@@ -182,7 +174,7 @@ fn signalHandlerUnix(signum: c_int) callconv(.c) void {
         const kind = entry.kind.load(.acquire);
         if (kind == signum) {
             _ = entry.counter.fetchAdd(1, .release);
-            entry.event.notify() catch {};
+            entry.event.notify();
         }
     }
 }
@@ -201,7 +193,7 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
         const kind = entry.kind.load(.acquire);
         if (kind == signal_value) {
             _ = entry.counter.fetchAdd(1, .release);
-            entry.event.notify() catch {};
+            entry.event.notify();
             found_handler = true;
         }
     }
@@ -233,7 +225,7 @@ pub const Signal = struct {
     // Future protocol - allows Signal to be used with select()
     pub const Result = void;
     pub const WaitContext = struct {
-        completion: xev.Completion = undefined,
+        async_handle: aio.Async = aio.Async.init(),
         parent_wait_node: ?*WaitNode = null,
     };
 
@@ -281,17 +273,16 @@ pub const Signal = struct {
             .parent_wait_node = &task.awaitable.wait_node,
         };
 
-        // Register async wait callback (this also adds to the loop)
-        self.entry.event.wait(
-            &executor.loop,
-            &ctx.completion,
-            WaitContext,
-            &ctx,
-            waitCallback,
-        );
+        // Set up the async handle to point to this loop
+        ctx.async_handle.loop = &executor.loop;
+        ctx.async_handle.c.userdata = &ctx;
+        ctx.async_handle.c.callback = asyncCallback;
+
+        // Add async to the loop
+        executor.loop.add(&ctx.async_handle.c);
 
         // Wait for signal (handles cancellation)
-        try waitForIo(rt, &ctx.completion);
+        try waitForIo(rt, &ctx.async_handle.c);
 
         // Consume the counter
         _ = self.entry.counter.swap(0, .acquire);
@@ -325,17 +316,16 @@ pub const Signal = struct {
             .parent_wait_node = &task.awaitable.wait_node,
         };
 
-        // Register async wait callback (this also adds to the loop)
-        self.entry.event.wait(
-            &executor.loop,
-            &ctx.completion,
-            WaitContext,
-            &ctx,
-            waitCallback,
-        );
+        // Set up the async handle to point to this loop
+        ctx.async_handle.loop = &executor.loop;
+        ctx.async_handle.c.userdata = &ctx;
+        ctx.async_handle.c.callback = asyncCallback;
+
+        // Add async to the loop
+        executor.loop.add(&ctx.async_handle.c);
 
         // Wait for signal with timeout (handles cancellation)
-        try timedWaitForIo(rt, &ctx.completion, timeout_ns);
+        try timedWaitForIo(rt, &ctx.async_handle.c, timeout_ns);
 
         // Consume the counter
         _ = self.entry.counter.swap(0, .acquire);
@@ -356,40 +346,34 @@ pub const Signal = struct {
         // Store parent_wait_node
         ctx.parent_wait_node = wait_node;
 
-        // Register xev async wait - store context in userdata
-        self.entry.event.wait(
-            &executor.loop,
-            &ctx.completion,
-            WaitContext,
-            ctx,
-            waitCallback,
-        );
+        // Set up the async handle
+        ctx.async_handle.loop = &executor.loop;
+        ctx.async_handle.c.userdata = ctx;
+        ctx.async_handle.c.callback = asyncCallback;
+
+        // Add async to the loop
+        executor.loop.add(&ctx.async_handle.c);
 
         return true;
     }
 
-    fn waitCallback(
-        userdata: ?*WaitContext,
-        _: *xev.Loop,
-        _: *xev.Completion,
-        result: xev.Async.WaitError!void,
-    ) xev.CallbackAction {
-        const ctx = userdata.?;
-        result catch {};
+    fn asyncCallback(
+        _: *aio.Loop,
+        completion: *aio.Completion,
+    ) void {
+        const ctx: *WaitContext = @ptrCast(@alignCast(completion.userdata.?));
 
         // Wake the parent if it's still registered
         if (ctx.parent_wait_node) |parent| {
             parent.wake();
         }
-
-        return .disarm;
     }
 
-    /// Cancels a pending wait operation by cancelling the xev completion.
+    /// Cancels a pending wait operation by cancelling the async completion.
     /// This is part of the Future protocol for select().
     pub fn asyncCancelWait(self: *Signal, rt: *Runtime, _: *WaitNode, ctx: *WaitContext) void {
-        // Check if the xev operation already completed
-        const was_active = ctx.completion.state() == .active;
+        // Check if the async operation already completed
+        const was_active = ctx.async_handle.c.state == .running;
 
         // Clear parent to prevent callback from waking
         ctx.parent_wait_node = null;
@@ -397,10 +381,10 @@ pub const Signal = struct {
         // Cancel if still active
         if (was_active) {
             const cancelIo = @import("io/base.zig").cancelIo;
-            cancelIo(rt, &ctx.completion);
+            cancelIo(rt, &ctx.async_handle.c);
         } else {
             // Signal was delivered but not consumed; wake another waiter to handle it.
-            self.entry.event.notify() catch {};
+            self.entry.event.notify();
         }
     }
 

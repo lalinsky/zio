@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const std = @import("std");
-const xev = @import("xev");
+
+const aio = @import("aio");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const resumeTask = @import("../core/task.zig").resumeTask;
@@ -12,22 +13,37 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("../core/timeout.zig").Timeout;
 
+/// Generic callback that resumes the task stored in userdata
+pub fn genericCallback(loop: *aio.Loop, completion: *aio.Completion) void {
+    _ = loop;
+    const task: *AnyTask = @ptrCast(@alignCast(completion.userdata.?));
+    resumeTask(task, .local);
+}
+
 /// Cancels the I/O operation and waits for full completion.
-pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
+pub fn cancelIo(rt: *Runtime, completion: *aio.Completion) void {
     // We can't handle user cancelations during this
     rt.beginShield();
     defer rt.endShield();
 
     // Cancel the operation and wait for the cancelation to complete
-    var cancel_completion: xev.Completion = .{ .op = .{ .cancel = .{ .c = completion } } };
-    runIo(rt, &cancel_completion, "cancel") catch {};
+    var cancel = aio.Cancel{
+        .c = aio.Completion.init(.cancel),
+        .target = completion,
+    };
+    cancel.c.userdata = rt.getCurrentTask() orelse @panic("no active task");
+    cancel.c.callback = genericCallback;
+
+    const executor = rt.getCurrentTask().?.getExecutor();
+    executor.loop.add(&cancel.c);
+    waitForIo(rt, &cancel.c) catch {};
 
     // Now wait for the main operation to complete
     // This can't return error.Canceled because of the shield
     waitForIo(rt, completion) catch unreachable;
 }
 
-pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) Cancelable!void {
+pub fn waitForIo(rt: *Runtime, completion: *aio.Completion) Cancelable!void {
     const task = rt.getCurrentTask() orelse @panic("no active task");
     var executor = task.getExecutor();
 
@@ -36,7 +52,7 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) Cancelable!void {
 
     // Re-check completion state after setting preparing_to_wait
     // If IO completed, restore ready state and exit
-    if (completion.state() != .active) {
+    if (completion.state != .running) {
         task.state.store(.ready, .release);
         return;
     }
@@ -48,10 +64,10 @@ pub fn waitForIo(rt: *Runtime, completion: *xev.Completion) Cancelable!void {
         return err;
     };
 
-    std.debug.assert(completion.state() == .dead);
+    std.debug.assert(completion.state == .completed);
 }
 
-pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+pub fn timedWaitForIo(rt: *Runtime, completion: *aio.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     const task = rt.getCurrentTask() orelse @panic("no active task");
     var executor = task.getExecutor();
 
@@ -65,7 +81,7 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64
 
     // Re-check completion state after setting preparing_to_wait
     // If IO completed, restore ready state and exit
-    if (completion.state() != .active) {
+    if (completion.state != .running) {
         task.state.store(.ready, .release);
         return;
     }
@@ -80,41 +96,8 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *xev.Completion, timeout_ns: u64
         return classified_err;
     };
 
-    std.debug.assert(completion.state() == .dead);
+    std.debug.assert(completion.state == .completed);
 }
 
-pub fn runIo(rt: *Runtime, completion: *xev.Completion, comptime op: []const u8) !meta.Payload(@FieldType(xev.Result, op)) {
-    return try IoOperation(op).run(rt, completion);
-}
-
-pub fn IoOperation(comptime op: []const u8) type {
-    return struct {
-        const Self = @This();
-        const ResultType = @FieldType(xev.Result, op);
-
-        task: *AnyTask,
-        result: @FieldType(xev.Result, op) = undefined,
-
-        pub fn callback(userdata: ?*anyopaque, _: *xev.Loop, _: *xev.Completion, result: xev.Result) xev.CallbackAction {
-            const self: *Self = @ptrCast(@alignCast(userdata));
-            self.result = @field(result, op);
-            resumeTask(self.task, .local);
-            return .disarm;
-        }
-
-        pub fn run(rt: *Runtime, completion: *xev.Completion) !meta.Payload(ResultType) {
-            const task = rt.getCurrentTask() orelse @panic("no active task");
-            const executor = task.getExecutor();
-
-            var self = Self{ .task = task };
-
-            completion.userdata = &self;
-            completion.callback = callback;
-
-            executor.loop.add(completion);
-            try waitForIo(rt, completion);
-
-            return self.result;
-        }
-    };
-}
+// Note: runIo and IoOperation have been removed in favor of working directly
+// with aio's typed completions (FileRead, FileWrite, etc.)

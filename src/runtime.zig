@@ -6,7 +6,8 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const xev = @import("xev");
+
+const aio = @import("aio");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
@@ -29,11 +30,6 @@ const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
 const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
-
-// Compile-time detection of whether the backend needs ThreadPool
-fn backendNeedsThreadPool() bool {
-    return @hasField(xev.Loop, "thread_pool");
-}
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -66,7 +62,7 @@ pub const SpawnOptions = struct {
 
 // Runtime configuration options
 pub const RuntimeOptions = struct {
-    thread_pool: ThreadPoolOptions = .{},
+    thread_pool: aio.ThreadPool.Options = .{},
     stack_pool: StackPoolOptions = .{},
     /// Number of executor threads to run.
     /// - null: auto-detect CPU count (multi-threaded)
@@ -79,58 +75,35 @@ pub const RuntimeOptions = struct {
     /// Enabled by default as it also maintains backward-compatible timing
     /// (woken tasks run immediately instead of being deferred to next batch).
     lifo_slot_enabled: bool = true,
-
-    pub const ThreadPoolOptions = struct {
-        enabled: bool = backendNeedsThreadPool(),
-        max_threads: ?u32 = null, // null = CPU count
-        stack_size: ?u32 = null, // null = default stack size
-    };
 };
 
 // Noop callback for async timer cancellation
 fn noopTimerCancelCallback(
-    ud: ?*void,
-    l: *xev.Loop,
-    c: *xev.Completion,
-    r: xev.Timer.CancelError!void,
-) xev.CallbackAction {
-    _ = ud;
+    l: *aio.Loop,
+    c: *aio.Completion,
+) void {
     _ = l;
     _ = c;
-    _ = r catch {};
-    return .disarm;
 }
 
 // Async callback for remote ready tasks wakeup (cross-thread resumption)
 // This just wakes up the loop - the actual draining happens in run().
 fn remoteWakeupCallback(
-    executor: ?*Executor,
-    loop: *xev.Loop,
-    c: *xev.Completion,
-    result: xev.Async.WaitError!void,
-) xev.CallbackAction {
-    _ = result catch unreachable;
+    loop: *aio.Loop,
+    c: *aio.Completion,
+) void {
     _ = loop;
     _ = c;
-    _ = executor;
-
     // Just wake up - draining happens in run() loop
-    return .rearm;
 }
 
 fn shutdownCallback(
-    executor: ?*Executor,
-    loop: *xev.Loop,
-    c: *xev.Completion,
-    result: xev.Async.WaitError!void,
-) xev.CallbackAction {
-    _ = result catch unreachable;
+    loop: *aio.Loop,
+    c: *aio.Completion,
+) void {
     _ = c;
-    _ = executor;
-
     // Stop the event loop
     loop.stop();
-    return .disarm;
 }
 
 const awaitable_module = @import("core/awaitable.zig");
@@ -328,7 +301,7 @@ comptime {
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     id: usize,
-    loop: xev.Loop,
+    loop: aio.Loop,
     stack_pool: StackPool,
     main_context: coroutines.Context,
     allocator: Allocator,
@@ -353,13 +326,11 @@ pub const Executor = struct {
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
-    remote_wakeup: xev.Async = undefined,
-    remote_completion: xev.Completion = undefined,
+    remote_wakeup: aio.Async = undefined,
     remote_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Shutdown support
-    shutdown_async: xev.Async = undefined,
-    shutdown_completion: xev.Completion = undefined,
+    shutdown_async: aio.Async = undefined,
 
     // Stack pool cleanup tracking
     cleanup_interval_ns: u64,
@@ -395,50 +366,36 @@ pub const Executor = struct {
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .remote_wakeup = undefined,
-            .remote_completion = undefined,
             .runtime = runtime,
         };
     }
 
     fn initLoop(self: *Executor) !void {
         // Initialize loop from the thread that will run it
-        self.loop = try xev.Loop.init(.{
+        try self.loop.init(.{
+            .allocator = self.allocator,
             .thread_pool = self.runtime.thread_pool,
         });
         errdefer self.loop.deinit();
 
         // Initialize remote wakeup
-        self.remote_wakeup = try xev.Async.init();
-        errdefer self.remote_wakeup.deinit();
-
-        // Register async completion to wake up loop (self pointer is stable)
-        self.remote_wakeup.wait(
-            &self.loop,
-            &self.remote_completion,
-            Executor,
-            self,
-            remoteWakeupCallback,
-        );
+        self.remote_wakeup = aio.Async.init();
+        self.remote_wakeup.loop = &self.loop;
+        self.remote_wakeup.c.userdata = self;
+        self.remote_wakeup.c.callback = remoteWakeupCallback;
+        self.loop.add(&self.remote_wakeup.c);
 
         // Initialize shutdown async
-        self.shutdown_async = try xev.Async.init();
-        errdefer self.shutdown_async.deinit();
-
-        // Register shutdown callback
-        self.shutdown_async.wait(
-            &self.loop,
-            &self.shutdown_completion,
-            Executor,
-            self,
-            shutdownCallback,
-        );
+        self.shutdown_async = aio.Async.init();
+        self.shutdown_async.loop = &self.loop;
+        self.shutdown_async.c.userdata = self;
+        self.shutdown_async.c.callback = shutdownCallback;
+        self.loop.add(&self.shutdown_async.c);
 
         self.remote_initialized.store(true, .release);
     }
 
     fn deinitLoop(self: *Executor) void {
-        self.shutdown_async.deinit();
-        self.remote_wakeup.deinit();
         self.loop.deinit();
     }
 
@@ -712,7 +669,7 @@ pub const Executor = struct {
             // Determine event loop run mode based on work availability and spin count
             // Spin briefly with non-blocking polls before blocking to reduce cross-thread wakeup latency
             const has_work = self.ready_queue.head != null or self.lifo_slot != null;
-            const run_mode: xev.RunMode = if (has_work or spin_count < 16) .no_wait else .once;
+            const run_mode: aio.RunMode = if (has_work or spin_count < 16) .no_wait else .once;
 
             // Run event loop
             try self.loop.run(run_mode);
@@ -803,9 +760,7 @@ pub const Executor = struct {
         // Notify the target executor's event loop (only if initialized)
         const initialized = self.remote_initialized.load(.acquire);
         if (initialized) {
-            self.remote_wakeup.notify() catch |err| {
-                std.log.warn("remote_wakeup.notify() failed for executor {}: {}", .{ self.id, err });
-            };
+            self.remote_wakeup.notify();
         }
     }
 
@@ -909,7 +864,7 @@ pub const ThreadWaiter = struct {
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
     executors: std.ArrayList(Executor),
-    thread_pool: ?*xev.ThreadPool,
+    thread_pool: *aio.ThreadPool,
     allocator: Allocator,
     options: RuntimeOptions,
 
@@ -935,21 +890,12 @@ pub const Runtime = struct {
             break :blk @max(1, cpu_count);
         };
 
-        // Initialize ThreadPool if enabled (shared resource)
-        var thread_pool: ?*xev.ThreadPool = null;
-        if (options.thread_pool.enabled) {
-            thread_pool = try allocator.create(xev.ThreadPool);
+        // Initialize ThreadPool (always enabled, shared resource)
+        const thread_pool = try allocator.create(aio.ThreadPool);
+        errdefer allocator.destroy(thread_pool);
 
-            var config = xev.ThreadPool.Config{};
-            if (options.thread_pool.max_threads) |max| config.max_threads = max;
-            if (options.thread_pool.stack_size) |size| config.stack_size = size;
-            thread_pool.?.* = xev.ThreadPool.init(config);
-        }
-        errdefer if (thread_pool) |tp| {
-            tp.shutdown();
-            tp.deinit();
-            allocator.destroy(tp);
-        };
+        try thread_pool.init(allocator, options.thread_pool);
+        errdefer thread_pool.deinit();
 
         // Initialize executors using ArrayList for clean error handling
         var executors = try std.ArrayList(Executor).initCapacity(allocator, num_executors);
@@ -982,9 +928,7 @@ pub const Runtime = struct {
         const allocator = self.allocator;
 
         // Shutdown ThreadPool before cleaning up executors
-        if (self.thread_pool) |tp| {
-            tp.shutdown();
-        }
+        self.thread_pool.stop();
 
         // Drain any remaining awaitables from global registry
         while (self.tasks.pop()) |awaitable| {
@@ -1000,10 +944,8 @@ pub const Runtime = struct {
         self.executors.deinit(allocator);
 
         // Clean up ThreadPool after executors
-        if (self.thread_pool) |tp| {
-            tp.deinit();
-            allocator.destroy(tp);
-        }
+        self.thread_pool.deinit();
+        allocator.destroy(self.thread_pool);
 
         // Free the Runtime allocation
         allocator.destroy(self);
@@ -1043,8 +985,6 @@ pub const Runtime = struct {
             return error.RuntimeShutdown;
         }
 
-        const thread_pool = self.thread_pool orelse return error.NoThreadPool;
-
         const Result = meta.ReturnType(func);
         const task = try BlockingTask(Result).create(self, func, args);
         errdefer task.destroy(self);
@@ -1058,10 +998,9 @@ pub const Runtime = struct {
         task.toAwaitable().ref_count.incr();
         errdefer _ = task.toAwaitable().ref_count.decr();
 
-        // Schedule the task to run on the thread pool
-        thread_pool.schedule(
-            xev.ThreadPool.Batch.from(&task.task.thread_pool_task),
-        );
+        // Add the work to an executor's loop (loop will submit to thread pool)
+        const executor_id = self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len;
+        self.executors.items[executor_id].loop.add(&task.task.work.c);
 
         return JoinHandle(Result){
             .awaitable = task.toAwaitable(),
@@ -1240,7 +1179,7 @@ pub const Runtime = struct {
     /// This uses the event loop's cached monotonic time for efficiency.
     /// In multi-threaded mode, uses the main executor's loop time.
     pub fn now(self: *Runtime) i64 {
-        return self.executors.items[0].loop.now();
+        return @intCast(self.executors.items[0].loop.now());
     }
 
     /// Check if task list is empty and initiate shutdown if so.
@@ -1255,7 +1194,7 @@ pub const Runtime = struct {
 
                 // Wake all executors (including main if sleeping in event loop)
                 for (self.executors.items) |*executor| {
-                    executor.shutdown_async.notify() catch {};
+                    executor.shutdown_async.notify();
                 }
             } else |_| {
                 // Another executor is closing or tasks were added - do nothing
@@ -1280,15 +1219,11 @@ test "runtime with thread pool smoke test" {
     const testing = std.testing;
 
     const runtime = try Runtime.init(testing.allocator, .{
-        .thread_pool = .{ .enabled = true },
+        .thread_pool = .{},
     });
     defer runtime.deinit();
 
-    // Verify ThreadPool was created
-    testing.expect(runtime.thread_pool != null) catch |err| {
-        std.debug.print("ThreadPool was not created when enabled\n", .{});
-        return err;
-    };
+    // ThreadPool is always created (no need to check)
 
     // Run empty runtime (should exit immediately)
     try runtime.run();
@@ -1447,7 +1382,7 @@ test "runtime: spawnBlocking smoke test" {
     const testing = std.testing;
 
     const runtime = try Runtime.init(testing.allocator, .{
-        .thread_pool = .{ .enabled = true },
+        .thread_pool = .{},
     });
     defer runtime.deinit();
 

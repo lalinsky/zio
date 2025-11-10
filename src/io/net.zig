@@ -3,11 +3,13 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("xev");
-const Runtime = @import("../runtime.zig").Runtime;
-const runIo = @import("base.zig").runIo;
 
-const Handle = if (xev.backend == .iocp) std.os.windows.HANDLE else std.posix.socket_t;
+const aio = @import("aio");
+const Runtime = @import("../runtime.zig").Runtime;
+const waitForIo = @import("base.zig").waitForIo;
+const genericCallback = @import("base.zig").genericCallback;
+
+const Handle = aio.Backend.NetHandle;
 
 pub const has_unix_sockets = switch (builtin.os.tag) {
     .windows => builtin.os.version_range.windows.isAtLeast(.win10_rs4) orelse false,
@@ -17,7 +19,7 @@ pub const has_unix_sockets = switch (builtin.os.tag) {
 
 pub const default_kernel_backlog = 128;
 
-pub const ShutdownHow = std.posix.ShutdownHow;
+pub const ShutdownHow = aio.system.net.ShutdownHow;
 
 /// Get the socket address length for a given sockaddr.
 /// Determines the appropriate length based on the address family.
@@ -474,42 +476,42 @@ pub const Socket = struct {
 
     /// Helper function to set a boolean socket option
     fn setBoolOption(self: Socket, level: i32, optname: u32, enabled: bool) !void {
-        const sock = if (xev.backend == .iocp)
-            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
-        else
-            self.handle;
-
+        // aio.Backend.NetHandle is already the correct type for the platform
         const value: c_int = if (enabled) 1 else 0;
         const bytes = std.mem.asBytes(&value);
-        try std.posix.setsockopt(sock, level, optname, bytes);
+        try std.posix.setsockopt(self.handle, level, optname, bytes);
     }
 
     /// Bind the socket to an address
     pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
-        _ = rt;
-        const sock = if (xev.backend == .iocp)
-            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
-        else
-            self.handle;
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&addr.any));
+        // Copy addr to self.address so NetBind can update it with actual bound address
+        self.address = addr;
+        var addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&self.address.any));
 
-        try std.posix.bind(sock, &addr.any, addr_len);
+        var op = aio.NetBind.init(self.handle, &self.address.any, &addr_len);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
 
-        // Update address with actual bound address (important for port 0)
-        var actual_len: std.posix.socklen_t = @sizeOf(Address);
-        try std.posix.getsockname(sock, &self.address.any, &actual_len);
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+        try op.getResult();
     }
 
     /// Mark the socket as a listening socket
     pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
-        _ = rt;
-        const sock = if (xev.backend == .iocp)
-            @as(std.os.windows.ws2_32.SOCKET, @ptrCast(self.handle))
-        else
-            self.handle;
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        try std.posix.listen(sock, backlog);
+        var op = aio.NetListen.init(self.handle, backlog);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+        try op.getResult();
     }
 
     /// Connect the socket to a remote address
@@ -534,29 +536,28 @@ pub const Socket = struct {
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
     pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        return switch (xev.backend) {
-            .io_uring, .epoll => try self.receiveFromRecvmsg(rt, buf),
-            .iocp, .kqueue => try self.receiveFromRecvfrom(rt, buf),
-            .wasi_poll => error.Unsupported,
-        };
+        // All backends use the same implementation with aio
+        return try self.receiveFromRecvfrom(rt, buf);
     }
 
     fn receiveFromRecvfrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        var completion: xev.Completion = .{
-            .op = .{
-                .recvfrom = .{
-                    .fd = self.handle,
-                    .buffer = .{ .slice = buf },
-                },
-            },
-        };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_read = runIo(rt, &completion, "recvfrom") catch |err| switch (err) {
-            error.EOF => 0, // EOF is not an error
-            else => return err,
-        };
-        const addr_bytes = std.mem.asBytes(&completion.op.recvfrom.addr)[0..completion.op.recvfrom.addr_size];
-        const addr = Address.fromStorage(addr_bytes);
+        var read_bufs = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buf)};
+        var peer_addr: std.posix.sockaddr = undefined;
+        var peer_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+
+        var op = aio.NetRecvFrom.init(self.handle, &read_bufs, .{}, &peer_addr, &peer_addr_len);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_read = try op.getResult();
+
+        const addr = Address.fromStorage(std.mem.asBytes(&peer_addr)[0..peer_addr_len]);
 
         return ReceiveFromResult{
             .from = addr,
@@ -565,99 +566,36 @@ pub const Socket = struct {
     }
 
     fn receiveFromRecvmsg(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        var iov = [_]std.posix.iovec{.{
-            .base = buf.ptr,
-            .len = buf.len,
-        }};
-
-        var addr_storage: std.posix.sockaddr.storage = undefined;
-        var msg: std.posix.msghdr = .{
-            .name = @ptrCast(&addr_storage),
-            .namelen = @sizeOf(std.posix.sockaddr.storage),
-            .iov = &iov,
-            .iovlen = 1,
-            .control = null,
-            .controllen = 0,
-            .flags = 0,
-        };
-
-        var completion: xev.Completion = .{
-            .op = .{
-                .recvmsg = .{
-                    .fd = self.handle,
-                    .msghdr = &msg,
-                },
-            },
-        };
-
-        const bytes_read = runIo(rt, &completion, "recvmsg") catch |err| switch (err) {
-            error.EOF => 0, // EOF is not an error
-            else => return err,
-        };
-
-        // Extract address from msghdr
-        const addr_bytes: [*]const u8 = @ptrCast(msg.name);
-        const addr = Address.fromStorage(addr_bytes[0..msg.namelen]);
-
-        return ReceiveFromResult{
-            .from = addr,
-            .len = bytes_read,
-        };
+        // aio handles this the same way as recvfrom
+        return self.receiveFromRecvfrom(rt, buf);
     }
 
     /// Sends a datagram to the specified address.
     /// Used for UDP and other datagram-based protocols.
     pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        return switch (xev.backend) {
-            .io_uring, .epoll => try self.sendToSendmsg(rt, addr, data),
-            .iocp, .kqueue => try self.sendToSendto(rt, addr, data),
-            .wasi_poll => error.Unsupported,
-        };
+        // All backends use the same implementation with aio
+        return try self.sendToSendto(rt, addr, data);
     }
 
     fn sendToSendto(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        var completion: xev.Completion = .{
-            .op = .{
-                .sendto = .{
-                    .fd = self.handle,
-                    .buffer = .{ .slice = data },
-                    .addr = undefined,
-                },
-            },
-        };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const addr_len = getSockAddrLen(&addr.any);
-        @memcpy(std.mem.asBytes(&completion.op.sendto.addr)[0..addr_len], std.mem.asBytes(&addr)[0..addr_len]);
+        var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(data)};
+        const addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&addr.any));
+        var op = aio.NetSendTo.init(self.handle, &write_buf, .{}, &addr.any, addr_len);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
 
-        return try runIo(rt, &completion, "sendto");
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
     }
 
     fn sendToSendmsg(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        var iov = [_]std.posix.iovec_const{.{
-            .base = data.ptr,
-            .len = data.len,
-        }};
-
-        var msg: std.posix.msghdr_const = .{
-            .name = @ptrCast(@constCast(&addr.any)),
-            .namelen = @intCast(getSockAddrLen(&addr.any)),
-            .iov = &iov,
-            .iovlen = 1,
-            .control = null,
-            .controllen = 0,
-            .flags = 0,
-        };
-
-        var completion: xev.Completion = .{
-            .op = .{
-                .sendmsg = .{
-                    .fd = self.handle,
-                    .msghdr = &msg,
-                },
-            },
-        };
-
-        return try runIo(rt, &completion, "sendmsg");
+        // aio handles this the same way as sendto
+        return self.sendToSendto(rt, addr, data);
     }
 
     pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
@@ -696,6 +634,26 @@ pub const Stream = struct {
         return netRead(rt, self.socket.handle, &bufs);
     }
 
+    /// Low-level read function that accepts aio.ReadBuf slice directly.
+    /// Returns the number of bytes read, which may be less than requested.
+    /// A return value of 0 indicates end-of-stream.
+    pub fn readBuf(self: Stream, rt: *Runtime, buffers: []aio.ReadBuf) !usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
+
+        var op = aio.NetRecv.init(self.socket.handle, buffers, .{});
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return op.getResult() catch |err| switch (err) {
+            error.EOF => 0, // EOF is not an error for streams
+            else => err,
+        };
+    }
+
     /// Reads data from the stream into the provided buffer until it is full or the stream is closed.
     /// A return value of 0 indicates end-of-stream.
     pub fn readAll(self: Stream, rt: *Runtime, buf: []u8) !void {
@@ -712,6 +670,22 @@ pub const Stream = struct {
     pub fn write(self: Stream, rt: *Runtime, buf: []const u8) !usize {
         const empty: []const u8 = "";
         return netWrite(rt, self.socket.handle, buf, &.{empty}, 0);
+    }
+
+    /// Low-level write function that accepts aio.WriteBuf slice directly.
+    /// Returns the number of bytes written, which may be less than requested.
+    pub fn writeBuf(self: Stream, rt: *Runtime, buffers: []const aio.WriteBuf) !usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
+
+        var op = aio.NetSend.init(self.socket.handle, buffers, .{});
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
     }
 
     /// Writes data from the provided buffer to the stream until it is empty.
@@ -738,7 +712,7 @@ pub const Stream = struct {
         rt: *Runtime,
         stream: Stream,
         interface: std.Io.Reader,
-        err: ?xev.ReadError = null,
+        err: ?aio.NetRecv.Error = null,
 
         pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
             return .{
@@ -790,7 +764,7 @@ pub const Stream = struct {
         rt: *Runtime,
         stream: Stream,
         interface: std.Io.Writer,
-        err: ?xev.WriteError = null,
+        err: ?aio.NetSend.Error = null,
 
         pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
             return .{
@@ -827,28 +801,36 @@ pub const Stream = struct {
     }
 };
 
-fn createStreamSocket(family: std.posix.sa_family_t) !Handle {
-    if (builtin.os.tag == .windows) {
-        return try std.os.windows.WSASocketW(family, std.posix.SOCK.STREAM, 0, null, 0, std.os.windows.ws2_32.WSA_FLAG_OVERLAPPED);
-    } else {
-        var flags: u32 = std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC;
-        if (xev.backend != .io_uring) flags |= std.posix.SOCK.NONBLOCK;
-        return try std.posix.socket(family, flags, 0);
-    }
+fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
+    var op = aio.NetOpen.init(@enumFromInt(family), .stream, .{});
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
+
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
 }
 
-fn createDatagramSocket(family: std.posix.sa_family_t) !Handle {
-    if (builtin.os.tag == .windows) {
-        return try std.os.windows.WSASocketW(family, std.posix.SOCK.DGRAM, 0, null, 0, std.os.windows.ws2_32.WSA_FLAG_OVERLAPPED);
-    } else {
-        var flags: u32 = std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC;
-        if (xev.backend != .io_uring) flags |= std.posix.SOCK.NONBLOCK;
-        return try std.posix.socket(family, flags, 0);
-    }
+fn createDatagramSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
+    var op = aio.NetOpen.init(@enumFromInt(family), .dgram, .{});
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
+
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
 }
 
 pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptions) !Server {
-    const fd = try createStreamSocket(addr.any.family);
+    const fd = try createStreamSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
     var socket: Socket = .{
@@ -869,7 +851,7 @@ pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptio
 pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
     if (!has_unix_sockets) unreachable;
 
-    const fd = try createStreamSocket(addr.any.family);
+    const fd = try createStreamSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
     var socket: Socket = .{
@@ -884,7 +866,7 @@ pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.Liste
 }
 
 pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
-    const fd = try createStreamSocket(addr.any.family);
+    const fd = try createStreamSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .{ .ip = addr });
@@ -894,7 +876,7 @@ pub fn netConnectIp(rt: *Runtime, addr: IpAddress) !Stream {
 pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
     if (!has_unix_sockets) unreachable;
 
-    const fd = try createStreamSocket(addr.any.family);
+    const fd = try createStreamSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
     try netConnect(rt, fd, .{ .unix = addr });
@@ -902,7 +884,7 @@ pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
 }
 
 pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
-    const fd = try createDatagramSocket(addr.any.family);
+    const fd = try createDatagramSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
     var socket: Socket = .{
@@ -918,7 +900,7 @@ pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
 pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
     if (!has_unix_sockets) unreachable;
 
-    const fd = try createDatagramSocket(addr.any.family);
+    const fd = try createDatagramSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
     var socket: Socket = .{
@@ -932,156 +914,172 @@ pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
 }
 
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
-    var completion: xev.Completion = .{ .op = .{
-        .recv = .{
-            .fd = fd,
-            .buffer = .fromSlices(bufs),
-        },
-    } };
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
 
-    return runIo(rt, &completion, "recv") catch |err| switch (err) {
-        error.EOF => 0, // EOF is not an error
-        else => err,
-    };
+    // Convert [][]u8 to []aio.ReadBuf
+    var read_bufs_storage: [16]aio.ReadBuf = undefined;
+    const read_bufs = aio.ReadBuf.fromSlices(bufs, &read_bufs_storage);
+
+    var op = aio.NetRecv.init(fd, read_bufs, .{});
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
+
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
 }
 
-fn addBuf(buf: *xev.WriteBuffer, data: []const u8) !void {
-    if (data.len == 0) return;
-    if (buf.vectors.len >= buf.vectors.data.len) return error.BufferFull;
+fn fillBuf(out: []aio.WriteBuf, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) usize {
+    var len: usize = 0;
+    const max_len = out.len;
 
-    buf.vectors.data[buf.vectors.len] = if (xev.backend == .iocp) .{
-        .buf = @constCast(data.ptr),
-        .len = @intCast(data.len),
-    } else .{
-        .base = data.ptr,
-        .len = data.len,
-    };
-    buf.vectors.len += 1;
-}
+    // Add header
+    if (header.len > 0 and len < max_len) {
+        out[len] = aio.WriteBuf.fromSlice(header);
+        len += 1;
+    }
 
-fn fillBuf(out: *xev.WriteBuffer, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) void {
-    addBuf(out, header) catch return;
-    if (data.len == 0) return;
+    if (data.len == 0) return len;
+
+    // Add data slices (except last which might be pattern)
     const last_index = data.len - 1;
-    for (data[0..last_index]) |bytes| addBuf(out, bytes) catch return;
+    for (data[0..last_index]) |bytes| {
+        if (bytes.len > 0 and len < max_len) {
+            out[len] = aio.WriteBuf.fromSlice(bytes);
+            len += 1;
+        }
+    }
+
+    // Handle pattern/splat
     const pattern = data[last_index];
     switch (splat) {
         0 => {},
-        1 => addBuf(out, pattern) catch return,
+        1 => if (pattern.len > 0 and len < max_len) {
+            out[len] = aio.WriteBuf.fromSlice(pattern);
+            len += 1;
+        },
         else => switch (pattern.len) {
             0 => {},
             1 => {
                 const memset_len = @min(splat_buffer.len, splat);
                 const buf = splat_buffer[0..memset_len];
                 @memset(buf, pattern[0]);
-                addBuf(out, buf) catch return;
+                if (len < max_len) {
+                    out[len] = aio.WriteBuf.fromSlice(buf);
+                    len += 1;
+                }
                 var remaining_splat = splat - buf.len;
-                while (remaining_splat > splat_buffer.len) {
-                    std.debug.assert(buf.len == splat_buffer.len);
-                    addBuf(out, splat_buffer) catch return;
+                while (remaining_splat > splat_buffer.len and len < max_len) {
+                    out[len] = aio.WriteBuf.fromSlice(splat_buffer);
+                    len += 1;
                     remaining_splat -= splat_buffer.len;
                 }
-                addBuf(out, splat_buffer[0..remaining_splat]) catch return;
+                if (remaining_splat > 0 and len < max_len) {
+                    out[len] = aio.WriteBuf.fromSlice(splat_buffer[0..remaining_splat]);
+                    len += 1;
+                }
             },
-            else => for (0..splat) |_| addBuf(out, pattern) catch return,
+            else => {
+                var i: usize = 0;
+                while (i < splat and len < max_len) : (i += 1) {
+                    out[len] = aio.WriteBuf.fromSlice(pattern);
+                    len += 1;
+                }
+            },
         },
     }
+
+    return len;
 }
 
 pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []const u8, splat: usize) !usize {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
     var splat_buf: [64]u8 = undefined;
-    var buf: xev.WriteBuffer = .{ .vectors = .{ .data = undefined, .len = 0 } };
-    fillBuf(&buf, header, data, splat, &splat_buf);
+    var write_bufs: [16]aio.WriteBuf = undefined;
+    const buf_len = fillBuf(&write_bufs, header, data, splat, &splat_buf);
 
-    var completion: xev.Completion = .{ .op = .{
-        .send = .{
-            .fd = fd,
-            .buffer = buf,
-        },
-    } };
+    var op = aio.NetSend.init(fd, write_bufs[0..buf_len], .{});
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
 
-    return runIo(rt, &completion, "send");
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
 }
 
 pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
-    var completion: xev.Completion = .{ .op = .{
-        .accept = .{
-            .socket = fd,
-        },
-    } };
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
 
-    const handle = try runIo(rt, &completion, "accept");
+    var peer_addr: std.posix.sockaddr = undefined;
+    var peer_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
 
-    // Extract peer address from completion
-    const addr = switch (xev.backend) {
-        .epoll, .io_uring, .kqueue => Address.fromStorage(std.mem.asBytes(&completion.op.accept.addr)),
-        .iocp => blk: {
-            // Windows IOCP: Extract peer address from storage buffer using GetAcceptExSockaddrs
-            var local_addr: *std.posix.sockaddr = undefined;
-            var local_addr_len: i32 = undefined;
-            var remote_addr: *std.posix.sockaddr = undefined;
-            var remote_addr_len: i32 = undefined;
+    var op = aio.NetAccept.init(fd, &peer_addr, &peer_addr_len);
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
 
-            std.os.windows.ws2_32.GetAcceptExSockaddrs(
-                @ptrCast(&completion.op.accept.storage),
-                0, // dwReceiveDataLength (same as AcceptEx)
-                0, // dwLocalAddressLength (same as AcceptEx)
-                @intCast(@sizeOf(std.posix.sockaddr.storage)), // dwRemoteAddressLength (same as AcceptEx)
-                &local_addr,
-                &local_addr_len,
-                &remote_addr,
-                &remote_addr_len,
-            );
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
 
-            // Convert remote_addr to Address using raw bytes
-            const remote_bytes: [*]const u8 = @ptrCast(remote_addr);
-            break :blk Address.fromStorage(remote_bytes[0..@intCast(remote_addr_len)]);
-        },
-        .wasi_poll => blk: {
-            // WASI doesn't provide peer address info
-            break :blk Address{ .ip = IpAddress.unspecified(0) };
-        },
-    };
+    const handle = try op.getResult();
+
+    // Convert sockaddr to Address
+    const addr = Address.fromStorage(std.mem.asBytes(&peer_addr)[0..peer_addr_len]);
 
     return .{ .socket = .{ .handle = handle, .address = addr } };
 }
 
 pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
-    var completion: xev.Completion = .{ .op = .{
-        .connect = .{
-            .socket = fd,
-            .addr = undefined,
-        },
-    } };
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
 
-    const addr_len = getSockAddrLen(&addr.any);
-    @memcpy(std.mem.asBytes(&completion.op.connect.addr)[0..addr_len], std.mem.asBytes(&addr)[0..addr_len]);
+    var addr_copy = addr;
+    const addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
 
-    return runIo(rt, &completion, "connect");
+    var op = aio.NetConnect.init(fd, &addr_copy.any, addr_len);
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
+
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
 }
 
 pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
-    var completion: xev.Completion = .{ .op = .{
-        .shutdown = .{
-            .socket = fd,
-            .how = how,
-        },
-    } };
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
 
-    return runIo(rt, &completion, "shutdown");
+    var op = aio.NetShutdown.init(fd, how);
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
+
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
 }
 
 pub fn netClose(rt: *Runtime, fd: Handle) void {
-    var completion: xev.Completion = .{ .op = .{
-        .close = .{
-            .fd = fd,
-        },
-    } };
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
+    var op = aio.NetClose.init(fd);
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
 
     rt.beginShield();
     defer rt.endShield();
 
-    return runIo(rt, &completion, "close") catch {};
+    executor.loop.add(&op.c);
+    waitForIo(rt, &op.c) catch {};
+
+    _ = op.getResult() catch {};
 }
 
 test {

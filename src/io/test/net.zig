@@ -152,7 +152,7 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
@@ -241,7 +241,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options }, .{});
