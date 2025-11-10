@@ -7,7 +7,8 @@ Testing:
 - use `./check.sh --test-fail-first true` to stop on first test failure
 - prefer only running specific tests and stopping on the first failure, while working on the feature
 - run full check after you are done
-- to test Windows builds on Linux: `zig build -Dinstall-test -Dtarget=x86_64-windows && wine zig-out/bin/test.exe`
+- running tests using different backends: `zig build test -Dbackend=poll`
+- cross compiling tests: `zig build -Dinstall-tests -Dbackend=poll -Dtarget=x86_64-windows`
 
 Zig compatibility:
 - use `zig env` to get the path to the Zig standard library, if you need to check something
