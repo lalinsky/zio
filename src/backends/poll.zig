@@ -274,7 +274,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
 
         // File operations are handled by Loop via thread pool
-        .file_open, .file_close, .file_read, .file_write, .file_sync => unreachable,
+        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync => unreachable,
     }
 }
 

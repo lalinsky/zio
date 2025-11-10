@@ -23,6 +23,7 @@ pub const Op = enum {
     net_shutdown,
     net_close,
     file_open,
+    file_create,
     file_close,
     file_read,
     file_write,
@@ -47,6 +48,7 @@ pub const Op = enum {
             .net_close => NetClose,
             .net_shutdown => NetShutdown,
             .file_open => FileOpen,
+            .file_create => FileCreate,
             .file_close => FileClose,
             .file_read => FileRead,
             .file_write => FileWrite,
@@ -73,6 +75,7 @@ pub const Op = enum {
             NetClose => .net_close,
             NetShutdown => .net_shutdown,
             FileOpen => .file_open,
+            FileCreate => .file_create,
             FileClose => .file_close,
             FileRead => .file_read,
             FileWrite => .file_write,
@@ -524,23 +527,48 @@ pub const FileOpen = struct {
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
-    mode: fs.mode_t,
     flags: fs.FileOpenFlags,
 
     pub const Error = fs.FileOpenError || Cancelable;
 
-    pub fn init(dir: fs.fd_t, path: []const u8, mode: fs.mode_t, flags: fs.FileOpenFlags) FileOpen {
+    pub fn init(dir: fs.fd_t, path: []const u8, flags: fs.FileOpenFlags) FileOpen {
         return .{
             .c = .init(.file_open),
             .dir = dir,
             .path = path,
             .flags = flags,
-            .mode = mode,
         };
     }
 
     pub fn getResult(self: *const FileOpen) Error!fs.fd_t {
         return self.c.getResult(.file_open);
+    }
+};
+
+pub const FileCreate = struct {
+    c: Completion,
+    result_private_do_not_touch: fs.fd_t = undefined,
+    internal: switch (@hasDecl(Backend, "supports_file_ops") and Backend.supports_file_ops) {
+        true => if (@hasDecl(Backend, "FileCreateData")) Backend.FileCreateData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    flags: fs.FileCreateFlags,
+
+    pub const Error = fs.FileOpenError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, flags: fs.FileCreateFlags) FileCreate {
+        return .{
+            .c = .init(.file_create),
+            .dir = dir,
+            .path = path,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const FileCreate) Error!fs.fd_t {
+        return self.c.getResult(.file_create);
     }
 };
 

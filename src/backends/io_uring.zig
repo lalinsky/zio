@@ -22,6 +22,7 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 const FileOpen = @import("../completion.zig").FileOpen;
+const FileCreate = @import("../completion.zig").FileCreate;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
@@ -48,6 +49,10 @@ pub const NetSendToData = struct {
 };
 
 pub const FileOpenData = struct {
+    path: [:0]const u8 = "",
+};
+
+pub const FileCreateData = struct {
     path: [:0]const u8 = "",
 };
 
@@ -261,12 +266,39 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 return;
             };
             const flags = linux.O{
-                .APPEND = data.flags.append,
-                .CREAT = data.flags.create,
+                .ACCMODE = switch (data.flags.mode) {
+                    .read_only => .RDONLY,
+                    .write_only => .WRONLY,
+                    .read_write => .RDWR,
+                },
+                .CLOEXEC = true,
+            };
+            sqe.prep_openat(data.dir, path, flags, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+        .file_create => {
+            const data = c.cast(FileCreate);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for file_create", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            const flags = linux.O{
+                .ACCMODE = if (data.flags.read) .RDWR else .WRONLY,
+                .CLOEXEC = true,
+                .CREAT = true,
                 .TRUNC = data.flags.truncate,
                 .EXCL = data.flags.exclusive,
             };
-            sqe.prep_openat(data.dir, path, flags, data.mode);
+            sqe.prep_openat(data.dir, path, flags, data.flags.mode);
             sqe.user_data = @intFromPtr(c);
             data.internal.path = path;
         },
@@ -531,6 +563,16 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
             } else {
                 c.setResult(.file_open, res);
+            }
+        },
+
+        .file_create => {
+            const data = c.cast(FileCreate);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_create, res);
             }
         },
 

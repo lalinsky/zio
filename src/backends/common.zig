@@ -8,6 +8,7 @@ const NetListen = @import("../completion.zig").NetListen;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 const NetClose = @import("../completion.zig").NetClose;
 const FileOpen = @import("../completion.zig").FileOpen;
+const FileCreate = @import("../completion.zig").FileCreate;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
@@ -70,8 +71,18 @@ pub fn handleNetClose(c: *Completion) void {
 /// Helper to handle file open operation
 pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileOpen);
-    if (fs.openat(allocator, data.dir, data.path, data.mode, data.flags)) |fd| {
+    if (fs.openat(allocator, data.dir, data.path, data.flags)) |fd| {
         c.setResult(.file_open, fd);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle file create operation
+pub fn handleFileCreate(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(FileCreate);
+    if (fs.createat(allocator, data.dir, data.path, data.flags)) |fd| {
+        c.setResult(.file_create, fd);
     } else |err| {
         c.setError(err);
     }
@@ -123,6 +134,14 @@ pub fn fileOpenWork(loop: *Loop, work: *Work) void {
     const internal: *@FieldType(FileOpen, "internal") = @fieldParentPtr("work", work);
     const file_open: *FileOpen = @fieldParentPtr("internal", internal);
     handleFileOpen(&file_open.c, file_open.internal.allocator);
+}
+
+/// Work function for FileCreate - performs blocking openat() syscall with O_CREAT
+pub fn fileCreateWork(loop: *Loop, work: *Work) void {
+    _ = loop;
+    const internal: *@FieldType(FileCreate, "internal") = @fieldParentPtr("work", work);
+    const file_create: *FileCreate = @fieldParentPtr("internal", internal);
+    handleFileCreate(&file_create.c, file_create.internal.allocator);
 }
 
 /// Work function for FileClose - performs blocking close() syscall

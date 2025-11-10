@@ -27,6 +27,7 @@ pub const NetSendTo = completion.NetSendTo;
 pub const NetClose = completion.NetClose;
 pub const NetShutdown = completion.NetShutdown;
 pub const FileOpen = completion.FileOpen;
+pub const FileCreate = completion.FileCreate;
 pub const FileClose = completion.FileClose;
 pub const FileRead = completion.FileRead;
 pub const FileWrite = completion.FileWrite;

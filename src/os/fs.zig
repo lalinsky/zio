@@ -12,11 +12,21 @@ pub const iovec_const = @import("base.zig").iovec_const;
 
 pub const mode_t = std.posix.mode_t;
 
+pub const FileOpenMode = enum {
+    read_only,
+    write_only,
+    read_write,
+};
+
 pub const FileOpenFlags = struct {
-    create: bool = false,
+    mode: FileOpenMode = .read_only,
+};
+
+pub const FileCreateFlags = struct {
+    read: bool = false,
     truncate: bool = false,
-    append: bool = false,
     exclusive: bool = false,
+    mode: mode_t = 0o664,
 };
 
 pub const FileOpenError = error{
@@ -93,8 +103,8 @@ pub const FileSyncError = error{
     Unexpected,
 };
 
-/// Open a file using openat() syscall
-pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: mode_t, flags: FileOpenFlags) FileOpenError!fd_t {
+/// Open an existing file using openat() syscall
+pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
 
@@ -105,18 +115,79 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: m
         const len = std.unicode.utf8ToUtf16Le(path_w, path) catch return error.InvalidUtf8;
         path_w[len] = 0;
 
-        const access_mask: w.DWORD = w.GENERIC_READ | w.GENERIC_WRITE;
-        const creation: w.DWORD = if (flags.create)
-            if (flags.exclusive)
-                w.CREATE_NEW
-            else if (flags.truncate)
-                w.CREATE_ALWAYS
-            else
-                w.OPEN_ALWAYS
-        else if (flags.truncate)
-            w.TRUNCATE_EXISTING
+        const access_mask: w.DWORD = switch (flags.mode) {
+            .read_only => w.GENERIC_READ,
+            .write_only => w.GENERIC_WRITE,
+            .read_write => w.GENERIC_READ | w.GENERIC_WRITE,
+        };
+
+        const handle = w.kernel32.CreateFileW(
+            path_w.ptr,
+            access_mask,
+            w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
+            null,
+            w.OPEN_EXISTING,
+            w.FILE_ATTRIBUTE_NORMAL,
+            null,
+        );
+
+        if (handle == w.INVALID_HANDLE_VALUE) {
+            return switch (w.kernel32.GetLastError()) {
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .PATH_NOT_FOUND => error.FileNotFound,
+                .ACCESS_DENIED => error.AccessDenied,
+                else => error.Unexpected,
+            };
+        }
+
+        return handle;
+    }
+
+    const open_flags: posix.system.O = .{
+        .ACCMODE = switch (flags.mode) {
+            .read_only => .RDONLY,
+            .write_only => .WRONLY,
+            .read_write => .RDWR,
+        },
+        .CLOEXEC = true,
+    };
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    while (true) {
+        const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToFileOpenError(err),
+        }
+    }
+}
+
+/// Create a file using openat() syscall
+pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileOpenError!fd_t {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        // Allocate buffer for UTF-16 conversion
+        const path_w = allocator.allocSentinel(u16, path.len, 0) catch return error.SystemResources;
+        defer allocator.free(path_w);
+
+        const len = std.unicode.utf8ToUtf16Le(path_w, path) catch return error.InvalidUtf8;
+        path_w[len] = 0;
+
+        const access_mask: w.DWORD = if (flags.read)
+            w.GENERIC_READ | w.GENERIC_WRITE
         else
-            w.OPEN_EXISTING;
+            w.GENERIC_WRITE;
+
+        const creation: w.DWORD = if (flags.exclusive)
+            w.CREATE_NEW
+        else if (flags.truncate)
+            w.CREATE_ALWAYS
+        else
+            w.OPEN_ALWAYS;
 
         const handle = w.kernel32.CreateFileW(
             path_w.ptr,
@@ -143,19 +214,18 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: m
     }
 
     var open_flags: posix.system.O = .{
-        .ACCMODE = .RDWR,
+        .ACCMODE = if (flags.read) .RDWR else .WRONLY,
         .CLOEXEC = true,
+        .CREAT = true,
     };
-    if (flags.create) open_flags.CREAT = true;
     if (flags.truncate) open_flags.TRUNC = true;
-    if (flags.append) open_flags.APPEND = true;
     if (flags.exclusive) open_flags.EXCL = true;
 
     const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
-        const rc = posix.system.openat(dir, path_z.ptr, open_flags, mode);
+        const rc = posix.system.openat(dir, path_z.ptr, open_flags, flags.mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,

@@ -9,6 +9,7 @@ const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
 const FileOpen = @import("completion.zig").FileOpen;
+const FileCreate = @import("completion.zig").FileCreate;
 const FileClose = @import("completion.zig").FileClose;
 const FileRead = @import("completion.zig").FileRead;
 const FileWrite = @import("completion.zig").FileWrite;
@@ -330,13 +331,14 @@ pub const Loop = struct {
                             }
                             return;
                         },
-                        .file_open, .file_close, .file_read, .file_write, .file_sync => {
+                        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync => {
                             // File ops on backends without native support use internal Work
                             if (!Backend.supports_file_ops) {
                                 self.state.active += 1; // Count the cancel operation
 
                                 const work = switch (cancel.target.op) {
                                     .file_open => &cancel.target.cast(FileOpen).internal.work,
+                                    .file_create => &cancel.target.cast(FileCreate).internal.work,
                                     .file_close => &cancel.target.cast(FileClose).internal.work,
                                     .file_read => &cancel.target.cast(FileRead).internal.work,
                                     .file_write => &cancel.target.cast(FileWrite).internal.work,
@@ -372,7 +374,7 @@ pub const Loop = struct {
                 // Route file operations to thread pool for backends without native support
                 if (!Backend.supports_file_ops) {
                     switch (completion.op) {
-                        .file_open, .file_close, .file_read, .file_write, .file_sync => {
+                        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync => {
                             self.submitFileOpToThreadPool(completion);
                             return;
                         },
@@ -449,6 +451,14 @@ pub const Loop = struct {
                 file_open.internal.work.loop = self;
                 file_open.internal.work.linked = completion;
                 tp.submit(&file_open.internal.work);
+            },
+            .file_create => {
+                const file_create = completion.cast(FileCreate);
+                file_create.internal.allocator = self.allocator;
+                file_create.internal.work = Work.init(common.fileCreateWork, null);
+                file_create.internal.work.loop = self;
+                file_create.internal.work.linked = completion;
+                tp.submit(&file_create.internal.work);
             },
             .file_close => {
                 const file_close = completion.cast(FileClose);
