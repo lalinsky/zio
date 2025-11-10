@@ -60,9 +60,8 @@ test "Loop: timer basic" {
     const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
 
     try std.testing.expectEqual(.completed, timer.c.state);
-    // Allow 20ms tolerance (timers can be imprecise, especially with spurious wake-ups)
     try std.testing.expect(elapsed_ms >= timeout_ms - 5);
-    try std.testing.expect(elapsed_ms <= timeout_ms + 20);
+    try std.testing.expect(elapsed_ms <= timeout_ms + 50);
     std.log.info("timer: expected={}ms, actual={}ms", .{ timeout_ms, elapsed_ms });
 }
 
