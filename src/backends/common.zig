@@ -13,6 +13,8 @@ const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
+const FileRename = @import("../completion.zig").FileRename;
+const FileDelete = @import("../completion.zig").FileDelete;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 
@@ -174,4 +176,40 @@ pub fn fileSyncWork(loop: *Loop, work: *Work) void {
     const internal: *@FieldType(FileSync, "internal") = @fieldParentPtr("work", work);
     const file_sync: *FileSync = @fieldParentPtr("internal", internal);
     handleFileSync(&file_sync.c);
+}
+
+/// Helper to handle file rename operation
+pub fn handleFileRename(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(FileRename);
+    if (fs.renameat(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
+        c.setResult(.file_rename, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle file delete operation
+pub fn handleFileDelete(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(FileDelete);
+    if (fs.unlinkat(allocator, data.dir, data.path)) |_| {
+        c.setResult(.file_delete, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for FileRename - performs blocking renameat() syscall
+pub fn fileRenameWork(loop: *Loop, work: *Work) void {
+    _ = loop;
+    const internal: *@FieldType(FileRename, "internal") = @fieldParentPtr("work", work);
+    const file_rename: *FileRename = @fieldParentPtr("internal", internal);
+    handleFileRename(&file_rename.c, file_rename.internal.allocator);
+}
+
+/// Work function for FileDelete - performs blocking unlinkat() syscall
+pub fn fileDeleteWork(loop: *Loop, work: *Work) void {
+    _ = loop;
+    const internal: *@FieldType(FileDelete, "internal") = @fieldParentPtr("work", work);
+    const file_delete: *FileDelete = @fieldParentPtr("internal", internal);
+    handleFileDelete(&file_delete.c, file_delete.internal.allocator);
 }

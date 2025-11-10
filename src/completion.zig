@@ -28,6 +28,8 @@ pub const Op = enum {
     file_read,
     file_write,
     file_sync,
+    file_rename,
+    file_delete,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -53,6 +55,8 @@ pub const Op = enum {
             .file_read => FileRead,
             .file_write => FileWrite,
             .file_sync => FileSync,
+            .file_rename => FileRename,
+            .file_delete => FileDelete,
         };
     }
 
@@ -80,6 +84,8 @@ pub const Op = enum {
             FileRead => .file_read,
             FileWrite => .file_write,
             FileSync => .file_sync,
+            FileRename => .file_rename,
+            FileDelete => .file_delete,
             else => @compileError("unknown completion type"),
         };
     }
@@ -671,5 +677,59 @@ pub const FileSync = struct {
 
     pub fn getResult(self: *const FileSync) Error!void {
         return self.c.getResult(.file_sync);
+    }
+};
+
+pub const FileRename = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (@hasDecl(Backend, "supports_file_ops") and Backend.supports_file_ops) {
+        true => if (@hasDecl(Backend, "FileRenameData")) Backend.FileRenameData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined },
+    } = .{},
+    old_dir: fs.fd_t,
+    old_path: []const u8,
+    new_dir: fs.fd_t,
+    new_path: []const u8,
+
+    pub const Error = fs.FileRenameError || Cancelable;
+
+    pub fn init(old_dir: fs.fd_t, old_path: []const u8, new_dir: fs.fd_t, new_path: []const u8) FileRename {
+        return .{
+            .c = .init(.file_rename),
+            .old_dir = old_dir,
+            .old_path = old_path,
+            .new_dir = new_dir,
+            .new_path = new_path,
+        };
+    }
+
+    pub fn getResult(self: *const FileRename) Error!void {
+        return self.c.getResult(.file_rename);
+    }
+};
+
+pub const FileDelete = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (@hasDecl(Backend, "supports_file_ops") and Backend.supports_file_ops) {
+        true => if (@hasDecl(Backend, "FileDeleteData")) Backend.FileDeleteData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+
+    pub const Error = fs.FileDeleteError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8) FileDelete {
+        return .{
+            .c = .init(.file_delete),
+            .dir = dir,
+            .path = path,
+        };
+    }
+
+    pub fn getResult(self: *const FileDelete) Error!void {
+        return self.c.getResult(.file_delete);
     }
 };

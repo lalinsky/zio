@@ -23,6 +23,8 @@ const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 const FileOpen = @import("../completion.zig").FileOpen;
 const FileCreate = @import("../completion.zig").FileCreate;
+const FileRename = @import("../completion.zig").FileRename;
+const FileDelete = @import("../completion.zig").FileDelete;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
@@ -53,6 +55,15 @@ pub const FileOpenData = struct {
 };
 
 pub const FileCreateData = struct {
+    path: [:0]const u8 = "",
+};
+
+pub const FileRenameData = struct {
+    old_path: [:0]const u8 = "",
+    new_path: [:0]const u8 = "",
+};
+
+pub const FileDeleteData = struct {
     path: [:0]const u8 = "",
 };
 
@@ -347,6 +358,50 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_fsync(data.handle, flags);
             sqe.user_data = @intFromPtr(c);
         },
+        .file_rename => {
+            const data = c.cast(FileRename);
+            const old_path = self.allocator.dupeZ(u8, data.old_path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const new_path = self.allocator.dupeZ(u8, data.new_path) catch {
+                self.allocator.free(old_path);
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(old_path);
+                self.allocator.free(new_path);
+                log.err("Failed to get io_uring SQE for file_rename", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_renameat(@intCast(data.old_dir), old_path.ptr, @intCast(data.new_dir), new_path.ptr, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.old_path = old_path;
+            data.internal.new_path = new_path;
+        },
+        .file_delete => {
+            const data = c.cast(FileDelete);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for file_delete", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_unlinkat(@intCast(data.dir), path.ptr, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
     }
 }
 
@@ -605,6 +660,27 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileSyncError(@enumFromInt(-res)));
             } else {
                 c.setResult(.file_sync, {});
+            }
+        },
+
+        .file_rename => {
+            const data = c.cast(FileRename);
+            self.allocator.free(data.internal.old_path);
+            self.allocator.free(data.internal.new_path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileRenameError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_rename, {});
+            }
+        },
+
+        .file_delete => {
+            const data = c.cast(FileDelete);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileDeleteError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_delete, {});
             }
         },
     }

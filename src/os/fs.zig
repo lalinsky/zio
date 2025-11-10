@@ -103,6 +103,43 @@ pub const FileSyncError = error{
     Unexpected,
 };
 
+pub const FileRenameError = error{
+    AccessDenied,
+    FileBusy,
+    DiskQuota,
+    IsDir,
+    SymLinkLoop,
+    LinkQuotaExceeded,
+    NameTooLong,
+    FileNotFound,
+    SystemResources,
+    NotDir,
+    PathAlreadyExists,
+    NoSpaceLeft,
+    ReadOnlyFileSystem,
+    NotSameFileSystem,
+    DirNotEmpty,
+    InvalidUtf8,
+    Canceled,
+    Unexpected,
+};
+
+pub const FileDeleteError = error{
+    AccessDenied,
+    FileBusy,
+    FileNotFound,
+    IsDir,
+    SymLinkLoop,
+    NameTooLong,
+    NotDir,
+    SystemResources,
+    ReadOnlyFileSystem,
+    DirNotEmpty,
+    InvalidUtf8,
+    Canceled,
+    Unexpected,
+};
+
 /// Open an existing file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
@@ -372,6 +409,100 @@ pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
     }
 }
 
+/// Rename a file using renameat() syscall
+pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) FileRenameError!void {
+    if (builtin.os.tag == .windows) {
+        // Windows doesn't support directory fds in the same way (old_dir/new_dir unused on Windows)
+        const w = std.os.windows;
+
+        // Allocate buffers for UTF-16 conversion
+        const old_path_w = allocator.allocSentinel(u16, old_path.len, 0) catch return error.SystemResources;
+        defer allocator.free(old_path_w);
+        const new_path_w = allocator.allocSentinel(u16, new_path.len, 0) catch return error.SystemResources;
+        defer allocator.free(new_path_w);
+
+        const old_len = std.unicode.utf8ToUtf16Le(old_path_w, old_path) catch return error.InvalidUtf8;
+        old_path_w[old_len] = 0;
+        const new_len = std.unicode.utf8ToUtf16Le(new_path_w, new_path) catch return error.InvalidUtf8;
+        new_path_w[new_len] = 0;
+
+        const success = w.kernel32.MoveFileExW(
+            old_path_w.ptr,
+            new_path_w.ptr,
+            w.MOVEFILE_REPLACE_EXISTING,
+        );
+
+        if (success == w.FALSE) {
+            return switch (w.kernel32.GetLastError()) {
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .PATH_NOT_FOUND => error.FileNotFound,
+                .ACCESS_DENIED => error.AccessDenied,
+                .ALREADY_EXISTS => error.PathAlreadyExists,
+                .SHARING_VIOLATION => error.FileBusy,
+                else => error.Unexpected,
+            };
+        }
+
+        return;
+    }
+
+    const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+    defer allocator.free(old_path_z);
+    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    defer allocator.free(new_path_z);
+
+    while (true) {
+        const rc = posix.system.renameat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileRenameError(err),
+        }
+    }
+}
+
+/// Delete a file using unlinkat() syscall
+pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileDeleteError!void {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        // Allocate buffer for UTF-16 conversion
+        const path_w = allocator.allocSentinel(u16, path.len, 0) catch return error.SystemResources;
+        defer allocator.free(path_w);
+
+        const len = std.unicode.utf8ToUtf16Le(path_w, path) catch return error.InvalidUtf8;
+        path_w[len] = 0;
+
+        w.DeleteFile(path_w, .{ .dir = dir, .remove_dir = false }) catch |err| {
+            return switch (err) {
+                error.FileNotFound => error.FileNotFound,
+                error.AccessDenied => error.AccessDenied,
+                error.FileBusy => error.FileBusy,
+                error.IsDir => error.IsDir,
+                error.NameTooLong => error.NameTooLong,
+                error.NotDir => error.NotDir,
+                error.NetworkNotFound => error.FileNotFound,
+                error.DirNotEmpty => error.DirNotEmpty,
+                else => error.Unexpected,
+            };
+        };
+
+        return;
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    while (true) {
+        const rc = posix.system.unlinkat(dir, path_z.ptr, 0);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileDeleteError(err),
+        }
+    }
+}
+
 pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
     return switch (errno) {
         .SUCCESS => unreachable,
@@ -444,6 +575,49 @@ pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
         .ROFS => error.ReadOnlyFileSystem,
         .BADF => error.InvalidFileDescriptor,
         .INVAL => error.NotOpenForWriting,
+        .CANCELED => error.Canceled,
+        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+    };
+}
+
+pub fn errnoToFileRenameError(errno: posix.system.E) FileRenameError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.AccessDenied,
+        .BUSY => error.FileBusy,
+        .DQUOT => error.DiskQuota,
+        .ISDIR => error.IsDir,
+        .LOOP => error.SymLinkLoop,
+        .MLINK => error.LinkQuotaExceeded,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOENT => error.FileNotFound,
+        .NOMEM => error.SystemResources,
+        .NOTDIR => error.NotDir,
+        .EXIST => error.PathAlreadyExists,
+        .NOSPC => error.NoSpaceLeft,
+        .ROFS => error.ReadOnlyFileSystem,
+        .XDEV => error.NotSameFileSystem,
+        .NOTEMPTY => error.DirNotEmpty,
+        .CANCELED => error.Canceled,
+        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+    };
+}
+
+pub fn errnoToFileDeleteError(errno: posix.system.E) FileDeleteError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.AccessDenied,
+        .BUSY => error.FileBusy,
+        .NOENT => error.FileNotFound,
+        .ISDIR => error.IsDir,
+        .LOOP => error.SymLinkLoop,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOTDIR => error.NotDir,
+        .NOMEM => error.SystemResources,
+        .ROFS => error.ReadOnlyFileSystem,
+        .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
         else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
     };

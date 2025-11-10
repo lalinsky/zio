@@ -14,6 +14,8 @@ const FileClose = @import("completion.zig").FileClose;
 const FileRead = @import("completion.zig").FileRead;
 const FileWrite = @import("completion.zig").FileWrite;
 const FileSync = @import("completion.zig").FileSync;
+const FileRename = @import("completion.zig").FileRename;
+const FileDelete = @import("completion.zig").FileDelete;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const time = @import("os/time.zig");
 const net = @import("os/net.zig");
@@ -343,6 +345,8 @@ pub const Loop = struct {
                                     .file_read => &cancel.target.cast(FileRead).internal.work,
                                     .file_write => &cancel.target.cast(FileWrite).internal.work,
                                     .file_sync => &cancel.target.cast(FileSync).internal.work,
+                                    .file_rename => &cancel.target.cast(FileRename).internal.work,
+                                    .file_delete => &cancel.target.cast(FileDelete).internal.work,
                                     else => unreachable,
                                 };
 
@@ -374,7 +378,7 @@ pub const Loop = struct {
                 // Route file operations to thread pool for backends without native support
                 if (!Backend.supports_file_ops) {
                     switch (completion.op) {
-                        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync => {
+                        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => {
                             self.submitFileOpToThreadPool(completion);
                             return;
                         },
@@ -487,6 +491,22 @@ pub const Loop = struct {
                 file_sync.internal.work.loop = self;
                 file_sync.internal.work.linked = completion;
                 tp.submit(&file_sync.internal.work);
+            },
+            .file_rename => {
+                const file_rename = completion.cast(FileRename);
+                file_rename.internal.allocator = self.allocator;
+                file_rename.internal.work = Work.init(common.fileRenameWork, null);
+                file_rename.internal.work.loop = self;
+                file_rename.internal.work.linked = completion;
+                tp.submit(&file_rename.internal.work);
+            },
+            .file_delete => {
+                const file_delete = completion.cast(FileDelete);
+                file_delete.internal.allocator = self.allocator;
+                file_delete.internal.work = Work.init(common.fileDeleteWork, null);
+                file_delete.internal.work.loop = self;
+                file_delete.internal.work.linked = completion;
+                tp.submit(&file_delete.internal.work);
             },
             else => unreachable,
         }
