@@ -6,7 +6,7 @@ const HeapNode = @import("heap.zig").HeapNode;
 const net = @import("os/net.zig");
 const fs = @import("os/fs.zig");
 
-pub const OperationType = enum {
+pub const Op = enum {
     timer,
     cancel,
     async,
@@ -26,10 +26,61 @@ pub const OperationType = enum {
     file_close,
     file_read,
     file_write,
+
+    /// Get the completion type for this operation
+    pub fn toType(comptime op: Op) type {
+        return switch (op) {
+            .timer => Timer,
+            .cancel => Cancel,
+            .async => Async,
+            .work => Work,
+            .net_open => NetOpen,
+            .net_bind => NetBind,
+            .net_listen => NetListen,
+            .net_connect => NetConnect,
+            .net_accept => NetAccept,
+            .net_recv => NetRecv,
+            .net_send => NetSend,
+            .net_recvfrom => NetRecvFrom,
+            .net_sendto => NetSendTo,
+            .net_close => NetClose,
+            .net_shutdown => NetShutdown,
+            .file_open => FileOpen,
+            .file_close => FileClose,
+            .file_read => FileRead,
+            .file_write => FileWrite,
+        };
+    }
+
+    /// Get the operation type from a completion type
+    pub fn fromType(comptime T: type) Op {
+        return switch (T) {
+            Timer => .timer,
+            Cancel => .cancel,
+            Async => .async,
+            Work => .work,
+            NetOpen => .net_open,
+            NetBind => .net_bind,
+            NetListen => .net_listen,
+            NetConnect => .net_connect,
+            NetAccept => .net_accept,
+            NetRecv => .net_recv,
+            NetSend => .net_send,
+            NetRecvFrom => .net_recvfrom,
+            NetSendTo => .net_sendto,
+            NetClose => .net_close,
+            NetShutdown => .net_shutdown,
+            FileOpen => .file_open,
+            FileClose => .file_close,
+            FileRead => .file_read,
+            FileWrite => .file_write,
+            else => @compileError("unknown completion type"),
+        };
+    }
 };
 
 pub const Completion = struct {
-    op: OperationType,
+    op: Op,
     state: State = .new,
 
     userdata: ?*anyopaque = null,
@@ -56,7 +107,7 @@ pub const Completion = struct {
         completion: *Completion,
     ) void;
 
-    pub fn init(op: OperationType) Completion {
+    pub fn init(op: Op) Completion {
         return .{ .op = op };
     }
 
@@ -67,15 +118,15 @@ pub const Completion = struct {
     }
 
     pub fn cast(c: *Completion, comptime T: type) *T {
-        std.debug.assert(c.op == completionOp(T));
+        std.debug.assert(c.op == Op.fromType(T));
         return @fieldParentPtr("c", c);
     }
 
-    pub fn getResult(c: *const Completion, comptime op: OperationType) (CompletionType(op).Error)!@FieldType(CompletionType(op), "result_private_do_not_touch") {
+    pub fn getResult(c: *const Completion, comptime op: Op) (op.toType().Error)!@FieldType(op.toType(), "result_private_do_not_touch") {
         std.debug.assert(c.has_result);
         std.debug.assert(c.op == op);
         if (c.err) |err| return @errorCast(err);
-        const T = CompletionType(op);
+        const T = op.toType();
         const parent: *const T = @fieldParentPtr("c", c);
         return parent.result_private_do_not_touch;
     }
@@ -96,7 +147,7 @@ pub const Completion = struct {
         c.has_result = true;
     }
 
-    pub fn setResult(c: *Completion, comptime op: OperationType, result: @FieldType(CompletionType(op), "result_private_do_not_touch")) void {
+    pub fn setResult(c: *Completion, comptime op: Op, result: @FieldType(op.toType(), "result_private_do_not_touch")) void {
         std.debug.assert(!c.has_result);
         std.debug.assert(c.op == op);
         // If this operation was canceled but completed successfully (race condition),
@@ -106,60 +157,11 @@ pub const Completion = struct {
             cancel.c.has_result = true;
         }
 
-        const T = CompletionType(op);
+        const T = op.toType();
         c.cast(T).result_private_do_not_touch = result;
         c.has_result = true;
     }
 };
-
-pub fn completionOp(comptime T: type) OperationType {
-    return switch (T) {
-        Timer => .timer,
-        Cancel => .cancel,
-        Async => .async,
-        Work => .work,
-        NetOpen => .net_open,
-        NetBind => .net_bind,
-        NetListen => .net_listen,
-        NetConnect => .net_connect,
-        NetAccept => .net_accept,
-        NetRecv => .net_recv,
-        NetSend => .net_send,
-        NetRecvFrom => .net_recvfrom,
-        NetSendTo => .net_sendto,
-        NetClose => .net_close,
-        NetShutdown => .net_shutdown,
-        FileOpen => .file_open,
-        FileClose => .file_close,
-        FileRead => .file_read,
-        FileWrite => .file_write,
-        else => @compileError("unknown completion type"),
-    };
-}
-
-pub fn CompletionType(comptime op: OperationType) type {
-    return switch (op) {
-        .timer => Timer,
-        .cancel => Cancel,
-        .async => Async,
-        .work => Work,
-        .net_open => NetOpen,
-        .net_bind => NetBind,
-        .net_listen => NetListen,
-        .net_connect => NetConnect,
-        .net_accept => NetAccept,
-        .net_recv => NetRecv,
-        .net_send => NetSend,
-        .net_recvfrom => NetRecvFrom,
-        .net_sendto => NetSendTo,
-        .net_close => NetClose,
-        .net_shutdown => NetShutdown,
-        .file_open => FileOpen,
-        .file_close => FileClose,
-        .file_read => FileRead,
-        .file_write => FileWrite,
-    };
-}
 
 pub const Cancelable = error{Canceled};
 

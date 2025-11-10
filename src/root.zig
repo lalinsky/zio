@@ -4,7 +4,30 @@ pub const backend = @import("backend.zig").backend;
 
 pub const Loop = @import("loop.zig").Loop;
 pub const RunMode = @import("loop.zig").RunMode;
-pub const Completion = @import("completion.zig").Completion;
+
+const completion = @import("completion.zig");
+pub const Completion = completion.Completion;
+pub const Op = completion.Op;
+pub const Cancelable = completion.Cancelable;
+pub const Cancel = completion.Cancel;
+pub const Timer = completion.Timer;
+pub const Async = completion.Async;
+pub const Work = completion.Work;
+pub const NetOpen = completion.NetOpen;
+pub const NetBind = completion.NetBind;
+pub const NetListen = completion.NetListen;
+pub const NetConnect = completion.NetConnect;
+pub const NetAccept = completion.NetAccept;
+pub const NetRecv = completion.NetRecv;
+pub const NetSend = completion.NetSend;
+pub const NetRecvFrom = completion.NetRecvFrom;
+pub const NetSendTo = completion.NetSendTo;
+pub const NetClose = completion.NetClose;
+pub const NetShutdown = completion.NetShutdown;
+pub const FileOpen = completion.FileOpen;
+pub const FileClose = completion.FileClose;
+pub const FileRead = completion.FileRead;
+pub const FileWrite = completion.FileWrite;
 
 /// Low level system APIs
 pub const system = @import("system.zig");

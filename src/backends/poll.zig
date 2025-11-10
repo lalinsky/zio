@@ -5,7 +5,7 @@ const time = @import("../os/time.zig");
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
-const OperationType = @import("../completion.zig").OperationType;
+const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
 const NetOpen = @import("../completion.zig").NetOpen;
@@ -83,7 +83,7 @@ pub fn wake(self: *Self) void {
     self.waker.notify();
 }
 
-fn getEvents(op: OperationType) @FieldType(net.pollfd, "events") {
+fn getEvents(op: Op) @FieldType(net.pollfd, "events") {
     return switch (op) {
         .net_connect => net.POLL.OUT,
         .net_accept => net.POLL.IN,
@@ -95,7 +95,7 @@ fn getEvents(op: OperationType) @FieldType(net.pollfd, "events") {
     };
 }
 
-fn getPollType(op: OperationType) PollEntryType {
+fn getPollType(op: Op) PollEntryType {
     return switch (op) {
         .net_accept => .accept,
         .net_connect => .connect,

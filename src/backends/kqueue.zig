@@ -6,7 +6,7 @@ const time = @import("../os/time.zig");
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
-const OperationType = @import("../completion.zig").OperationType;
+const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
 const NetOpen = @import("../completion.zig").NetOpen;
@@ -98,7 +98,7 @@ pub fn wake(self: *Self) void {
     self.waker.notify();
 }
 
-fn getFilter(op: OperationType) i16 {
+fn getFilter(op: Op) i16 {
     return switch (op) {
         .net_connect => std.c.EVFILT.WRITE,
         .net_accept => std.c.EVFILT.READ,
