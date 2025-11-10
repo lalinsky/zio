@@ -160,27 +160,6 @@ fn queueUnregister(self: *Self, state: *LoopState, fd: NetHandle, completion: *C
     return true;
 }
 
-/// Submit all queued kevent changes in batches
-fn submitChanges(self: *Self) !void {
-    if (self.change_buffer.items.len == 0) return;
-
-    var offset: usize = 0;
-    while (offset < self.change_buffer.items.len) {
-        const batch_size = @min(self.change_buffer.items.len - offset, 64);
-        const batch = self.change_buffer.items[offset..][0..batch_size];
-
-        const rc = std.c.kevent(self.kqueue_fd, batch.ptr, @intCast(batch_size), &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| return posix.unexpectedErrno(err),
-        }
-
-        offset += batch_size;
-    }
-
-    self.change_buffer.clearRetainingCapacity();
-}
-
 fn getHandle(completion: *Completion) NetHandle {
     return switch (completion.op) {
         .net_accept => completion.cast(NetAccept).handle,
@@ -306,17 +285,12 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         break :blk &timeout_spec;
     } else null;
 
-    // Submit pending changes AND wait for events in a single kevent() call
-    const first_batch_size = @min(self.change_buffer.items.len, 64);
-    const first_batch = if (first_batch_size > 0)
-        self.change_buffer.items[0..first_batch_size]
-    else
-        &[_]std.c.Kevent{};
-
+    // Submit ALL pending changes AND wait for events in a single kevent() call
+    const changes_to_submit = self.change_buffer.items;
     const rc = std.c.kevent(
         self.kqueue_fd,
-        first_batch.ptr,
-        @intCast(first_batch_size),
+        changes_to_submit.ptr,
+        @intCast(changes_to_submit.len),
         self.events.ptr,
         @intCast(self.events.len),
         timeout_ptr,
@@ -327,20 +301,8 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         else => |err| return posix.unexpectedErrno(err),
     };
 
-    // Remove submitted changes from buffer
-    if (first_batch_size > 0) {
-        std.mem.copyForwards(
-            std.c.Kevent,
-            self.change_buffer.items,
-            self.change_buffer.items[first_batch_size..],
-        );
-        self.change_buffer.shrinkRetainingCapacity(self.change_buffer.items.len - first_batch_size);
-    }
-
-    // Submit any remaining changes (if we had more than 64)
-    if (self.change_buffer.items.len > 0) {
-        try self.submitChanges();
-    }
+    // Clear submitted changes from buffer
+    self.change_buffer.clearRetainingCapacity();
 
     if (n == 0) {
         return true; // Timed out
@@ -371,9 +333,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
             },
         }
     }
-
-    // Submit any unregister operations that were queued while processing events
-    try self.submitChanges();
 
     return false; // Did not timeout, woke up due to events
 }
