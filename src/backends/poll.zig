@@ -3,6 +3,8 @@ const posix = @import("../os/posix.zig");
 const net = @import("../os/net.zig");
 const time = @import("../os/time.zig");
 const common = @import("common.zig");
+const ReadBuf = @import("../buf.zig").ReadBuf;
+const WriteBuf = @import("../buf.zig").WriteBuf;
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
@@ -413,7 +415,8 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 c.setError(err);
                 return .completed;
             }
-            if (net.recv(data.handle, data.buffers, data.flags)) |n| {
+            const iov = ReadBuf.toIovecs(data.buffers);
+            if (net.recv(data.handle, iov, data.flags)) |n| {
                 c.setResult(.net_recv, n);
                 return .completed;
             } else |err| switch (err) {
@@ -430,7 +433,8 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 c.setError(err);
                 return .completed;
             }
-            if (net.send(data.handle, data.buffers, data.flags)) |n| {
+            const iov = WriteBuf.toIovecs(data.buffers);
+            if (net.send(data.handle, iov, data.flags)) |n| {
                 c.setResult(.net_send, n);
                 return .completed;
             } else |err| switch (err) {
@@ -447,7 +451,8 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 c.setError(err);
                 return .completed;
             }
-            if (net.recvfrom(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+            const iov = ReadBuf.toIovecs(data.buffers);
+            if (net.recvfrom(data.handle, iov, data.flags, data.addr, data.addr_len)) |n| {
                 c.setResult(.net_recvfrom, n);
                 return .completed;
             } else |err| switch (err) {
@@ -464,7 +469,8 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 c.setError(err);
                 return .completed;
             }
-            if (net.sendto(data.handle, data.buffers, data.flags, data.addr, data.addr_len)) |n| {
+            const iov = WriteBuf.toIovecs(data.buffers);
+            if (net.sendto(data.handle, iov, data.flags, data.addr, data.addr_len)) |n| {
                 c.setResult(.net_sendto, n);
                 return .completed;
             } else |err| switch (err) {

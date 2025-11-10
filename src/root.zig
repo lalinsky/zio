@@ -7,6 +7,9 @@ pub const Loop = @import("loop.zig").Loop;
 pub const RunMode = @import("loop.zig").RunMode;
 pub const ThreadPool = @import("thread_pool.zig").ThreadPool;
 
+pub const ReadBuf = @import("buf.zig").ReadBuf;
+pub const WriteBuf = @import("buf.zig").WriteBuf;
+
 const completion = @import("completion.zig");
 pub const Completion = completion.Completion;
 pub const Op = completion.Op;

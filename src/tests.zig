@@ -10,6 +10,7 @@ const NetListen = @import("completion.zig").NetListen;
 const NetAccept = @import("completion.zig").NetAccept;
 const NetConnect = @import("completion.zig").NetConnect;
 const NetRecv = @import("completion.zig").NetRecv;
+const ReadBuf = @import("buf.zig").ReadBuf;
 const net = @import("os/net.zig");
 const time = @import("os/time.zig");
 
@@ -250,7 +251,7 @@ test "Loop: cancel net_recv" {
 
     // Start recv (will block waiting for data)
     var recv_buf: [128]u8 = undefined;
-    var recv_iov = [_]net.iovec{net.iovecFromSlice(&recv_buf)};
+    var recv_iov = [_]ReadBuf{.fromSlice(&recv_buf)};
     var recv: NetRecv = .init(accepted_sock, &recv_iov, .{});
     loop.add(&recv.c);
 
