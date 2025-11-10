@@ -43,7 +43,12 @@ pub fn SimpleStack(comptime T: type) type {
         pub fn pop(self: *@This()) ?*T {
             const head = self.head orelse return null;
             self.head = head.next;
+            head.next = null;
             return head;
+        }
+
+        pub fn empty(self: *const @This()) bool {
+            return self.head == null;
         }
     };
 }
@@ -68,6 +73,10 @@ pub fn AtomicStack(comptime T: type) type {
             const head = self.head.swap(null, .acq_rel);
             return .{ .head = head };
         }
+
+        pub fn empty(self: *const @This()) bool {
+            return self.head.load(.acquire) == null;
+        }
     };
 }
 
@@ -85,6 +94,7 @@ pub const LoopState = struct {
 
     async_handles: Queue(Completion) = .{},
 
+    completions: Queue(Completion) = .{},
     work_completions: AtomicStack(Completion) = .{},
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
@@ -108,7 +118,7 @@ pub const LoopState = struct {
 
         completion.state = .completed;
         self.active -= 1;
-        completion.call(self.loop);
+        self.completions.push(completion);
     }
 
     pub fn markRunning(self: *LoopState, completion: *Completion) void {
@@ -192,7 +202,7 @@ pub const Loop = struct {
     }
 
     pub fn done(self: *const Loop) bool {
-        return self.state.stopped or self.state.active == 0;
+        return self.state.stopped or (self.state.active == 0 and self.state.completions.empty());
     }
 
     /// Wake up the loop from blocking poll/epoll (thread-safe)
@@ -404,10 +414,14 @@ pub const Loop = struct {
         }
     }
 
-    pub fn processWorkCompletions(self: *Loop) void {
-        var stack = self.state.work_completions.popAll();
-        while (stack.pop()) |completion| {
+    pub fn processCompletions(self: *Loop) void {
+        var work_completions = self.state.work_completions.popAll();
+        while (work_completions.pop()) |completion| {
             self.state.markCompleted(completion);
+        }
+
+        while (self.state.completions.pop()) |completion| {
+            completion.call(self);
         }
     }
 
@@ -466,7 +480,10 @@ pub const Loop = struct {
 
         var timeout_ms: u64 = 0;
         if (wait) {
-            if (timer_timeout_ms) |t| {
+            // Don't block if we have completions waiting to be processed
+            if (!self.state.completions.empty() or !self.state.work_completions.empty()) {
+                timeout_ms = 0;
+            } else if (timer_timeout_ms) |t| {
                 // Use timer timeout, capped at max_wait_ms
                 timeout_ms = @min(t, self.max_wait_ms);
             } else {
@@ -478,7 +495,7 @@ pub const Loop = struct {
         const timed_out = try self.backend.poll(&self.state, timeout_ms);
 
         // Process any work completions from thread pool
-        self.processWorkCompletions();
+        self.processCompletions();
 
         // Only check timers again if we timed out (avoids syscall when woken by I/O)
         if (timed_out) {
