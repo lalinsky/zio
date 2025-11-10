@@ -11,6 +11,7 @@ const FileOpen = @import("../completion.zig").FileOpen;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
+const FileSync = @import("../completion.zig").FileSync;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 
@@ -106,6 +107,16 @@ pub fn handleFileWrite(c: *Completion) void {
     }
 }
 
+/// Helper to handle file sync operation
+pub fn handleFileSync(c: *Completion) void {
+    const data = c.cast(FileSync);
+    if (fs.sync(data.handle, data.flags)) |_| {
+        c.setResult(.file_sync, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
 /// Work function for FileOpen - performs blocking openat() syscall
 pub fn fileOpenWork(loop: *Loop, work: *Work) void {
     _ = loop;
@@ -136,4 +147,12 @@ pub fn fileWriteWork(loop: *Loop, work: *Work) void {
     const internal: *@FieldType(FileWrite, "internal") = @fieldParentPtr("work", work);
     const file_write: *FileWrite = @fieldParentPtr("internal", internal);
     handleFileWrite(&file_write.c);
+}
+
+/// Work function for FileSync - performs blocking fsync()/fdatasync() syscall
+pub fn fileSyncWork(loop: *Loop, work: *Work) void {
+    _ = loop;
+    const internal: *@FieldType(FileSync, "internal") = @fieldParentPtr("work", work);
+    const file_sync: *FileSync = @fieldParentPtr("internal", internal);
+    handleFileSync(&file_sync.c);
 }

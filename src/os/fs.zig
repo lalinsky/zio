@@ -78,6 +78,21 @@ pub const FileCloseError = error{
     Unexpected,
 };
 
+pub const FileSyncFlags = struct {
+    only_data: bool = false,
+};
+
+pub const FileSyncError = error{
+    InputOutput,
+    NoSpaceLeft,
+    DiskQuota,
+    ReadOnlyFileSystem,
+    InvalidFileDescriptor,
+    NotOpenForWriting,
+    Canceled,
+    Unexpected,
+};
+
 /// Open a file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: mode_t, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
@@ -257,6 +272,36 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
     }
 }
 
+/// Sync file data to disk
+pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        const success = w.kernel32.FlushFileBuffers(fd);
+        if (success == w.FALSE) {
+            return switch (w.kernel32.GetLastError()) {
+                .ACCESS_DENIED => error.NotOpenForWriting,
+                .INVALID_HANDLE => error.InvalidFileDescriptor,
+                else => error.Unexpected,
+            };
+        }
+        return;
+    }
+
+    while (true) {
+        const rc = if (flags.only_data)
+            posix.system.fdatasync(fd)
+        else
+            posix.system.fsync(fd);
+
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSyncError(err),
+        }
+    }
+}
+
 pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
     return switch (errno) {
         .SUCCESS => unreachable,
@@ -315,6 +360,20 @@ pub fn errnoToFileWriteError(errno: posix.system.E) FileWriteError {
 pub fn errnoToFileCloseError(errno: posix.system.E) FileCloseError {
     return switch (errno) {
         .SUCCESS => unreachable,
+        .CANCELED => error.Canceled,
+        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+    };
+}
+
+pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .IO => error.InputOutput,
+        .NOSPC => error.NoSpaceLeft,
+        .DQUOT => error.DiskQuota,
+        .ROFS => error.ReadOnlyFileSystem,
+        .BADF => error.InvalidFileDescriptor,
+        .INVAL => error.NotOpenForWriting,
         .CANCELED => error.Canceled,
         else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
     };

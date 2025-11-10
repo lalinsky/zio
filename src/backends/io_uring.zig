@@ -25,6 +25,7 @@ const FileOpen = @import("../completion.zig").FileOpen;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
+const FileSync = @import("../completion.zig").FileSync;
 
 pub const NetHandle = net.fd_t;
 
@@ -302,6 +303,18 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_writev(data.handle, data.buffers, data.offset);
             sqe.user_data = @intFromPtr(c);
         },
+        .file_sync => {
+            const data = c.cast(FileSync);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_sync", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            const flags: u32 = if (data.flags.only_data) linux.IORING_FSYNC_DATASYNC else 0;
+            sqe.prep_fsync(data.handle, flags);
+            sqe.user_data = @intFromPtr(c);
+        },
     }
 }
 
@@ -542,6 +555,14 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
             } else {
                 c.setResult(.file_write, @intCast(res));
+            }
+        },
+
+        .file_sync => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileSyncError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_sync, {});
             }
         },
     }

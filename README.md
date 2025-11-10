@@ -6,7 +6,7 @@ Supports Linux (io_uring/epoll/poll), FreeBSD (kqueue/poll), NetBSD (kqueue/poll
 
 Features:
 - Socket operations: `net_open`, `net_close`, `net_bind`, `net_listen`, `net_accept`, `net_connect`, `net_send`, `net_recv`, `net_sendto`, `net_recvfrom`
-- File operation: `file_open`, `file_close`, `file_read`, `file_write`
+- File operations: `file_open`, `file_close`, `file_read`, `file_write`, `file_sync`
 - Timers: `timer`
 - Cancelation: `cancel`
 - Cross-thread notifications: `async`

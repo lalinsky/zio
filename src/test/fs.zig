@@ -28,6 +28,22 @@ test "File: open/close" {
         try std.testing.expect(fd > 0);
     }
 
+    // Sync file (full sync)
+    var file_sync1 = aio.FileSync.init(fd, .{ .only_data = false });
+    loop.add(&file_sync1.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.completed, file_sync1.c.state);
+    try std.testing.expectEqual(true, file_sync1.c.has_result);
+    try file_sync1.getResult();
+
+    // Sync file (data only)
+    var file_sync2 = aio.FileSync.init(fd, .{ .only_data = true });
+    loop.add(&file_sync2.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.completed, file_sync2.c.state);
+    try std.testing.expectEqual(true, file_sync2.c.has_result);
+    try file_sync2.getResult();
+
     var file_close = aio.FileClose.init(fd);
     loop.add(&file_close.c);
 

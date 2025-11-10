@@ -26,6 +26,7 @@ pub const Op = enum {
     file_close,
     file_read,
     file_write,
+    file_sync,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -49,6 +50,7 @@ pub const Op = enum {
             .file_close => FileClose,
             .file_read => FileRead,
             .file_write => FileWrite,
+            .file_sync => FileSync,
         };
     }
 
@@ -74,6 +76,7 @@ pub const Op = enum {
             FileClose => .file_close,
             FileRead => .file_read,
             FileWrite => .file_write,
+            FileSync => .file_sync,
             else => @compileError("unknown completion type"),
         };
     }
@@ -615,5 +618,30 @@ pub const FileWrite = struct {
 
     pub fn getResult(self: *const FileWrite) Error!usize {
         return self.c.getResult(.file_write);
+    }
+};
+
+pub const FileSync = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (@hasDecl(Backend, "supports_file_ops") and Backend.supports_file_ops) {
+        true => if (@hasDecl(Backend, "FileSyncData")) Backend.FileSyncData else struct {},
+        false => struct { work: Work = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    flags: fs.FileSyncFlags,
+
+    pub const Error = fs.FileSyncError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, flags: fs.FileSyncFlags) FileSync {
+        return .{
+            .c = .init(.file_sync),
+            .handle = handle,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const FileSync) Error!void {
+        return self.c.getResult(.file_sync);
     }
 };

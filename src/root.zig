@@ -30,6 +30,7 @@ pub const FileOpen = completion.FileOpen;
 pub const FileClose = completion.FileClose;
 pub const FileRead = completion.FileRead;
 pub const FileWrite = completion.FileWrite;
+pub const FileSync = completion.FileSync;
 
 /// Low level system APIs
 pub const system = @import("system.zig");

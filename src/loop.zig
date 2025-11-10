@@ -12,6 +12,7 @@ const FileOpen = @import("completion.zig").FileOpen;
 const FileClose = @import("completion.zig").FileClose;
 const FileRead = @import("completion.zig").FileRead;
 const FileWrite = @import("completion.zig").FileWrite;
+const FileSync = @import("completion.zig").FileSync;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const time = @import("os/time.zig");
 const net = @import("os/net.zig");
@@ -329,7 +330,7 @@ pub const Loop = struct {
                             }
                             return;
                         },
-                        .file_open, .file_close, .file_read, .file_write => {
+                        .file_open, .file_close, .file_read, .file_write, .file_sync => {
                             // File ops on backends without native support use internal Work
                             if (!Backend.supports_file_ops) {
                                 self.state.active += 1; // Count the cancel operation
@@ -339,6 +340,7 @@ pub const Loop = struct {
                                     .file_close => &cancel.target.cast(FileClose).internal.work,
                                     .file_read => &cancel.target.cast(FileRead).internal.work,
                                     .file_write => &cancel.target.cast(FileWrite).internal.work,
+                                    .file_sync => &cancel.target.cast(FileSync).internal.work,
                                     else => unreachable,
                                 };
 
@@ -370,7 +372,7 @@ pub const Loop = struct {
                 // Route file operations to thread pool for backends without native support
                 if (!Backend.supports_file_ops) {
                     switch (completion.op) {
-                        .file_open, .file_close, .file_read, .file_write => {
+                        .file_open, .file_close, .file_read, .file_write, .file_sync => {
                             self.submitFileOpToThreadPool(completion);
                             return;
                         },
@@ -468,6 +470,13 @@ pub const Loop = struct {
                 file_write.internal.work.loop = self;
                 file_write.internal.work.linked = completion;
                 tp.submit(&file_write.internal.work);
+            },
+            .file_sync => {
+                const file_sync = completion.cast(FileSync);
+                file_sync.internal.work = Work.init(common.fileSyncWork, null);
+                file_sync.internal.work.loop = self;
+                file_sync.internal.work.linked = completion;
+                tp.submit(&file_sync.internal.work);
             },
             else => unreachable,
         }
