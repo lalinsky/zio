@@ -29,8 +29,8 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         // Buffer for echo
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]aio.ReadBuf = undefined,
-        send_iov: [1]aio.WriteBuf = undefined,
+        recv_iov: [1]aio.system.iovec = undefined,
+        send_iov: [1]aio.system.iovec_const = undefined,
         bytes_received: usize = 0,
 
         pub const State = enum {
@@ -125,9 +125,8 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
             // Start receiving
             self.state = .receiving;
-            self.recv_iov = [_]aio.ReadBuf{.fromSlice(&self.recv_buf)};
             self.client_addr_len = @sizeOf(sockaddr);
-            self.comp = .{ .recvfrom = aio.NetRecvFrom.init(self.server_sock, &self.recv_iov, .{}, @ptrCast(&self.client_addr), &self.client_addr_len) };
+            self.comp = .{ .recvfrom = aio.NetRecvFrom.init(self.server_sock, .fromSlice(&self.recv_buf, &self.recv_iov), .{}, @ptrCast(&self.client_addr), &self.client_addr_len) };
             self.comp.recvfrom.c.callback = recvCallback;
             self.comp.recvfrom.c.userdata = self;
             loop.add(&self.comp.recvfrom.c);
@@ -145,8 +144,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             // Echo back to sender
             self.state = .sending;
             const send_buf = self.recv_buf[0..self.bytes_received];
-            self.send_iov = [_]aio.WriteBuf{.fromSlice(send_buf)};
-            self.comp = .{ .sendto = aio.NetSendTo.init(self.server_sock, &self.send_iov, .{}, @ptrCast(&self.client_addr), self.client_addr_len) };
+            self.comp = .{ .sendto = aio.NetSendTo.init(self.server_sock, .fromSlice(send_buf, &self.send_iov), .{}, @ptrCast(&self.client_addr), self.client_addr_len) };
             self.comp.sendto.c.callback = sendCallback;
             self.comp.sendto.c.userdata = self;
             loop.add(&self.comp.sendto.c);
@@ -204,9 +202,9 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         // Buffers
         send_buf: []const u8,
-        send_iov: [1]aio.WriteBuf = undefined,
+        send_iov: [1]aio.system.iovec_const = undefined,
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]aio.ReadBuf = undefined,
+        recv_iov: [1]aio.system.iovec = undefined,
         recv_addr: sockaddr = undefined,
         recv_addr_len: net.socklen_t = undefined,
         bytes_received: usize = 0,
@@ -278,8 +276,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             } else {
                 // Start send directly for IP sockets
                 self.state = .sending;
-                self.send_iov = [_]aio.WriteBuf{.fromSlice(self.send_buf)};
-                self.comp = .{ .sendto = aio.NetSendTo.init(self.client_sock, &self.send_iov, .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
+                self.comp = .{ .sendto = aio.NetSendTo.init(self.client_sock, .fromSlice(self.send_buf, &self.send_iov), .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
                 self.comp.sendto.c.callback = sendCallback;
                 self.comp.sendto.c.userdata = self;
                 loop.add(&self.comp.sendto.c);
@@ -297,8 +294,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
             // Start send
             self.state = .sending;
-            self.send_iov = [_]aio.WriteBuf{.fromSlice(self.send_buf)};
-            self.comp = .{ .sendto = aio.NetSendTo.init(self.client_sock, &self.send_iov, .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
+            self.comp = .{ .sendto = aio.NetSendTo.init(self.client_sock, .fromSlice(self.send_buf, &self.send_iov), .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
             self.comp.sendto.c.callback = sendCallback;
             self.comp.sendto.c.userdata = self;
             loop.add(&self.comp.sendto.c);
@@ -315,9 +311,8 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
             // Start recv
             self.state = .receiving;
-            self.recv_iov = [_]aio.ReadBuf{.fromSlice(&self.recv_buf)};
             self.recv_addr_len = @sizeOf(sockaddr);
-            self.comp = .{ .recvfrom = aio.NetRecvFrom.init(self.client_sock, &self.recv_iov, .{}, @ptrCast(&self.recv_addr), &self.recv_addr_len) };
+            self.comp = .{ .recvfrom = aio.NetRecvFrom.init(self.client_sock, .fromSlice(&self.recv_buf, &self.recv_iov), .{}, @ptrCast(&self.recv_addr), &self.recv_addr_len) };
             self.comp.recvfrom.c.callback = recvCallback;
             self.comp.recvfrom.c.userdata = self;
             loop.add(&self.comp.recvfrom.c);

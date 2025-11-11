@@ -31,8 +31,8 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         // Buffer for echo
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]aio.ReadBuf = undefined,
-        send_iov: [1]aio.WriteBuf = undefined,
+        recv_iov: [1]aio.system.iovec = undefined,
+        send_iov: [1]aio.system.iovec_const = undefined,
         bytes_received: usize = 0,
         bytes_sent: usize = 0,
 
@@ -162,8 +162,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             };
 
             self.state = .receiving;
-            self.recv_iov = [_]aio.ReadBuf{.fromSlice(&self.recv_buf)};
-            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock.?, &self.recv_iov, .{}) };
+            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock.?, .fromSlice(&self.recv_buf, &self.recv_iov), .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
             loop.add(&self.comp.recv.c);
@@ -191,8 +190,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             self.state = .sending;
             self.bytes_sent = 0;
             const send_buf = self.recv_buf[0..self.bytes_received];
-            self.send_iov = [_]aio.WriteBuf{.fromSlice(send_buf)};
-            self.comp = .{ .send = aio.NetSend.init(self.client_sock.?, &self.send_iov, .{}) };
+            self.comp = .{ .send = aio.NetSend.init(self.client_sock.?, .fromSlice(send_buf, &self.send_iov), .{}) };
             self.comp.send.c.callback = sendCallback;
             self.comp.send.c.userdata = self;
             loop.add(&self.comp.send.c);
@@ -213,8 +211,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
             if (self.bytes_sent < self.bytes_received) {
                 // Partial write - continue sending remaining data
                 const remaining = self.recv_buf[self.bytes_sent..self.bytes_received];
-                self.send_iov = [_]aio.WriteBuf{.fromSlice(remaining)};
-                self.comp = .{ .send = aio.NetSend.init(self.client_sock.?, &self.send_iov, .{}) };
+                self.comp = .{ .send = aio.NetSend.init(self.client_sock.?, .fromSlice(remaining, &self.send_iov), .{}) };
                 self.comp.send.c.callback = sendCallback;
                 self.comp.send.c.userdata = self;
                 loop.add(&self.comp.send.c);
@@ -223,8 +220,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
             // Full message sent - go back to receiving to check for EOF or more data
             self.state = .receiving;
-            self.recv_iov = [_]aio.ReadBuf{.fromSlice(&self.recv_buf)};
-            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock.?, &self.recv_iov, .{}) };
+            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock.?, .fromSlice(&self.recv_buf, &self.recv_iov), .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
             loop.add(&self.comp.recv.c);
@@ -280,9 +276,9 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         // Buffers
         send_buf: []const u8,
-        send_iov: [1]aio.WriteBuf = undefined,
+        send_iov: [1]aio.system.iovec_const = undefined,
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]aio.ReadBuf = undefined,
+        recv_iov: [1]aio.system.iovec = undefined,
         bytes_sent: usize = 0,
         bytes_received: usize = 0,
 
@@ -351,8 +347,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
             self.state = .sending;
             self.bytes_sent = 0;
-            self.send_iov = [_]aio.WriteBuf{.fromSlice(self.send_buf)};
-            self.comp = .{ .send = aio.NetSend.init(self.client_sock, &self.send_iov, .{}) };
+            self.comp = .{ .send = aio.NetSend.init(self.client_sock, .fromSlice(self.send_buf, &self.send_iov), .{}) };
             self.comp.send.c.callback = sendCallback;
             self.comp.send.c.userdata = self;
             loop.add(&self.comp.send.c);
@@ -373,8 +368,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             if (self.bytes_sent < self.send_buf.len) {
                 // Partial write - continue sending remaining data
                 const remaining = self.send_buf[self.bytes_sent..];
-                self.send_iov = [_]aio.WriteBuf{.fromSlice(remaining)};
-                self.comp = .{ .send = aio.NetSend.init(self.client_sock, &self.send_iov, .{}) };
+                self.comp = .{ .send = aio.NetSend.init(self.client_sock, .fromSlice(remaining, &self.send_iov), .{}) };
                 self.comp.send.c.callback = sendCallback;
                 self.comp.send.c.userdata = self;
                 loop.add(&self.comp.send.c);
@@ -401,8 +395,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             self.state = .receiving;
             self.bytes_received = 0;
             // Start reading into the beginning of recv_buf
-            self.recv_iov = [_]aio.ReadBuf{.fromSlice(&self.recv_buf)};
-            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock, &self.recv_iov, .{}) };
+            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock, .fromSlice(&self.recv_buf, &self.recv_iov), .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
             loop.add(&self.comp.recv.c);
@@ -433,8 +426,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
             // Continue reading - re-arm NetRecv to drain the full echo
             // Read into the buffer starting after what we've already received
             const remaining_buf = self.recv_buf[self.bytes_received..];
-            self.recv_iov = [_]aio.ReadBuf{.fromSlice(remaining_buf)};
-            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock, &self.recv_iov, .{}) };
+            self.comp = .{ .recv = aio.NetRecv.init(self.client_sock, .fromSlice(remaining_buf, &self.recv_iov), .{}) };
             self.comp.recv.c.callback = recvCallback;
             self.comp.recv.c.userdata = self;
             loop.add(&self.comp.recv.c);

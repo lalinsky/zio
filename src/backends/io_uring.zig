@@ -171,12 +171,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_recv => {
             const data = c.cast(NetRecv);
-            const iov = ReadBuf.toIovecs(data.buffers);
             data.internal.msg = .{
                 .name = null,
                 .namelen = 0,
-                .iov = iov.ptr,
-                .iovlen = iov.len,
+                .iov = data.buffers.iovecs.ptr,
+                .iovlen = data.buffers.iovecs.len,
                 .control = null,
                 .controllen = 0,
                 .flags = 0,
@@ -192,12 +191,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_send => {
             const data = c.cast(NetSend);
-            const iov = WriteBuf.toIovecs(data.buffers);
             data.internal.msg = .{
                 .name = null,
                 .namelen = 0,
-                .iov = iov.ptr,
-                .iovlen = iov.len,
+                .iov = data.buffer.iovecs.ptr,
+                .iovlen = data.buffer.iovecs.len,
                 .control = null,
                 .controllen = 0,
                 .flags = 0,
@@ -213,12 +211,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
-            const iov = ReadBuf.toIovecs(data.buffers);
             data.internal.msg = .{
                 .name = @ptrCast(data.addr),
                 .namelen = if (data.addr_len) |len| len.* else 0,
-                .iov = iov.ptr,
-                .iovlen = iov.len,
+                .iov = data.buffer.iovecs.ptr,
+                .iovlen = data.buffer.iovecs.len,
                 .control = null,
                 .controllen = 0,
                 .flags = 0,
@@ -234,12 +231,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
-            const iov = WriteBuf.toIovecs(data.buffers);
             data.internal.msg = .{
                 .name = @ptrCast(data.addr),
                 .namelen = data.addr_len,
-                .iov = iov.ptr,
-                .iovlen = iov.len,
+                .iov = data.buffer.iovecs.ptr,
+                .iovlen = data.buffer.iovecs.len,
                 .control = null,
                 .controllen = 0,
                 .flags = 0,
@@ -346,8 +342,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompleted(c);
                 return;
             };
-            const iov = ReadBuf.toIovecs(data.buffers);
-            sqe.prep_readv(data.handle, iov, data.offset);
+            sqe.prep_readv(data.handle, data.buffer.iovecs, data.offset);
             sqe.user_data = @intFromPtr(c);
         },
         .file_write => {
@@ -358,8 +353,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompleted(c);
                 return;
             };
-            const iov = WriteBuf.toIovecs(data.buffers);
-            sqe.prep_writev(data.handle, iov, data.offset);
+            sqe.prep_writev(data.handle, data.buffer.iovecs, data.offset);
             sqe.user_data = @intFromPtr(c);
         },
         .file_sync => {

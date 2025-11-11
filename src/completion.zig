@@ -462,16 +462,16 @@ pub const NetRecv = struct {
     result_private_do_not_touch: usize = undefined,
     internal: if (@hasDecl(Backend, "NetRecvData")) Backend.NetRecvData else struct {} = .{},
     handle: Backend.NetHandle,
-    buffers: []ReadBuf,
+    buffers: ReadBuf,
     flags: net.RecvFlags,
 
     pub const Error = net.RecvError || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, buffers: []ReadBuf, flags: net.RecvFlags) NetRecv {
+    pub fn init(handle: Backend.NetHandle, buffer: ReadBuf, flags: net.RecvFlags) NetRecv {
         return .{
             .c = .init(.net_recv),
             .handle = handle,
-            .buffers = buffers,
+            .buffers = buffer,
             .flags = flags,
         };
     }
@@ -486,16 +486,16 @@ pub const NetSend = struct {
     result_private_do_not_touch: usize = undefined,
     internal: if (@hasDecl(Backend, "NetSendData")) Backend.NetSendData else struct {} = .{},
     handle: Backend.NetHandle,
-    buffers: []const WriteBuf,
+    buffer: WriteBuf,
     flags: net.SendFlags,
 
     pub const Error = net.SendError || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, buffers: []const WriteBuf, flags: net.SendFlags) NetSend {
+    pub fn init(handle: Backend.NetHandle, buffer: WriteBuf, flags: net.SendFlags) NetSend {
         return .{
             .c = .init(.net_send),
             .handle = handle,
-            .buffers = buffers,
+            .buffer = buffer,
             .flags = flags,
         };
     }
@@ -510,7 +510,7 @@ pub const NetRecvFrom = struct {
     result_private_do_not_touch: usize = undefined,
     internal: if (@hasDecl(Backend, "NetRecvFromData")) Backend.NetRecvFromData else struct {} = .{},
     handle: Backend.NetHandle,
-    buffers: []ReadBuf,
+    buffer: ReadBuf,
     flags: net.RecvFlags,
     addr: ?*net.sockaddr,
     addr_len: ?*net.socklen_t,
@@ -519,7 +519,7 @@ pub const NetRecvFrom = struct {
 
     pub fn init(
         handle: Backend.NetHandle,
-        buffers: []ReadBuf,
+        buffer: ReadBuf,
         flags: net.RecvFlags,
         addr: ?*net.sockaddr,
         addr_len: ?*net.socklen_t,
@@ -527,7 +527,7 @@ pub const NetRecvFrom = struct {
         return .{
             .c = .init(.net_recvfrom),
             .handle = handle,
-            .buffers = buffers,
+            .buffer = buffer,
             .flags = flags,
             .addr = addr,
             .addr_len = addr_len,
@@ -544,7 +544,7 @@ pub const NetSendTo = struct {
     result_private_do_not_touch: usize = undefined,
     internal: if (@hasDecl(Backend, "NetSendToData")) Backend.NetSendToData else struct {} = .{},
     handle: Backend.NetHandle,
-    buffers: []const WriteBuf,
+    buffer: WriteBuf,
     flags: net.SendFlags,
     addr: *const net.sockaddr,
     addr_len: net.socklen_t,
@@ -553,7 +553,7 @@ pub const NetSendTo = struct {
 
     pub fn init(
         handle: Backend.NetHandle,
-        buffers: []const WriteBuf,
+        buffer: WriteBuf,
         flags: net.SendFlags,
         addr: *const net.sockaddr,
         addr_len: net.socklen_t,
@@ -561,7 +561,7 @@ pub const NetSendTo = struct {
         return .{
             .c = .init(.net_sendto),
             .handle = handle,
-            .buffers = buffers,
+            .buffer = buffer,
             .flags = flags,
             .addr = addr,
             .addr_len = addr_len,
@@ -658,16 +658,16 @@ pub const FileRead = struct {
         false => struct { work: Work = undefined },
     } = .{},
     handle: fs.fd_t,
-    buffers: []ReadBuf,
+    buffer: ReadBuf,
     offset: u64,
 
     pub const Error = fs.FileReadError || Cancelable;
 
-    pub fn init(handle: fs.fd_t, buffers: []ReadBuf, offset: u64) FileRead {
+    pub fn init(handle: fs.fd_t, buffer: ReadBuf, offset: u64) FileRead {
         return .{
             .c = .init(.file_read),
             .handle = handle,
-            .buffers = buffers,
+            .buffer = buffer,
             .offset = offset,
         };
     }
@@ -685,16 +685,16 @@ pub const FileWrite = struct {
         false => struct { work: Work = undefined },
     } = .{},
     handle: fs.fd_t,
-    buffers: []const WriteBuf,
+    buffer: WriteBuf,
     offset: u64,
 
     pub const Error = fs.FileWriteError || Cancelable;
 
-    pub fn init(handle: fs.fd_t, buffers: []const WriteBuf, offset: u64) FileWrite {
+    pub fn init(handle: fs.fd_t, buffer: WriteBuf, offset: u64) FileWrite {
         return .{
             .c = .init(.file_write),
             .handle = handle,
-            .buffers = buffers,
+            .buffer = buffer,
             .offset = offset,
         };
     }

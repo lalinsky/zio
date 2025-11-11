@@ -334,8 +334,8 @@ test "cancel: net_recv with Cancel completion" {
 
     // Start recv on accepted socket
     var buf: [128]u8 = undefined;
-    var read_buf = [_]aio.ReadBuf{aio.ReadBuf.fromSlice(&buf)};
-    var recv: NetRecv = .init(accepted_sock, &read_buf, .{});
+    var read_iov: [1]aio.system.iovec = undefined;
+    var recv: NetRecv = .init(accepted_sock, .fromSlice(&buf, &read_iov), .{});
     loop.add(&recv.c);
 
     try loop.run(.no_wait);
@@ -411,8 +411,8 @@ test "cancel: net_recv with loop.cancel()" {
 
     // Start recv on accepted socket
     var buf: [128]u8 = undefined;
-    var read_buf = [_]aio.ReadBuf{aio.ReadBuf.fromSlice(&buf)};
-    var recv: NetRecv = .init(accepted_sock, &read_buf, .{});
+    var read_iov: [1]aio.system.iovec = undefined;
+    var recv: NetRecv = .init(accepted_sock, .fromSlice(&buf, &read_iov), .{});
     loop.add(&recv.c);
 
     try loop.run(.no_wait);

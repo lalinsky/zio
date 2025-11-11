@@ -1,51 +1,36 @@
 const std = @import("std");
 const system = @import("system.zig");
 
-pub const ReadBuf = extern struct {
-    data: system.iovec,
+pub const ReadBuf = struct {
+    iovecs: []system.iovec,
 
-    pub fn fromSlice(data: []u8) ReadBuf {
-        return .{ .data = system.iovecFromSlice(data) };
+    pub fn fromSlice(slice: []u8, storage: []system.iovec) ReadBuf {
+        storage[0] = system.iovecFromSlice(slice);
+        return .{ .iovecs = storage[0..1] };
     }
 
-    pub fn fromSlices(src: [][]u8, dest: []ReadBuf) []ReadBuf {
-        const len = @min(src.len, dest.len);
+    pub fn fromSlices(slices: [][]u8, storage: []system.iovec) ReadBuf {
+        const len = @min(slices.len, storage.len);
         for (0..len) |i| {
-            dest[i] = ReadBuf.fromSlice(src[i]);
+            storage[i] = system.iovecFromSlice(slices[i]);
         }
-        return dest[0..len];
-    }
-
-    pub fn toIovecs(bufs: []const ReadBuf) []system.iovec {
-        std.debug.assert(@alignOf(ReadBuf) == @alignOf(system.iovec));
-        std.debug.assert(@sizeOf(ReadBuf) == @sizeOf(system.iovec));
-        std.debug.assert(@bitSizeOf(ReadBuf) == @bitSizeOf(system.iovec));
-        var ptr: [*]system.iovec = @ptrCast(@constCast(bufs.ptr));
-        return ptr[0..bufs.len];
+        return .{ .iovecs = storage[0..len] };
     }
 };
 
-pub const WriteBuf = extern struct {
-    data: system.iovec_const,
+pub const WriteBuf = struct {
+    iovecs: []const system.iovec_const,
 
-    pub fn fromSlice(data: []const u8) WriteBuf {
-        return .{ .data = system.iovecConstFromSlice(data) };
+    pub fn fromSlice(slice: []const u8, storage: []system.iovec_const) WriteBuf {
+        storage[0] = system.iovecConstFromSlice(slice);
+        return .{ .iovecs = storage[0..1] };
     }
 
-    pub fn fromSlices(comptime n: usize, slices: [][]const u8) [n]WriteBuf {
-        var bufs = [_]WriteBuf{undefined} ** n;
-        const len = @min(slices.len, n);
+    pub fn fromSlices(slices: []const []const u8, storage: []system.iovec_const) WriteBuf {
+        const len = @min(slices.len, storage.len);
         for (0..len) |i| {
-            bufs[i] = WriteBuf.fromSlice(slices[i]);
+            storage[i] = system.iovecConstFromSlice(slices[i]);
         }
-        return bufs;
-    }
-
-    pub fn toIovecs(bufs: []const WriteBuf) []const system.iovec_const {
-        std.debug.assert(@alignOf(WriteBuf) == @alignOf(system.iovec_const));
-        std.debug.assert(@sizeOf(WriteBuf) == @sizeOf(system.iovec_const));
-        std.debug.assert(@bitSizeOf(WriteBuf) == @bitSizeOf(system.iovec_const));
-        var ptr: [*]const system.iovec_const = @ptrCast(bufs.ptr);
-        return ptr[0..bufs.len];
+        return .{ .iovecs = storage[0..len] };
     }
 };

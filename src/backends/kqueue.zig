@@ -402,8 +402,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setError(err);
                 return .completed;
             }
-            const iov = ReadBuf.toIovecs(data.buffers);
-            if (net.recv(data.handle, iov, data.flags)) |n| {
+            if (net.recv(data.handle, data.buffers.iovecs, data.flags)) |n| {
                 comp.setResult(.net_recv, n);
                 return .completed;
             } else |err| switch (err) {
@@ -420,8 +419,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setError(err);
                 return .completed;
             }
-            const iov = WriteBuf.toIovecs(data.buffers);
-            if (net.send(data.handle, iov, data.flags)) |n| {
+            if (net.send(data.handle, data.buffer.iovecs, data.flags)) |n| {
                 comp.setResult(.net_send, n);
                 return .completed;
             } else |err| switch (err) {
@@ -438,8 +436,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setError(err);
                 return .completed;
             }
-            const iov = ReadBuf.toIovecs(data.buffers);
-            if (net.recvfrom(data.handle, iov, data.flags, data.addr, data.addr_len)) |n| {
+            if (net.recvfrom(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |n| {
                 comp.setResult(.net_recvfrom, n);
                 return .completed;
             } else |err| switch (err) {
@@ -456,8 +453,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setError(err);
                 return .completed;
             }
-            const iov = WriteBuf.toIovecs(data.buffers);
-            if (net.sendto(data.handle, iov, data.flags, data.addr, data.addr_len)) |n| {
+            if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |n| {
                 comp.setResult(.net_sendto, n);
                 return .completed;
             } else |err| switch (err) {
