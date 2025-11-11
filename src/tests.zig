@@ -19,6 +19,7 @@ test {
     _ = @import("test/stream_server.zig");
     _ = @import("test/dgram_server.zig");
     _ = @import("test/fs.zig");
+    _ = @import("test/timer.zig");
 }
 
 test "Loop: empty run(.no_wait)" {

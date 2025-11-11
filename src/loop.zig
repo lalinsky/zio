@@ -214,6 +214,26 @@ pub const Loop = struct {
         self.backend.wake();
     }
 
+    /// Set or reset a timer with a new delay (works immediately, no completion required)
+    pub fn setTimer(self: *Loop, timer: *Timer, delay_ms: u64) void {
+        self.state.updateNow();
+        timer.delay_ms = delay_ms;
+        self.state.setTimer(timer);
+    }
+
+    /// Clear a timer without completing it (works immediately, no cancellation completion required)
+    pub fn clearTimer(self: *Loop, timer: *Timer) void {
+        const was_active = timer.deadline_ms > 0;
+        self.state.clearTimer(timer);
+        if (was_active) {
+            // Reset state so timer can be reused
+            timer.c.state = .new;
+            timer.c.has_result = false;
+            timer.c.err = null;
+            self.state.active -= 1;
+        }
+    }
+
     pub fn run(self: *Loop, mode: RunMode) !void {
         std.debug.assert(self.state.initialized);
         if (self.state.stopped) return;
