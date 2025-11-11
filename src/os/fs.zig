@@ -145,12 +145,15 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
 
-        // Allocate buffer for UTF-16 conversion
-        const path_w = allocator.allocSentinel(u16, path.len, 0) catch return error.SystemResources;
-        defer allocator.free(path_w);
-
-        const len = std.unicode.utf8ToUtf16Le(path_w, path) catch return error.InvalidUtf8;
-        path_w[len] = 0;
+        // Convert path to UTF-16 with proper prefixing and directory handling
+        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
+            error.InvalidWtf8 => error.InvalidUtf8,
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.BadPathName,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            error.Unexpected => error.Unexpected,
+        };
 
         const access_mask: w.DWORD = switch (flags.mode) {
             .read_only => w.GENERIC_READ,
@@ -159,7 +162,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         };
 
         const handle = w.kernel32.CreateFileW(
-            path_w.ptr,
+            path_w.span().ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
             null,
@@ -207,12 +210,15 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
 
-        // Allocate buffer for UTF-16 conversion
-        const path_w = allocator.allocSentinel(u16, path.len, 0) catch return error.SystemResources;
-        defer allocator.free(path_w);
-
-        const len = std.unicode.utf8ToUtf16Le(path_w, path) catch return error.InvalidUtf8;
-        path_w[len] = 0;
+        // Convert path to UTF-16 with proper prefixing and directory handling
+        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
+            error.InvalidWtf8 => error.InvalidUtf8,
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.BadPathName,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            error.Unexpected => error.Unexpected,
+        };
 
         const access_mask: w.DWORD = if (flags.read)
             w.GENERIC_READ | w.GENERIC_WRITE
@@ -227,7 +233,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
             w.OPEN_ALWAYS;
 
         const handle = w.kernel32.CreateFileW(
-            path_w.ptr,
+            path_w.span().ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
             null,
@@ -412,23 +418,29 @@ pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 /// Rename a file using renameat() syscall
 pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) FileRenameError!void {
     if (builtin.os.tag == .windows) {
-        // Windows doesn't support directory fds in the same way (old_dir/new_dir unused on Windows)
         const w = std.os.windows;
 
-        // Allocate buffers for UTF-16 conversion
-        const old_path_w = allocator.allocSentinel(u16, old_path.len, 0) catch return error.SystemResources;
-        defer allocator.free(old_path_w);
-        const new_path_w = allocator.allocSentinel(u16, new_path.len, 0) catch return error.SystemResources;
-        defer allocator.free(new_path_w);
-
-        const old_len = std.unicode.utf8ToUtf16Le(old_path_w, old_path) catch return error.InvalidUtf8;
-        old_path_w[old_len] = 0;
-        const new_len = std.unicode.utf8ToUtf16Le(new_path_w, new_path) catch return error.InvalidUtf8;
-        new_path_w[new_len] = 0;
+        // Convert paths to UTF-16 with proper prefixing and directory handling
+        const old_path_w = w.sliceToPrefixedFileW(old_dir, old_path) catch |err| return switch (err) {
+            error.InvalidWtf8 => error.InvalidUtf8,
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.FileNotFound,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            error.Unexpected => error.Unexpected,
+        };
+        const new_path_w = w.sliceToPrefixedFileW(new_dir, new_path) catch |err| return switch (err) {
+            error.InvalidWtf8 => error.InvalidUtf8,
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.FileNotFound,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            error.Unexpected => error.Unexpected,
+        };
 
         const success = w.kernel32.MoveFileExW(
-            old_path_w.ptr,
-            new_path_w.ptr,
+            old_path_w.span().ptr,
+            new_path_w.span().ptr,
             w.MOVEFILE_REPLACE_EXISTING,
         );
 
@@ -466,14 +478,17 @@ pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileD
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
 
-        // Allocate buffer for UTF-16 conversion
-        const path_w = allocator.allocSentinel(u16, path.len, 0) catch return error.SystemResources;
-        defer allocator.free(path_w);
+        // Convert path to UTF-16 with proper prefixing and directory handling
+        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
+            error.InvalidWtf8 => error.InvalidUtf8,
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.FileNotFound,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            error.Unexpected => error.Unexpected,
+        };
 
-        const len = std.unicode.utf8ToUtf16Le(path_w, path) catch return error.InvalidUtf8;
-        path_w[len] = 0;
-
-        w.DeleteFile(path_w, .{ .dir = dir, .remove_dir = false }) catch |err| {
+        w.DeleteFile(path_w.span(), .{ .dir = dir, .remove_dir = false }) catch |err| {
             return switch (err) {
                 error.FileNotFound => error.FileNotFound,
                 error.AccessDenied => error.AccessDenied,
