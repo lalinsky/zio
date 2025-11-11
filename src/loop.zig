@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Backend = @import("backend.zig").Backend;
 const Completion = @import("completion.zig").Completion;
 const Cancel = @import("completion.zig").Cancel;
@@ -22,6 +23,8 @@ const net = @import("os/net.zig");
 const common = @import("backends/common.zig");
 
 const log = std.log.scoped(.zevent_loop);
+
+const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
 pub const RunMode = enum {
     no_wait,
@@ -122,7 +125,12 @@ pub const LoopState = struct {
 
         completion.state = .completed;
         self.active -= 1;
-        self.completions.push(completion);
+
+        if (self.loop.defer_callbacks) {
+            self.completions.push(completion);
+        } else {
+            completion.call(self.loop);
+        }
     }
 
     pub fn markRunning(self: *LoopState, completion: *Completion) void {
@@ -163,6 +171,9 @@ pub const Loop = struct {
     thread_pool: ?*ThreadPool = null,
 
     max_wait_ms: u64 = 60 * std.time.ms_per_s,
+    defer_callbacks: bool = true,
+
+    in_add: if (in_safe_mode) bool else void = if (in_safe_mode) false else {},
 
     const default_queue_size = 256;
 
@@ -170,6 +181,7 @@ pub const Loop = struct {
         allocator: std.mem.Allocator = std.heap.page_allocator,
         thread_pool: ?*ThreadPool = null,
         queue_size: u16 = default_queue_size,
+        defer_callbacks: bool = true,
     };
 
     pub fn init(self: *Loop, options: Options) !void {
@@ -178,6 +190,7 @@ pub const Loop = struct {
             .backend = undefined,
             .allocator = options.allocator,
             .thread_pool = options.thread_pool,
+            .defer_callbacks = options.defer_callbacks,
         };
 
         if (options.queue_size == 0) {
@@ -247,6 +260,16 @@ pub const Loop = struct {
     }
 
     pub fn add(self: *Loop, completion: *Completion) void {
+        if (in_safe_mode) {
+            if (self.in_add) {
+                @panic("recursive call to Loop.add() is not allowed");
+            }
+            self.in_add = true;
+        }
+        defer {
+            if (in_safe_mode) self.in_add = false;
+        }
+
         std.debug.assert(completion.state == .new);
 
         if (completion.canceled != null) {
