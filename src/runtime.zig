@@ -85,17 +85,6 @@ fn noopTimerCancelCallback(
     _ = c;
 }
 
-// Async callback for remote ready tasks wakeup (cross-thread resumption)
-// This just wakes up the loop - the actual draining happens in run().
-fn remoteWakeupCallback(
-    loop: *aio.Loop,
-    c: *aio.Completion,
-) void {
-    // Just wake up - draining happens in run() loop
-    // Re-add the async handle for the next notification
-    loop.add(c);
-}
-
 fn shutdownCallback(
     loop: *aio.Loop,
     c: *aio.Completion,
@@ -325,8 +314,6 @@ pub const Executor = struct {
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
-    remote_wakeup: aio.Async = undefined,
-    remote_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Shutdown support
     shutdown_async: aio.Async = undefined,
@@ -364,7 +351,6 @@ pub const Executor = struct {
             .cleanup_timer = try std.time.Timer.start(),
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
-            .remote_wakeup = undefined,
             .runtime = runtime,
         };
     }
@@ -378,21 +364,12 @@ pub const Executor = struct {
         });
         errdefer self.loop.deinit();
 
-        // Initialize remote wakeup
-        self.remote_wakeup = aio.Async.init();
-        self.remote_wakeup.loop = &self.loop;
-        self.remote_wakeup.c.userdata = self;
-        self.remote_wakeup.c.callback = remoteWakeupCallback;
-        self.loop.add(&self.remote_wakeup.c);
-
         // Initialize shutdown async
         self.shutdown_async = aio.Async.init();
         self.shutdown_async.loop = &self.loop;
         self.shutdown_async.c.userdata = self;
         self.shutdown_async.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown_async.c);
-
-        self.remote_initialized.store(true, .release);
     }
 
     fn deinitLoop(self: *Executor) void {
@@ -757,11 +734,8 @@ pub const Executor = struct {
         // Push to remote ready queue (thread-safe)
         self.next_ready_queue_remote.push(wait_node);
 
-        // Notify the target executor's event loop (only if initialized)
-        const initialized = self.remote_initialized.load(.acquire);
-        if (initialized) {
-            self.remote_wakeup.notify();
-        }
+        // Wake the target executor's event loop
+        self.loop.wake();
     }
 
     /// Schedule a task for execution. Called on the task's home executor (self).
