@@ -1209,7 +1209,7 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     try getsockname(listen_sock, &actual_addr, &addr_len);
 
     // Create connecting socket
-    const write_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    const write_sock = try socket(.ipv4, .stream, .{ .nonblocking = true });
     errdefer close(write_sock);
 
     // Connect to the listening socket
