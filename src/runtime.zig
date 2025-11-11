@@ -375,6 +375,7 @@ pub const Executor = struct {
         try self.loop.init(.{
             .allocator = self.allocator,
             .thread_pool = self.runtime.thread_pool,
+            .defer_callbacks = false,
         });
         errdefer self.loop.deinit();
 

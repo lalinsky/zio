@@ -1016,10 +1016,10 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
     const task = rt.getCurrentTask() orelse @panic("no active task");
     const executor = task.getExecutor();
 
-    var peer_addr: std.posix.sockaddr = undefined;
-    var peer_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+    var peer_addr: Address = undefined;
+    var peer_addr_len: std.posix.socklen_t = @sizeOf(Address);
 
-    var op = aio.NetAccept.init(fd, &peer_addr, &peer_addr_len);
+    var op = aio.NetAccept.init(fd, &peer_addr.any, &peer_addr_len);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -1028,10 +1028,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
 
     const handle = try op.getResult();
 
-    // Convert sockaddr to Address
-    const addr = Address.fromStorage(std.mem.asBytes(&peer_addr)[0..peer_addr_len]);
-
-    return .{ .socket = .{ .handle = handle, .address = addr } };
+    return .{ .socket = .{ .handle = handle, .address = peer_addr } };
 }
 
 pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
