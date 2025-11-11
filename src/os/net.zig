@@ -1188,7 +1188,7 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     ensureWSAInitialized();
 
     // Create a listening socket on loopback
-    const listen_sock = try socket(.ipv4, .stream, .tcp, .{ .nonblocking = true });
+    const listen_sock = try socket(.ipv4, .stream, .{ .nonblocking = true });
     errdefer close(listen_sock);
 
     // Bind to 127.0.0.1:0 (any available port)
