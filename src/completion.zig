@@ -232,7 +232,7 @@ pub const Async = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
     pending: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    loop: *Loop = undefined,
+    loop: ?*Loop = null,
 
     pub const Error = Cancelable;
 
@@ -248,7 +248,10 @@ pub const Async = struct {
         const was_pending = self.pending.swap(1, .release);
         if (was_pending == 0) {
             // Only notify loop if transitioning from not-pending to pending
-            self.loop.wake();
+            // If loop is not set (not actively waiting), this is a no-op
+            if (self.loop) |loop| {
+                loop.wake();
+            }
         }
     }
 

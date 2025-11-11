@@ -414,7 +414,15 @@ pub const Loop = struct {
                 async.loop = self;
                 async.c.state = .running;
                 self.state.active += 1;
-                self.state.async_handles.push(&async.c);
+
+                // Check if already notified before submission
+                if (checkAndSetAsyncResult(async)) {
+                    // Already pending - complete immediately
+                    self.state.markCompleted(&async.c);
+                } else {
+                    // Not pending - add to queue to wait for notification
+                    self.state.async_handles.push(&async.c);
+                }
                 return;
             },
             .work => {
@@ -488,17 +496,28 @@ pub const Loop = struct {
         return null;
     }
 
+    /// Check if an async handle is pending and set its result if so.
+    /// Returns true if the async was pending and had its result set.
+    /// Caller is responsible for managing queues and calling markCompleted.
+    fn checkAndSetAsyncResult(async_handle: *Async) bool {
+        const was_pending = async_handle.pending.swap(0, .acquire);
+        if (was_pending != 0) {
+            async_handle.c.setResult(.async, {});
+            async_handle.loop = null;
+            return true;
+        }
+        return false;
+    }
+
     pub fn processAsyncHandles(self: *Loop) void {
         // Check all async handles for pending notifications
         var c = self.state.async_handles.head;
         while (c) |completion| {
             const next = completion.next;
             const async_handle = completion.cast(Async);
-            const was_pending = async_handle.pending.swap(0, .acquire);
-            if (was_pending != 0) {
+            if (checkAndSetAsyncResult(async_handle)) {
                 // This handle was notified - remove from queue and complete it
                 _ = self.state.async_handles.remove(completion);
-                completion.setResult(.async, {});
                 self.state.markCompleted(&async_handle.c);
             }
             c = next;
