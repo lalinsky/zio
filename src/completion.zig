@@ -114,7 +114,7 @@ pub const Completion = struct {
     prev: ?*Completion = null,
     next: ?*Completion = null,
 
-    pub const State = enum { new, running, completed };
+    pub const State = enum { new, running, completed, dead };
 
     pub const CallbackFn = fn (
         loop: *Loop,

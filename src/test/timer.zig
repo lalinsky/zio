@@ -18,7 +18,7 @@ test "setTimer and clearTimer basic" {
     const elapsed_ns = wall_timer.read();
     const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
 
-    try std.testing.expectEqual(.completed, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.state);
     try std.testing.expect(elapsed_ms >= 90);
     try std.testing.expect(elapsed_ms <= 250);
     std.log.info("setTimer: expected=100ms, actual={}ms", .{elapsed_ms});
@@ -72,7 +72,7 @@ test "setTimer multiple times" {
     const elapsed_ns = wall_timer.read();
     const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
 
-    try std.testing.expectEqual(.completed, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.state);
     try std.testing.expect(elapsed_ms >= 90);
     try std.testing.expect(elapsed_ms <= 300);
     std.log.info("setTimer multiple: expected=100ms, actual={}ms", .{elapsed_ms});
@@ -99,7 +99,7 @@ test "clearTimer and reuse timer" {
     const elapsed_ns = wall_timer.read();
     const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
 
-    try std.testing.expectEqual(.completed, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.state);
     try std.testing.expect(elapsed_ms >= 90);
     try std.testing.expect(elapsed_ms <= 250);
     std.log.info("clearTimer reuse: expected=100ms, actual={}ms", .{elapsed_ms});

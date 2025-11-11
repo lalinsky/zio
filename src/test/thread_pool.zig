@@ -30,7 +30,7 @@ test "aio.ThreadPool: one task" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.completed, work.c.state);
+    try std.testing.expectEqual(.dead, work.c.state);
     try std.testing.expectEqual(1, test_fn.called);
 }
 
@@ -71,7 +71,7 @@ test "aio.ThreadPool: many tasks" {
     try loop.run(.until_done);
 
     for (0..num_tasks) |i| {
-        try std.testing.expectEqual(.completed, work[i].c.state);
+        try std.testing.expectEqual(.dead, work[i].c.state);
         try std.testing.expectEqual(1, test_fn[i].called);
     }
 

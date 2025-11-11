@@ -105,11 +105,12 @@ pub const LoopState = struct {
     work_completions: AtomicStack(Completion) = .{},
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
-        std.debug.assert(completion.state != .completed);
+        std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
 
         if (completion.canceled) |cancel| {
             std.debug.assert(!cancel.c.has_result);
+            cancel.c.state = .running; // Set to running before marking completed
             var set = false;
             if (completion.err) |err| {
                 if (err == error.Canceled) {
@@ -124,13 +125,20 @@ pub const LoopState = struct {
         }
 
         completion.state = .completed;
-        self.active -= 1;
 
         if (self.loop.defer_callbacks) {
             self.completions.push(completion);
         } else {
-            completion.call(self.loop);
+            self.finishCompletion(completion);
         }
+    }
+
+    pub fn finishCompletion(self: *LoopState, completion: *Completion) void {
+        std.debug.assert(completion.state == .completed);
+
+        completion.state = .dead;
+        self.active -= 1;
+        completion.call(self.loop);
     }
 
     pub fn markRunning(self: *LoopState, completion: *Completion) void {
@@ -329,7 +337,7 @@ pub const Loop = struct {
                         return;
                     }
 
-                    if (cancel.target.state == .completed) {
+                    if (cancel.target.state == .completed or cancel.target.state == .dead) {
                         completion.setError(error.AlreadyCompleted);
                         self.state.active += 1;
                         self.state.markCompleted(completion);
@@ -380,7 +388,7 @@ pub const Loop = struct {
                                 // The thread pool will complete it and the cancel completion
                             } else {
                                 // No thread pool - work is always immediately completed with error.NoThreadPool
-                                std.debug.assert(work.c.state == .completed);
+                                std.debug.assert(work.c.state == .completed or work.c.state == .dead);
                                 completion.setError(error.AlreadyCompleted);
                                 self.state.markCompleted(&cancel.c);
                             }
@@ -412,7 +420,7 @@ pub const Loop = struct {
                                     // If cancel failed, work is running/completed and will complete normally
                                 } else {
                                     // No thread pool - file op should already be completed with error.Unexpected
-                                    std.debug.assert(cancel.target.state == .completed);
+                                    std.debug.assert(cancel.target.state == .completed or cancel.target.state == .dead);
                                     completion.setError(error.AlreadyCompleted);
                                     self.state.markCompleted(completion);
                                 }
@@ -482,7 +490,7 @@ pub const Loop = struct {
         }
 
         while (self.state.completions.pop()) |completion| {
-            completion.call(self);
+            self.state.finishCompletion(completion);
         }
     }
 

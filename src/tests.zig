@@ -60,7 +60,7 @@ test "Loop: timer basic" {
     const elapsed_ns = wall_timer.read();
     const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
 
-    try std.testing.expectEqual(.completed, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.state);
     try std.testing.expect(elapsed_ms >= timeout_ms - 5);
     try std.testing.expect(elapsed_ms <= timeout_ms + 50);
     std.log.info("timer: expected={}ms, actual={}ms", .{ timeout_ms, elapsed_ms });
@@ -84,8 +84,8 @@ test "Loop: timer cancel" {
     const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
 
     // Timer should be canceled immediately, much faster than the timeout
-    try std.testing.expectEqual(.completed, timer.c.state);
-    try std.testing.expectEqual(.completed, cancel.c.state);
+    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, cancel.c.state);
     try std.testing.expectError(error.Canceled, timer.c.getResult(.timer));
     try std.testing.expect(elapsed_ms < 50);
     std.log.info("timer cancel: elapsed={}ms", .{elapsed_ms});
@@ -185,8 +185,8 @@ test "Loop: cancel net_accept" {
     try loop.run(.until_done);
 
     // Verify both completed
-    try std.testing.expectEqual(.completed, accept_comp.c.state);
-    try std.testing.expectEqual(.completed, cancel.c.state);
+    try std.testing.expectEqual(.dead, accept_comp.c.state);
+    try std.testing.expectEqual(.dead, cancel.c.state);
 
     // Verify accept got canceled error
     try std.testing.expectError(error.Canceled, accept_comp.getResult());
@@ -268,8 +268,8 @@ test "Loop: cancel net_recv" {
         try loop.run(.until_done);
 
         // Verify both completed
-        try std.testing.expectEqual(.completed, recv.c.state);
-        try std.testing.expectEqual(.completed, cancel.c.state);
+        try std.testing.expectEqual(.dead, recv.c.state);
+        try std.testing.expectEqual(.dead, cancel.c.state);
 
         // Verify recv got canceled error
         try std.testing.expectError(error.Canceled, recv.getResult());
@@ -301,7 +301,7 @@ test "Loop: async notification - same thread" {
 
     // Run loop - async should complete
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.state);
     try async_handle.c.getResult(.async);
 }
 
@@ -328,7 +328,7 @@ test "Loop: async notification - cross-thread" {
 
     // Run loop - should block until notified
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.state);
     try async_handle.c.getResult(.async);
 
     thread.join();
@@ -354,9 +354,9 @@ test "Loop: async notification - multiple handles" {
 
     // Run loop - all should complete
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, async1.c.state);
-    try std.testing.expectEqual(.completed, async2.c.state);
-    try std.testing.expectEqual(.completed, async3.c.state);
+    try std.testing.expectEqual(.dead, async1.c.state);
+    try std.testing.expectEqual(.dead, async2.c.state);
+    try std.testing.expectEqual(.dead, async3.c.state);
 }
 
 test "Loop: async notification - re-arm" {
@@ -370,14 +370,14 @@ test "Loop: async notification - re-arm" {
     loop.add(&async_handle.c);
     async_handle.notify();
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.state);
 
     // Re-arm for second notification
     async_handle = .init();
     loop.add(&async_handle.c);
     async_handle.notify();
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.state);
 }
 
 test "Loop: wakeFromAnywhere - cross-thread" {
@@ -407,7 +407,7 @@ test "Loop: wakeFromAnywhere - cross-thread" {
 
     // Run loop - should wake up due to wakeFromAnywhere
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.state);
 
     thread.join();
 }

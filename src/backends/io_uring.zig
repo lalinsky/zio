@@ -452,8 +452,8 @@ pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_cancel(@intFromPtr(target), 0);
             sqe.user_data = @intFromPtr(c);
         },
-        .completed => {
-            // Target already completed before cancel was processed.
+        .completed, .dead => {
+            // Target already completed (has result) or fully finished (callback called).
             // No CQEs will arrive. Complete cancel immediately.
             c.setError(error.AlreadyCompleted);
             state.markCompleted(c);
@@ -535,7 +535,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         // When a target is canceled, it recursively completes the cancel operation
         // So when we get the cancel's CQE, it's already completed
         // Similarly, when we get the target's CQE after the cancel already completed it
-        if (completion.state == .completed) {
+        if (completion.state == .completed or completion.state == .dead) {
             continue;
         }
 

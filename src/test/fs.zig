@@ -18,7 +18,7 @@ test "File: open/close" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.completed, file_create.c.state);
+    try std.testing.expectEqual(.dead, file_create.c.state);
     try std.testing.expectEqual(true, file_create.c.has_result);
 
     const fd = try file_create.getResult();
@@ -34,7 +34,7 @@ test "File: open/close" {
     var file_write = aio.FileWrite.init(fd, &write_iov, 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_write.c.state);
+    try std.testing.expectEqual(.dead, file_write.c.state);
     try std.testing.expectEqual(true, file_write.c.has_result);
     const bytes_written = try file_write.getResult();
     try std.testing.expectEqual(write_data.len, bytes_written);
@@ -43,7 +43,7 @@ test "File: open/close" {
     var file_sync1 = aio.FileSync.init(fd, .{ .only_data = false });
     loop.add(&file_sync1.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_sync1.c.state);
+    try std.testing.expectEqual(.dead, file_sync1.c.state);
     try std.testing.expectEqual(true, file_sync1.c.has_result);
     try file_sync1.getResult();
 
@@ -53,7 +53,7 @@ test "File: open/close" {
     var file_read = aio.FileRead.init(fd, &read_iov, 0);
     loop.add(&file_read.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_read.c.state);
+    try std.testing.expectEqual(.dead, file_read.c.state);
     try std.testing.expectEqual(true, file_read.c.has_result);
     const bytes_read = try file_read.getResult();
     try std.testing.expectEqual(write_data.len, bytes_read);
@@ -63,7 +63,7 @@ test "File: open/close" {
     var file_sync2 = aio.FileSync.init(fd, .{ .only_data = true });
     loop.add(&file_sync2.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_sync2.c.state);
+    try std.testing.expectEqual(.dead, file_sync2.c.state);
     try std.testing.expectEqual(true, file_sync2.c.has_result);
     try file_sync2.getResult();
 
@@ -72,7 +72,7 @@ test "File: open/close" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.completed, file_close.c.state);
+    try std.testing.expectEqual(.dead, file_close.c.state);
     try std.testing.expectEqual(true, file_close.c.has_result);
 
     try file_close.getResult();
@@ -93,7 +93,7 @@ test "File: rename/delete" {
     var file_create = aio.FileCreate.init(cwd.fd, "test-rename-src", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_create.c.state);
+    try std.testing.expectEqual(.dead, file_create.c.state);
     const fd = try file_create.getResult();
 
     // Write some data
@@ -102,19 +102,19 @@ test "File: rename/delete" {
     var file_write = aio.FileWrite.init(fd, &write_iov, 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_write.c.state);
+    try std.testing.expectEqual(.dead, file_write.c.state);
 
     // Close the file
     var file_close = aio.FileClose.init(fd);
     loop.add(&file_close.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_close.c.state);
+    try std.testing.expectEqual(.dead, file_close.c.state);
 
     // Rename the file
     var file_rename = aio.FileRename.init(cwd.fd, "test-rename-src", cwd.fd, "test-rename-dst");
     loop.add(&file_rename.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_rename.c.state);
+    try std.testing.expectEqual(.dead, file_rename.c.state);
     try std.testing.expectEqual(true, file_rename.c.has_result);
     try file_rename.getResult();
 
@@ -122,7 +122,7 @@ test "File: rename/delete" {
     var file_open = aio.FileOpen.init(cwd.fd, "test-rename-dst", .{ .mode = .read_only });
     loop.add(&file_open.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_open.c.state);
+    try std.testing.expectEqual(.dead, file_open.c.state);
     const fd2 = try file_open.getResult();
 
     // Read and verify the data
@@ -131,7 +131,7 @@ test "File: rename/delete" {
     var file_read = aio.FileRead.init(fd2, &read_iov, 0);
     loop.add(&file_read.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_read.c.state);
+    try std.testing.expectEqual(.dead, file_read.c.state);
     const bytes_read = try file_read.getResult();
     try std.testing.expectEqual(write_data.len, bytes_read);
     try std.testing.expectEqualStrings(write_data, read_buffer[0..bytes_read]);
@@ -140,13 +140,13 @@ test "File: rename/delete" {
     var file_close2 = aio.FileClose.init(fd2);
     loop.add(&file_close2.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_close2.c.state);
+    try std.testing.expectEqual(.dead, file_close2.c.state);
 
     // Delete the file
     var file_delete = aio.FileDelete.init(cwd.fd, "test-rename-dst");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_delete.c.state);
+    try std.testing.expectEqual(.dead, file_delete.c.state);
     try std.testing.expectEqual(true, file_delete.c.has_result);
     try file_delete.getResult();
 
@@ -154,6 +154,6 @@ test "File: rename/delete" {
     var file_open_fail = aio.FileOpen.init(cwd.fd, "test-rename-dst", .{ .mode = .read_only });
     loop.add(&file_open_fail.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.completed, file_open_fail.c.state);
+    try std.testing.expectEqual(.dead, file_open_fail.c.state);
     try std.testing.expectError(error.FileNotFound, file_open_fail.getResult());
 }
