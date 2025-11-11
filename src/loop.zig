@@ -222,9 +222,14 @@ pub const Loop = struct {
         return self.state.stopped or (self.state.active == 0 and self.state.completions.empty());
     }
 
-    /// Wake up the loop from blocking poll/epoll (thread-safe)
+    /// Wake up the loop from another thread (thread-safe)
     pub fn wake(self: *Loop) void {
         self.backend.wake();
+    }
+
+    /// Wake up the loop from anywhere, including signal handlers (async-signal-safe)
+    pub fn wakeFromAnywhere(self: *Loop) void {
+        self.backend.wakeFromAnywhere();
     }
 
     /// Set or reset a timer with a new delay (works immediately, no completion required)

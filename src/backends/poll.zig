@@ -85,6 +85,11 @@ pub fn wake(self: *Self) void {
     self.waker.notify();
 }
 
+pub fn wakeFromAnywhere(self: *Self) void {
+    // pipe write is async-signal-safe on POSIX, so we can use the same mechanism
+    self.waker.notify();
+}
+
 fn getEvents(op: Op) @FieldType(net.pollfd, "events") {
     return switch (op) {
         .net_connect => net.POLL.OUT,

@@ -98,6 +98,11 @@ pub fn wake(self: *Self) void {
     self.waker.notify();
 }
 
+pub fn wakeFromAnywhere(self: *Self) void {
+    // eventfd is async-signal-safe, so we can use the same mechanism
+    self.waker.notify();
+}
+
 fn getEvents(op: Op) u32 {
     return switch (op) {
         .net_connect => std.os.linux.EPOLL.OUT,
