@@ -126,6 +126,14 @@ pub const Completion = struct {
         return .{ .op = op };
     }
 
+    pub fn reset(c: *Completion) void {
+        c.state = .new;
+        c.has_result = false;
+        c.err = null;
+        c.canceled = false;
+        c.canceled_by = null;
+    }
+
     pub fn call(c: *Completion, loop: *Loop) void {
         if (c.callback) |func| {
             func(loop, c);

@@ -387,6 +387,11 @@ pub const Loop = struct {
             if (in_safe_mode) self.in_add = false;
         }
 
+        // If completion is dead (callback was called), reset it to new state for rearming
+        if (completion.state == .dead) {
+            completion.reset();
+        }
+
         std.debug.assert(completion.state == .new);
 
         if (completion.canceled) {
