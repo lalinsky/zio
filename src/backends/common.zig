@@ -23,7 +23,7 @@ const fs = @import("../os/fs.zig");
 /// Helper to handle socket open operation
 pub fn handleNetOpen(c: *Completion) void {
     const data = c.cast(NetOpen);
-    if (net.socket(data.domain, data.socket_type, data.protocol, data.flags)) |handle| {
+    if (net.socket(data.domain, data.socket_type, data.flags)) |handle| {
         c.setResult(.net_open, handle);
     } else |err| {
         c.setError(err);

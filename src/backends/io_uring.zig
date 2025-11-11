@@ -120,7 +120,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             if (net.socket(
                 data.domain,
                 data.socket_type,
-                data.protocol,
                 data.flags,
             )) |handle| {
                 c.setResult(.net_open, handle);

@@ -192,18 +192,14 @@ pub const Domain = enum(c_int) {
     ipv4 = posix.system.AF.INET,
     ipv6 = posix.system.AF.INET6,
     unix = posix.system.AF.UNIX,
+    _,
 };
 
 pub const Type = enum(c_int) {
     stream = posix.system.SOCK.STREAM,
     dgram = posix.system.SOCK.DGRAM,
     seqpacket = posix.system.SOCK.SEQPACKET,
-};
-
-pub const Protocol = enum(c_int) {
-    default = 0,
-    tcp = posix.system.IPPROTO.TCP,
-    udp = posix.system.IPPROTO.UDP,
+    _,
 };
 
 pub const OpenFlags = packed struct {
@@ -222,13 +218,13 @@ pub const OpenError = error{
     Unexpected,
 };
 
-pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: OpenFlags) OpenError!fd_t {
+pub fn socket(domain: Domain, socket_type: Type, flags: OpenFlags) OpenError!fd_t {
     switch (builtin.os.tag) {
         .windows => {
             const sock = std.os.windows.ws2_32.WSASocketW(
                 @intFromEnum(domain),
                 @intFromEnum(socket_type),
-                @intFromEnum(protocol),
+                0,
                 null,
                 0,
                 std.os.windows.ws2_32.WSA_FLAG_OVERLAPPED,
@@ -260,7 +256,7 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                 const rc = posix.system.socket(
                     @intCast(@intFromEnum(domain)),
                     @intCast(sock_flags),
-                    @intCast(@intFromEnum(protocol)),
+                    0,
                 );
                 switch (posix.errno(rc)) {
                     .SUCCESS => {

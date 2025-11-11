@@ -97,7 +97,7 @@ test "Loop: close" {
     defer loop.deinit();
 
     // Create a socket first
-    var open: NetOpen = .init(.ipv4, .stream, .tcp);
+    var open: NetOpen = .init(.ipv4, .stream, .{});
     loop.add(&open.c);
     try loop.run(.until_done);
     const sock = try open.c.getResult(.net_open);
@@ -114,7 +114,7 @@ test "Loop: socket create and bind" {
     defer loop.deinit();
 
     // Create socket
-    var open: NetOpen = .init(.ipv4, .stream, .tcp);
+    var open: NetOpen = .init(.ipv4, .stream, .{});
     loop.add(&open.c);
     try loop.run(.until_done);
 
@@ -146,7 +146,7 @@ test "Loop: cancel net_accept" {
     defer loop.deinit();
 
     // Create and bind server socket
-    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
+    var server_open: NetOpen = .init(.ipv4, .stream, .{});
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.c.getResult(.net_open);
@@ -203,7 +203,7 @@ test "Loop: cancel net_recv" {
     defer loop.deinit();
 
     // Create and setup server
-    var server_open: NetOpen = .init(.ipv4, .stream, .tcp);
+    var server_open: NetOpen = .init(.ipv4, .stream, .{});
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.c.getResult(.net_open);
@@ -228,7 +228,7 @@ test "Loop: cancel net_recv" {
     try server_listen.c.getResult(.net_listen);
 
     // Create client and connect
-    var client_open: NetOpen = .init(.ipv4, .stream, .tcp);
+    var client_open: NetOpen = .init(.ipv4, .stream, .{});
     loop.add(&client_open.c);
     try loop.run(.until_done);
     const client_sock = try client_open.c.getResult(.net_open);

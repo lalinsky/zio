@@ -86,6 +86,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
                     const timestamp = time.now(.realtime);
                     _ = std.fmt.bufPrintZ(&self.server_addr.path, "/tmp/zevent-test-{d}.sock", .{timestamp}) catch unreachable;
                 },
+                else => unreachable,
             }
 
             return self;
@@ -93,8 +94,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         pub fn start(self: *Self) void {
             self.state = .opening;
-            const protocol: net.Protocol = if (domain == .unix) .default else .tcp;
-            self.comp = .{ .open = aio.NetOpen.init(domain, .stream, protocol) };
+            self.comp = .{ .open = aio.NetOpen.init(domain, .stream, .{}) };
             self.comp.open.c.callback = openCallback;
             self.comp.open.c.userdata = self;
             self.loop.add(&self.comp.open.c);
@@ -308,8 +308,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
                 .comp = undefined,
             };
 
-            const protocol: net.Protocol = if (domain == .unix) .default else .tcp;
-            self.comp = .{ .open = aio.NetOpen.init(domain, .stream, protocol) };
+            self.comp = .{ .open = aio.NetOpen.init(domain, .stream, .{}) };
 
             return self;
         }
