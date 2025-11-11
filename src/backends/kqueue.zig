@@ -264,26 +264,19 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 }
 
 /// Cancel a completion - infallible.
-/// Note: target.canceled is already set by loop.add() before this is called.
-pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
-    // Mark cancel operation as running
-    c.state = .running;
-    state.active += 1;
-
-    const cancel_data = c.cast(Cancel);
-    const target = cancel_data.target;
-
+/// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
+pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Try to queue unregister
     const fd = getHandle(target);
     if (!self.queueUnregister(state, fd, target)) {
         // Queueing failed - target is still registered with target.canceled set
-        // When target completes, markCompleted(target) will recursively complete cancel
+        // When target completes, markCompleted(target) will recursively complete cancel if canceled_by is set
         return; // Do nothing, let target complete naturally
     }
 
     // Successfully queued - target will be unregistered on flush
     // Complete target with error.Canceled immediately
-    // markCompleted(target) will recursively complete the cancel operation
+    // markCompleted(target) will recursively complete the Cancel operation if canceled_by is set
     target.setError(error.Canceled);
     state.markCompleted(target);
 }

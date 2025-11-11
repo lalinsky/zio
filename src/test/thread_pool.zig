@@ -52,7 +52,7 @@ test "aio.ThreadPool: many tasks" {
         called: usize = 0,
         pub fn main(work: *aio.Work) void {
             var self: *@This() = @ptrCast(@alignCast(work.userdata));
-            aio.system.time.sleep(1);
+            aio.system.time.sleep(12);
             self.called += 1;
         }
     };

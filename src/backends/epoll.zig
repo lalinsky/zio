@@ -332,26 +332,19 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 }
 
 /// Cancel a completion - infallible.
-/// Note: target.canceled is already set by loop.add() before this is called.
-pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
-    // Mark cancel operation as running
-    c.state = .running;
-    state.active += 1;
-
-    const cancel_data = c.cast(Cancel);
-    const target = cancel_data.target;
-
+/// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
+pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Try to remove from queue
     const fd = getHandle(target);
     self.removeFromPollQueue(fd, target) catch {
         // Removal failed - target is still in queue with target.canceled set
-        // When target completes, markCompleted(target) will recursively complete cancel
+        // When target completes, markCompleted(target) will recursively complete cancel if canceled_by is set
         log.err("Failed to remove completion from poll queue during cancel", .{});
         return; // Do nothing, let target complete naturally
     };
 
     // Successfully removed - complete target with error.Canceled
-    // markCompleted(target) will recursively complete the cancel operation
+    // markCompleted(target) will recursively complete the Cancel operation if canceled_by is set
     target.setError(error.Canceled);
     state.markCompleted(target);
 }

@@ -12,6 +12,10 @@ const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
+
+// Special user_data values for internal operations
+const USER_DATA_WAKER: u64 = 0; // Waker eventfd POLL_ADD operations
+const USER_DATA_CANCEL: u64 = 1; // Cancel SQE operations (should be skipped)
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
 const NetListen = @import("../completion.zig").NetListen;
@@ -418,15 +422,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 }
 
 /// Cancel a completion - infallible.
-/// Note: target.canceled is already set by loop.add() before this is called.
-pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
-    // Mark cancel operation as running
-    c.state = .running;
-    state.active += 1;
-
-    const cancel_op = c.cast(Cancel);
-    const target = cancel_op.target;
-
+/// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
+pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     switch (target.state) {
         .new => {
             // UNREACHABLE: When cancel is added via loop.add() and target.state == .new,
@@ -436,27 +433,26 @@ pub fn cancel(self: *Self, state: *LoopState, c: *Completion) void {
         .running => {
             // Target is executing in io_uring. Submit a cancel SQE.
             // This will generate TWO CQEs:
-            // 1. Cancel CQE (user_data=target, res=0 or -ENOENT)
+            // 1. Cancel CQE (user_data=USER_DATA_CANCEL, res=0 or -ENOENT)
             // 2. Target CQE (user_data=target, res=-ECANCELED or success if cancel was too late)
             //
-            // In tick(), we:
-            // - Skip cancel CQEs (they never complete the cancel directly)
+            // In poll(), we:
+            // - Skip cancel CQEs with user_data=USER_DATA_CANCEL
             // - Process target CQE and mark target complete
-            // - markCompleted(target) recursively completes the cancel via target.canceled link
+            // - markCompleted(target) recursively completes the Cancel operation if canceled_by is set
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for cancel", .{});
                 // Cancel SQE failed - do nothing, let target complete naturally
-                // When target completes, markCompleted(target) will recursively complete cancel
+                // When target completes, markCompleted(target) will recursively complete cancel if canceled_by is set
                 return;
             };
             sqe.prep_cancel(@intFromPtr(target), 0);
-            sqe.user_data = @intFromPtr(c);
+            sqe.user_data = USER_DATA_CANCEL;
         },
         .completed, .dead => {
             // Target already completed (has result) or fully finished (callback called).
-            // No CQEs will arrive. Complete cancel immediately.
-            c.setError(error.AlreadyCompleted);
-            state.markCompleted(c);
+            // No CQEs will arrive. This shouldn't happen as loop.add()/loop.cancel() check state first.
+            unreachable;
         },
     }
 }
@@ -520,11 +516,16 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     }
 
     for (cqes[0..count]) |cqe| {
-        // Skip internal wake-up operation (user_data == 0)
-        if (cqe.user_data == 0) {
+        // Handle internal operations with special user_data values
+        if (cqe.user_data == USER_DATA_WAKER) {
             // Wake-up POLL_ADD completion
             self.waker.drain();
             state.loop.processAsyncHandles();
+            continue;
+        }
+
+        if (cqe.user_data == USER_DATA_CANCEL) {
+            // Cancel SQE completion - just skip it
             continue;
         }
 
@@ -754,7 +755,7 @@ const Waker = struct {
 
         const sqe = try self.ring.get_sqe();
         sqe.prep_poll_add(self.eventfd, linux.POLL.IN);
-        sqe.user_data = 0; // Special marker for wake-up events
+        sqe.user_data = USER_DATA_WAKER;
 
         self.needs_rearm = false;
     }

@@ -100,7 +100,8 @@ pub const Completion = struct {
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
 
-    canceled: ?*Cancel = null,
+    canceled: bool = false,
+    canceled_by: ?*Cancel = null,
 
     /// Error result - null means success, error means failure.
     /// Stored here instead of in each operation type to simplify error handling.
@@ -150,7 +151,7 @@ pub const Completion = struct {
         // If this operation was canceled but got a different error (race condition),
         // we need to mark the cancel as AlreadyCompleted.
         // If err is error.Canceled, the normal cancelation flow handles the cancel.
-        if (c.canceled) |cancel| {
+        if (c.canceled_by) |cancel| {
             if (err != error.Canceled) {
                 cancel.c.err = error.AlreadyCompleted;
                 cancel.c.has_result = true;
@@ -166,7 +167,7 @@ pub const Completion = struct {
         std.debug.assert(c.op == op);
         // If this operation was canceled but completed successfully (race condition),
         // we need to mark the cancel as AlreadyCompleted.
-        if (c.canceled) |cancel| {
+        if (c.canceled_by) |cancel| {
             cancel.c.err = error.AlreadyCompleted;
             cancel.c.has_result = true;
         }
@@ -184,7 +185,7 @@ pub const Cancel = struct {
     target: *Completion,
     result_private_do_not_touch: void = {},
 
-    pub const Error = error{ AlreadyCanceled, AlreadyCompleted };
+    pub const Error = error{ AlreadyCanceled, AlreadyCompleted, Uncancelable };
 
     pub fn init(target: *Completion) Cancel {
         return .{
