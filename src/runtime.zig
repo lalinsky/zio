@@ -314,6 +314,7 @@ pub const Executor = struct {
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
+    loop_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Shutdown support
     shutdown_async: aio.Async = undefined,
@@ -370,9 +371,14 @@ pub const Executor = struct {
         self.shutdown_async.c.userdata = self;
         self.shutdown_async.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown_async.c);
+
+        // Mark loop as initialized and safe to wake
+        self.loop_initialized.store(true, .release);
     }
 
     fn deinitLoop(self: *Executor) void {
+        // Mark loop as no longer safe to wake
+        self.loop_initialized.store(false, .release);
         self.loop.deinit();
     }
 
@@ -734,8 +740,10 @@ pub const Executor = struct {
         // Push to remote ready queue (thread-safe)
         self.next_ready_queue_remote.push(wait_node);
 
-        // Wake the target executor's event loop
-        self.loop.wake();
+        // Wake the target executor's event loop if it's initialized
+        if (self.loop_initialized.load(.acquire)) {
+            self.loop.wake();
+        }
     }
 
     /// Schedule a task for execution. Called on the task's home executor (self).

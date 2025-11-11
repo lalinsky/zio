@@ -23,19 +23,19 @@ pub const ShutdownHow = aio.system.net.ShutdownHow;
 
 /// Get the socket address length for a given sockaddr.
 /// Determines the appropriate length based on the address family.
-fn getSockAddrLen(addr: *const std.posix.sockaddr) usize {
+fn getSockAddrLen(addr: *const aio.system.net.sockaddr) usize {
     return switch (addr.family) {
-        std.posix.AF.INET => @sizeOf(std.posix.sockaddr.in),
-        std.posix.AF.INET6 => @sizeOf(std.posix.sockaddr.in6),
-        std.posix.AF.UNIX => @sizeOf(std.posix.sockaddr.un),
+        std.posix.AF.INET => @sizeOf(aio.system.net.sockaddr.in),
+        std.posix.AF.INET6 => @sizeOf(aio.system.net.sockaddr.in6),
+        std.posix.AF.UNIX => @sizeOf(aio.system.net.sockaddr.un),
         else => unreachable,
     };
 }
 
 pub const IpAddress = extern union {
-    any: std.posix.sockaddr,
-    in: std.posix.sockaddr.in,
-    in6: std.posix.sockaddr.in6,
+    any: aio.system.net.sockaddr,
+    in: aio.system.net.sockaddr.in,
+    in6: aio.system.net.sockaddr.in6,
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
         return .{ .in = .{
@@ -57,18 +57,18 @@ pub const IpAddress = extern union {
         }
     }
 
-    pub fn initPosix(addr: *const std.posix.sockaddr, len: std.posix.socklen_t) IpAddress {
+    pub fn initPosix(addr: *const aio.system.net.sockaddr, len: aio.system.net.socklen_t) IpAddress {
         return switch (addr.family) {
             std.posix.AF.INET => blk: {
-                std.debug.assert(len >= @sizeOf(std.posix.sockaddr.in));
+                std.debug.assert(len >= @sizeOf(aio.system.net.sockaddr.in));
                 var result: IpAddress = .{ .in = undefined };
-                @memcpy(std.mem.asBytes(&result.in), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(std.posix.sockaddr.in)]);
+                @memcpy(std.mem.asBytes(&result.in), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(aio.system.net.sockaddr.in)]);
                 break :blk result;
             },
             std.posix.AF.INET6 => blk: {
-                std.debug.assert(len >= @sizeOf(std.posix.sockaddr.in6));
+                std.debug.assert(len >= @sizeOf(aio.system.net.sockaddr.in6));
                 var result: IpAddress = .{ .in6 = undefined };
-                @memcpy(std.mem.asBytes(&result.in6), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(std.posix.sockaddr.in6)]);
+                @memcpy(std.mem.asBytes(&result.in6), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(aio.system.net.sockaddr.in6)]);
                 break :blk result;
             },
             else => unreachable,
@@ -306,14 +306,14 @@ pub const IpAddress = extern union {
 };
 
 pub const UnixAddress = extern union {
-    any: std.posix.sockaddr,
-    un: if (has_unix_sockets) std.posix.sockaddr.un else void,
+    any: aio.system.net.sockaddr,
+    un: if (has_unix_sockets) aio.system.net.sockaddr.un else void,
 
     pub const max_len = 108;
 
     pub fn init(path: []const u8) !UnixAddress {
         if (!has_unix_sockets) unreachable;
-        var un = std.posix.sockaddr.un{ .family = std.posix.AF.UNIX, .path = undefined };
+        var un = aio.system.net.sockaddr.un{ .family = std.posix.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
         @memcpy(un.path[0..path.len], path);
         un.path[path.len] = 0;
@@ -346,7 +346,7 @@ pub const UnixAddress = extern union {
 };
 
 pub const Address = extern union {
-    any: std.posix.sockaddr,
+    any: aio.system.net.sockaddr,
     ip: IpAddress,
     unix: UnixAddress,
 
@@ -373,7 +373,7 @@ pub const Address = extern union {
     /// Convert sockaddr to IpAddress from raw bytes.
     /// This properly handles IPv4 and IPv6 addresses without alignment issues.
     fn fromStorageIp(data: []const u8) IpAddress {
-        const sockaddr: *align(1) const std.posix.sockaddr = @ptrCast(data.ptr);
+        const sockaddr: *align(1) const aio.system.net.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
             std.posix.AF.INET => blk: {
                 var addr: IpAddress = .{ .in = undefined };
@@ -392,13 +392,13 @@ pub const Address = extern union {
     /// Convert sockaddr to Address from raw bytes.
     /// This properly handles IPv4, IPv6, and Unix socket addresses without alignment issues.
     fn fromStorage(data: []const u8) Address {
-        const sockaddr: *align(1) const std.posix.sockaddr = @ptrCast(data.ptr);
+        const sockaddr: *align(1) const aio.system.net.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
             std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(data) },
             std.posix.AF.UNIX => blk: {
                 if (!has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
-                const copy_len = @min(data.len, @sizeOf(std.posix.sockaddr.un));
+                const copy_len = @min(data.len, @sizeOf(aio.system.net.sockaddr.un));
                 @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
                 break :blk addr;
             },
@@ -489,7 +489,7 @@ pub const Socket = struct {
 
         // Copy addr to self.address so NetBind can update it with actual bound address
         self.address = addr;
-        var addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&self.address.any));
+        var addr_len: aio.system.net.socklen_t = @intCast(getSockAddrLen(&self.address.any));
 
         var op = aio.NetBind.init(self.handle, &self.address.any, &addr_len);
         op.c.userdata = task;
@@ -546,7 +546,7 @@ pub const Socket = struct {
 
         var read_bufs = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buf)};
         var result: ReceiveFromResult = undefined;
-        var peer_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(result.from));
+        var peer_addr_len: aio.system.net.socklen_t = @sizeOf(@TypeOf(result.from));
 
         var op = aio.NetRecvFrom.init(self.handle, &read_bufs, .{}, &result.from.any, &peer_addr_len);
         op.c.userdata = task;
@@ -577,7 +577,7 @@ pub const Socket = struct {
         const executor = task.getExecutor();
 
         var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(data)};
-        const addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&addr.any));
+        const addr_len: aio.system.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
         var op = aio.NetSendTo.init(self.handle, &write_buf, .{}, &addr.any, addr_len);
         op.c.userdata = task;
         op.c.callback = genericCallback;
@@ -1012,7 +1012,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
     const executor = task.getExecutor();
 
     var peer_addr: Address = undefined;
-    var peer_addr_len: std.posix.socklen_t = @sizeOf(Address);
+    var peer_addr_len: aio.system.net.socklen_t = @sizeOf(Address);
 
     var op = aio.NetAccept.init(fd, &peer_addr.any, &peer_addr_len);
     op.c.userdata = task;
@@ -1031,7 +1031,7 @@ pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
     const executor = task.getExecutor();
 
     var addr_copy = addr;
-    const addr_len: std.posix.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
+    const addr_len: aio.system.net.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
 
     var op = aio.NetConnect.init(fd, &addr_copy.any, addr_len);
     op.c.userdata = task;
