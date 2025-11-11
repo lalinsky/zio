@@ -222,6 +222,11 @@ pub const Loop = struct {
         return self.state.stopped or (self.state.active == 0 and self.state.completions.empty());
     }
 
+    /// Get the current monotonic timestamp in milliseconds
+    pub fn now(self: *const Loop) u64 {
+        return self.state.now_ms;
+    }
+
     /// Wake up the loop from another thread (thread-safe)
     pub fn wake(self: *Loop) void {
         self.backend.wake();

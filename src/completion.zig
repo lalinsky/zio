@@ -192,6 +192,10 @@ pub const Cancel = struct {
             .target = target,
         };
     }
+
+    pub fn getResult(self: *const Cancel) Error!void {
+        return self.c.getResult(.cancel);
+    }
 };
 
 pub const Timer = struct {
@@ -208,6 +212,10 @@ pub const Timer = struct {
             .c = .init(.timer),
             .delay_ms = delay_ms,
         };
+    }
+
+    pub fn getResult(self: *const Timer) Error!void {
+        return self.c.getResult(.timer);
     }
 };
 
@@ -233,6 +241,10 @@ pub const Async = struct {
             // Only notify loop if transitioning from not-pending to pending
             self.loop.wake();
         }
+    }
+
+    pub fn getResult(self: *const Async) Error!void {
+        return self.c.getResult(.async);
     }
 };
 
@@ -265,6 +277,10 @@ pub const Work = struct {
             .userdata = userdata,
         };
     }
+
+    pub fn getResult(self: *const Work) Error!void {
+        return self.c.getResult(.work);
+    }
 };
 
 pub const NetClose = struct {
@@ -279,6 +295,10 @@ pub const NetClose = struct {
             .c = .init(.net_close),
             .handle = handle,
         };
+    }
+
+    pub fn getResult(self: *const NetClose) Error!void {
+        return self.c.getResult(.net_close);
     }
 };
 
@@ -296,6 +316,10 @@ pub const NetShutdown = struct {
             .handle = handle,
             .how = how,
         };
+    }
+
+    pub fn getResult(self: *const NetShutdown) Error!void {
+        return self.c.getResult(.net_shutdown);
     }
 };
 
@@ -320,6 +344,10 @@ pub const NetOpen = struct {
             .flags = flags,
         };
     }
+
+    pub fn getResult(self: *const NetOpen) Error!Backend.NetHandle {
+        return self.c.getResult(.net_open);
+    }
 };
 
 pub const NetBind = struct {
@@ -339,6 +367,10 @@ pub const NetBind = struct {
             .addr_len = addr_len,
         };
     }
+
+    pub fn getResult(self: *const NetBind) Error!void {
+        return self.c.getResult(.net_bind);
+    }
 };
 
 pub const NetListen = struct {
@@ -355,6 +387,10 @@ pub const NetListen = struct {
             .handle = handle,
             .backlog = backlog,
         };
+    }
+
+    pub fn getResult(self: *const NetListen) Error!void {
+        return self.c.getResult(.net_listen);
     }
 };
 
