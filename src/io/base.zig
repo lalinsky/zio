@@ -51,8 +51,10 @@ pub fn waitForIo(rt: *Runtime, completion: *aio.Completion) Cancelable!void {
     task.state.store(.preparing_to_wait, .release);
 
     // Re-check completion state after setting preparing_to_wait
-    // If IO completed, restore ready state and exit
-    if (completion.state != .running) {
+    // If IO completed and callback was already called, restore ready state and exit
+    // We must check for .dead (not .completed) because .completed means the callback
+    // hasn't been called yet, and the completion is still referenced by the loop
+    if (completion.state == .dead) {
         task.state.store(.ready, .release);
         return;
     }
@@ -64,7 +66,7 @@ pub fn waitForIo(rt: *Runtime, completion: *aio.Completion) Cancelable!void {
         return err;
     };
 
-    std.debug.assert(completion.state == .completed);
+    std.debug.assert(completion.state == .dead);
 }
 
 pub fn timedWaitForIo(rt: *Runtime, completion: *aio.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
@@ -80,8 +82,10 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *aio.Completion, timeout_ns: u64
     task.state.store(.preparing_to_wait, .release);
 
     // Re-check completion state after setting preparing_to_wait
-    // If IO completed, restore ready state and exit
-    if (completion.state != .running) {
+    // If IO completed and callback was already called, restore ready state and exit
+    // We must check for .dead (not .completed) because .completed means the callback
+    // hasn't been called yet, and the completion is still referenced by the loop
+    if (completion.state == .dead) {
         task.state.store(.ready, .release);
         return;
     }
@@ -96,7 +100,7 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *aio.Completion, timeout_ns: u64
         return classified_err;
     };
 
-    std.debug.assert(completion.state == .completed);
+    std.debug.assert(completion.state == .dead);
 }
 
 // Note: runIo and IoOperation have been removed in favor of working directly

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const std = @import("std");
-const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
@@ -92,9 +91,9 @@ fn remoteWakeupCallback(
     loop: *aio.Loop,
     c: *aio.Completion,
 ) void {
-    _ = loop;
-    _ = c;
     // Just wake up - draining happens in run() loop
+    // Re-add the async handle for the next notification
+    loop.add(c);
 }
 
 fn shutdownCallback(

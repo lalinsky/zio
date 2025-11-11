@@ -11,8 +11,8 @@
     },
     .dependencies = .{
         .aio = .{
-            .url = "git+https://github.com/lalinsky/aio.zig#ed3d5b9aa5ebe8f90f0d3cc335e640b9026d5588",
-            .hash = "aio-0.4.0-k5779hMaBQC0mh5JMWUhI9lbkWAbaS276-tFD4-fgJDd",
+            .url = "git+https://github.com/lalinsky/aio.zig#f514c3ca2576f0f42b361c000d94cc65d123e77e",
+            .hash = "aio-0.4.0-k5779ncbBQDmJ-kronuV_r0EQ6fB34Uepqp3BDdOoFV8",
         },
     },
 }

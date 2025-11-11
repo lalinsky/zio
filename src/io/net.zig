@@ -545,24 +545,19 @@ pub const Socket = struct {
         const executor = task.getExecutor();
 
         var read_bufs = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buf)};
-        var peer_addr: std.posix.sockaddr = undefined;
-        var peer_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+        var result: ReceiveFromResult = undefined;
+        var peer_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(result.from));
 
-        var op = aio.NetRecvFrom.init(self.handle, &read_bufs, .{}, &peer_addr, &peer_addr_len);
+        var op = aio.NetRecvFrom.init(self.handle, &read_bufs, .{}, &result.from.any, &peer_addr_len);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
         executor.loop.add(&op.c);
         try waitForIo(rt, &op.c);
 
-        const bytes_read = try op.getResult();
+        result.len = try op.getResult();
 
-        const addr = Address.fromStorage(std.mem.asBytes(&peer_addr)[0..peer_addr_len]);
-
-        return ReceiveFromResult{
-            .from = addr,
-            .len = bytes_read,
-        };
+        return result;
     }
 
     fn receiveFromRecvmsg(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
