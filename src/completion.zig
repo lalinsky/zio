@@ -256,7 +256,7 @@ pub const Work = struct {
         canceled,
     };
 
-    pub const WorkFn = fn (loop: *Loop, work: *Work) void;
+    pub const WorkFn = fn (work: *Work) void;
 
     pub fn init(func: *const WorkFn, userdata: ?*anyopaque) Work {
         return .{

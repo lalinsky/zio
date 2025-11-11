@@ -193,7 +193,7 @@ pub const ThreadPool = struct {
                 work.c.setError(error.Canceled);
             } else {
                 // We successfully claimed it, execute the work
-                work.func(loop, work);
+                work.func(work);
                 work.c.setResult(.work, {});
                 work.state.store(.completed, .release);
             }

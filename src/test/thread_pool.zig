@@ -17,7 +17,7 @@ test "aio.ThreadPool: one task" {
 
     const TestFn = struct {
         called: usize = 0,
-        pub fn main(_: *aio.Loop, work: *aio.Work) void {
+        pub fn main(work: *aio.Work) void {
             var self: *@This() = @ptrCast(@alignCast(work.userdata));
             self.called += 1;
         }
@@ -50,7 +50,7 @@ test "aio.ThreadPool: many tasks" {
 
     const TestFn = struct {
         called: usize = 0,
-        pub fn main(_: *aio.Loop, work: *aio.Work) void {
+        pub fn main(work: *aio.Work) void {
             var self: *@This() = @ptrCast(@alignCast(work.userdata));
             aio.system.time.sleep(1);
             self.called += 1;

@@ -135,48 +135,42 @@ pub fn handleFileSync(c: *Completion) void {
 }
 
 /// Work function for FileOpen - performs blocking openat() syscall
-pub fn fileOpenWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileOpenWork(work: *Work) void {
     const internal: *@FieldType(FileOpen, "internal") = @fieldParentPtr("work", work);
     const file_open: *FileOpen = @fieldParentPtr("internal", internal);
     handleFileOpen(&file_open.c, file_open.internal.allocator);
 }
 
 /// Work function for FileCreate - performs blocking openat() syscall with O_CREAT
-pub fn fileCreateWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileCreateWork(work: *Work) void {
     const internal: *@FieldType(FileCreate, "internal") = @fieldParentPtr("work", work);
     const file_create: *FileCreate = @fieldParentPtr("internal", internal);
     handleFileCreate(&file_create.c, file_create.internal.allocator);
 }
 
 /// Work function for FileClose - performs blocking close() syscall
-pub fn fileCloseWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileCloseWork(work: *Work) void {
     const internal: *@FieldType(FileClose, "internal") = @fieldParentPtr("work", work);
     const file_close: *FileClose = @fieldParentPtr("internal", internal);
     handleFileClose(&file_close.c);
 }
 
 /// Work function for FileRead - performs blocking preadv() syscall
-pub fn fileReadWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileReadWork(work: *Work) void {
     const internal: *@FieldType(FileRead, "internal") = @fieldParentPtr("work", work);
     const file_read: *FileRead = @fieldParentPtr("internal", internal);
     handleFileRead(&file_read.c);
 }
 
 /// Work function for FileWrite - performs blocking pwritev() syscall
-pub fn fileWriteWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileWriteWork(work: *Work) void {
     const internal: *@FieldType(FileWrite, "internal") = @fieldParentPtr("work", work);
     const file_write: *FileWrite = @fieldParentPtr("internal", internal);
     handleFileWrite(&file_write.c);
 }
 
 /// Work function for FileSync - performs blocking fsync()/fdatasync() syscall
-pub fn fileSyncWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileSyncWork(work: *Work) void {
     const internal: *@FieldType(FileSync, "internal") = @fieldParentPtr("work", work);
     const file_sync: *FileSync = @fieldParentPtr("internal", internal);
     handleFileSync(&file_sync.c);
@@ -203,16 +197,14 @@ pub fn handleFileDelete(c: *Completion, allocator: std.mem.Allocator) void {
 }
 
 /// Work function for FileRename - performs blocking renameat() syscall
-pub fn fileRenameWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileRenameWork(work: *Work) void {
     const internal: *@FieldType(FileRename, "internal") = @fieldParentPtr("work", work);
     const file_rename: *FileRename = @fieldParentPtr("internal", internal);
     handleFileRename(&file_rename.c, file_rename.internal.allocator);
 }
 
 /// Work function for FileDelete - performs blocking unlinkat() syscall
-pub fn fileDeleteWork(loop: *Loop, work: *Work) void {
-    _ = loop;
+pub fn fileDeleteWork(work: *Work) void {
     const internal: *@FieldType(FileDelete, "internal") = @fieldParentPtr("work", work);
     const file_delete: *FileDelete = @fieldParentPtr("internal", internal);
     handleFileDelete(&file_delete.c, file_delete.internal.allocator);
