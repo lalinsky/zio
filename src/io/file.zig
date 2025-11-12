@@ -147,9 +147,7 @@ pub const File = struct {
         op.c.callback = genericCallback;
 
         executor.loop.add(&op.c);
-        waitForIo(rt, &op.c) catch |err| switch (err) {
-            error.Canceled => return error.ReadFailed,
-        };
+        try waitForIo(rt, &op.c);
 
         const bytes_read = op.getResult() catch return error.ReadFailed;
 
@@ -191,7 +189,7 @@ pub const File = struct {
         defer rt.endShield();
 
         executor.loop.add(&op.c);
-        waitForIo(rt, &op.c) catch {};
+        waitForIo(rt, &op.c) catch unreachable;
 
         // Ignore close errors, following Zig std lib pattern
         _ = op.getResult() catch {};
