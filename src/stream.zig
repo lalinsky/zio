@@ -5,7 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const aio = @import("aio");
 
-/// Generic reader for any stream type that implements readBuf(rt, []aio.ReadBuf) !usize
+/// Generic reader for any stream type that implements readVec(rt, [][]u8) !usize
 pub fn StreamReader(comptime T: type) type {
     const Runtime = @import("runtime.zig").Runtime;
     return struct {
@@ -36,8 +36,8 @@ pub fn StreamReader(comptime T: type) type {
             const r: *Self = @alignCast(@fieldParentPtr("interface", io_reader));
             const dest = limit.slice(try w.writableSliceGreedy(1));
 
-            var buf = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(dest)};
-            const n = r.stream.readBuf(r.runtime, &buf) catch |err| {
+            var slices = [1][]u8{dest};
+            const n = r.stream.readVec(r.runtime, &slices) catch |err| {
                 // Convert Canceled to ReadFailed since std.Io.Reader doesn't support cancellation
                 return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
@@ -54,8 +54,8 @@ pub fn StreamReader(comptime T: type) type {
 
             while (total_discarded < remaining) {
                 const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
-                var buf = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(io_reader.buffer[0..to_read])};
-                const n = r.stream.readBuf(r.runtime, &buf) catch |err| {
+                var slices = [1][]u8{io_reader.buffer[0..to_read]};
+                const n = r.stream.readVec(r.runtime, &slices) catch |err| {
                     if (err == error.EndOfStream) break;
                     return error.ReadFailed;
                 };
@@ -67,23 +67,20 @@ pub fn StreamReader(comptime T: type) type {
         fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
             const r: *Self = @alignCast(@fieldParentPtr("interface", io_reader));
 
-            // Create buffer for ReadBuf structures
-            var bufs_storage: [16]aio.ReadBuf = undefined;
-            var vectors_storage: [16]std.posix.iovec = undefined;
-            const dest_n, const data_size = if (builtin.os.tag == .windows) blk: {
-                var wsa_vectors_storage: [16]std.os.windows.ws2_32.WSABUF = undefined;
-                break :blk try io_reader.writableVectorWsa(&wsa_vectors_storage, data);
-            } else try io_reader.writableVectorPosix(&vectors_storage, data);
+            // Get writable vectors from io_reader
+            // buffer needs space for data.len + 1 (for internal buffer)
+            const max_vecs = 17; // 16 data slices + 1 internal buffer
+            var buffer_storage: [max_vecs][]u8 = undefined;
+            const buffer_slice = if (data.len + 1 <= max_vecs)
+                buffer_storage[0 .. data.len + 1]
+            else
+                buffer_storage[0..];
 
+            const dest_n, const data_size = try io_reader.writableVector(buffer_slice, data);
             if (dest_n == 0) return 0;
 
-            // Convert iovecs to ReadBuf - they're the same layout so we can reinterpret
-            const bufs: []aio.ReadBuf = if (builtin.os.tag == .windows)
-                &bufs_storage[0..0] // TODO: handle Windows case properly
-            else
-                @ptrCast(vectors_storage[0..dest_n]);
-
-            const n = r.stream.readBuf(r.runtime, bufs) catch |err| {
+            // writableVector fills buffer_slice with the actual slices to read into
+            const n = r.stream.readVec(r.runtime, buffer_slice[0..dest_n]) catch |err| {
                 // Convert Canceled to ReadFailed since std.Io.Reader doesn't support cancellation
                 return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
             };
@@ -98,7 +95,7 @@ pub fn StreamReader(comptime T: type) type {
     };
 }
 
-/// Generic writer for any stream type that implements writeBuf(rt, []const aio.WriteBuf) !usize
+/// Generic writer for any stream type that implements writeVec(rt, []const []const u8) !usize
 pub fn StreamWriter(comptime T: type) type {
     const Runtime = @import("runtime.zig").Runtime;
     return struct {
@@ -179,12 +176,7 @@ pub fn StreamWriter(comptime T: type) type {
 
             if (len == 0) return 0;
 
-            var write_bufs: [max_vecs]aio.WriteBuf = undefined;
-            for (0..len) |i| {
-                write_bufs[i] = aio.WriteBuf.fromSlice(vecs[i]);
-            }
-
-            const n = w.stream.writeBuf(w.runtime, write_bufs[0..len]) catch |err| {
+            const n = w.stream.writeVec(w.runtime, vecs[0..len]) catch |err| {
                 if (err == error.Canceled) return error.WriteFailed;
                 return error.WriteFailed;
             };
@@ -196,8 +188,8 @@ pub fn StreamWriter(comptime T: type) type {
 
             while (io_writer.end > 0) {
                 const buffered = io_writer.buffered();
-                var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(buffered)};
-                const n = w.stream.writeBuf(w.runtime, &write_buf) catch |err| {
+                var slices = [1][]const u8{buffered};
+                const n = w.stream.writeVec(w.runtime, &slices) catch |err| {
                     if (err == error.Canceled) return error.WriteFailed;
                     return error.WriteFailed;
                 };
@@ -221,7 +213,7 @@ pub fn StreamWriter(comptime T: type) type {
 // ============================================================================
 
 /// Mock stream type for testing StreamReader/StreamWriter.
-/// Uses an in-memory buffer to simulate readBuf/writeBuf operations.
+/// Uses an in-memory buffer to simulate readVec/writeVec operations.
 const BufferStream = struct {
     allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8),
@@ -240,20 +232,18 @@ const BufferStream = struct {
         self.read_pos = 0;
     }
 
-    /// Implements readBuf for StreamReader compatibility.
+    /// Implements readVec for StreamReader compatibility.
     /// Returns error.EndOfStream when no more data available (NOT 0).
-    fn readBuf(self: *BufferStream, rt: anytype, bufs: []aio.ReadBuf) std.Io.Reader.Error!usize {
+    fn readVec(self: *BufferStream, rt: anytype, slices: [][]u8) std.Io.Reader.Error!usize {
         _ = rt; // Unused in mock
         const available = self.buffer.items[self.read_pos..];
         if (available.len == 0) return error.EndOfStream;
 
         var copied: usize = 0;
-        for (bufs) |buf| {
+        for (slices) |slice| {
             if (copied >= available.len) break;
-            const dest_ptr: [*]u8 = @ptrCast(buf.data.base);
-            const dest_len: usize = @intCast(buf.data.len);
-            const to_copy = @min(dest_len, available.len - copied);
-            @memcpy(dest_ptr[0..to_copy], available[copied..][0..to_copy]);
+            const to_copy = @min(slice.len, available.len - copied);
+            @memcpy(slice[0..to_copy], available[copied..][0..to_copy]);
             copied += to_copy;
         }
 
@@ -261,15 +251,13 @@ const BufferStream = struct {
         return copied;
     }
 
-    /// Implements writeBuf for StreamWriter compatibility.
-    fn writeBuf(self: *BufferStream, rt: anytype, bufs: []const aio.WriteBuf) std.Io.Writer.Error!usize {
+    /// Implements writeVec for StreamWriter compatibility.
+    fn writeVec(self: *BufferStream, rt: anytype, slices: []const []const u8) std.Io.Writer.Error!usize {
         _ = rt; // Unused in mock
         var written: usize = 0;
-        for (bufs) |buf| {
-            const src_ptr: [*]const u8 = @ptrCast(buf.data.base);
-            const src_len: usize = @intCast(buf.data.len);
-            self.buffer.appendSlice(self.allocator, src_ptr[0..src_len]) catch return error.WriteFailed;
-            written += src_len;
+        for (slices) |slice| {
+            self.buffer.appendSlice(self.allocator, slice) catch return error.WriteFailed;
+            written += slice.len;
         }
         return written;
     }

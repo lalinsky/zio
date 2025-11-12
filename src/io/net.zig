@@ -544,11 +544,11 @@ pub const Socket = struct {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var read_bufs = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buf)};
+        var storage: [1]aio.system.iovec = undefined;
         var result: ReceiveFromResult = undefined;
         var peer_addr_len: aio.system.net.socklen_t = @sizeOf(@TypeOf(result.from));
 
-        var op = aio.NetRecvFrom.init(self.handle, &read_bufs, .{}, &result.from.any, &peer_addr_len);
+        var op = aio.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -576,9 +576,9 @@ pub const Socket = struct {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(data)};
+        var storage: [1]aio.system.iovec_const = undefined;
         const addr_len: aio.system.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
-        var op = aio.NetSendTo.init(self.handle, &write_buf, .{}, &addr.any, addr_len);
+        var op = aio.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -912,9 +912,9 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
     const task = rt.getCurrentTask() orelse @panic("no active task");
     const executor = task.getExecutor();
 
-    // Convert [][]u8 to []aio.ReadBuf
-    var read_bufs_storage: [16]aio.ReadBuf = undefined;
-    const read_bufs = aio.ReadBuf.fromSlices(bufs, &read_bufs_storage);
+    // Convert [][]u8 to ReadBuf
+    var storage: [16]aio.system.iovec = undefined;
+    const read_bufs = aio.ReadBuf.fromSlices(bufs, &storage);
 
     var op = aio.NetRecv.init(fd, read_bufs, .{});
     op.c.userdata = task;
@@ -926,13 +926,13 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
     return try op.getResult();
 }
 
-fn fillBuf(out: []aio.WriteBuf, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) usize {
+fn fillBuf(out: [][]const u8, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) usize {
     var len: usize = 0;
     const max_len = out.len;
 
     // Add header
     if (header.len > 0 and len < max_len) {
-        out[len] = aio.WriteBuf.fromSlice(header);
+        out[len] = header;
         len += 1;
     }
 
@@ -942,7 +942,7 @@ fn fillBuf(out: []aio.WriteBuf, header: []const u8, data: []const []const u8, sp
     const last_index = data.len - 1;
     for (data[0..last_index]) |bytes| {
         if (bytes.len > 0 and len < max_len) {
-            out[len] = aio.WriteBuf.fromSlice(bytes);
+            out[len] = bytes;
             len += 1;
         }
     }
@@ -952,7 +952,7 @@ fn fillBuf(out: []aio.WriteBuf, header: []const u8, data: []const []const u8, sp
     switch (splat) {
         0 => {},
         1 => if (pattern.len > 0 and len < max_len) {
-            out[len] = aio.WriteBuf.fromSlice(pattern);
+            out[len] = pattern;
             len += 1;
         },
         else => switch (pattern.len) {
@@ -962,24 +962,24 @@ fn fillBuf(out: []aio.WriteBuf, header: []const u8, data: []const []const u8, sp
                 const buf = splat_buffer[0..memset_len];
                 @memset(buf, pattern[0]);
                 if (len < max_len) {
-                    out[len] = aio.WriteBuf.fromSlice(buf);
+                    out[len] = buf;
                     len += 1;
                 }
                 var remaining_splat = splat - buf.len;
                 while (remaining_splat > splat_buffer.len and len < max_len) {
-                    out[len] = aio.WriteBuf.fromSlice(splat_buffer);
+                    out[len] = splat_buffer;
                     len += 1;
                     remaining_splat -= splat_buffer.len;
                 }
                 if (remaining_splat > 0 and len < max_len) {
-                    out[len] = aio.WriteBuf.fromSlice(splat_buffer[0..remaining_splat]);
+                    out[len] = splat_buffer[0..remaining_splat];
                     len += 1;
                 }
             },
             else => {
                 var i: usize = 0;
                 while (i < splat and len < max_len) : (i += 1) {
-                    out[len] = aio.WriteBuf.fromSlice(pattern);
+                    out[len] = pattern;
                     len += 1;
                 }
             },
@@ -994,10 +994,11 @@ pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []co
     const executor = task.getExecutor();
 
     var splat_buf: [64]u8 = undefined;
-    var write_bufs: [16]aio.WriteBuf = undefined;
-    const buf_len = fillBuf(&write_bufs, header, data, splat, &splat_buf);
+    var slices: [16][]const u8 = undefined;
+    const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
 
-    var op = aio.NetSend.init(fd, write_bufs[0..buf_len], .{});
+    var storage: [16]aio.system.iovec_const = undefined;
+    var op = aio.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage), .{});
     op.c.userdata = task;
     op.c.callback = genericCallback;
 

@@ -12,7 +12,7 @@ const windows = if (builtin.os.tag == .windows) std.os.windows else struct {};
 /// Open a file for async I/O operations.
 ///
 /// Opens an existing file for reading and/or writing.
-/// On Windows, files are opened with FILE_FLAG_OVERLAPPED for IOCP compatibility.
+/// TODO: Use aio.zig's openat() function instead of manual CreateFileW calls.
 /// The returned File handle supports async read, write, pread, pwrite, and close operations.
 ///
 /// ## Parameters
@@ -38,6 +38,7 @@ pub fn openFile(runtime: *Runtime, path: []const u8, flags: std.fs.File.OpenFlag
 
 /// Create a file for async I/O operations.
 ///
+/// TODO: Use aio.zig's createat() function instead of manual CreateFileW calls.
 /// Creates a new file with the specified creation flags.
 ///
 /// ## Parameters
@@ -89,7 +90,8 @@ fn openFileWindows(path: []const u8, flags: std.fs.File.OpenFlags) !File {
         share_mode,
         null,
         creation_disposition,
-        windows.FILE_FLAG_OVERLAPPED,
+        //windows.FILE_FLAG_OVERLAPPED,
+        windows.FILE_ATTRIBUTE_NORMAL,
         null,
     );
 
@@ -140,7 +142,8 @@ fn createFileWindows(path: []const u8, flags: std.fs.File.CreateFlags) !File {
         share_mode,
         null,
         creation_disposition,
-        windows.FILE_FLAG_OVERLAPPED,
+//        windows.FILE_FLAG_OVERLAPPED,
+        windows.FILE_ATTRIBUTE_NORMAL,
         null,
     );
 

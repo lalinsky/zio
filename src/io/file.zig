@@ -37,8 +37,8 @@ pub const File = struct {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var read_buf = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buffer)};
-        var op = aio.FileRead.init(self.fd, &read_buf, self.position);
+        var storage: [1]aio.system.iovec = undefined;
+        var op = aio.FileRead.init(self.fd, .fromSlice(buffer, &storage), self.position);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -54,15 +54,29 @@ pub const File = struct {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(data)};
-        var op = aio.FileWrite.init(self.fd, &write_buf, self.position);
+        std.log.debug("write: fd={}, data.len={}, position={}", .{ self.fd, data.len, self.position });
+        var storage: [1]aio.system.iovec_const = undefined;
+        std.log.debug("write: created storage", .{});
+        const write_buf = aio.WriteBuf.fromSlice(data, &storage);
+        std.log.debug("write: created WriteBuf, iovecs.len={}", .{write_buf.iovecs.len});
+        var op = aio.FileWrite.init(self.fd, write_buf, self.position);
+        std.log.debug("write: initialized FileWrite", .{});
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
+        std.log.debug("write: adding to loop", .{});
         executor.loop.add(&op.c);
+        std.log.debug("write: waiting for IO", .{});
         try waitForIo(rt, &op.c);
+        std.log.debug("write: IO completed, state={}, has_result={}", .{ op.c.state, op.c.has_result });
+        std.log.debug("write: result_private_do_not_touch={}", .{op.result_private_do_not_touch});
 
-        const bytes_written = try op.getResult();
+        std.log.debug("write: calling getResult", .{});
+        const bytes_written = op.getResult() catch |err| {
+            std.log.err("write: getResult failed with error: {}", .{err});
+            return err;
+        };
+        std.log.debug("write: getResult returned {} bytes", .{bytes_written});
         self.position += bytes_written;
         return bytes_written;
     }
@@ -95,8 +109,8 @@ pub const File = struct {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var read_buf = [1]aio.ReadBuf{aio.ReadBuf.fromSlice(buffer)};
-        var op = aio.FileRead.init(self.fd, &read_buf, offset);
+        var storage: [1]aio.system.iovec = undefined;
+        var op = aio.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -110,8 +124,8 @@ pub const File = struct {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var write_buf = [1]aio.WriteBuf{aio.WriteBuf.fromSlice(data)};
-        var op = aio.FileWrite.init(self.fd, &write_buf, offset);
+        var storage: [1]aio.system.iovec_const = undefined;
+        var op = aio.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -121,13 +135,14 @@ pub const File = struct {
         return try op.getResult();
     }
 
-    /// Low-level read function that accepts aio.ReadBuf slice directly.
+    /// Read from file into multiple slices (vectored read).
     /// Returns std.Io.Reader compatible errors.
-    pub fn readBuf(self: *File, rt: *Runtime, buffers: []aio.ReadBuf) (Cancelable || std.Io.Reader.Error)!usize {
+    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8) (Cancelable || std.Io.Reader.Error)!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var op = aio.FileRead.init(self.fd, buffers, self.position);
+        var storage: [16]aio.system.iovec = undefined;
+        var op = aio.FileRead.init(self.fd, aio.ReadBuf.fromSlices(slices, &storage), self.position);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -145,13 +160,14 @@ pub const File = struct {
         return bytes_read;
     }
 
-    /// Low-level write function that accepts aio.WriteBuf slice directly.
+    /// Write to file from multiple slices (vectored write).
     /// Returns std.Io.Writer compatible errors.
-    pub fn writeBuf(self: *File, rt: *Runtime, buffers: []const aio.WriteBuf) (Cancelable || std.Io.Writer.Error)!usize {
+    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8) (Cancelable || std.Io.Writer.Error)!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        var op = aio.FileWrite.init(self.fd, buffers, self.position);
+        var storage: [16]aio.system.iovec_const = undefined;
+        var op = aio.FileWrite.init(self.fd, aio.WriteBuf.fromSlices(slices, &storage), self.position);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
