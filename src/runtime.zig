@@ -12,10 +12,9 @@ const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 
-const coroutines = @import("coroutines.zig");
-const Coroutine = coroutines.Coroutine;
+const Coroutine = @import("coro").Coroutine;
+const Context = @import("coro").Context;
 
-// const Error = coroutines.Error;
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 const stack_pool = @import("stack_pool.zig");
 const StackPool = stack_pool.StackPool;
@@ -291,7 +290,7 @@ pub const Executor = struct {
     id: usize,
     loop: aio.Loop,
     stack_pool: StackPool,
-    main_context: coroutines.Context,
+    main_context: Context,
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 

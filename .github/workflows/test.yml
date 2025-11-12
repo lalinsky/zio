@@ -36,11 +36,11 @@ jobs:
         version: 0.15.2
 
     - name: Build
-      run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
     - name: Build tests
-      run: zig build build-tests ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build build-tests --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
     - name: Build examples
