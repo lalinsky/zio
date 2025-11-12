@@ -3,6 +3,8 @@ const posix = @import("../os/posix.zig");
 const net = @import("../os/net.zig");
 const time = @import("../os/time.zig");
 const common = @import("common.zig");
+
+const unexpectedError = @import("../os/base.zig").unexpectedError;
 const ReadBuf = @import("../buf.zig").ReadBuf;
 const WriteBuf = @import("../buf.zig").WriteBuf;
 const LoopState = @import("../loop.zig").LoopState;
@@ -63,7 +65,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
     const epoll_fd: i32 = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
-        else => |err| return posix.unexpectedErrno(err),
+        else => |err| return unexpectedError(err),
     };
     errdefer _ = std.os.linux.close(epoll_fd);
 
@@ -212,7 +214,7 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
                 // SUCCESS: successfully removed
                 // NOENT: fd was not registered (already removed or never added) - safe to proceed
             },
-            else => |err| return posix.unexpectedErrno(err),
+            else => |err| return unexpectedError(err),
         }
         const was_removed = self.poll_queue.remove(fd);
         std.debug.assert(was_removed);
@@ -236,7 +238,7 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
             .SUCCESS => {
                 entry.events = new_events;
             },
-            else => |err| return posix.unexpectedErrno(err),
+            else => |err| return unexpectedError(err),
         }
     }
 }
@@ -359,7 +361,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const n: usize = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INTR => 0, // Interrupted by signal, no events
-        else => |err| return posix.unexpectedErrno(err),
+        else => |err| return unexpectedError(err),
     };
 
     if (n == 0) {
@@ -525,7 +527,7 @@ pub const Waker = struct {
         };
         const rc = std.os.linux.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, efd, &event);
         if (posix.errno(rc) != .SUCCESS) {
-            return posix.unexpectedErrno(posix.errno(rc));
+            return unexpectedError(posix.errno(rc));
         }
 
         self.* = .{

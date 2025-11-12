@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
 
+const unexpectedError = @import("base.zig").unexpectedError;
+
 pub const EFD = switch (builtin.os.tag) {
     .linux => std.os.linux.EFD,
     .freebsd => struct {
@@ -44,7 +46,7 @@ pub fn eventfd(initval: u32, flags: u32) !i32 {
                     .NFILE => return error.SystemFdQuotaExceeded,
                     .NODEV => return error.SystemResources,
                     .NOMEM => return error.SystemResources,
-                    else => |err| return posix.unexpectedErrno(err),
+                    else => |err| return unexpectedError(err),
                 }
             }
         },
@@ -59,7 +61,7 @@ pub fn eventfd(initval: u32, flags: u32) !i32 {
                     .NFILE => return error.SystemFdQuotaExceeded,
                     .NODEV => return error.SystemResources,
                     .NOMEM => return error.SystemResources,
-                    else => |err| return posix.unexpectedErrno(err),
+                    else => |err| return unexpectedError(err),
                 }
             }
         },

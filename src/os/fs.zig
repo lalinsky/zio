@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
 
+const unexpectedError = @import("base.zig").unexpectedError;
+
 pub const fd_t = switch (builtin.os.tag) {
     .windows => std.os.windows.HANDLE,
     else => posix.system.fd_t,
@@ -176,7 +178,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => error.Unexpected,
+                else => |err| return unexpectedError(err),
             };
         }
 
@@ -249,7 +251,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
                 .ACCESS_DENIED => error.AccessDenied,
                 .ALREADY_EXISTS => error.PathAlreadyExists,
                 .FILE_EXISTS => error.PathAlreadyExists,
-                else => error.Unexpected,
+                else => |err| return unexpectedError(err),
             };
         }
 
@@ -316,11 +318,12 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
             );
 
             if (success == w.FALSE) {
-                return switch (w.kernel32.GetLastError()) {
-                    .HANDLE_EOF => if (total_read == 0) return 0 else return total_read,
-                    .BROKEN_PIPE => error.BrokenPipe,
-                    else => error.Unexpected,
-                };
+                switch (w.kernel32.GetLastError()) {
+                    .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
+                    .BROKEN_PIPE => return error.BrokenPipe,
+                    .IO_PENDING => return error.WouldBlock,
+                    else => |err| return unexpectedError(err),
+                }
             }
 
             total_read += bytes_read;
@@ -361,11 +364,12 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
             );
 
             if (success == w.FALSE) {
-                return switch (w.kernel32.GetLastError()) {
-                    .BROKEN_PIPE => error.BrokenPipe,
-                    .DISK_FULL => error.NoSpaceLeft,
-                    else => error.Unexpected,
-                };
+                switch (w.kernel32.GetLastError()) {
+                    .BROKEN_PIPE => return error.BrokenPipe,
+                    .DISK_FULL => return error.NoSpaceLeft,
+                    .IO_PENDING => return error.WouldBlock,
+                    else => |err| return unexpectedError(err),
+                }
             }
 
             total_written += bytes_written;
@@ -392,11 +396,11 @@ pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 
         const success = w.kernel32.FlushFileBuffers(fd);
         if (success == w.FALSE) {
-            return switch (w.kernel32.GetLastError()) {
-                .ACCESS_DENIED => error.NotOpenForWriting,
-                .INVALID_HANDLE => error.InvalidFileDescriptor,
-                else => error.Unexpected,
-            };
+            switch (w.kernel32.GetLastError()) {
+                .ACCESS_DENIED => return error.NotOpenForWriting,
+                .INVALID_HANDLE => return error.InvalidFileDescriptor,
+                else => |err| return unexpectedError(err),
+            }
         }
         return;
     }
@@ -445,14 +449,14 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
         );
 
         if (success == w.FALSE) {
-            return switch (w.kernel32.GetLastError()) {
-                .FILE_NOT_FOUND => error.FileNotFound,
-                .PATH_NOT_FOUND => error.FileNotFound,
-                .ACCESS_DENIED => error.AccessDenied,
-                .ALREADY_EXISTS => error.PathAlreadyExists,
-                .SHARING_VIOLATION => error.FileBusy,
-                else => error.Unexpected,
-            };
+            switch (w.kernel32.GetLastError()) {
+                .FILE_NOT_FOUND => return error.FileNotFound,
+                .PATH_NOT_FOUND => return error.FileNotFound,
+                .ACCESS_DENIED => return error.AccessDenied,
+                .ALREADY_EXISTS => return error.PathAlreadyExists,
+                .SHARING_VIOLATION => return error.FileBusy,
+                else => |err| return unexpectedError(err),
+            }
         }
 
         return;
@@ -488,8 +492,8 @@ pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileD
             error.Unexpected => error.Unexpected,
         };
 
-        w.DeleteFile(path_w.span(), .{ .dir = dir, .remove_dir = false }) catch |err| {
-            return switch (err) {
+        w.DeleteFile(path_w.span(), .{ .dir = dir, .remove_dir = false }) catch |e| {
+            return switch (e) {
                 error.FileNotFound => error.FileNotFound,
                 error.AccessDenied => error.AccessDenied,
                 error.FileBusy => error.FileBusy,
@@ -498,7 +502,7 @@ pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileD
                 error.NotDir => error.NotDir,
                 error.NetworkNotFound => error.FileNotFound,
                 error.DirNotEmpty => error.DirNotEmpty,
-                else => error.Unexpected,
+                error.Unexpected => error.Unexpected,
             };
         };
 
@@ -538,7 +542,7 @@ pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
         .BUSY => error.DeviceBusy,
         .TXTBSY => error.FileBusy,
         .CANCELED => error.Canceled,
-        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+        else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
@@ -552,7 +556,7 @@ pub fn errnoToFileReadError(errno: posix.system.E) FileReadError {
         .PIPE => error.BrokenPipe,
         .NOMEM => error.SystemResources,
         .BADF => error.NotOpenForReading,
-        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+        else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
@@ -569,7 +573,7 @@ pub fn errnoToFileWriteError(errno: posix.system.E) FileWriteError {
         .BADF => error.NotOpenForWriting,
         .DQUOT => error.DiskQuota,
         .FBIG => error.FileTooBig,
-        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+        else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
@@ -577,7 +581,7 @@ pub fn errnoToFileCloseError(errno: posix.system.E) FileCloseError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .CANCELED => error.Canceled,
-        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+        else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
@@ -591,7 +595,7 @@ pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
         .BADF => error.InvalidFileDescriptor,
         .INVAL => error.NotOpenForWriting,
         .CANCELED => error.Canceled,
-        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+        else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
@@ -615,7 +619,7 @@ pub fn errnoToFileRenameError(errno: posix.system.E) FileRenameError {
         .XDEV => error.NotSameFileSystem,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
-        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+        else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
@@ -634,6 +638,6 @@ pub fn errnoToFileDeleteError(errno: posix.system.E) FileDeleteError {
         .ROFS => error.ReadOnlyFileSystem,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
-        else => |e| posix.unexpectedErrno(e) catch error.Unexpected,
+        else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }

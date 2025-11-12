@@ -3,23 +3,9 @@ const builtin = @import("builtin");
 const posix = @import("posix.zig");
 const time = @import("time.zig");
 
-const log = std.log.scoped(.zio_socket);
+const unexpectedError = @import("base.zig").unexpectedError;
 
-fn unexpectedWSAError(err: std.os.windows.ws2_32.WinsockError) error{Unexpected} {
-    if (posix.unexpected_error_tracing) {
-        std.debug.print(
-            \\unexpected WSA error: {}
-            \\please file a bug report: https://github.com/lalinsky/aio.zig/issues/new
-            \\
-        , .{err});
-        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            std.debug.dumpCurrentStackTrace(null);
-        } else {
-            std.debug.dumpCurrentStackTrace(.{});
-        }
-    }
-    return error.Unexpected;
-}
+const log = std.log.scoped(.zio_socket);
 
 var wsa_init_once = std.once(wsaInit);
 
@@ -95,9 +81,9 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
                     .WSAEFAULT => unreachable,
                     .WSAEINVAL => {
                         log.err("WSAPoll returned WSAEINVAL - invalid parameter (fds.len={}, timeout={})", .{ fds.len, timeout });
-                        return unexpectedWSAError(err);
+                        return unexpectedError(err);
                     },
-                    else => return unexpectedWSAError(err),
+                    else => return unexpectedError(err),
                 }
             }
         },
@@ -110,7 +96,7 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
                     .INTR => continue,
                     .INVAL => return error.SystemResources,
                     .NOMEM => return error.SystemResources,
-                    else => |err| return posix.unexpectedErrno(err),
+                    else => |err| return unexpectedError(err),
                 }
             }
         },
@@ -131,7 +117,7 @@ pub fn close(fd: fd_t) void {
                     .BADF => unreachable, // sockfd is not a valid file descriptor - would be a bug
                     // Note: EIO, ENOSPC, EDQUOT can occur but are rare; we treat them as unexpected
                     else => |err| {
-                        posix.unexpectedErrno(err) catch {};
+                        unexpectedError(err) catch {};
                         return;
                     },
                 }
@@ -310,7 +296,7 @@ pub fn errnoToBindError(err: E) BindError {
                 .WSAENOTSOCK => error.FileDescriptorNotASocket,
                 .WSAENETDOWN => error.NetworkDown,
                 .WSAENOBUFS => error.SystemResources,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -330,7 +316,7 @@ pub fn errnoToBindError(err: E) BindError {
                 .ROFS => error.ReadOnlyFileSystem,
                 .IO => error.InputOutput,
                 .NETDOWN => error.NetworkDown,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -378,7 +364,7 @@ pub fn errnoToListenError(err: E) ListenError {
                 .WSAENOTSOCK => error.FileDescriptorNotASocket,
                 .WSAENETDOWN => error.NetworkDown,
                 .WSAENOBUFS, .WSAEMFILE => error.SystemResources,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -388,7 +374,7 @@ pub fn errnoToListenError(err: E) ListenError {
                 .OPNOTSUPP => error.OperationNotSupported,
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .NETDOWN => error.NetworkDown,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -559,13 +545,13 @@ pub fn getsockname(fd: fd_t, addr: *sockaddr, addr_len: *socklen_t) GetSockNameE
         .windows => {
             const rc = std.os.windows.ws2_32.getsockname(fd, @ptrCast(addr), @ptrCast(addr_len));
             if (rc != 0) {
-                return unexpectedWSAError(std.os.windows.ws2_32.WSAGetLastError());
+                return unexpectedError(std.os.windows.ws2_32.WSAGetLastError());
             }
         },
         else => {
             const rc = posix.system.getsockname(fd, addr, addr_len);
             if (rc != 0) {
-                return posix.unexpectedErrno(posix.errno(rc));
+                return unexpectedError(posix.errno(rc));
             }
         },
     }
@@ -580,7 +566,7 @@ pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
             var len: i32 = @sizeOf(i32);
             const rc = std.os.windows.ws2_32.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
             if (rc != 0) {
-                return unexpectedWSAError(std.os.windows.ws2_32.WSAGetLastError());
+                return unexpectedError(std.os.windows.ws2_32.WSAGetLastError());
             }
             return err;
         },
@@ -589,7 +575,7 @@ pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
             var len: socklen_t = @sizeOf(i32);
             const rc = posix.system.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
             if (rc != 0) {
-                return posix.unexpectedErrno(posix.errno(rc));
+                return unexpectedError(posix.errno(rc));
             }
             return err;
         },
@@ -614,7 +600,7 @@ pub fn errnoToConnectError(err: E) ConnectError {
                 .WSAENETDOWN => error.NetworkDown,
                 .WSAENOBUFS => error.SystemResources,
                 .WSA_OPERATION_ABORTED => error.Canceled,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -637,7 +623,7 @@ pub fn errnoToConnectError(err: E) ConnectError {
                 .NAMETOOLONG => error.NameTooLong,
                 .NOTDIR => error.NotDir,
                 .CANCELED => error.Canceled,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -658,7 +644,7 @@ pub fn errnoToAcceptError(err: E) AcceptError {
                 .WSAEPROTONOSUPPORT => error.ProtocolFailure,
                 .WSAENETDOWN => error.NetworkDown,
                 .WSA_OPERATION_ABORTED => error.Canceled,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -677,7 +663,7 @@ pub fn errnoToAcceptError(err: E) AcceptError {
                 .PERM => error.BlockedByFirewall,
                 .NETDOWN => error.NetworkDown,
                 .CANCELED => error.Canceled,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -699,7 +685,7 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .WSAENETDOWN => error.NetworkDown,
                 .WSAENOBUFS, .WSAEINVAL => error.SystemResources,
                 .WSA_OPERATION_ABORTED => error.Canceled,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -712,7 +698,7 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .NOMEM => error.SystemResources,
                 .CANCELED => error.Canceled,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -735,7 +721,7 @@ pub fn errnoToSendError(err: E) SendError {
                 .WSAEOPNOTSUPP => error.OperationNotSupported,
                 .WSAENOBUFS => error.SystemResources,
                 .WSA_OPERATION_ABORTED => error.Canceled,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -751,7 +737,7 @@ pub fn errnoToSendError(err: E) SendError {
                 .HOSTUNREACH, .HOSTDOWN, .NETDOWN => error.NetworkUnreachable,
                 .NOBUFS => error.SystemResources,
                 .CANCELED => error.Canceled,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -767,7 +753,7 @@ pub fn errnoToShutdownError(err: E) ShutdownError {
                 .WSAECONNRESET => error.ConnectionResetByPeer,
                 .WSAENETDOWN => error.NetworkDown,
                 .WSA_OPERATION_ABORTED => error.Canceled,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -779,7 +765,7 @@ pub fn errnoToShutdownError(err: E) ShutdownError {
                 .CONNRESET => error.ConnectionResetByPeer,
                 .NETDOWN => error.NetworkDown,
                 .CANCELED => error.Canceled,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -794,7 +780,7 @@ pub fn errnoToOpenError(err: E) OpenError {
                 .WSAEMFILE => error.ProcessFdQuotaExceeded,
                 .WSAENOBUFS => error.SystemResources,
                 .WSA_OPERATION_ABORTED => error.Canceled,
-                else => unexpectedWSAError(err),
+                else => unexpectedError(err),
             };
         },
         else => {
@@ -807,7 +793,7 @@ pub fn errnoToOpenError(err: E) OpenError {
                 .NOBUFS, .NOMEM => error.SystemResources,
                 .PROTONOSUPPORT => error.ProtocolNotSupported,
                 .CANCELED => error.Canceled,
-                else => |e| posix.unexpectedErrno(e),
+                else => |e| unexpectedError(e),
             };
         },
     }

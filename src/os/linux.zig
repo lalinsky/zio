@@ -1,6 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
 
+const unexpectedError = @import("base.zig").unexpectedError;
+
 /// Extended arguments for io_uring_enter2 with IORING_ENTER_EXT_ARG
 pub const io_uring_getevents_arg = extern struct {
     sigmask: u64 = 0,
@@ -43,6 +45,6 @@ pub fn io_uring_enter2(
         .INVAL => error.SubmissionQueueEntryInvalid,
         .OPNOTSUPP => error.OpcodeNotSupported,
         .NOMEM => error.SystemResources,
-        else => |err| posix.unexpectedErrno(err),
+        else => |err| unexpectedError(err),
     };
 }

@@ -4,6 +4,8 @@ const posix = @import("../os/posix.zig");
 const net = @import("../os/net.zig");
 const time = @import("../os/time.zig");
 const common = @import("common.zig");
+
+const unexpectedError = @import("../os/base.zig").unexpectedError;
 const ReadBuf = @import("../buf.zig").ReadBuf;
 const WriteBuf = @import("../buf.zig").WriteBuf;
 const LoopState = @import("../loop.zig").LoopState;
@@ -65,7 +67,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
     const kq = std.c.kqueue();
     const kqueue_fd: i32 = switch (posix.errno(kq)) {
         .SUCCESS => @intCast(kq),
-        else => |err| return posix.unexpectedErrno(err),
+        else => |err| return unexpectedError(err),
     };
     errdefer _ = std.c.close(kqueue_fd);
 
@@ -304,7 +306,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const n: usize = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INTR => 0, // Interrupted by signal, no events
-        else => |err| return posix.unexpectedErrno(err),
+        else => |err| return unexpectedError(err),
     };
 
     // Clear submitted changes from buffer
@@ -489,7 +491,7 @@ pub const UserEventWaker = struct {
             .SUCCESS => {},
             else => |err| {
                 log.err("Failed to add user kevent: {}", .{err});
-                return posix.unexpectedErrno(err);
+                return unexpectedError(err);
             },
         }
 
@@ -583,7 +585,7 @@ pub const FdWaker = struct {
             .SUCCESS => {},
             else => |err| {
                 log.err("Failed to add read fd to kqueue: {}", .{err});
-                return posix.unexpectedErrno(err);
+                return unexpectedError(err);
             },
         }
 

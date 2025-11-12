@@ -1,17 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const unexpectedError = @import("base.zig").unexpectedError;
+
 pub const system = switch (builtin.os.tag) {
     .linux => std.os.linux,
     else => std.c,
 };
 
 pub const O = system.O;
-
-pub const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.zig_backend) {
-    .stage2_llvm, .stage2_x86_64 => true,
-    else => false,
-};
 
 pub fn errno(rc: anytype) system.E {
     switch (system) {
@@ -27,29 +24,13 @@ pub fn errno(rc: anytype) system.E {
     }
 }
 
-pub fn unexpectedErrno(err: system.E) error{Unexpected} {
-    if (unexpected_error_tracing) {
-        std.debug.print(
-            \\unexpected errno: {d}
-            \\please file a bug report: https://github.com/lalinsky/aio.zig/issues/new
-            \\
-        , .{@intFromEnum(err)});
-        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            std.debug.dumpCurrentStackTrace(null);
-        } else {
-            std.debug.dumpCurrentStackTrace(.{});
-        }
-    }
-    return error.Unexpected;
-}
-
 pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
     const fl_flags = system.fcntl(fd, system.F.GETFL, @as(c_int, 0));
     switch (errno(fl_flags)) {
         .SUCCESS => {},
         .BADF => unreachable, // Invalid fd
         .FAULT => unreachable, // Invalid address
-        else => |err| return unexpectedErrno(err),
+        else => |err| return unexpectedError(err),
     }
 
     const new_flags = fl_flags | (@as(c_int, 1) << @bitOffsetOf(O, "NONBLOCK"));
@@ -57,7 +38,7 @@ pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
         .SUCCESS => {},
         .BADF => unreachable,
         .FAULT => unreachable,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return unexpectedError(err),
     }
 }
 
@@ -66,7 +47,7 @@ pub fn setCloexec(fd: std.posix.fd_t) error{Unexpected}!void {
         .SUCCESS => {},
         .BADF => unreachable,
         .FAULT => unreachable,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return unexpectedError(err),
     }
 }
 
@@ -92,7 +73,7 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
                 .FAULT => unreachable,
                 .NFILE => return error.SystemFdQuotaExceeded,
                 .MFILE => return error.ProcessFdQuotaExceeded,
-                else => |err| return unexpectedErrno(err),
+                else => |err| return unexpectedError(err),
             }
             errdefer {
                 std.posix.close(fds[0]);
@@ -124,7 +105,7 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
                 .INVAL => unreachable, // Invalid flags - would be a bug
                 .NFILE => return error.SystemFdQuotaExceeded,
                 .MFILE => return error.ProcessFdQuotaExceeded,
-                else => |err| return unexpectedErrno(err),
+                else => |err| return unexpectedError(err),
             }
         },
         else => @compileError("unsupported OS"),
