@@ -54,29 +54,18 @@ pub const File = struct {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
-        std.log.debug("write: fd={}, data.len={}, position={}", .{ self.fd, data.len, self.position });
         var storage: [1]aio.system.iovec_const = undefined;
-        std.log.debug("write: created storage", .{});
-        const write_buf = aio.WriteBuf.fromSlice(data, &storage);
-        std.log.debug("write: created WriteBuf, iovecs.len={}", .{write_buf.iovecs.len});
-        var op = aio.FileWrite.init(self.fd, write_buf, self.position);
-        std.log.debug("write: initialized FileWrite", .{});
+        var op = aio.FileWrite.init(self.fd, .fromSlice(data, &storage), self.position);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
-        std.log.debug("write: adding to loop", .{});
         executor.loop.add(&op.c);
-        std.log.debug("write: waiting for IO", .{});
         try waitForIo(rt, &op.c);
-        std.log.debug("write: IO completed, state={}, has_result={}", .{ op.c.state, op.c.has_result });
-        std.log.debug("write: result_private_do_not_touch={}", .{op.result_private_do_not_touch});
 
-        std.log.debug("write: calling getResult", .{});
         const bytes_written = op.getResult() catch |err| {
             std.log.err("write: getResult failed with error: {}", .{err});
             return err;
         };
-        std.log.debug("write: getResult returned {} bytes", .{bytes_written});
         self.position += bytes_written;
         return bytes_written;
     }
