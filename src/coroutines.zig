@@ -72,7 +72,7 @@ pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Contex
 }
 
 /// Context switching function using C calling convention.
-pub fn switchContext(
+pub inline fn switchContext(
     noalias current_context: *Context,
     noalias new_context: *Context,
 ) void {
@@ -255,7 +255,10 @@ pub fn switchContext(
               .x26 = true,
               .x27 = true,
               .x28 = true,
-              .x30 = true,
+              // Use .lr instead of .x30 - LLVM doesn't recognize "x30" as a clobber name
+              // on AArch64, causing the compiler to incorrectly assume x30 is preserved.
+              // See: https://github.com/rust-lang/rust/blob/master/compiler/rustc_target/src/asm/aarch64.rs
+              .lr = true,
               .z0 = true,
               .z1 = true,
               .z2 = true,
