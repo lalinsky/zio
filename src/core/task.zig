@@ -7,8 +7,8 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const CanceledStatus = @import("awaitable.zig").CanceledStatus;
-const Coroutine = @import("../coroutines.zig").Coroutine;
-const coroutines = @import("../coroutines.zig");
+const Coroutine = @import("coro").Coroutine;
+const DEFAULT_STACK_SIZE = @import("coro").DEFAULT_STACK_SIZE;
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
@@ -323,7 +323,7 @@ pub const AnyTask = struct {
         errdefer alloc_result.closure.free(AnyTask, executor.allocator, alloc_result.task);
 
         // Acquire stack from pool
-        const stack = try executor.stack_pool.acquire(options.stack_size orelse coroutines.DEFAULT_STACK_SIZE);
+        const stack = try executor.stack_pool.acquire(options.stack_size orelse DEFAULT_STACK_SIZE);
         errdefer executor.stack_pool.release(stack);
 
         const self = alloc_result.task;

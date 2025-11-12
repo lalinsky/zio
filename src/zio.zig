@@ -3,10 +3,6 @@
 
 const std = @import("std");
 
-// Re-export coroutine functionality
-pub const coroutines = @import("coroutines.zig");
-pub const Coroutine = coroutines.Coroutine;
-
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;

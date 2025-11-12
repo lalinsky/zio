@@ -14,5 +14,9 @@
         .libxev = .{
             .path = "vendor/libxev",
         },
+        .coro = .{
+            .url = "git+https://github.com/lalinsky/coro.zig#d22571cd424f744d5f495e321ee0378b7ff9a7f8",
+            .hash = "coro-0.4.0-PlYYwHaIAAALtblZmYohmIzIpeIZC8eo8J_1D-82z3BP",
+        },
     },
 }
