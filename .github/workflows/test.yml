@@ -38,19 +38,19 @@ jobs:
         version: 0.15.2
 
     - name: Build
-      run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
+      run: zig build --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build tests
-      run: zig build build-tests ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
+      run: zig build build-tests --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build examples
-      run: zig build examples ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
+      run: zig build examples --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Build benchmarks
-      run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
+      run: zig build benchmarks --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
       timeout-minutes: 5
 
     - name: Run tests (native)
