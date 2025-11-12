@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         "Install tests binary",
     ) orelse false;
 
-    const mod = b.addModule("coroutines", .{
+    const mod = b.addModule("coro", .{
         .root_source_file = b.path("src/coroutines.zig"),
         .target = target,
         .optimize = optimize,
