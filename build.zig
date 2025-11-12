@@ -7,16 +7,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const aio_backend = b.option(
+    const backend = b.option(
         []const u8,
-        "aio_backend",
+        "backend",
         "Override the default aio backend (io_uring, epoll, kqueue, iocp, wasi_poll)",
     );
 
     const aio = b.dependency("aio", .{
         .target = target,
         .optimize = optimize,
-        .backend = aio_backend,
+        .backend = backend,
     });
 
     const zio = b.addModule("zio", .{
