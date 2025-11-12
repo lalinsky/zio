@@ -31,8 +31,9 @@ pub const Context = switch (builtin.cpu.arch) {
         extra: ExtraContext,
     },
     .aarch64 => extern struct {
-        sp: u64,
-        fp: u64,
+        sp: u64,  // x31 (stack pointer)
+        fp: u64,  // x29 (frame pointer)
+        lr: u64,  // x30 (link register)
         pc: u64,
         extra: ExtraContext,
     },
@@ -58,6 +59,7 @@ pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Contex
         .aarch64 => .{
             .sp = @intFromPtr(stack_ptr),
             .fp = 0,
+            .lr = 0,
             .pc = @intFromPtr(entry_point),
             .extra = undefined,
         },
@@ -185,40 +187,42 @@ pub inline fn switchContext(
               .dirflag = true,
               .memory = true,
             }),
+
+        // NOTE: We technically don't need to save x30/lr, we could mark it as clobbered,
+        //       but the compiler will almost always need to save it anyway, and we can
+        //       fit it into our stp/ldp instructions, so we will help it out a bit.
         .aarch64 => asm volatile (
             \\ adr x9, 0f
-            \\ str x9, [x0, #16]
-            \\ mov x9, sp
-            \\ mov x10, fp
-            \\ stp x9, x10, [x0, #0]
+            \\ mov x10, sp
+            \\ stp x10, fp, [x0, #0]
+            \\ stp lr, x9, [x0, #16]
             \\
             ++ (if (is_windows)
                 \\ // Save TIB fields (x18 points to TEB on ARM64 Windows)
                 \\ ldr x10, [x18, #0x20]
                 \\ ldr x11, [x18, #0x1478]
-                \\ stp x10, x11, [x0, #24]
+                \\ stp x10, x11, [x0, #32]
                 \\ ldp x10, x11, [x18, #0x08]
-                \\ stp x10, x11, [x0, #40]
+                \\ stp x10, x11, [x0, #48]
                 \\
             else
                 "")
             ++
-            \\ ldp x9, x10, [x1, #0]
+            \\ ldp x9, fp, [x1, #0]
             \\ mov sp, x9
-            \\ mov fp, x10
+            \\ ldp lr, x9, [x1, #16]
             \\
             ++ (if (is_windows)
                 \\ // Restore TIB fields
-                \\ ldp x10, x11, [x1, #24]
+                \\ ldp x10, x11, [x1, #32]
                 \\ str x10, [x18, #0x20]
                 \\ str x11, [x18, #0x1478]
-                \\ ldp x10, x11, [x1, #40]
+                \\ ldp x10, x11, [x1, #48]
                 \\ stp x10, x11, [x18, #0x08]
                 \\
             else
                 "")
             ++
-            \\ ldr x9, [x1, #16]
             \\ br x9
             \\0:
             :
@@ -255,10 +259,6 @@ pub inline fn switchContext(
               .x26 = true,
               .x27 = true,
               .x28 = true,
-              // Use .lr instead of .x30 - LLVM doesn't recognize "x30" as a clobber name
-              // on AArch64, causing the compiler to incorrectly assume x30 is preserved.
-              // See: https://github.com/rust-lang/rust/blob/master/compiler/rustc_target/src/asm/aarch64.rs
-              .lr = true,
               .z0 = true,
               .z1 = true,
               .z2 = true,
@@ -409,7 +409,8 @@ pub inline fn switchContext(
 /// - CALL would push 8-byte return address, so we push 0 to simulate this
 /// - If the function unexpectedly returns, it will crash on null address (defensive)
 ///
-/// ARM64 stores return address in x30 register (not stack), so we set x30=0 for safety
+/// ARM64 stores return address in x30 register (not stack). x30 is already 0 from
+/// Context.lr initialization, so no need to explicitly set it here.
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
@@ -432,7 +433,7 @@ fn coroEntry() callconv(.naked) noreturn {
             }
         },
         .aarch64 => asm volatile (
-            \\ mov x30, #0
+            // x30 is already 0 from Context.lr initialization and switchContext restore
             \\ ldr x0, [sp, #8]
             \\ ldr x2, [sp]
             \\ br x2
