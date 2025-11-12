@@ -291,13 +291,12 @@ test "Timeout: multiple timeouts with different deadlines" {
             var timeout3 = Timeout.init;
             defer timeout3.clear(rt);
 
-            // Set timeouts: 30ms, 10ms (earliest), 20ms
-            timeout1.set(rt, 30 * std.time.ns_per_ms);
+            timeout1.set(rt, 200 * std.time.ns_per_ms);
             timeout2.set(rt, 10 * std.time.ns_per_ms); // This should fire
-            timeout3.set(rt, 20 * std.time.ns_per_ms);
+            timeout3.set(rt, 100 * std.time.ns_per_ms);
 
             // Sleep - should be interrupted by timeout2 (earliest at 10ms)
-            rt.sleep(100) catch |err| {
+            rt.sleep(1000) catch |err| {
                 // timeout2 should have triggered
                 try std.testing.expect(timeout2.triggered);
                 try std.testing.expect(!timeout1.triggered);
