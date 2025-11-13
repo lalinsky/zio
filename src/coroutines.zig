@@ -11,6 +11,10 @@ const StackInfo = @import("stack.zig").StackInfo;
 const stackAlloc = @import("stack.zig").stackAlloc;
 const stackFree = @import("stack.zig").stackFree;
 
+/// Current coroutine context for this thread. Used by the SIGSEGV signal handler
+/// to determine if a fault is from a coroutine stack and to access stack metadata.
+pub threadlocal var current_context: ?*Context = null;
+
 pub const Context = switch (builtin.cpu.arch) {
     .x86_64 => extern struct {
         rsp: u64,
@@ -70,9 +74,13 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
 
 /// Context switching function using C calling convention.
 pub inline fn switchContext(
-    noalias current_context: *Context,
+    noalias current_context_param: *Context,
     noalias new_context: *Context,
 ) void {
+    // Update current context pointer for SIGSEGV handler
+    // After the switch, we'll be executing in new_context
+    current_context = new_context;
+
     const is_windows = builtin.os.tag == .windows;
     switch (builtin.cpu.arch) {
         .x86_64 => asm volatile (
@@ -118,7 +126,7 @@ pub inline fn switchContext(
             \\ jmpq *16(%%rcx)
             \\0:
             :
-            : [current] "{rax}" (current_context),
+            : [current] "{rax}" (current_context_param),
               [new] "{rcx}" (new_context),
             : .{
               .rax = true,
@@ -221,7 +229,7 @@ pub inline fn switchContext(
             \\ br x9
             \\0:
             :
-            : [current] "{x0}" (current_context),
+            : [current] "{x0}" (current_context_param),
               [new] "{x1}" (new_context),
             : .{
               .x0 = true,
@@ -319,7 +327,7 @@ pub inline fn switchContext(
             \\ jr t0
             \\0:
             :
-            : [current] "{a0}" (current_context),
+            : [current] "{a0}" (current_context_param),
               [new] "{a1}" (new_context),
             : .{
               .x1 = true,   // ra

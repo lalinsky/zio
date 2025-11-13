@@ -2,8 +2,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 const windows = std.os.windows;
+const coroutines = @import("coroutines.zig");
 
 pub const page_size = std.heap.page_size_min;
+
+// Stack growth signal handler state (POSIX only)
+threadlocal var altstack_installed: bool = false;
+threadlocal var altstack_mem: ?[]u8 = null;
+var signal_handler_refcount: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
+var old_sigsegv_action: posix.Sigaction = undefined;
+var old_sigbus_action: posix.Sigaction = undefined;
 
 // Platform-specific macros for declaring future mprotect permissions
 // NetBSD PROT_MPROTECT: Required when PaX MPROTECT is enabled to allow permission escalation
@@ -293,6 +301,192 @@ fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
     unreachable;
 }
 
+/// Setup automatic stack growth via SIGSEGV handler for this thread.
+/// This function is idempotent - safe to call multiple times per thread.
+///
+/// On first call (any thread): Installs global SIGSEGV signal handler
+/// On every call: Sets up alternate signal stack for this thread if not already configured
+/// On Windows: No-op (stack growth is automatic via PAGE_GUARD)
+///
+/// Must be called once per thread before using coroutines on that thread.
+pub fn setupStackGrowth() !void {
+    // Windows handles stack growth automatically
+    if (builtin.os.tag == .windows) return;
+
+    const altstack_size = switch (builtin.os.tag) {
+        .linux => std.os.linux.SIGSTKSZ,
+        else => std.c.SIGSTKSZ,
+    };
+
+    // Setup alternate stack for this thread if not already done
+    if (!altstack_installed) {
+        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
+        errdefer std.heap.page_allocator.free(mem);
+
+        var stack = posix.stack_t{
+            .flags = 0,
+            .sp = mem.ptr,
+            .size = altstack_size,
+        };
+
+        try posix.sigaltstack(&stack, null);
+
+        altstack_mem = mem;
+        altstack_installed = true;
+    }
+
+    // Install global signal handler (once per process)
+    // Increment refcount; if this is the first caller, install the handler
+    const prev_refcount = signal_handler_refcount.fetchAdd(1, .acquire);
+    if (prev_refcount == 0) {
+        var sa = posix.Sigaction{
+            .handler = .{ .sigaction = stackFaultHandler },
+            .mask = posix.sigemptyset(),
+            .flags = posix.SA.SIGINFO | posix.SA.ONSTACK,
+        };
+
+        posix.sigaction(posix.SIG.SEGV, &sa, &old_sigsegv_action);
+
+        // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
+        if (builtin.os.tag.isDarwin()) {
+            posix.sigaction(posix.SIG.BUS, &sa, &old_sigbus_action);
+        }
+    }
+}
+
+/// Cleanup stack growth handler state for this thread.
+/// Disables the alternate stack and frees its memory.
+/// Decrements the global signal handler refcount and uninstalls the handler when it reaches 0.
+/// On Windows: No-op (nothing to clean up)
+///
+/// Should be called when a thread exits if setupStackGrowth() was called.
+pub fn cleanupStackGrowth() void {
+    // Windows has nothing to clean up
+    if (builtin.os.tag == .windows) return;
+
+    if (altstack_installed) {
+        // Disable alternate stack
+        var disable_stack = posix.stack_t{
+            .flags = std.posix.system.SS.DISABLE,
+            .sp = undefined,
+            .size = 0,
+        };
+        posix.sigaltstack(&disable_stack, null) catch {
+            // Best effort - can't do much if this fails
+        };
+
+        // Free the alternate stack memory
+        if (altstack_mem) |mem| {
+            std.heap.page_allocator.free(mem);
+            altstack_mem = null;
+        }
+
+        altstack_installed = false;
+    }
+
+    // Decrement refcount; if this was the last thread, uninstall the handler
+    const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
+    if (prev_refcount == 1) {
+        // We were the last thread - restore the old signal handlers
+        posix.sigaction(posix.SIG.SEGV, &old_sigsegv_action, null);
+        if (builtin.os.tag.isDarwin()) {
+            posix.sigaction(posix.SIG.BUS, &old_sigbus_action, null);
+        }
+    }
+}
+
+/// Extract fault address from siginfo_t in a platform-agnostic way
+inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
+    return @intFromPtr(switch (builtin.os.tag) {
+        .linux => info.fields.sigfault.addr,
+        .macos, .ios, .tvos, .watchos, .visionos => info.addr,
+        .freebsd, .dragonfly => info.addr,
+        .netbsd => info.info.reason.fault.addr,
+        .solaris, .illumos => info.reason.fault.addr,
+        else => @compileError("Stack growth not supported on this platform"),
+    });
+}
+
+/// Invoke the previous signal handler or use default behavior.
+/// This allows proper signal handler chaining instead of unconditionally aborting.
+fn invokePreviousHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque) noreturn {
+    // Get the appropriate old sigaction based on signal number
+    const old_sa = if (sig == posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
+
+    // Check if the old handler had SA_SIGINFO flag set
+    if ((old_sa.flags & posix.SA.SIGINFO) != 0) {
+        // Previous handler was a sigaction-style handler
+        if (old_sa.handler.sigaction) |sa| {
+            sa(sig, info, ctx);
+        }
+    } else {
+        // Previous handler was a simple handler (or SIG_DFL/SIG_IGN)
+        if (old_sa.handler.handler) |h| {
+            if (h == posix.SIG.DFL or h == posix.SIG.IGN) {
+                // Restore the previous handler and re-raise the signal
+                // We must restore the handler first, otherwise the signal comes back to us
+                posix.sigaction(@intCast(sig), old_sa, null);
+                _ = posix.raise(@intCast(sig)) catch {};
+            } else {
+                // Call the previous simple handler
+                h(sig);
+            }
+        }
+    }
+
+    // If we reach here, either raise failed or the handler returned
+    // In either case, abort
+    posix.abort();
+}
+
+/// Signal handler for automatic stack growth (SIGSEGV on Linux/BSD, SIGBUS on macOS).
+/// This handler checks if the fault is within a coroutine's uncommitted stack region
+/// and extends the stack if so. Real faults are propagated to the previous handler.
+fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
+    const fault_addr = getFaultAddress(info);
+
+    // Get current_context from coroutines module
+    const current_ctx = coroutines.current_context orelse {
+        // Not in a coroutine context - propagate to previous handler
+        invokePreviousHandler(sig, info, ctx);
+    };
+
+    const stack_info = &current_ctx.stack_info;
+
+    // Check if allocation_ptr is null (not our stack)
+    if (@intFromPtr(stack_info.allocation_ptr) == 0) {
+        invokePreviousHandler(sig, info, ctx);
+    }
+
+    // Check if fault is in uncommitted stack region
+    // Stack layout: [guard_page][uncommitted][committed]
+    const guard_end = @intFromPtr(stack_info.allocation_ptr) + page_size;
+    const uncommitted_start = guard_end;
+    const uncommitted_end = stack_info.limit;
+
+    if (fault_addr >= uncommitted_start and fault_addr < uncommitted_end) {
+        // Fault is in uncommitted region - extend the stack
+        stackExtendPosix(stack_info) catch {
+            // Extension failed - this is a stack overflow
+            abortOnStackOverflow(fault_addr);
+        };
+        // Stack extended successfully - return to resume execution
+        return;
+    }
+
+    // Fault is not in our stack region - propagate to previous handler
+    invokePreviousHandler(sig, info, ctx);
+}
+
+/// Abort with diagnostic message on stack overflow.
+/// Uses async-signal-safe write() to stderr in a single call.
+fn abortOnStackOverflow(fault_addr: usize) noreturn {
+    var buf: [100]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "SIGSEGV: Stack overflow at address 0x{x}\n", .{fault_addr}) catch "SIGSEGV: Stack overflow\n";
+    _ = posix.write(posix.STDERR_FILENO, msg) catch {};
+    posix.abort();
+}
+
 test "Stack: alloc/free" {
     const maximum_size = 8192;
     const committed_size = 1024;
@@ -359,4 +553,61 @@ test "Stack: extend" {
     // Verify we can write to the extended region
     const extended_region: [*]u8 = @ptrFromInt(stack.limit);
     @memset(extended_region[0..1024], 0xAA);
+}
+
+test "Stack: automatic growth" {
+    // Setup signal handler (no-op on Windows where PAGE_GUARD handles it automatically)
+    try setupStackGrowth();
+    defer cleanupStackGrowth();
+
+    var parent_context: coroutines.Context = undefined;
+    var coro: coroutines.Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+
+    // Allocate a stack with small initial commit but larger maximum
+    const maximum_size = 256 * 1024;
+    const initial_commit = 4096; // Very small initial commit
+    try stackAlloc(&coro.context.stack_info, maximum_size, initial_commit);
+    defer stackFree(coro.context.stack_info);
+
+    const initial_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
+
+    // Recursive function that will exceed initial commit and trigger stack growth
+    const RecursiveFn = struct {
+        fn recurse(c: *coroutines.Coroutine, depth: u32, target: u32) u32 {
+            // Allocate stack space to force growth
+            var buffer: [1024]u8 = undefined;
+            @memset(&buffer, @intCast(depth & 0xFF));
+
+            if (depth >= target) {
+                // Force use of buffer to prevent optimization
+                return buffer[0];
+            }
+
+            // Recurse deeper
+            return recurse(c, depth + 1, target);
+        }
+
+        fn start(c: *coroutines.Coroutine, target: u32) u32 {
+            return recurse(c, 0, target);
+        }
+    };
+
+    const Closure = coroutines.Closure(RecursiveFn.start);
+    var closure = Closure.init(.{100}); // Recurse 100 times with 1KB per frame = ~100KB
+
+    coro.setup(&Closure.start, &closure);
+
+    // Run coroutine - should trigger automatic stack growth
+    // On POSIX: via SIGSEGV/SIGBUS handler
+    // On Windows: via PAGE_GUARD mechanism
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    // Verify stack grew beyond initial commit
+    const final_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
+    try std.testing.expect(final_committed > initial_committed);
 }

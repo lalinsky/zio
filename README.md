@@ -7,7 +7,7 @@ Features:
  - allocating stacks on virtual memory with proper stack guard pages
  - growable stacks within the reserved virtual memory space
     * automatic on Windows
-    * custom SIGSEGV handlers on POSIX (_TBD_)
+    * opt-in on Linux, FreeBSD, NetBSD and macOS (uses custom SIGSEGV/SIGBUS handler)
  - stacks registered with Valgrind in debug mode
  
 
