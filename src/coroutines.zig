@@ -7,70 +7,65 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-
-pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
-
-pub const stack_alignment = 16;
-pub const Stack = []align(stack_alignment) u8;
-pub const StackPtr = [*]align(stack_alignment) u8;
-
-const WindowsTIB = extern struct {
-    fiber_data: u64, // TEB offset 0x20
-    deallocation_stack: u64, // TEB offset 0x1478
-    stack_base: u64, // TEB offset 0x08
-    stack_limit: u64, // TEB offset 0x10
-};
-
-const ExtraContext = if (builtin.os.tag == .windows) WindowsTIB else void;
+const StackInfo = @import("stack.zig").StackInfo;
+const stackAlloc = @import("stack.zig").stackAlloc;
+const stackFree = @import("stack.zig").stackFree;
 
 pub const Context = switch (builtin.cpu.arch) {
     .x86_64 => extern struct {
         rsp: u64,
         rbp: u64,
         rip: u64,
-        extra: ExtraContext,
+        fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
     },
     .aarch64 => extern struct {
         sp: u64,  // x31 (stack pointer)
         fp: u64,  // x29 (frame pointer)
         lr: u64,  // x30 (link register)
         pc: u64,
-        extra: ExtraContext,
+        fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
     },
     .riscv64 => extern struct {
         sp: u64,
         fp: u64,
         pc: u64,
-        extra: ExtraContext,
+        fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
     },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
 pub const EntryPointFn = fn () callconv(.naked) noreturn;
 
-pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Context {
-    return switch (builtin.cpu.arch) {
-        .x86_64 => .{
-            .rsp = @intFromPtr(stack_ptr),
-            .rbp = 0,
-            .rip = @intFromPtr(entry_point),
-            .extra = undefined,
+pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPointFn) void {
+    assert(stack_ptr % Context.stack_alignment == 0);
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            ctx.rsp = stack_ptr;
+            ctx.rbp = 0;
+            ctx.rip = @intFromPtr(entry_point);
         },
-        .aarch64 => .{
-            .sp = @intFromPtr(stack_ptr),
-            .fp = 0,
-            .lr = 0,
-            .pc = @intFromPtr(entry_point),
-            .extra = undefined,
+        .aarch64 => {
+            ctx.sp = stack_ptr;
+            ctx.fp = 0;
+            ctx.lr = 0;
+            ctx.pc = @intFromPtr(entry_point);
         },
-        .riscv64 => .{
-            .sp = @intFromPtr(stack_ptr),
-            .fp = 0,
-            .pc = @intFromPtr(entry_point),
-            .extra = undefined,
+        .riscv64 => {
+            ctx.sp = stack_ptr;
+            ctx.fp = 0;
+            ctx.pc = @intFromPtr(entry_point);
         },
         else => @compileError("unsupported architecture"),
-    };
+    }
 }
 
 /// Context switching function using C calling convention.
@@ -451,7 +446,6 @@ fn coroEntry() callconv(.naked) noreturn {
 pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
-    stack: ?Stack,
     finished: bool = false,
 
     /// Step into the coroutine
@@ -492,34 +486,27 @@ pub const Coroutine = struct {
             }
         };
 
-        // Convert the stack pointer to ints for calculations
-        const stack = self.stack.?; // Stack must be non-null during setup
-        const stack_base = @intFromPtr(stack.ptr);
-        var stack_end = stack_base + stack.len;
+        // Stack grows downward: base (high address) -> limit (low address)
+        var stack_top = self.context.stack_info.base;
+        const stack_limit = self.context.stack_info.limit;
 
-        // Copy our wrapper to stack
-        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), @alignOf(CoroutineData));
-        const data: *CoroutineData = @ptrFromInt(stack_end);
+        // Copy our wrapper to stack (allocate downward from top)
+        stack_top = std.mem.alignBackward(usize, stack_top - @sizeOf(CoroutineData), @alignOf(CoroutineData));
+        if (stack_top < stack_limit) @panic("Stack overflow during coroutine setup: not enough space for CoroutineData");
+        const data: *CoroutineData = @ptrFromInt(stack_top);
         data.coro = self;
         data.func = func;
         data.userdata = userdata;
 
         // Allocate and configure structure for coroEntry
-        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(Entrypoint), stack_alignment);
-        const entry: *Entrypoint = @ptrFromInt(stack_end);
+        stack_top = std.mem.alignBackward(usize, stack_top - @sizeOf(Entrypoint), Context.stack_alignment);
+        if (stack_top < stack_limit) @panic("Stack overflow during coroutine setup: not enough space for Entrypoint");
+        const entry: *Entrypoint = @ptrFromInt(stack_top);
         entry.func = &CoroutineData.entrypointFn;
         entry.context = data;
 
         // Initialize the context with the entry point
-        self.context = initContext(@ptrCast(@alignCast(entry)), &coroEntry);
-
-        // Initialize Windows TIB fields for the coroutine stack
-        if (builtin.os.tag == .windows) {
-            self.context.extra.fiber_data = 0; // No fiber data for our coroutines
-            self.context.extra.stack_base = stack_end; // Top of stack (high address)
-            self.context.extra.stack_limit = stack_base; // Bottom of stack (low address)
-            self.context.extra.deallocation_stack = stack_base; // Allocation base
-        }
+        setupContext(&self.context, stack_top, &coroEntry);
     }
 };
 
@@ -554,14 +541,14 @@ pub fn Closure(func: anytype) type {
 }
 
 test "Coroutine: basic" {
-    const stack = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
-    defer std.testing.allocator.free(stack);
-
     var parent_context: Context = undefined;
+
     var coro: Coroutine = .{
         .parent_context_ptr = &parent_context,
-        .stack = stack,
+        .context = undefined,
     };
+    try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
+    defer stackFree(coro.context.stack_info);
 
     const Fn = struct {
         fn sum(_: *Coroutine, a: u32, b: u32) u32 {
@@ -581,12 +568,21 @@ test "Coroutine: basic" {
 }
 
 test "Coroutine: message passing" {
-    const stack1 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
-    defer std.testing.allocator.free(stack1);
-    const stack2 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
-    defer std.testing.allocator.free(stack2);
-
     var parent_context: Context = undefined;
+
+    var coro1: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+    try stackAlloc(&coro1.context.stack_info, 64 * 1024, 4096);
+    defer stackFree(coro1.context.stack_info);
+
+    var coro2: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+    try stackAlloc(&coro2.context.stack_info, 64 * 1024, 4096);
+    defer stackFree(coro2.context.stack_info);
 
     // Simple single-slot channel
     const Channel = struct {
@@ -611,9 +607,6 @@ test "Coroutine: message passing" {
 
     var chan_to_receiver = Channel{};
     var chan_to_sender = Channel{};
-
-    var coro1: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack1 };
-    var coro2: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack2 };
 
     const sender = struct {
         fn run(coro: *Coroutine, send_chan: *Channel, recv_chan: *Channel) void {

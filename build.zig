@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     ) orelse false;
 
     const mod = b.addModule("coro", .{
-        .root_source_file = b.path("src/coroutines.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
