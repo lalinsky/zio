@@ -123,7 +123,7 @@ pub const AnyTask = struct {
     coro: Coroutine,
     state: std.atomic.Value(State),
 
-    // Number of active cancelation sheilds
+    // Number of active cancellation shields
     shield_count: u8 = 0,
 
     // Number of times this task was pinned to the current executor
