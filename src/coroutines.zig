@@ -567,6 +567,34 @@ test "Coroutine: basic" {
     try std.testing.expectEqual(3, closure.result);
 }
 
+test "Coroutine: recursion" {
+    var parent_context: Context = undefined;
+
+    var coro: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+    try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
+    defer stackFree(coro.context.stack_info);
+
+    const Fn = struct {
+        fn fib(c: *Coroutine, a: u32) u32 {
+            if (a <= 1) return 1;
+            return fib(c, a - 1) + fib(c, a - 2);
+        }
+    };
+
+    const C = Closure(Fn.fib);
+    var closure = C.init(.{ 10 });
+    coro.setup(&C.start, &closure);
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    try std.testing.expectEqual(89, closure.result);
+}
+
 test "Coroutine: message passing" {
     var parent_context: Context = undefined;
 
