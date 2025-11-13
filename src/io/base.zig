@@ -14,11 +14,11 @@ const Timeout = @import("../core/timeout.zig").Timeout;
 
 /// Cancels the I/O operation and waits for full completion.
 pub fn cancelIo(rt: *Runtime, completion: *xev.Completion) void {
-    // We can't handle user cancelations during this
+    // We can't handle user cancellations during this
     rt.beginShield();
     defer rt.endShield();
 
-    // Cancel the operation and wait for the cancelation to complete
+    // Cancel the operation and wait for the cancellation to complete
     var cancel_completion: xev.Completion = .{ .op = .{ .cancel = .{ .c = completion } } };
     runIo(rt, &cancel_completion, "cancel") catch {};
 

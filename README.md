@@ -23,7 +23,7 @@ You can see this as an alternative to the Go runtime, the Tokio project for Rust
 - Spawning blocking tasks in an auxiliary thread pool
 - Fully asynchronous network I/O, supports TCP/UDP sockets, Unix sockets, DNS resolution currently via thread pool
 - Asynchronous file I/O, Linux and Windows are truly asynchronous, other platforms are simulated using a thread pool
-- Cancelation support for all I/O operations on Linux and Windows, on other platforms we just stop polling, but can't cancel an active operation
+- Cancellation support for all I/O operations on Linux and Windows, on other platforms we just stop polling, but can't cancel an active operation
 - Full `std.Io.Reader` and `std.Io.Writer` support for files and streaming sockets (TCP, Unix)
 - Synchronization primitives matching `std.Thread` API (`Mutex`, `Condition`, `Semaphore`, `ResetEvent`, `Notify`, `Barrier`)
 - `Channel(T)` and `BroadcastChannel(T)` for producer-consumer patterns across coroutines
@@ -126,4 +126,4 @@ There are many projects implementing stackful coroutines for Zig, unfortunately 
 
 ### How is this different from the future `std.Io` interface in Zig?
 
-When I realized that the Zig team is working on the `std.Io` interface, I was questioning whether to continue working on this project, because there is a huge overlap. I still wanted something I can use now, instead of waiting and there are still things I'd be missing from `std.Io`, most specifically the ability to run tasks from a separate thread pool and wait on them from a coroutine, but also more control over task cancelation, and some more advanced synchronization primitives that are hard to implement without access to the event loop internals. I decided to continue with this project and when the interface is released, Zio will become one implementation of it.
+When I realized that the Zig team is working on the `std.Io` interface, I was questioning whether to continue working on this project, because there is a huge overlap. I still wanted something I can use now, instead of waiting and there are still things I'd be missing from `std.Io`, most specifically the ability to run tasks from a separate thread pool and wait on them from a coroutine, but also more control over task cancellation, and some more advanced synchronization primitives that are hard to implement without access to the event loop internals. I decided to continue with this project and when the interface is released, Zio will become one implementation of it.

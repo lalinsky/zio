@@ -644,7 +644,7 @@ pub const Loop = struct {
         sqe.user_data = @intFromPtr(completion);
     }
 
-    /// Submits a completion cancelation request.
+    /// Submits a completion cancellation request.
     /// Results in error.NotFound if the completion couldn't be located because
     /// it was already completed or an invalid Completion was provided.
     pub fn cancel(

@@ -64,7 +64,7 @@ pub const Awaitable = struct {
     /// Request cancellation of this awaitable.
     /// This will set user_canceled flag and increment pending_errors.
     /// If the task is currently suspended, we will wake it up,
-    /// so that it can handle the cancelation (e.g. cancel the underlaying I/O operation).
+    /// so that it can handle the cancellation (e.g. cancel the underlying I/O operation).
     /// If the task is already running/dead, the wake is a noop.
     pub fn cancel(self: *Awaitable) void {
         // CAS loop to set user_canceled and increment pending_errors
