@@ -8,7 +8,7 @@ const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const CanceledStatus = @import("awaitable.zig").CanceledStatus;
 const Coroutine = @import("coro").Coroutine;
-const DEFAULT_STACK_SIZE = @import("coro").DEFAULT_STACK_SIZE;
+const StackInfo = @import("coro").StackInfo;
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
@@ -17,7 +17,6 @@ const Timeout = @import("timeout.zig").Timeout;
 
 /// Options for creating a task
 pub const CreateOptions = struct {
-    stack_size: ?usize = null,
     pinned: bool = false,
 };
 
@@ -283,9 +282,8 @@ pub const AnyTask = struct {
     pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
         const self = fromAwaitable(awaitable);
 
-        if (self.coro.stack) |stack| {
-            const executor = Executor.fromCoroutine(&self.coro);
-            executor.stack_pool.release(stack);
+        if (self.coro.context.stack_info.allocation_len > 0) {
+            rt.stack_pool.release(self.coro.context.stack_info);
         }
 
         self.closure.free(AnyTask, rt.allocator, self);
@@ -322,10 +320,6 @@ pub const AnyTask = struct {
         );
         errdefer alloc_result.closure.free(AnyTask, executor.allocator, alloc_result.task);
 
-        // Acquire stack from pool
-        const stack = try executor.stack_pool.acquire(options.stack_size orelse DEFAULT_STACK_SIZE);
-        errdefer executor.stack_pool.release(stack);
-
         const self = alloc_result.task;
         self.* = .{
             .state = .init(.new),
@@ -337,12 +331,15 @@ pub const AnyTask = struct {
                 },
             },
             .coro = .{
-                .stack = stack,
                 .parent_context_ptr = &executor.main_context,
             },
             .closure = alloc_result.closure,
             .pin_count = if (options.pinned) 1 else 0,
         };
+
+        // Acquire stack from pool and initialize context
+        self.coro.context.stack_info = try executor.runtime.stack_pool.acquire();
+        errdefer executor.runtime.stack_pool.release(self.coro.context.stack_info);
 
         // Copy context data into the allocation
         const context_dest = self.closure.getContextSlice(AnyTask, self);

@@ -14,11 +14,13 @@ const Timeoutable = @import("common.zig").Timeoutable;
 
 const Coroutine = @import("coro").Coroutine;
 const Context = @import("coro").Context;
+const StackPool = @import("coro").StackPool;
+const StackPoolConfig = @import("coro").StackPoolConfig;
+const StackInfo = @import("coro").StackInfo;
+const setupStackGrowth = @import("coro").setupStackGrowth;
+const cleanupStackGrowth = @import("coro").cleanupStackGrowth;
 
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
-const stack_pool = @import("stack_pool.zig");
-const StackPool = stack_pool.StackPool;
-const StackPoolOptions = stack_pool.StackPoolOptions;
 
 const AnyTask = @import("core/task.zig").AnyTask;
 const Task = @import("core/task.zig").Task;
@@ -55,7 +57,6 @@ pub const ExecutorId = enum(usize) {
 
 /// Options for spawning a coroutine
 pub const SpawnOptions = struct {
-    stack_size: ?usize = null,
     executor: ExecutorId = .any,
     /// Pin task to its home executor (prevents cross-thread migration).
     /// Pinned tasks always run on their original executor, even when woken from other threads.
@@ -66,7 +67,12 @@ pub const SpawnOptions = struct {
 // Runtime configuration options
 pub const RuntimeOptions = struct {
     thread_pool: ThreadPoolOptions = .{},
-    stack_pool: StackPoolOptions = .{},
+    stack_pool: StackPoolConfig = .{
+        .maximum_size = 8 * 1024 * 1024, // 8MB reserved
+        .committed_size = 64 * 1024, // 64KB initial commit
+        .max_unused_stacks = 16,
+        .max_age_ns = 60 * std.time.ns_per_s, // 60 seconds
+    },
     /// Number of executor threads to run.
     /// - null: auto-detect CPU count (multi-threaded)
     /// - 1: single-threaded mode (default)
@@ -328,7 +334,6 @@ comptime {
 pub const Executor = struct {
     id: usize,
     loop: xev.Loop,
-    stack_pool: StackPool,
     main_context: Context,
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
@@ -360,10 +365,6 @@ pub const Executor = struct {
     shutdown_async: xev.Async = undefined,
     shutdown_completion: xev.Completion = undefined,
 
-    // Stack pool cleanup tracking
-    cleanup_interval_ns: u64,
-    cleanup_timer: std.time.Timer,
-
     // Runtime metrics
     metrics: ExecutorMetrics = .{},
 
@@ -388,9 +389,6 @@ pub const Executor = struct {
             .id = id,
             .allocator = allocator,
             .loop = undefined,
-            .stack_pool = StackPool.init(allocator, options.stack_pool),
-            .cleanup_interval_ns = options.stack_pool.cleanup_interval_ns,
-            .cleanup_timer = try std.time.Timer.start(),
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .remote_wakeup = undefined,
@@ -445,16 +443,14 @@ pub const Executor = struct {
         // Note: ThreadPool and loop are owned by thread that runs them
         // Loop cleanup is handled in deinitLoop() called from run*()
         // Task cleanup is handled by Runtime.deinit()
-
-        // Clean up stack pool
-        self.stack_pool.deinit();
+        // Stack pool is owned by Runtime
+        _ = self;
     }
 
     pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
 
         const task = try Task(Result).create(self, func, args, .{
-            .stack_size = options.stack_size,
             .pinned = options.pinned or options.executor.isId(),
         });
         errdefer task.destroy(self);
@@ -635,6 +631,10 @@ pub const Executor = struct {
     /// Main executor (id=0) orchestrates shutdown when all tasks complete.
     /// Worker executors (id>0) run until signaled to shut down by main executor.
     pub fn run(self: *Executor) !void {
+        // Setup stack growth signal handlers for this thread
+        try setupStackGrowth();
+        defer cleanupStackGrowth();
+
         // Initialize loop on this thread
         try self.initLoop();
         defer self.deinitLoop();
@@ -654,12 +654,6 @@ pub const Executor = struct {
         while (true) {
             // Exit if loop was stopped (by shutdown callback)
             if (self.loop.stopped()) break;
-
-            // Time-based stack pool cleanup
-            if (self.cleanup_timer.read() >= self.cleanup_interval_ns) {
-                self.cleanup_timer.reset();
-                self.stack_pool.cleanup(self.cleanup_timer.started);
-            }
 
             // Drain remote ready queue (cross-thread tasks)
             // Atomically drain all remote ready tasks and append to ready queue
@@ -685,9 +679,9 @@ pub const Executor = struct {
                         const current_awaitable = &current_task.awaitable;
 
                         // Release stack immediately since coroutine execution is complete
-                        if (current_coro.stack) |stack| {
-                            self.stack_pool.release(stack);
-                            current_coro.stack = null;
+                        if (current_coro.context.stack_info.allocation_len > 0) {
+                            self.runtime.stack_pool.release(current_coro.context.stack_info);
+                            current_coro.context.stack_info.allocation_len = 0;
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
@@ -909,6 +903,7 @@ pub const ThreadWaiter = struct {
 pub const Runtime = struct {
     executors: std.ArrayList(Executor),
     thread_pool: ?*xev.ThreadPool,
+    stack_pool: StackPool,
     allocator: Allocator,
     options: RuntimeOptions,
 
@@ -921,6 +916,9 @@ pub const Runtime = struct {
     pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
+        // Setup stack growth signal handlers for this thread
+        try setupStackGrowth();
+
         // Allocate Runtime on heap for stable pointer
         const runtime = try allocator.create(Runtime);
         errdefer allocator.destroy(runtime);
@@ -968,6 +966,7 @@ pub const Runtime = struct {
         runtime.* = Runtime{
             .executors = executors,
             .thread_pool = thread_pool,
+            .stack_pool = StackPool.init(options.stack_pool),
             .allocator = allocator,
             .options = options,
             .next_executor = std.atomic.Value(usize).init(0),
@@ -1003,6 +1002,12 @@ pub const Runtime = struct {
             tp.deinit();
             allocator.destroy(tp);
         }
+
+        // Clean up stack pool
+        self.stack_pool.deinit();
+
+        // Cleanup stack growth signal handlers for this thread
+        cleanupStackGrowth();
 
         // Free the Runtime allocation
         allocator.destroy(self);
