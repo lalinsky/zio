@@ -128,11 +128,17 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     // On NetBSD/FreeBSD, we must declare future permissions upfront for security policies
     const prot_flags = posix.PROT.NONE | PROT_MAX_FUTURE(posix.PROT.READ | posix.PROT.WRITE);
 
+    // MAP_STACK is supported on Linux and NetBSD, but not on macOS/FreeBSD
+    var map_flags = posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true };
+    if (builtin.os.tag == .linux or builtin.os.tag == .netbsd) {
+        map_flags.STACK = true;
+    }
+
     const allocation = posix.mmap(
         null, // Address hint (null for system to choose)
         size,
         prot_flags,
-        .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .STACK = true },
+        map_flags,
         -1, // File descriptor (not applicable)
         0, // Offset within the file (not applicable)
     ) catch |err| {
