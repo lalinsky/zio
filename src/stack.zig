@@ -25,6 +25,12 @@ inline fn PROT_MAX_FUTURE(prot: u32) u32 {
     };
 }
 
+// https://github.com/ziglang/zig/pull/25927
+const MADV_FREE = switch (builtin.os.tag) {
+    .netbsd => 6,
+    else => std.c.MADV.FREE,
+};
+
 // Windows ntdll.dll functions for stack management
 const INITIAL_TEB = extern struct {
     OldStackBase: windows.PVOID,
@@ -202,6 +208,30 @@ pub fn stackFree(info: StackInfo) void {
 fn stackFreePosix(info: StackInfo) void {
     const allocation: []align(page_size) u8 = info.allocation_ptr[0..info.allocation_len];
     posix.munmap(allocation);
+}
+
+/// Recycle stack memory for reuse by marking committed pages as available for kernel reclamation.
+/// This is useful for stack pooling - the virtual address space remains reserved but the physical
+/// memory can be reclaimed by the kernel if needed. Pages will be zero-filled on next access.
+///
+/// Uses MADV_FREE which allows lazy reclamation - pages are marked as candidates for reclamation
+/// but are only actually freed when the system is under memory pressure.
+///
+/// Supported on: Linux 4.5+, macOS, FreeBSD, NetBSD
+/// On Windows: No-op (stack recycling not currently implemented)
+pub fn stackRecycle(info: StackInfo) void {
+    if (builtin.os.tag == .windows) return;
+
+    // Only recycle committed region (don't touch guard page or uncommitted regions)
+    const committed_start = info.limit;
+    const committed_size = info.base - info.limit;
+    if (committed_size == 0) return;
+
+    const addr: [*]align(page_size) u8 = @ptrFromInt(committed_start);
+
+    // MADV_FREE is available on Linux 4.5+, macOS, FreeBSD, NetBSD
+    // It allows lazy reclamation - physical pages are freed when system needs memory
+    _ = posix.madvise(addr, committed_size, MADV_FREE) catch {};
 }
 
 pub fn stackExtend(info: *StackInfo) error{StackOverflow}!void {
@@ -622,4 +652,35 @@ test "Stack: automatic growth" {
     // Verify stack grew beyond initial commit
     const final_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
     try std.testing.expect(final_committed > initial_committed);
+}
+
+test "Stack: recycle" {
+    const maximum_size = 256 * 1024;
+    const committed_size = 64 * 1024;
+    var stack: StackInfo = undefined;
+    try stackAlloc(&stack, maximum_size, committed_size);
+    defer stackFree(stack);
+
+    const committed_start = stack.limit;
+    const committed_len = stack.base - stack.limit;
+
+    // Write pattern to committed memory
+    const mem: [*]u8 = @ptrFromInt(committed_start);
+    @memset(mem[0..committed_len], 0xAA);
+
+    // Verify pattern was written
+    try std.testing.expect(mem[0] == 0xAA);
+    try std.testing.expect(mem[committed_len - 1] == 0xAA);
+
+    // Recycle the stack (mark pages for kernel reclamation)
+    stackRecycle(stack);
+
+    // Memory should still be accessible (though may be zero-filled by kernel)
+    // We just verify no crash occurs
+    _ = mem[0];
+    _ = mem[committed_len - 1];
+
+    // Stack info should remain unchanged
+    try std.testing.expect(stack.limit == committed_start);
+    try std.testing.expect(stack.base - stack.limit == committed_len);
 }
