@@ -65,9 +65,19 @@ jobs:
         ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 
+    - name: Build signal tests
+      if: matrix.run == 'native'
+      run: zig build install-signal-tests
+      timeout-minutes: 5
+
     - name: Run tests (native)
       if: matrix.run == 'native'
       run: ./zig-out/bin/test
+      timeout-minutes: 5
+
+    - name: Run signal tests (native)
+      if: matrix.run == 'native'
+      run: python3 src/tests/run_signal_tests.py
       timeout-minutes: 5
 
     - name: Install QEMU

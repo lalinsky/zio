@@ -36,4 +36,33 @@ pub fn build(b: *std.Build) void {
         const install_tests_artifact = b.addInstallArtifact(tests, .{});
         b.getInstallStep().dependOn(&install_tests_artifact.step);
     }
+
+    // Standalone test programs
+    const stack_overflow_exe = b.addExecutable(.{
+        .name = "test_stack_overflow",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/stack_overflow.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    stack_overflow_exe.root_module.addImport("coro", mod);
+
+    const install_stack_overflow = b.addInstallArtifact(stack_overflow_exe, .{});
+
+    const segfault_exe = b.addExecutable(.{
+        .name = "test_segfault",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/segfault.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    segfault_exe.root_module.addImport("coro", mod);
+
+    const install_segfault = b.addInstallArtifact(segfault_exe, .{});
+
+    const install_signal_tests_step = b.step("install-signal-tests", "Install standalone signal test programs");
+    install_signal_tests_step.dependOn(&install_stack_overflow.step);
+    install_signal_tests_step.dependOn(&install_segfault.step);
 }
