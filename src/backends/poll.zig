@@ -26,6 +26,8 @@ pub const NetHandle = net.fd_t;
 
 pub const supports_file_ops = false;
 
+pub const SharedState = struct {};
+
 pub const NetOpenError = error{
     Unexpected,
 };
@@ -58,7 +60,8 @@ waker: Waker,
 queue_size: u16,
 pending_changes: usize = 0,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+    _ = shared_state;
     self.* = .{
         .allocator = allocator,
         .waker = undefined,

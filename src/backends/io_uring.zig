@@ -40,6 +40,8 @@ pub const NetHandle = net.fd_t;
 
 pub const supports_file_ops = true;
 
+pub const SharedState = struct {};
+
 pub const NetRecvData = struct {
     msg: linux.msghdr = undefined,
 };
@@ -81,7 +83,8 @@ allocator: std.mem.Allocator,
 ring: linux.IoUring,
 waker: Waker,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+    _ = shared_state;
     var flags: u32 = 0;
     flags |= linux.IORING_SETUP_SINGLE_ISSUER;
     flags |= linux.IORING_SETUP_DEFER_TASKRUN;

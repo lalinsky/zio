@@ -29,6 +29,8 @@ pub const NetHandle = net.fd_t;
 
 pub const supports_file_ops = false;
 
+pub const SharedState = struct {};
+
 pub const NetOpenError = error{
     Unexpected,
 };
@@ -63,7 +65,8 @@ change_buffer: std.ArrayList(std.c.Kevent) = .{},
 events: []std.c.Kevent,
 queue_size: u16,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+    _ = shared_state;
     const kq = std.c.kqueue();
     const kqueue_fd: i32 = switch (posix.errno(kq)) {
         .SUCCESS => @intCast(kq),

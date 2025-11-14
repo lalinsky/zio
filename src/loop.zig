@@ -26,6 +26,10 @@ const log = std.log.scoped(.zevent_loop);
 
 const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
+pub const LoopGroup = struct {
+    shared: Backend.SharedState = .{},
+};
+
 pub const RunMode = enum {
     no_wait,
     once,
@@ -178,6 +182,9 @@ pub const Loop = struct {
     allocator: std.mem.Allocator,
     thread_pool: ?*ThreadPool = null,
 
+    loop_group: *LoopGroup,
+    internal_loop_group: LoopGroup = .{},
+
     max_wait_ms: u64 = 60 * std.time.ms_per_s,
     defer_callbacks: bool = true,
 
@@ -188,6 +195,7 @@ pub const Loop = struct {
     pub const Options = struct {
         allocator: std.mem.Allocator = std.heap.page_allocator,
         thread_pool: ?*ThreadPool = null,
+        loop_group: ?*LoopGroup = null,
         queue_size: u16 = default_queue_size,
         defer_callbacks: bool = true,
     };
@@ -198,8 +206,15 @@ pub const Loop = struct {
             .backend = undefined,
             .allocator = options.allocator,
             .thread_pool = options.thread_pool,
+            .loop_group = undefined,
             .defer_callbacks = options.defer_callbacks,
         };
+
+        if (options.loop_group) |group| {
+            self.loop_group = group;
+        } else {
+            self.loop_group = &self.internal_loop_group;
+        }
 
         if (options.queue_size == 0) {
             return error.InvalidQueueSize;
@@ -208,7 +223,7 @@ pub const Loop = struct {
         net.ensureWSAInitialized();
         self.state.updateNow();
 
-        try self.backend.init(options.allocator, options.queue_size);
+        try self.backend.init(options.allocator, options.queue_size, &self.loop_group.shared);
         errdefer self.backend.deinit();
 
         self.state.initialized = true;

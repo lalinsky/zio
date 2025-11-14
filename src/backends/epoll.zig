@@ -28,6 +28,8 @@ pub const NetHandle = net.fd_t;
 
 pub const supports_file_ops = false;
 
+pub const SharedState = struct {};
+
 pub const NetOpenError = error{
     Unexpected,
 };
@@ -61,7 +63,8 @@ events: []std.os.linux.epoll_event,
 queue_size: u16,
 pending_changes: usize = 0,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+    _ = shared_state;
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
     const epoll_fd: i32 = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
