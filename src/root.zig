@@ -4,7 +4,12 @@ pub const Closure = @import("coroutines.zig").Closure;
 pub const Context = @import("coroutines.zig").Context;
 pub const switchContext = @import("coroutines.zig").switchContext;
 
-pub const Stack = @import("stack.zig").Stack;
+pub const StackInfo = @import("stack.zig").StackInfo;
+pub const StackAllocator = @import("stack.zig").StackAllocator;
+pub const stackAlloc = @import("stack.zig").stackAlloc;
+pub const stackFree = @import("stack.zig").stackFree;
+pub const setupStackGrowth = @import("stack.zig").setupStackGrowth;
+pub const cleanupStackGrowth = @import("stack.zig").cleanupStackGrowth;
 
 test {
     _ = @import("coroutines.zig");
