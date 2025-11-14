@@ -2,16 +2,16 @@ const std = @import("std");
 const coro = @import("coro");
 
 fn causeSegfault() void {
-    // Use a low invalid address (not 0 to bypass Zig's null pointer check)
+    // Use an invalid unmapped address (not 0 to bypass Zig's null pointer check)
     // Use volatile to prevent compiler optimization
-    var invalid_addr: usize = 10;
+    var invalid_addr: usize = 0x1000;
     _ = @as(*volatile usize, @ptrCast(&invalid_addr));
-    const ptr: *u32 = @ptrFromInt(invalid_addr);
+    const ptr: *volatile u8 = @ptrFromInt(invalid_addr);
 
-    std.debug.print("About to access invalid address at 0x{x}...\n", .{invalid_addr});
+    std.debug.print("About to write to invalid address at 0x{x}...\n", .{invalid_addr});
 
     // This will cause a segmentation fault
-    _ = ptr.*;
+    ptr.* = 42;
 
     // Should never reach here
     std.debug.print("ERROR: Survived invalid pointer dereference!\n", .{});
