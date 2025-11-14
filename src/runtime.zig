@@ -28,6 +28,7 @@ const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
 const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
+const stdio = @import("stdio.zig");
 
 // Compile-time detection of whether the backend needs ThreadPool
 fn backendNeedsThreadPool() bool {
@@ -374,7 +375,7 @@ pub const Executor = struct {
     thread: ?std.Thread = null,
 
     // Coordination for thread startup
-    ready: std.Thread.ResetEvent = .{},
+    ready: std.Thread.ResetEvent = .unset,
 
     /// Get the Executor instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
@@ -459,20 +460,8 @@ pub const Executor = struct {
         });
         errdefer task.destroy(self);
 
-        // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.runtime.tasks.add(task.toAwaitable());
-        errdefer _ = self.runtime.tasks.remove(task.toAwaitable());
-
-        // Increment ref count for JoinHandle BEFORE scheduling
-        // This prevents race where task completes before we create the handle
-        task.toAwaitable().ref_count.incr();
-        errdefer _ = task.toAwaitable().ref_count.decr();
-
-        // Schedule the task to run (handles cross-thread notification)
-        self.scheduleTask(task.task, .maybe_remote);
-
-        // Track task spawn
-        self.metrics.tasks_spawned += 1;
+        // Register and schedule the task
+        try self.runtime.registerAndScheduleTask(self, task.task);
 
         return JoinHandle(Result){
             .awaitable = task.toAwaitable(),
@@ -920,6 +909,50 @@ pub const Runtime = struct {
     /// Thread-local storage for the current executor
     pub threadlocal var current_executor: ?*Executor = null;
 
+    /// Pick an executor based on ExecutorId option.
+    /// Returns error.InvalidExecutorId if the specified executor doesn't exist.
+    pub fn pickExecutor(self: *Runtime, executor_option: ExecutorId) !*Executor {
+        const executor_id = switch (executor_option) {
+            .any => self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
+            .same => if (Runtime.current_executor) |current_exec|
+                current_exec.id
+            else
+                self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
+            _ => |id| blk: {
+                const raw_id = @intFromEnum(id);
+                if (raw_id >= self.executors.items.len) {
+                    return error.InvalidExecutorId;
+                }
+                break :blk raw_id;
+            },
+        };
+        return &self.executors.items[executor_id];
+    }
+
+    /// Register a task with the runtime and schedule it for execution.
+    /// This handles:
+    /// - Adding to the global awaitable registry
+    /// - Incrementing ref count for external handle
+    /// - Scheduling the task on its executor
+    /// - Tracking metrics
+    ///
+    /// On error, the task is NOT cleaned up - caller is responsible for cleanup.
+    pub fn registerAndScheduleTask(self: *Runtime, executor: *Executor, task: *AnyTask) !void {
+        // Add to global awaitable registry (can fail if runtime is shutting down)
+        try self.tasks.add(&task.awaitable);
+        errdefer _ = self.tasks.remove(&task.awaitable);
+
+        // Increment ref count for external handle BEFORE scheduling
+        // This prevents race where task completes before we return the handle
+        task.awaitable.ref_count.incr();
+
+        // Schedule the task to run (handles cross-thread notification)
+        executor.scheduleTask(task, .maybe_remote);
+
+        // Track task spawn
+        executor.metrics.tasks_spawned += 1;
+    }
+
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
         // Allocate Runtime on heap for stable pointer
         const runtime = try allocator.create(Runtime);
@@ -1016,22 +1049,7 @@ pub const Runtime = struct {
         }
 
         // Determine target executor
-        const executor_id = switch (options.executor) {
-            .any => self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
-            .same => if (Runtime.current_executor) |current_exec|
-                current_exec.id
-            else
-                self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
-            _ => |id| blk: {
-                const raw_id = @intFromEnum(id);
-                if (raw_id >= self.executors.items.len) {
-                    return error.InvalidExecutorId;
-                }
-                break :blk raw_id;
-            },
-        };
-
-        const executor = &self.executors.items[executor_id];
+        const executor = try self.pickExecutor(options.executor);
 
         return executor.spawn(func, args, options);
     }
@@ -1142,7 +1160,8 @@ pub const Runtime = struct {
             }
         }
         // Not in coroutine - use blocking sleep (cannot be canceled)
-        std.Thread.sleep(milliseconds * std.time.ns_per_ms);
+        const ns = milliseconds * std.time.ns_per_ms;
+        std.posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.
@@ -1273,7 +1292,19 @@ pub const Runtime = struct {
             self.maybeShutdown();
         }
     }
+
+    pub fn io(self: *Runtime) std.Io {
+        return stdio.fromRuntime(self);
+    }
+
+    pub fn fromIo(io_: std.Io) *Runtime {
+        return stdio.toRuntime(io_);
+    }
 };
+
+test {
+    _ = stdio;
+}
 
 test "runtime with thread pool smoke test" {
     const testing = std.testing;

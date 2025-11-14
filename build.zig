@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
         .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
         .{ .name = "http-server", .file = "examples/http_server.zig" },
-        .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },
+        //        .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },
         .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig" },
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
         .{ .name = "signal-demo", .file = "examples/signal_demo.zig" },
@@ -117,6 +117,7 @@ pub fn build(b: *std.Build) void {
         .root_module = zio,
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
+    lib_unit_tests.root_module.link_libc = true;
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const test_step = b.step("test", "Run unit tests");

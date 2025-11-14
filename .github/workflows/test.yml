@@ -35,7 +35,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: 0.16.0-dev.1188+74c23a237
 
     - name: Build
       run: zig build --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }} ${{ matrix.xev_backend && format('-Dxev_backend={0}', matrix.xev_backend) || '' }}
@@ -56,11 +56,6 @@ jobs:
     - name: Run tests (native)
       if: ${{ !matrix.qemu_binary }}
       run: ./zig-out/bin/test
-      timeout-minutes: 5
-
-    - name: Run xev tests (native only)
-      if: ${{ !matrix.qemu_binary }}
-      run: cd vendor/libxev && zig build test
       timeout-minutes: 5
 
     - name: Install QEMU

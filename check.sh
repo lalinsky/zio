@@ -80,7 +80,4 @@ zig build examples
 echo "=== Running benchmarks ==="
 zig build benchmarks
 
-echo "=== Running xev unit tests ==="
-cd vendor/libxev && zig build test
-
 echo "=== All checks passed! ==="

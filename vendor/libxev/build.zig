@@ -336,7 +336,7 @@ fn manPages(b: *std.Build) ![]const *Step {
         ) });
 
         try steps.append(alloc, &b.addInstallFile(
-            cmd.captureStdOut(),
+            cmd.captureStdOut(.{}),
             b.fmt("share/man/man{s}/{s}", .{ section, base }),
         ).step);
     }

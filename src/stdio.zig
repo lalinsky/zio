@@ -1,0 +1,890 @@
+const std = @import("std");
+const Runtime = @import("runtime.zig").Runtime;
+const AnyTask = @import("core/task.zig").AnyTask;
+const CreateOptions = @import("core/task.zig").CreateOptions;
+const Awaitable = @import("core/awaitable.zig").Awaitable;
+const select = @import("select.zig");
+const zio_net = @import("io/net.zig");
+const zio_file_io = @import("io/file.zig");
+
+fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*std.Io.AnyFuture {
+    return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
+        // If we can't schedule asynchronously, execute synchronously
+        start(context.ptr, result.ptr);
+        return null;
+    };
+}
+
+fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) std.Io.ConcurrentError!*std.Io.AnyFuture {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Check if runtime is shutting down
+    if (rt.tasks.isClosed()) {
+        return error.ConcurrencyUnavailable;
+    }
+
+    // Pick an executor (round-robin)
+    const executor = rt.pickExecutor(.any) catch return error.ConcurrencyUnavailable;
+
+    // Create the task using AnyTask.create
+    const task = AnyTask.create(
+        executor,
+        result_len,
+        result_alignment,
+        context,
+        context_alignment,
+        start,
+        CreateOptions{},
+    ) catch return error.ConcurrencyUnavailable;
+    errdefer task.closure.free(AnyTask, executor.allocator, task);
+
+    // Register and schedule the task
+    rt.registerAndScheduleTask(executor, task) catch return error.ConcurrencyUnavailable;
+
+    // Return the awaitable as AnyFuture
+    return @ptrCast(&task.awaitable);
+}
+
+fn awaitOrCancel(userdata: ?*anyopaque, any_future: *std.Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment, should_cancel: bool) void {
+    _ = result_alignment;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const awaitable: *Awaitable = @ptrCast(@alignCast(any_future));
+
+    // Request cancellation if needed
+    if (should_cancel and !awaitable.done.load(.acquire)) {
+        awaitable.cancel();
+    }
+
+    // Wait for completion
+    _ = select.waitUntilComplete(rt, awaitable);
+
+    // Copy result from task to result buffer
+    const task = AnyTask.fromAwaitable(awaitable);
+    const task_result = task.closure.getResultSlice(AnyTask, task);
+    @memcpy(result, task_result);
+
+    // Release the awaitable (decrements ref count, may destroy)
+    rt.releaseAwaitable(awaitable, false);
+}
+
+fn awaitImpl(userdata: ?*anyopaque, any_future: *std.Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment) void {
+    awaitOrCancel(userdata, any_future, result, result_alignment, false);
+}
+
+fn cancelImpl(userdata: ?*anyopaque, any_future: *std.Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment) void {
+    awaitOrCancel(userdata, any_future, result, result_alignment, true);
+}
+
+fn cancelRequestedImpl(userdata: ?*anyopaque) bool {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    rt.checkCanceled() catch return true;
+    return false;
+}
+
+fn groupAsyncImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (*std.Io.Group, context: *const anyopaque) void) void {
+    _ = userdata;
+    _ = group;
+    _ = context;
+    _ = context_alignment;
+    _ = start;
+    @panic("TODO");
+}
+
+fn groupWaitImpl(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) void {
+    _ = userdata;
+    _ = group;
+    _ = token;
+    @panic("TODO");
+}
+
+fn groupCancelImpl(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) void {
+    _ = userdata;
+    _ = group;
+    _ = token;
+    @panic("TODO");
+}
+
+fn selectImpl(userdata: ?*anyopaque, futures: []const *std.Io.AnyFuture) std.Io.Cancelable!usize {
+    _ = userdata;
+    _ = futures;
+    @panic("TODO");
+}
+
+fn mutexLockImpl(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) std.Io.Cancelable!void {
+    _ = userdata;
+    _ = prev_state;
+    _ = mutex;
+    @panic("TODO");
+}
+
+fn mutexLockUncancelableImpl(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) void {
+    _ = userdata;
+    _ = prev_state;
+    _ = mutex;
+    @panic("TODO");
+}
+
+fn mutexUnlockImpl(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) void {
+    _ = userdata;
+    _ = prev_state;
+    _ = mutex;
+    @panic("TODO");
+}
+
+fn conditionWaitImpl(userdata: ?*anyopaque, cond: *std.Io.Condition, mutex: *std.Io.Mutex) std.Io.Cancelable!void {
+    _ = userdata;
+    _ = cond;
+    _ = mutex;
+    @panic("TODO");
+}
+
+fn conditionWaitUncancelableImpl(userdata: ?*anyopaque, cond: *std.Io.Condition, mutex: *std.Io.Mutex) void {
+    _ = userdata;
+    _ = cond;
+    _ = mutex;
+    @panic("TODO");
+}
+
+fn conditionWakeImpl(userdata: ?*anyopaque, cond: *std.Io.Condition, wake: std.Io.Condition.Wake) void {
+    _ = userdata;
+    _ = cond;
+    _ = wake;
+    @panic("TODO");
+}
+
+fn dirMakeImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, mode: std.Io.Dir.Mode) std.Io.Dir.MakeError!void {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = mode;
+    @panic("TODO");
+}
+
+fn dirMakePathImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, mode: std.Io.Dir.Mode) std.Io.Dir.MakeError!void {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = mode;
+    @panic("TODO");
+}
+
+fn dirMakeOpenPathImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.MakeOpenPathError!std.Io.Dir {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = options;
+    @panic("TODO");
+}
+
+fn dirStatImpl(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
+    _ = userdata;
+    _ = dir;
+    @panic("TODO");
+}
+
+fn dirStatPathImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatPathOptions) std.Io.Dir.StatPathError!std.Io.File.Stat {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = options;
+    @panic("TODO");
+}
+
+fn dirAccessImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = options;
+    @panic("TODO");
+}
+
+fn dirCreateFileImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = flags;
+    @panic("TODO");
+}
+
+fn dirOpenFileImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = flags;
+    @panic("TODO");
+}
+
+fn dirOpenDirImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
+    _ = userdata;
+    _ = dir;
+    _ = sub_path;
+    _ = options;
+    @panic("TODO");
+}
+
+fn dirCloseImpl(userdata: ?*anyopaque, dir: std.Io.Dir) void {
+    _ = userdata;
+    _ = dir;
+    @panic("TODO");
+}
+
+fn fileStatImpl(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+    _ = userdata;
+    _ = file;
+    @panic("TODO");
+}
+
+fn fileCloseImpl(userdata: ?*anyopaque, file: std.Io.File) void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var zio_file = zio_file_io.File.initFd(file.handle);
+    zio_file.close(rt);
+}
+
+fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: std.Io.File, buffer: [][]const u8) std.Io.File.WriteStreamingError!usize {
+    _ = userdata;
+    _ = file;
+    _ = buffer;
+    // Cannot track position with bare file handle - std.Io.File is just a handle
+    return error.Unexpected;
+}
+
+fn fileWritePositionalImpl(userdata: ?*anyopaque, file: std.Io.File, buffer: [][]const u8, offset: u64) std.Io.File.WritePositionalError!usize {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    if (buffer.len == 0) return 0;
+
+    return zio_file_io.fileWritePositional(rt, file.handle, buffer, offset) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+}
+
+fn fileReadStreamingImpl(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8) std.Io.File.Reader.Error!usize {
+    _ = userdata;
+    _ = file;
+    _ = data;
+    // Cannot track position with bare file handle - std.Io.File is just a handle
+    return error.Unexpected;
+}
+
+fn fileReadPositionalImpl(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    if (data.len == 0) return 0;
+
+    return zio_file_io.fileReadPositional(rt, file.handle, data, offset) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+}
+
+fn fileSeekByImpl(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
+    _ = userdata;
+    _ = file;
+    _ = relative_offset;
+    // Cannot seek without position tracking - std.Io.File is just a handle
+    return error.Unseekable;
+}
+
+fn fileSeekToImpl(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
+    _ = userdata;
+    _ = file;
+    _ = absolute_offset;
+    // Cannot seek without position tracking - std.Io.File is just a handle
+    return error.Unseekable;
+}
+
+fn openSelfExeImpl(userdata: ?*anyopaque, flags: std.Io.File.OpenFlags) std.Io.File.OpenSelfExeError!std.Io.File {
+    _ = userdata;
+    _ = flags;
+    @panic("TODO");
+}
+
+fn nowImpl(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Clock.Error!std.Io.Timestamp {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    return switch (clock) {
+        // libxev uses CLOCK_MONOTONIC which maps to .awake
+        // We treat .boot the same since both are monotonic clocks
+        .awake, .boot => {
+            const ms = rt.now(); // Returns milliseconds from libxev
+            const ns = ms * std.time.ns_per_ms;
+            return .{ .nanoseconds = ns };
+        },
+        .real, .cpu_process, .cpu_thread => error.UnsupportedClock,
+    };
+}
+
+fn sleepImpl(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.SleepError!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const io = fromRuntime(rt);
+
+    // Convert timeout to duration from now (handles none/duration/deadline cases)
+    const duration = (try timeout.toDurationFromNow(io)) orelse return;
+
+    // Convert nanoseconds to milliseconds
+    const ns: i96 = duration.raw.nanoseconds;
+    if (ns <= 0) return;
+    const ms: u64 = @intCast(@divTrunc(ns, std.time.ns_per_ms));
+
+    try rt.sleep(ms);
+}
+
+fn stdIoIpToZio(addr: std.Io.net.IpAddress) zio_net.IpAddress {
+    return switch (addr) {
+        .ip4 => |ip4| zio_net.IpAddress.initIp4(ip4.bytes, ip4.port),
+        .ip6 => |ip6| zio_net.IpAddress.initIp6(ip6.bytes, ip6.port, ip6.flow, ip6.interface.index),
+    };
+}
+
+fn zioIpToStdIo(addr: zio_net.IpAddress) std.Io.net.IpAddress {
+    return switch (addr.any.family) {
+        std.posix.AF.INET => .{ .ip4 = .{
+            .bytes = @bitCast(addr.in.addr),
+            .port = std.mem.bigToNative(u16, addr.in.port),
+        } },
+        std.posix.AF.INET6 => .{ .ip6 = .{
+            .bytes = addr.in6.addr,
+            .port = std.mem.bigToNative(u16, addr.in6.port),
+            .flow = addr.in6.flowinfo,
+            .interface = .{ .index = addr.in6.scope_id },
+        } },
+        else => unreachable,
+    };
+}
+
+fn netListenIpImpl(userdata: ?*anyopaque, address: std.Io.net.IpAddress, options: std.Io.net.IpAddress.ListenOptions) std.Io.net.IpAddress.ListenError!std.Io.net.Server {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_addr = stdIoIpToZio(address);
+    const zio_options: zio_net.IpAddress.ListenOptions = .{
+        .reuse_address = options.reuse_address,
+        .kernel_backlog = options.kernel_backlog,
+    };
+    const server = zio_net.netListenIp(rt, zio_addr, zio_options) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+    return .{
+        .socket = .{
+            .handle = server.socket.handle,
+            .address = zioIpToStdIo(server.socket.address.ip),
+        },
+    };
+}
+
+fn netAcceptImpl(userdata: ?*anyopaque, server: std.Io.net.Socket.Handle) std.Io.net.Server.AcceptError!std.Io.net.Stream {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const stream = zio_net.netAccept(rt, server) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+
+    // Convert address based on family
+    // Note: std.Io.net.Stream.socket.address is IpAddress only, so for Unix sockets we use a fake address
+    const std_addr: std.Io.net.IpAddress = switch (stream.socket.address.any.family) {
+        std.posix.AF.INET, std.posix.AF.INET6 => zioIpToStdIo(stream.socket.address.ip),
+        std.posix.AF.UNIX => .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } }, // Fake address for Unix sockets
+        else => unreachable,
+    };
+
+    return .{
+        .socket = .{
+            .handle = stream.socket.handle,
+            .address = std_addr,
+        },
+    };
+}
+
+fn netBindIpImpl(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.BindOptions) std.Io.net.IpAddress.BindError!std.Io.net.Socket {
+    _ = options; // No options used in zio yet
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_addr = stdIoIpToZio(address.*);
+    const socket = zio_net.netBindIp(rt, zio_addr) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+    return .{
+        .handle = socket.handle,
+        .address = zioIpToStdIo(socket.address.ip),
+    };
+}
+
+fn netConnectIpImpl(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Stream {
+    _ = options; // No options used in zio yet
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_addr = stdIoIpToZio(address.*);
+    const stream = zio_net.netConnectIp(rt, zio_addr) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+    return .{
+        .socket = .{
+            .handle = stream.socket.handle,
+            .address = zioIpToStdIo(stream.socket.address.ip),
+        },
+    };
+}
+
+fn netListenUnixImpl(userdata: ?*anyopaque, address: *const std.Io.net.UnixAddress, options: std.Io.net.UnixAddress.ListenOptions) std.Io.net.UnixAddress.ListenError!std.Io.net.Socket.Handle {
+    if (!zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Convert std.Io.net.UnixAddress (path) to zio UnixAddress (sockaddr)
+    const zio_addr = zio_net.UnixAddress.init(address.path) catch {
+        // NameTooLong isn't in the error set, so treat as Unexpected
+        return error.Unexpected;
+    };
+    const zio_options: zio_net.UnixAddress.ListenOptions = .{
+        .kernel_backlog = options.kernel_backlog,
+    };
+
+    const server = zio_net.netListenUnix(rt, zio_addr, zio_options) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.AddressInUse => return error.AddressInUse,
+        error.SystemResources => return error.SystemResources,
+        error.SymLinkLoop => return error.SymLinkLoop,
+        error.FileNotFound => return error.FileNotFound,
+        error.NotDir => return error.NotDir,
+        error.ReadOnlyFileSystem => return error.ReadOnlyFileSystem,
+        else => return error.Unexpected,
+    };
+
+    return server.socket.handle;
+}
+
+fn netConnectUnixImpl(userdata: ?*anyopaque, address: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
+    if (!zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Convert std.Io.net.UnixAddress (path) to zio UnixAddress (sockaddr)
+    const zio_addr = zio_net.UnixAddress.init(address.path) catch {
+        // NameTooLong isn't in the error set, so treat as Unexpected
+        return error.Unexpected;
+    };
+
+    const stream = zio_net.netConnectUnix(rt, zio_addr) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.SystemResources => return error.SystemResources,
+        // Map any other error to Unexpected
+        else => return error.Unexpected,
+    };
+
+    return stream.socket.handle;
+}
+
+fn netSendImpl(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
+    _ = userdata;
+    _ = handle;
+    _ = messages;
+    _ = flags;
+    @panic("TODO");
+}
+
+fn netReceiveImpl(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, message_buffer: []std.Io.net.IncomingMessage, data_buffer: []u8, flags: std.Io.net.ReceiveFlags, timeout: std.Io.Timeout) struct { ?std.Io.net.Socket.ReceiveTimeoutError, usize } {
+    _ = userdata;
+    _ = handle;
+    _ = message_buffer;
+    _ = data_buffer;
+    _ = flags;
+    _ = timeout;
+    @panic("TODO");
+}
+
+fn netReadImpl(userdata: ?*anyopaque, src: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return zio_net.netRead(rt, src, data) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+}
+
+fn netWriteImpl(userdata: ?*anyopaque, dest: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return zio_net.netWrite(rt, dest, header, data, splat) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.Unexpected,
+    };
+}
+
+fn netCloseImpl(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle) void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    zio_net.netClose(rt, handle);
+}
+
+fn netInterfaceNameResolveImpl(userdata: ?*anyopaque, name: *const std.Io.net.Interface.Name) std.Io.net.Interface.Name.ResolveError!std.Io.net.Interface {
+    _ = userdata;
+    _ = name;
+    @panic("TODO");
+}
+
+fn netInterfaceNameImpl(userdata: ?*anyopaque, interface: std.Io.net.Interface) std.Io.net.Interface.NameError!std.Io.net.Interface.Name {
+    _ = userdata;
+    _ = interface;
+    @panic("TODO");
+}
+
+fn netLookupImpl(userdata: ?*anyopaque, hostname: std.Io.net.HostName, queue: *std.Io.Queue(std.Io.net.HostName.LookupResult), options: std.Io.net.HostName.LookupOptions) void {
+    _ = userdata;
+    _ = hostname;
+    _ = queue;
+    _ = options;
+    @panic("TODO");
+}
+
+pub const vtable = std.Io.VTable{
+    .async = asyncImpl,
+    .concurrent = concurrentImpl,
+    .await = awaitImpl,
+    .cancel = cancelImpl,
+    .cancelRequested = cancelRequestedImpl,
+    .groupAsync = groupAsyncImpl,
+    .groupWait = groupWaitImpl,
+    .groupCancel = groupCancelImpl,
+    .select = selectImpl,
+    .mutexLock = mutexLockImpl,
+    .mutexLockUncancelable = mutexLockUncancelableImpl,
+    .mutexUnlock = mutexUnlockImpl,
+    .conditionWait = conditionWaitImpl,
+    .conditionWaitUncancelable = conditionWaitUncancelableImpl,
+    .conditionWake = conditionWakeImpl,
+    .dirMake = dirMakeImpl,
+    .dirMakePath = dirMakePathImpl,
+    .dirMakeOpenPath = dirMakeOpenPathImpl,
+    .dirStat = dirStatImpl,
+    .dirStatPath = dirStatPathImpl,
+    .dirAccess = dirAccessImpl,
+    .dirCreateFile = dirCreateFileImpl,
+    .dirOpenFile = dirOpenFileImpl,
+    .dirOpenDir = dirOpenDirImpl,
+    .dirClose = dirCloseImpl,
+    .fileStat = fileStatImpl,
+    .fileClose = fileCloseImpl,
+    .fileWriteStreaming = fileWriteStreamingImpl,
+    .fileWritePositional = fileWritePositionalImpl,
+    .fileReadStreaming = fileReadStreamingImpl,
+    .fileReadPositional = fileReadPositionalImpl,
+    .fileSeekBy = fileSeekByImpl,
+    .fileSeekTo = fileSeekToImpl,
+    .openSelfExe = openSelfExeImpl,
+    .now = nowImpl,
+    .sleep = sleepImpl,
+    .netListenIp = netListenIpImpl,
+    .netAccept = netAcceptImpl,
+    .netBindIp = netBindIpImpl,
+    .netConnectIp = netConnectIpImpl,
+    .netListenUnix = netListenUnixImpl,
+    .netConnectUnix = netConnectUnixImpl,
+    .netSend = netSendImpl,
+    .netReceive = netReceiveImpl,
+    .netRead = netReadImpl,
+    .netWrite = netWriteImpl,
+    .netClose = netCloseImpl,
+    .netInterfaceNameResolve = netInterfaceNameResolveImpl,
+    .netInterfaceName = netInterfaceNameImpl,
+    .netLookup = netLookupImpl,
+};
+
+pub fn fromRuntime(rt: *Runtime) std.Io {
+    return std.Io{
+        .userdata = @ptrCast(rt),
+        .vtable = &vtable,
+    };
+}
+
+pub fn toRuntime(io: std.Io) *Runtime {
+    return @ptrCast(@alignCast(io.userdata));
+}
+
+test "Io: basic" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = fromRuntime(rt);
+    try std.testing.expect(io.vtable == &vtable);
+}
+
+test "Io: async/await pattern" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn computeValue(x: i32) i32 {
+            return x * 2 + 10;
+        }
+
+        fn mainTask(io: std.Io) !void {
+            // Create async future
+            var future = io.async(computeValue, .{21});
+            defer _ = future.cancel(io);
+
+            // Await the result
+            const result = future.await(io);
+            try std.testing.expectEqual(52, result);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: concurrent/await pattern" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn computeValue(x: i32) i32 {
+            return x * 2 + 10;
+        }
+
+        fn mainTask(io: std.Io) !void {
+            // Create concurrent future (guaranteed async)
+            var future = try io.concurrent(computeValue, .{21});
+            defer _ = future.cancel(io);
+
+            // Await the result
+            const result = future.await(io);
+            try std.testing.expectEqual(52, result);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: now and sleep" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            // Get current time
+            const t1 = try std.Io.Clock.now(.awake, io);
+
+            // Sleep for 10ms
+            try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+
+            // Get time after sleep
+            const t2 = try std.Io.Clock.now(.awake, io);
+
+            // Verify time moved forward
+            const elapsed = t1.durationTo(t2);
+            try std.testing.expect(elapsed.nanoseconds >= 10 * std.time.ns_per_ms);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: TCP listen/accept/connect/read/write IPv4" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
+            var server = try addr.listen(io, .{});
+            defer server.socket.close(io);
+
+            var server_future = try io.concurrent(serverFn, .{ io, &server });
+            defer server_future.cancel(io) catch {};
+
+            var client_future = try io.concurrent(clientFn, .{ io, server });
+            defer client_future.cancel(io) catch {};
+
+            try server_future.await(io);
+            try client_future.await(io);
+        }
+
+        fn serverFn(io: std.Io, server: *std.Io.net.Server) !void {
+            const stream = try server.accept(io);
+            defer stream.close(io);
+
+            var buf: [32]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", line);
+        }
+
+        fn clientFn(io: std.Io, server: std.Io.net.Server) !void {
+            const stream = try server.socket.address.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var write_buf: [32]u8 = undefined;
+            var writer = stream.writer(io, &write_buf);
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: TCP listen/accept/connect/read/write IPv6" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{
+                .ip6 = .{
+                    .bytes = .{0} ** 15 ++ .{1}, // ::1
+                    .port = 0,
+                },
+            };
+            var server = addr.listen(io, .{}) catch |err| {
+                if (err == error.AddressNotAvailable) return error.SkipZigTest;
+                return err;
+            };
+            defer server.socket.close(io);
+
+            var server_future = try io.concurrent(serverFn, .{ io, &server });
+            defer server_future.cancel(io) catch {};
+
+            var client_future = try io.concurrent(clientFn, .{ io, server });
+            defer client_future.cancel(io) catch {};
+
+            try server_future.await(io);
+            try client_future.await(io);
+        }
+
+        fn serverFn(io: std.Io, server: *std.Io.net.Server) !void {
+            const stream = try server.accept(io);
+            defer stream.close(io);
+
+            var buf: [32]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", line);
+        }
+
+        fn clientFn(io: std.Io, server: std.Io.net.Server) !void {
+            const stream = try server.socket.address.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var write_buf: [32]u8 = undefined;
+            var writer = stream.writer(io, &write_buf);
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: UDP bind IPv4" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
+            const socket = try addr.bind(io, .{ .mode = .dgram });
+            defer socket.close(io);
+
+            // Verify we got a valid address with ephemeral port
+            try std.testing.expect(socket.address.ip4.port != 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: UDP bind IPv6" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const addr = std.Io.net.IpAddress{
+                .ip6 = .{
+                    .bytes = .{0} ** 15 ++ .{1}, // ::1
+                    .port = 0,
+                },
+            };
+            const socket = addr.bind(io, .{ .mode = .dgram }) catch |err| {
+                if (err == error.AddressNotAvailable) return error.SkipZigTest;
+                return err;
+            };
+            defer socket.close(io);
+
+            // Verify we got a valid address with ephemeral port
+            try std.testing.expect(socket.address.ip6.port != 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Unix domain socket listen/accept/connect/read/write" {
+    if (!zio_net.has_unix_sockets) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            // Create a temporary path for the socket
+            var tmp_dir = std.testing.tmpDir(.{});
+            defer tmp_dir.cleanup();
+
+            var path_buf1: [std.fs.max_path_bytes]u8 = undefined;
+            var path_buf2: [std.fs.max_path_bytes]u8 = undefined;
+            const socket_path = try tmp_dir.dir.realpath(".", &path_buf1);
+            const full_path = try std.fmt.bufPrint(&path_buf2, "{s}/test.sock", .{socket_path});
+
+            const addr = try std.Io.net.UnixAddress.init(full_path);
+            var server = try addr.listen(io, .{});
+            defer server.deinit(io);
+
+            var server_future = try io.concurrent(serverFn, .{ io, &server });
+            defer server_future.cancel(io) catch {};
+
+            var client_future = try io.concurrent(clientFn, .{ io, addr });
+            defer client_future.cancel(io) catch {};
+
+            try server_future.await(io);
+            try client_future.await(io);
+        }
+
+        fn serverFn(io: std.Io, server: *std.Io.net.Server) !void {
+            const stream = try server.accept(io);
+            defer stream.close(io);
+
+            var buf: [32]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello unix", line);
+        }
+
+        fn clientFn(io: std.Io, addr: std.Io.net.UnixAddress) !void {
+            const stream = try addr.connect(io);
+            defer stream.close(io);
+
+            var write_buf: [32]u8 = undefined;
+            var writer = stream.writer(io, &write_buf);
+            try writer.interface.writeAll("hello unix\n");
+            try writer.interface.flush();
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: File close" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const file_path = "test_stdio_file_close.txt";
+            defer std.fs.cwd().deleteFile(file_path) catch {};
+
+            // Create file using std.fs
+            const std_file = try std.fs.cwd().createFile(file_path, .{});
+            const file: std.Io.File = .{ .handle = std_file.handle };
+
+            // Test that close works
+            file.close(io);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
