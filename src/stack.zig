@@ -132,7 +132,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
         null, // Address hint (null for system to choose)
         size,
         prot_flags,
-        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .STACK = true },
         -1, // File descriptor (not applicable)
         0, // Offset within the file (not applicable)
     ) catch |err| {
@@ -140,6 +140,12 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
         return error.OutOfMemory;
     };
     errdefer posix.munmap(allocation);
+
+    // Advise kernel not to use transparent huge pages (Linux-specific optimization)
+    // THP can cause memory bloat for small/sparse stack allocations
+    if (builtin.os.tag == .linux) {
+        _ = posix.madvise(allocation.ptr, allocation.len, posix.MADV.NOHUGEPAGE) catch {};
+    }
 
     // Guard page stays as PROT_NONE (first page)
 
