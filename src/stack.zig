@@ -61,51 +61,6 @@ pub const StackInfo = extern struct {
     valgrind_stack_id: usize = 0,
 };
 
-pub const StackAllocator = struct {
-    ptr: ?*anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        alloc: *const fn (
-            ptr: ?*anyopaque,
-            info: *StackInfo,
-            maximum_size: usize,
-            committed_size: usize,
-        ) error{OutOfMemory}!void,
-
-        free: *const fn (
-            ptr: ?*anyopaque,
-            info: StackInfo,
-        ) void,
-    };
-
-    pub fn alloc(self: StackAllocator, info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
-        return self.vtable.alloc(self.ptr, info, maximum_size, committed_size);
-    }
-
-    pub fn free(self: StackAllocator, info: StackInfo) void {
-        return self.vtable.free(self.ptr, info);
-    }
-};
-
-const default_vtable = StackAllocator.VTable{
-    .alloc = defaultAlloc,
-    .free = defaultFree,
-};
-
-fn defaultAlloc(_: ?*anyopaque, info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
-    return stackAlloc(info, maximum_size, committed_size);
-}
-
-fn defaultFree(_: ?*anyopaque, info: StackInfo) void {
-    return stackFree(info);
-}
-
-pub var default_stack_allocator = StackAllocator{
-    .ptr = null,
-    .vtable = &default_vtable,
-};
-
 pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
     if (builtin.os.tag == .windows) {
         try stackAllocWindows(info, maximum_size, committed_size);
