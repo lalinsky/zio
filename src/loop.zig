@@ -287,6 +287,21 @@ pub const Loop = struct {
         return self.cancelInternal(completion, null);
     }
 
+    /// Helper to cancel a file operation that's running in the thread pool
+    fn cancelFileOpViaThreadPool(self: *Loop, completion: *Completion, work: *Work) void {
+        if (self.thread_pool) |thread_pool| {
+            if (thread_pool.cancel(work)) {
+                // Successfully canceled the internal work
+                completion.setError(error.Canceled);
+                self.state.markCompleted(completion);
+            }
+            // If cancel failed, work is running/completed and will complete normally
+        } else {
+            // No thread pool - file op should already be completed with error.Unexpected
+            std.debug.assert(completion.state == .completed or completion.state == .dead);
+        }
+    }
+
     /// Internal cancel implementation
     fn cancelInternal(self: *Loop, completion: *Completion, cancel_comp: ?*Cancel) !void {
         // Check if already being canceled
@@ -341,37 +356,16 @@ pub const Loop = struct {
                     std.debug.assert(work.c.state == .completed or work.c.state == .dead);
                 }
             },
-            .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => {
-                // File ops on backends without native support use internal Work
-                if (!Backend.supports_file_ops) {
-                    const work = switch (completion.op) {
-                        .file_open => &completion.cast(FileOpen).internal.work,
-                        .file_create => &completion.cast(FileCreate).internal.work,
-                        .file_close => &completion.cast(FileClose).internal.work,
-                        .file_read => &completion.cast(FileRead).internal.work,
-                        .file_write => &completion.cast(FileWrite).internal.work,
-                        .file_sync => &completion.cast(FileSync).internal.work,
-                        .file_rename => &completion.cast(FileRename).internal.work,
-                        .file_delete => &completion.cast(FileDelete).internal.work,
-                        else => unreachable,
-                    };
 
-                    if (self.thread_pool) |thread_pool| {
-                        if (thread_pool.cancel(work)) {
-                            // Successfully canceled the internal work
-                            completion.setError(error.Canceled);
-                            self.state.markCompleted(completion);
-                        }
-                        // If cancel failed, work is running/completed and will complete normally
-                    } else {
-                        // No thread pool - file op should already be completed with error.Unexpected
-                        std.debug.assert(completion.state == .completed or completion.state == .dead);
-                    }
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => |op| {
+                if (!@field(Backend.capabilities, @tagName(op))) {
+                    const op_data = completion.cast(op.toType());
+                    self.cancelFileOpViaThreadPool(completion, &op_data.internal.work);
                 } else {
-                    // Backend operations with native support
                     self.backend.cancel(&self.state, completion);
                 }
             },
+
             else => {
                 // Backend operations (net_*, etc)
                 self.backend.cancel(&self.state, completion);
@@ -482,14 +476,14 @@ pub const Loop = struct {
 
                 // Regular backend operation
                 // Route file operations to thread pool for backends without native support
-                if (!Backend.supports_file_ops) {
-                    switch (completion.op) {
-                        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => {
+                switch (completion.op) {
+                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => |op| {
+                        if (!@field(Backend.capabilities, @tagName(op))) {
                             self.submitFileOpToThreadPool(completion);
                             return;
-                        },
-                        else => {},
-                    }
+                        }
+                    },
+                    else => {},
                 }
 
                 self.backend.submit(&self.state, completion);
@@ -565,65 +559,31 @@ pub const Loop = struct {
         self.state.active += 1;
 
         switch (completion.op) {
-            .file_open => {
-                const file_open = completion.cast(FileOpen);
-                file_open.internal.allocator = self.allocator;
-                file_open.internal.work = Work.init(common.fileOpenWork, null);
-                file_open.internal.work.loop = self;
-                file_open.internal.work.linked = completion;
-                tp.submit(&file_open.internal.work);
-            },
-            .file_create => {
-                const file_create = completion.cast(FileCreate);
-                file_create.internal.allocator = self.allocator;
-                file_create.internal.work = Work.init(common.fileCreateWork, null);
-                file_create.internal.work.loop = self;
-                file_create.internal.work.linked = completion;
-                tp.submit(&file_create.internal.work);
-            },
-            .file_close => {
-                const file_close = completion.cast(FileClose);
-                file_close.internal.work = Work.init(common.fileCloseWork, null);
-                file_close.internal.work.loop = self;
-                file_close.internal.work.linked = completion;
-                tp.submit(&file_close.internal.work);
-            },
-            .file_read => {
-                const file_read = completion.cast(FileRead);
-                file_read.internal.work = Work.init(common.fileReadWork, null);
-                file_read.internal.work.loop = self;
-                file_read.internal.work.linked = completion;
-                tp.submit(&file_read.internal.work);
-            },
-            .file_write => {
-                const file_write = completion.cast(FileWrite);
-                file_write.internal.work = Work.init(common.fileWriteWork, null);
-                file_write.internal.work.loop = self;
-                file_write.internal.work.linked = completion;
-                tp.submit(&file_write.internal.work);
-            },
-            .file_sync => {
-                const file_sync = completion.cast(FileSync);
-                file_sync.internal.work = Work.init(common.fileSyncWork, null);
-                file_sync.internal.work.loop = self;
-                file_sync.internal.work.linked = completion;
-                tp.submit(&file_sync.internal.work);
-            },
-            .file_rename => {
-                const file_rename = completion.cast(FileRename);
-                file_rename.internal.allocator = self.allocator;
-                file_rename.internal.work = Work.init(common.fileRenameWork, null);
-                file_rename.internal.work.loop = self;
-                file_rename.internal.work.linked = completion;
-                tp.submit(&file_rename.internal.work);
-            },
-            .file_delete => {
-                const file_delete = completion.cast(FileDelete);
-                file_delete.internal.allocator = self.allocator;
-                file_delete.internal.work = Work.init(common.fileDeleteWork, null);
-                file_delete.internal.work.loop = self;
-                file_delete.internal.work.linked = completion;
-                tp.submit(&file_delete.internal.work);
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => |op| {
+                if (@field(Backend.capabilities, @tagName(op))) {
+                    unreachable;
+                }
+
+                const op_func = switch (op) {
+                    .file_open => common.fileOpenWork,
+                    .file_create => common.fileCreateWork,
+                    .file_close => common.fileCloseWork,
+                    .file_read => common.fileReadWork,
+                    .file_write => common.fileWriteWork,
+                    .file_sync => common.fileSyncWork,
+                    .file_rename => common.fileRenameWork,
+                    .file_delete => common.fileDeleteWork,
+                    else => unreachable,
+                };
+
+                const op_data = completion.cast(op.toType());
+                if (@hasField(@TypeOf(op_data.internal), "allocator")) {
+                    op_data.internal.allocator = self.allocator;
+                }
+                op_data.internal.work = Work.init(op_func, null);
+                op_data.internal.work.loop = self;
+                op_data.internal.work.linked = completion;
+                tp.submit(&op_data.internal.work);
             },
             else => unreachable,
         }

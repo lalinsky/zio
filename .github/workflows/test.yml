@@ -64,7 +64,7 @@ jobs:
     - name: Build and test
       shell: bash
       run: |
-        for backend in poll; do
+        for backend in iocp poll; do
           echo "Building and testing with backend: $backend"
           zig build -Dinstall-tests -Dbackend=$backend
           ./zig-out/bin/test

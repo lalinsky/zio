@@ -26,7 +26,9 @@ const NetShutdown = @import("../completion.zig").NetShutdown;
 
 pub const NetHandle = net.fd_t;
 
-pub const supports_file_ops = false;
+const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
+
+pub const capabilities: BackendCapabilities = .{};
 
 pub const SharedState = struct {};
 

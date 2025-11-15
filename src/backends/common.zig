@@ -132,16 +132,54 @@ pub fn handleFileSync(c: *Completion) void {
 
 /// Work function for FileOpen - performs blocking openat() syscall
 pub fn fileOpenWork(work: *Work) void {
+    const loop = work.loop.?;
     const internal: *@FieldType(FileOpen, "internal") = @fieldParentPtr("work", work);
     const file_open: *FileOpen = @fieldParentPtr("internal", internal);
+
+    if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
+        file_open.flags.nonblocking = true;
+    }
+
     handleFileOpen(&file_open.c, file_open.internal.allocator);
+
+    // If the operation failed, exit early
+    if (file_open.c.err != null) return;
+
+    // If the file was successfully opened, give the backend a chance to post-process the handle
+    if (@hasDecl(@TypeOf(loop.backend), "postProcessFileHandle")) {
+        loop.backend.postProcessFileHandle(file_open.result_private_do_not_touch) catch |err| {
+            // Failed to post-process - close the file and set error
+            fs.close(file_open.result_private_do_not_touch) catch {};
+            file_open.c.has_result = false;
+            file_open.c.setError(err);
+        };
+    }
 }
 
 /// Work function for FileCreate - performs blocking openat() syscall with O_CREAT
 pub fn fileCreateWork(work: *Work) void {
+    const loop = work.loop.?;
     const internal: *@FieldType(FileCreate, "internal") = @fieldParentPtr("work", work);
     const file_create: *FileCreate = @fieldParentPtr("internal", internal);
+
+    if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
+        file_create.flags.nonblocking = true;
+    }
+
     handleFileCreate(&file_create.c, file_create.internal.allocator);
+
+    // If the operation failed, exit early
+    if (file_create.c.err != null) return;
+
+    // If the file was successfully created, give the backend a chance to post-process the handle
+    if (@hasDecl(@TypeOf(loop.backend), "postProcessFileHandle")) {
+        loop.backend.postProcessFileHandle(file_create.result_private_do_not_touch) catch |err| {
+            // Failed to post-process - close the file and set error
+            fs.close(file_create.result_private_do_not_touch) catch {};
+            file_create.c.has_result = false;
+            file_create.c.setError(err);
+        };
+    }
 }
 
 /// Work function for FileClose - performs blocking close() syscall

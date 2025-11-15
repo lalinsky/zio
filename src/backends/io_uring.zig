@@ -38,7 +38,18 @@ const FileSync = @import("../completion.zig").FileSync;
 
 pub const NetHandle = net.fd_t;
 
-pub const supports_file_ops = true;
+const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
+
+pub const capabilities: BackendCapabilities = .{
+    .file_read = true,
+    .file_write = true,
+    .file_open = true,
+    .file_create = true,
+    .file_close = true,
+    .file_sync = true,
+    .file_rename = true,
+    .file_delete = true,
+};
 
 pub const SharedState = struct {};
 
