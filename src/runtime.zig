@@ -294,14 +294,9 @@ comptime {
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     id: usize,
-<<<<<<< HEAD
     loop: aio.Loop,
     stack_pool: StackPool,
-    main_context: coroutines.Context,
-=======
-    loop: xev.Loop,
     main_context: Context,
->>>>>>> origin/main
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
@@ -843,13 +838,8 @@ pub const ThreadWaiter = struct {
 
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
-<<<<<<< HEAD
     thread_pool: aio.ThreadPool,
-=======
-    executors: std.ArrayList(Executor),
-    thread_pool: ?*xev.ThreadPool,
     stack_pool: StackPool,
->>>>>>> origin/main
     allocator: Allocator,
     options: RuntimeOptions,
 
@@ -864,68 +854,18 @@ pub const Runtime = struct {
     pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
-<<<<<<< HEAD
+        // Setup stack growth signal handlers for this thread
+        try setupStackGrowth();
+
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
         self.* = .{
-=======
-        // Setup stack growth signal handlers for this thread
-        try setupStackGrowth();
-
-        // Allocate Runtime on heap for stable pointer
-        const runtime = try allocator.create(Runtime);
-        errdefer allocator.destroy(runtime);
-
-        // Determine number of executors
-        const num_executors = if (options.num_executors) |n|
-            n
-        else blk: {
-            // null = auto-detect CPU count
-            const cpu_count = std.Thread.getCpuCount() catch 1;
-            break :blk @max(1, cpu_count);
-        };
-
-        // Initialize ThreadPool if enabled (shared resource)
-        var thread_pool: ?*xev.ThreadPool = null;
-        if (options.thread_pool.enabled) {
-            thread_pool = try allocator.create(xev.ThreadPool);
-
-            var config = xev.ThreadPool.Config{};
-            if (options.thread_pool.max_threads) |max| config.max_threads = max;
-            if (options.thread_pool.stack_size) |size| config.stack_size = size;
-            thread_pool.?.* = xev.ThreadPool.init(config);
-        }
-        errdefer if (thread_pool) |tp| {
-            tp.shutdown();
-            tp.deinit();
-            allocator.destroy(tp);
-        };
-
-        // Initialize executors using ArrayList for clean error handling
-        var executors = try std.ArrayList(Executor).initCapacity(allocator, num_executors);
-        errdefer {
-            for (executors.items) |*exec| {
-                exec.deinit();
-            }
-            executors.deinit(allocator);
-        }
-
-        for (0..num_executors) |i| {
-            var executor: Executor = undefined;
-            try executor.init(i, allocator, options, runtime);
-            executors.appendAssumeCapacity(executor);
-        }
-
-        runtime.* = Runtime{
-            .executors = executors,
-            .thread_pool = thread_pool,
-            .stack_pool = StackPool.init(options.stack_pool),
->>>>>>> origin/main
             .allocator = allocator,
             .options = options,
             .thread_pool = undefined,
             .main_executor = undefined,
+            .stack_pool = .{},
         };
 
         try self.thread_pool.init(allocator, options.thread_pool);
