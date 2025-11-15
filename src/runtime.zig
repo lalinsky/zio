@@ -63,11 +63,6 @@ pub const SpawnOptions = struct {
 pub const RuntimeOptions = struct {
     thread_pool: aio.ThreadPool.Options = .{},
     stack_pool: StackPoolOptions = .{},
-    /// Number of executor threads to run.
-    /// - null: auto-detect CPU count (multi-threaded)
-    /// - 1: single-threaded mode (default)
-    /// - N > 1: use N executor threads (multi-threaded)
-    num_executors: ?usize = 1,
     /// Enable LIFO slot optimization for cache locality.
     /// When enabled, tasks woken by other tasks are placed in a LIFO slot
     /// for immediate execution, improving cache locality.
@@ -844,13 +839,14 @@ pub const ThreadWaiter = struct {
 
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
-    executors: std.ArrayList(Executor),
-    thread_pool: *aio.ThreadPool,
+    thread_pool: aio.ThreadPool,
     allocator: Allocator,
     options: RuntimeOptions,
 
-    // Multi-executor coordination
-    next_executor: std.atomic.Value(usize),
+    executors: std.ArrayList(*Executor) = .empty,
+    main_executor: Executor,
+    last_used_executor_index: std.atomic.Value(usize),
+
     tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
 
@@ -858,51 +854,28 @@ pub const Runtime = struct {
     pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
-        // Allocate Runtime on heap for stable pointer
-        const runtime = try allocator.create(Runtime);
-        errdefer allocator.destroy(runtime);
+        const self = try allocator.create(Runtime);
+        errdefer allocator.destroy(self);
 
-        // Determine number of executors
-        const num_executors = if (options.num_executors) |n|
-            n
-        else blk: {
-            // null = auto-detect CPU count
-            const cpu_count = std.Thread.getCpuCount() catch 1;
-            break :blk @max(1, cpu_count);
-        };
-
-        // Initialize ThreadPool (always enabled, shared resource)
-        const thread_pool = try allocator.create(aio.ThreadPool);
-        errdefer allocator.destroy(thread_pool);
-
-        try thread_pool.init(allocator, options.thread_pool);
-        errdefer thread_pool.deinit();
-
-        // Initialize executors using ArrayList for clean error handling
-        var executors = try std.ArrayList(Executor).initCapacity(allocator, num_executors);
-        errdefer {
-            for (executors.items) |*exec| {
-                exec.deinit();
-            }
-            executors.deinit(allocator);
-        }
-
-        for (0..num_executors) |i| {
-            var executor: Executor = undefined;
-            try executor.init(i, allocator, options, runtime);
-            executors.appendAssumeCapacity(executor);
-        }
-
-        runtime.* = Runtime{
-            .executors = executors,
-            .thread_pool = thread_pool,
+        self.* = .{
             .allocator = allocator,
             .options = options,
-            .next_executor = std.atomic.Value(usize).init(0),
-            .shutting_down = std.atomic.Value(bool).init(false),
+            .thread_pool = undefined,
+            .main_executor = undefined,
         };
 
-        return runtime;
+        try self.thread_pool.init(allocator, options.thread_pool);
+        errdefer self.thread_pool.deinit();
+
+        try self.main_executor.init(allocator, options, self);
+        errdefer self.main_executor.deinit();
+
+        try self.executors.ensureTotalCapacity(allocator, 16);
+        errdefer self.executors.deinit(allocator);
+
+        self.executors.appendAssumeCapacity(&self.main_executor);
+
+        return self;
     }
 
     pub fn deinit(self: *Runtime) void {
