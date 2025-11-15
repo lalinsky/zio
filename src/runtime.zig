@@ -12,14 +12,15 @@ const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 
-const coroutines = @import("coroutines.zig");
-const Coroutine = coroutines.Coroutine;
+const Coroutine = @import("coro").Coroutine;
+const Context = @import("coro").Context;
+const StackPool = @import("coro").StackPool;
+const StackPoolConfig = @import("coro").StackPoolConfig;
+const StackInfo = @import("coro").StackInfo;
+const setupStackGrowth = @import("coro").setupStackGrowth;
+const cleanupStackGrowth = @import("coro").cleanupStackGrowth;
 
-// const Error = coroutines.Error;
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
-const stack_pool = @import("stack_pool.zig");
-const StackPool = stack_pool.StackPool;
-const StackPoolOptions = stack_pool.StackPoolOptions;
 
 const AnyTask = @import("core/task.zig").AnyTask;
 const Task = @import("core/task.zig").Task;
@@ -51,7 +52,6 @@ pub const ExecutorId = enum(usize) {
 
 /// Options for spawning a coroutine
 pub const SpawnOptions = struct {
-    stack_size: ?usize = null,
     executor: ExecutorId = .any,
     /// Pin task to its home executor (prevents cross-thread migration).
     /// Pinned tasks always run on their original executor, even when woken from other threads.
@@ -62,7 +62,17 @@ pub const SpawnOptions = struct {
 // Runtime configuration options
 pub const RuntimeOptions = struct {
     thread_pool: aio.ThreadPool.Options = .{},
-    stack_pool: StackPoolOptions = .{},
+    stack_pool: StackPoolConfig = .{
+        .maximum_size = 8 * 1024 * 1024, // 8MB reserved
+        .committed_size = 64 * 1024, // 64KB initial commit
+        .max_unused_stacks = 16,
+        .max_age_ns = 60 * std.time.ns_per_s, // 60 seconds
+    },
+    /// Number of executor threads to run.
+    /// - null: auto-detect CPU count (multi-threaded)
+    /// - 1: single-threaded mode (default)
+    /// - N > 1: use N executor threads (multi-threaded)
+    num_executors: ?usize = 1,
     /// Enable LIFO slot optimization for cache locality.
     /// When enabled, tasks woken by other tasks are placed in a LIFO slot
     /// for immediate execution, improving cache locality.
@@ -284,9 +294,14 @@ comptime {
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     id: usize,
+<<<<<<< HEAD
     loop: aio.Loop,
     stack_pool: StackPool,
     main_context: coroutines.Context,
+=======
+    loop: xev.Loop,
+    main_context: Context,
+>>>>>>> origin/main
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
@@ -314,10 +329,6 @@ pub const Executor = struct {
     // Shutdown support
     shutdown_async: aio.Async = undefined,
 
-    // Stack pool cleanup tracking
-    cleanup_interval_ns: u64,
-    cleanup_timer: std.time.Timer,
-
     // Runtime metrics
     metrics: ExecutorMetrics = .{},
 
@@ -342,9 +353,6 @@ pub const Executor = struct {
             .id = id,
             .allocator = allocator,
             .loop = undefined,
-            .stack_pool = StackPool.init(allocator, options.stack_pool),
-            .cleanup_interval_ns = options.stack_pool.cleanup_interval_ns,
-            .cleanup_timer = try std.time.Timer.start(),
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .runtime = runtime,
@@ -376,16 +384,14 @@ pub const Executor = struct {
         // Note: ThreadPool and loop are owned by thread that runs them
         // Loop cleanup is handled in deinitLoop() called from run*()
         // Task cleanup is handled by Runtime.deinit()
-
-        // Clean up stack pool
-        self.stack_pool.deinit();
+        // Stack pool is owned by Runtime
+        _ = self;
     }
 
     pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
 
         const task = try Task(Result).create(self, func, args, .{
-            .stack_size = options.stack_size,
             .pinned = options.pinned or options.executor.isId(),
         });
         errdefer task.destroy(self);
@@ -566,6 +572,10 @@ pub const Executor = struct {
     /// Main executor (id=0) orchestrates shutdown when all tasks complete.
     /// Worker executors (id>0) run until signaled to shut down by main executor.
     pub fn run(self: *Executor) !void {
+        // Setup stack growth signal handlers for this thread
+        try setupStackGrowth();
+        defer cleanupStackGrowth();
+
         // Initialize loop on this thread
         try self.initLoop();
         self.loop_initialized.store(true, .release);
@@ -589,12 +599,6 @@ pub const Executor = struct {
         while (true) {
             // Exit if loop was stopped (by shutdown callback)
             if (self.loop.stopped()) break;
-
-            // Time-based stack pool cleanup
-            if (self.cleanup_timer.read() >= self.cleanup_interval_ns) {
-                self.cleanup_timer.reset();
-                self.stack_pool.cleanup(self.cleanup_timer.started);
-            }
 
             // Drain remote ready queue (cross-thread tasks)
             // Atomically drain all remote ready tasks and append to ready queue
@@ -620,9 +624,9 @@ pub const Executor = struct {
                         const current_awaitable = &current_task.awaitable;
 
                         // Release stack immediately since coroutine execution is complete
-                        if (current_coro.stack) |stack| {
-                            self.stack_pool.release(stack);
-                            current_coro.stack = null;
+                        if (current_coro.context.stack_info.allocation_len > 0) {
+                            self.runtime.stack_pool.release(current_coro.context.stack_info);
+                            current_coro.context.stack_info.allocation_len = 0;
                         }
 
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
@@ -839,7 +843,13 @@ pub const ThreadWaiter = struct {
 
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
+<<<<<<< HEAD
     thread_pool: aio.ThreadPool,
+=======
+    executors: std.ArrayList(Executor),
+    thread_pool: ?*xev.ThreadPool,
+    stack_pool: StackPool,
+>>>>>>> origin/main
     allocator: Allocator,
     options: RuntimeOptions,
 
@@ -854,10 +864,64 @@ pub const Runtime = struct {
     pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
+<<<<<<< HEAD
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
         self.* = .{
+=======
+        // Setup stack growth signal handlers for this thread
+        try setupStackGrowth();
+
+        // Allocate Runtime on heap for stable pointer
+        const runtime = try allocator.create(Runtime);
+        errdefer allocator.destroy(runtime);
+
+        // Determine number of executors
+        const num_executors = if (options.num_executors) |n|
+            n
+        else blk: {
+            // null = auto-detect CPU count
+            const cpu_count = std.Thread.getCpuCount() catch 1;
+            break :blk @max(1, cpu_count);
+        };
+
+        // Initialize ThreadPool if enabled (shared resource)
+        var thread_pool: ?*xev.ThreadPool = null;
+        if (options.thread_pool.enabled) {
+            thread_pool = try allocator.create(xev.ThreadPool);
+
+            var config = xev.ThreadPool.Config{};
+            if (options.thread_pool.max_threads) |max| config.max_threads = max;
+            if (options.thread_pool.stack_size) |size| config.stack_size = size;
+            thread_pool.?.* = xev.ThreadPool.init(config);
+        }
+        errdefer if (thread_pool) |tp| {
+            tp.shutdown();
+            tp.deinit();
+            allocator.destroy(tp);
+        };
+
+        // Initialize executors using ArrayList for clean error handling
+        var executors = try std.ArrayList(Executor).initCapacity(allocator, num_executors);
+        errdefer {
+            for (executors.items) |*exec| {
+                exec.deinit();
+            }
+            executors.deinit(allocator);
+        }
+
+        for (0..num_executors) |i| {
+            var executor: Executor = undefined;
+            try executor.init(i, allocator, options, runtime);
+            executors.appendAssumeCapacity(executor);
+        }
+
+        runtime.* = Runtime{
+            .executors = executors,
+            .thread_pool = thread_pool,
+            .stack_pool = StackPool.init(options.stack_pool),
+>>>>>>> origin/main
             .allocator = allocator,
             .options = options,
             .thread_pool = undefined,
@@ -900,6 +964,12 @@ pub const Runtime = struct {
         // Clean up ThreadPool after executors
         self.thread_pool.deinit();
         allocator.destroy(self.thread_pool);
+
+        // Clean up stack pool
+        self.stack_pool.deinit();
+
+        // Cleanup stack growth signal handlers for this thread
+        cleanupStackGrowth();
 
         // Free the Runtime allocation
         allocator.destroy(self);

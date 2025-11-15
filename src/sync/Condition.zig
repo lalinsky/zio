@@ -53,7 +53,6 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
-const coroutines = @import("../coroutines.zig");
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../core/task.zig").resumeTask;

@@ -19,6 +19,11 @@ pub fn build(b: *std.Build) void {
         .backend = backend,
     });
 
+    const coro = b.dependency("coro", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
         .target = target,
@@ -26,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     zio.addImport("aio", aio.module("aio"));
+    zio.addImport("coro", coro.module("coro"));
 
     const zio_lib = b.addLibrary(.{
         .name = "zio",
