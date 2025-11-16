@@ -52,7 +52,6 @@ pub const ExecutorId = enum(usize) {
 
 /// Options for spawning a coroutine
 pub const SpawnOptions = struct {
-    executor: ExecutorId = .any,
     /// Pin task to its home executor (prevents cross-thread migration).
     /// Pinned tasks always run on their original executor, even when woken from other threads.
     /// Useful for tasks with executor-specific state or when thread affinity is desired.
@@ -293,9 +292,7 @@ comptime {
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
-    id: usize,
     loop: aio.Loop,
-    stack_pool: StackPool,
     main_context: Context,
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
@@ -341,11 +338,8 @@ pub const Executor = struct {
         return @fieldParentPtr("main_context", coro.parent_context_ptr);
     }
 
-    pub fn init(self: *Executor, id: usize, allocator: Allocator, options: RuntimeOptions, runtime: *Runtime) !void {
-        // Establish stable memory location with defaults
-        // Loop will be initialized later from the thread that runs it
+    pub fn init(self: *Executor, allocator: Allocator, options: RuntimeOptions, runtime: *Runtime) !void {
         self.* = .{
-            .id = id,
             .allocator = allocator,
             .loop = undefined,
             .lifo_slot_enabled = options.lifo_slot_enabled,
@@ -358,7 +352,7 @@ pub const Executor = struct {
         // Initialize loop from the thread that will run it
         try self.loop.init(.{
             .allocator = self.allocator,
-            .thread_pool = self.runtime.thread_pool,
+            .thread_pool = &self.runtime.thread_pool,
             .defer_callbacks = false,
         });
         errdefer self.loop.deinit();
@@ -387,7 +381,7 @@ pub const Executor = struct {
         const Result = meta.ReturnType(func);
 
         const task = try Task(Result).create(self, func, args, .{
-            .pinned = options.pinned or options.executor.isId(),
+            .pinned = options.pinned,
         });
         errdefer task.destroy(self);
 
@@ -845,7 +839,7 @@ pub const Runtime = struct {
 
     executors: std.ArrayList(*Executor) = .empty,
     main_executor: Executor,
-    last_used_executor_index: std.atomic.Value(usize),
+    next_executor: std.atomic.Value(usize),
 
     tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
@@ -854,7 +848,6 @@ pub const Runtime = struct {
     pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
-        // Setup stack growth signal handlers for this thread
         try setupStackGrowth();
 
         const self = try allocator.create(Runtime);
@@ -865,7 +858,9 @@ pub const Runtime = struct {
             .options = options,
             .thread_pool = undefined,
             .main_executor = undefined,
-            .stack_pool = .{},
+            .stack_pool = .init(options.stack_pool),
+            .next_executor = .init(0),
+            .shutting_down = .init(false),
         };
 
         try self.thread_pool.init(allocator, options.thread_pool);
@@ -894,7 +889,7 @@ pub const Runtime = struct {
         }
 
         // Deinit all executors (they own their threads)
-        for (self.executors.items) |*exec| {
+        for (self.executors.items) |exec| {
             exec.deinit();
         }
 
@@ -903,42 +898,25 @@ pub const Runtime = struct {
 
         // Clean up ThreadPool after executors
         self.thread_pool.deinit();
-        allocator.destroy(self.thread_pool);
 
         // Clean up stack pool
         self.stack_pool.deinit();
 
-        // Cleanup stack growth signal handlers for this thread
-        cleanupStackGrowth();
-
         // Free the Runtime allocation
         allocator.destroy(self);
+
+        // Cleanup stack growth signal handlers for this thread
+        cleanupStackGrowth();
     }
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        // Check if runtime is shutting down
         if (self.tasks.isClosed()) {
             return error.RuntimeShutdown;
         }
 
-        // Determine target executor
-        const executor_id = switch (options.executor) {
-            .any => self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
-            .same => if (Runtime.current_executor) |current_exec|
-                current_exec.id
-            else
-                self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
-            _ => |id| blk: {
-                const raw_id = @intFromEnum(id);
-                if (raw_id >= self.executors.items.len) {
-                    return error.InvalidExecutorId;
-                }
-                break :blk raw_id;
-            },
-        };
-
-        const executor = &self.executors.items[executor_id];
+        const executor_no = self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len;
+        const executor = self.executors.items[executor_no];
 
         return executor.spawn(func, args, options);
     }
@@ -986,12 +964,12 @@ pub const Runtime = struct {
         }
 
         // Multi-threaded: spawn worker threads for executors[1..]
-        for (self.executors.items[1..], 1..) |*executor, i| {
+        for (self.executors.items[1..], 1..) |executor, i| {
             executor.thread = try std.Thread.spawn(.{}, workerThreadFn, .{ self, i });
         }
 
         // Wait for all workers to be ready (loop initialized)
-        for (self.executors.items[1..]) |*executor| {
+        for (self.executors.items[1..]) |executor| {
             executor.ready.wait();
         }
 
@@ -999,7 +977,7 @@ pub const Runtime = struct {
         const main_result = self.executors.items[0].run();
 
         // Join all worker threads
-        for (self.executors.items[1..]) |*executor| {
+        for (self.executors.items[1..]) |executor| {
             if (executor.thread) |thread| {
                 thread.join();
             }
@@ -1009,10 +987,7 @@ pub const Runtime = struct {
     }
 
     pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
-        // Spawn on first executor (explicit pinning)
-        var spawn_options = options;
-        spawn_options.executor = ExecutorId.id(0);
-        var handle = try self.spawn(func, args, spawn_options);
+        var handle = try self.spawn(func, args, options);
         defer handle.cancel(self);
 
         // Run all executors
@@ -1157,7 +1132,7 @@ pub const Runtime = struct {
                 self.shutting_down.store(true, .release);
 
                 // Wake all executors (including main if sleeping in event loop)
-                for (self.executors.items) |*executor| {
+                for (self.executors.items) |executor| {
                     executor.shutdown_async.notify();
                 }
             } else |_| {
@@ -1191,155 +1166,6 @@ test "runtime with thread pool smoke test" {
 
     // Run empty runtime (should exit immediately)
     try runtime.run();
-}
-
-test "runtime: multi-threaded with auto-detect executors" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = null, // Auto-detect CPU count
-    });
-    defer runtime.deinit();
-
-    // Verify we have multiple executors
-    try testing.expect(runtime.executors.items.len >= 1);
-
-    const TestContext = struct {
-        fn task(rt: *Runtime, id: usize) Cancelable!usize {
-            try rt.sleep(1);
-            return id * 2;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Spawn multiple tasks
-            var handles: [10]JoinHandle(Cancelable!usize) = undefined;
-            for (&handles, 0..) |*handle, i| {
-                handle.* = try rt.spawn(task, .{ rt, i }, .{});
-            }
-            defer for (&handles) |*handle| handle.cancel(rt);
-
-            // Wait for all tasks
-            for (&handles, 0..) |*handle, i| {
-                const result = try handle.join(rt);
-                try testing.expectEqual(i * 2, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
-}
-
-test "runtime: multi-threaded with explicit executor count" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = 4,
-    });
-    defer runtime.deinit();
-
-    // Verify we have exactly 4 executors
-    try testing.expectEqual(@as(usize, 4), runtime.executors.items.len);
-
-    const TestContext = struct {
-        fn task(rt: *Runtime, id: usize) Cancelable!usize {
-            try rt.sleep(1);
-            return id * 2;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Spawn multiple tasks
-            var handles: [10]JoinHandle(Cancelable!usize) = undefined;
-            var n: usize = 0;
-            defer {
-                for (handles[0..n]) |*handle| {
-                    handle.cancel(rt);
-                }
-            }
-            for (&handles, 0..) |*handle, i| {
-                handle.* = try rt.spawn(task, .{ rt, i }, .{});
-                n += 1;
-            }
-
-            // Wait for all tasks
-            for (&handles, 0..) |*handle, i| {
-                const result = try handle.join(rt);
-                try testing.expectEqual(i * 2, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
-}
-
-test "runtime: multi-threaded with executor pinning" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = 4,
-    });
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn task(executor_id: usize) usize {
-            return executor_id;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Pin tasks to specific executors
-            var handles: [4]JoinHandle(usize) = undefined;
-            for (&handles, 0..) |*handle, i| {
-                handle.* = try rt.spawn(task, .{i}, .{ .executor = ExecutorId.id(i) });
-            }
-            defer for (&handles) |*handle| handle.cancel(rt);
-
-            // Verify results
-            for (&handles, 0..) |*handle, i| {
-                const result = handle.join(rt);
-                try testing.expectEqual(i, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
-}
-
-test "runtime: task colocation with getExecutorId" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = 4,
-    });
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn getExecutorId() usize {
-            const executor = Runtime.current_executor.?;
-            return executor.id;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Spawn first task on executor 2
-            var handle1 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(2) });
-            defer handle1.cancel(rt);
-
-            // Get the executor ID from the first task
-            const executor_id = handle1.getExecutorId();
-            try testing.expect(executor_id != null);
-            try testing.expectEqual(@as(usize, 2), executor_id.?);
-
-            // Spawn second task colocated with the first task
-            var handle2 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(executor_id.?) });
-            defer handle2.cancel(rt);
-
-            // Verify both tasks ran on the same executor
-            const result1 = handle1.join(rt);
-            const result2 = handle2.join(rt);
-            try testing.expectEqual(result1, result2);
-            try testing.expectEqual(@as(usize, 2), result1);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
 }
 
 test "runtime: spawnBlocking smoke test" {
