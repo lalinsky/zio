@@ -207,10 +207,9 @@ test "File: basic read and write" {
         fn run(rt: *Runtime) !void {
             std.log.info("TestTask: Starting file test", .{});
 
-            // Create a test file using the new fs module
+            const dir = fs.cwd();
             const file_path = "test_file_basic.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{});
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+            var zio_file = try dir.createFile(rt, file_path, .{});
             std.log.info("TestTask: Created file using fs module", .{});
 
             // Write test
@@ -225,15 +224,17 @@ test "File: basic read and write" {
             std.log.info("TestTask: Closed file after write", .{});
 
             // Read test - reopen the file for reading
-            var read_file = try fs.openFile(rt, file_path, .{ .mode = .read_only });
-            defer read_file.close(rt);
+            var read_file = try dir.openFile(rt, file_path, .{ .mode = .read_only });
             std.log.info("TestTask: Reopened file for reading", .{});
 
             var buffer: [100]u8 = undefined;
             const bytes_read = try read_file.read(rt, &buffer);
             std.log.info("TestTask: Read {} bytes", .{bytes_read});
             try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+            read_file.close(rt);
             std.log.info("TestTask: File test completed successfully", .{});
+
+            try dir.deleteFile(rt, file_path);
         }
     };
 
@@ -248,10 +249,9 @@ test "File: positional read and write" {
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
+            const dir = fs.cwd();
             const file_path = "test_file_positional.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
-            defer zio_file.close(rt);
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+            var zio_file = try dir.createFile(rt, file_path, .{ .read = true });
 
             // Write at different positions
             try std.testing.expectEqual(5, try zio_file.pwrite(rt, "HELLO", 0));
@@ -268,6 +268,9 @@ test "File: positional read and write" {
             // Test reading from gap (should be zeros or random data)
             var gap_buf: [3]u8 = undefined;
             try std.testing.expectEqual(3, try zio_file.pread(rt, &gap_buf, 5));
+
+            zio_file.close(rt);
+            try dir.deleteFile(rt, file_path);
         }
     };
 
@@ -282,9 +285,9 @@ test "File: close operation" {
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
+            const dir = fs.cwd();
             const file_path = "test_file_close.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{});
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+            var zio_file = try dir.createFile(rt, file_path, .{});
 
             // Write some data
             const bytes_written = try zio_file.write(rt, "test data");
@@ -293,7 +296,7 @@ test "File: close operation" {
             // Close the file using zio
             zio_file.close(rt);
 
-            // File should now be closed
+            try dir.deleteFile(rt, file_path);
         }
     };
 
@@ -308,12 +311,12 @@ test "File: reader and writer interface" {
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
+            const dir = fs.cwd();
             const file_path = "test_file_rw_interface.txt";
-            defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write using writer interface
             {
-                var file = try fs.createFile(rt, file_path, .{});
+                var file = try dir.createFile(rt, file_path, .{});
 
                 var write_buffer: [256]u8 = undefined;
                 var writer = file.writer(rt, &write_buffer);
@@ -328,7 +331,7 @@ test "File: reader and writer interface" {
 
             // Read using reader interface
             {
-                var file = try fs.openFile(rt, file_path, .{});
+                var file = try dir.openFile(rt, file_path, .{});
 
                 var read_buffer: [256]u8 = undefined;
                 var reader = file.reader(rt, &read_buffer);
@@ -341,6 +344,8 @@ test "File: reader and writer interface" {
 
                 file.close(rt);
             }
+
+            try dir.deleteFile(rt, file_path);
         }
     };
 
