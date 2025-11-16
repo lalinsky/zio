@@ -355,7 +355,6 @@ pub const Executor = struct {
     thread: ?std.Thread = null,
 
     // Coordination for thread startup
-    ready: std.Thread.ResetEvent = .{},
     available: bool = true,
 
     // Executor dedicated to this thread
@@ -586,9 +585,6 @@ pub const Executor = struct {
     /// Main executor (id=0) orchestrates shutdown when all tasks complete.
     /// Worker executors (id>0) run until signaled to shut down by main executor.
     pub fn run(self: *Executor) !void {
-        // Signal that executor is ready
-        self.ready.set();
-
         // Set thread-local current executor
         Runtime.current_executor = self;
         defer Runtime.current_executor = null;
