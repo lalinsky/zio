@@ -25,9 +25,9 @@ pub const ShutdownHow = aio.system.net.ShutdownHow;
 /// Determines the appropriate length based on the address family.
 fn getSockAddrLen(addr: *const aio.system.net.sockaddr) usize {
     return switch (addr.family) {
-        std.posix.AF.INET => @sizeOf(aio.system.net.sockaddr.in),
-        std.posix.AF.INET6 => @sizeOf(aio.system.net.sockaddr.in6),
-        std.posix.AF.UNIX => @sizeOf(aio.system.net.sockaddr.un),
+        aio.system.net.AF.INET => @sizeOf(aio.system.net.sockaddr.in),
+        aio.system.net.AF.INET6 => @sizeOf(aio.system.net.sockaddr.in6),
+        aio.system.net.AF.UNIX => @sizeOf(aio.system.net.sockaddr.un),
         else => unreachable,
     };
 }
@@ -39,7 +39,7 @@ pub const IpAddress = extern union {
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
         return .{ .in = .{
-            .family = std.posix.AF.INET,
+            .family = aio.system.net.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
             .addr = @as(*align(1) const u32, @ptrCast(&addr)).*,
         } };
@@ -51,21 +51,21 @@ pub const IpAddress = extern union {
 
     pub fn fromStd(addr: std.net.Address) IpAddress {
         switch (addr.any.family) {
-            std.posix.AF.INET => return .{ .in = addr.in.sa },
-            std.posix.AF.INET6 => return .{ .in6 = addr.in6.sa },
+            aio.system.net.AF.INET => return .{ .in = addr.in.sa },
+            aio.system.net.AF.INET6 => return .{ .in6 = addr.in6.sa },
             else => unreachable,
         }
     }
 
     pub fn initPosix(addr: *const aio.system.net.sockaddr, len: aio.system.net.socklen_t) IpAddress {
         return switch (addr.family) {
-            std.posix.AF.INET => blk: {
+            aio.system.net.AF.INET => blk: {
                 std.debug.assert(len >= @sizeOf(aio.system.net.sockaddr.in));
                 var result: IpAddress = .{ .in = undefined };
                 @memcpy(std.mem.asBytes(&result.in), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(aio.system.net.sockaddr.in)]);
                 break :blk result;
             },
-            std.posix.AF.INET6 => blk: {
+            aio.system.net.AF.INET6 => blk: {
                 std.debug.assert(len >= @sizeOf(aio.system.net.sockaddr.in6));
                 var result: IpAddress = .{ .in6 = undefined };
                 @memcpy(std.mem.asBytes(&result.in6), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(aio.system.net.sockaddr.in6)]);
@@ -77,7 +77,7 @@ pub const IpAddress = extern union {
 
     pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
         return .{ .in6 = .{
-            .family = std.posix.AF.INET6,
+            .family = aio.system.net.AF.INET6,
             .port = std.mem.nativeToBig(u16, port),
             .flowinfo = flowinfo,
             .addr = addr,
@@ -188,8 +188,8 @@ pub const IpAddress = extern union {
     /// Asserts that the address is ip4 or ip6.
     pub fn getPort(self: IpAddress) u16 {
         return switch (self.any.family) {
-            std.posix.AF.INET => std.mem.bigToNative(u16, self.in.port),
-            std.posix.AF.INET6 => std.mem.bigToNative(u16, self.in6.port),
+            aio.system.net.AF.INET => std.mem.bigToNative(u16, self.in.port),
+            aio.system.net.AF.INET6 => std.mem.bigToNative(u16, self.in6.port),
             else => unreachable,
         };
     }
@@ -198,19 +198,19 @@ pub const IpAddress = extern union {
     /// Asserts that the address is ip4 or ip6.
     pub fn setPort(self: *IpAddress, port: u16) void {
         switch (self.any.family) {
-            std.posix.AF.INET => self.in.port = std.mem.nativeToBig(u16, port),
-            std.posix.AF.INET6 => self.in6.port = std.mem.nativeToBig(u16, port),
+            aio.system.net.AF.INET => self.in.port = std.mem.nativeToBig(u16, port),
+            aio.system.net.AF.INET6 => self.in6.port = std.mem.nativeToBig(u16, port),
             else => unreachable,
         }
     }
 
     pub fn format(self: IpAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
-            std.posix.AF.INET => {
+            aio.system.net.AF.INET => {
                 const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
                 try w.print("{d}.{d}.{d}.{d}:{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3], self.getPort() });
             },
-            std.posix.AF.INET6 => {
+            aio.system.net.AF.INET6 => {
                 const port = self.getPort();
                 const addr = self.in6.addr;
 
@@ -313,7 +313,7 @@ pub const UnixAddress = extern union {
 
     pub fn init(path: []const u8) !UnixAddress {
         if (!has_unix_sockets) unreachable;
-        var un = aio.system.net.sockaddr.un{ .family = std.posix.AF.UNIX, .path = undefined };
+        var un = aio.system.net.sockaddr.un{ .family = aio.system.net.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
         @memcpy(un.path[0..path.len], path);
         un.path[path.len] = 0;
@@ -327,7 +327,7 @@ pub const UnixAddress = extern union {
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
-            std.posix.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
+            aio.system.net.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
             else => unreachable,
         }
     }
@@ -353,9 +353,9 @@ pub const Address = extern union {
     /// Convert to std.net.Address
     pub fn toStd(self: *const Address) std.net.Address {
         return switch (self.any.family) {
-            std.posix.AF.INET => std.net.Address{ .in = .{ .sa = self.ip.in } },
-            std.posix.AF.INET6 => std.net.Address{ .in6 = .{ .sa = self.ip.in6 } },
-            std.posix.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            aio.system.net.AF.INET => std.net.Address{ .in = .{ .sa = self.ip.in } },
+            aio.system.net.AF.INET6 => std.net.Address{ .in6 = .{ .sa = self.ip.in6 } },
+            aio.system.net.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
             else => unreachable,
         };
     }
@@ -363,9 +363,9 @@ pub const Address = extern union {
     /// Convert from std.net.Address
     pub fn fromStd(addr: std.net.Address) Address {
         return switch (addr.any.family) {
-            std.posix.AF.INET => Address{ .ip = .{ .in = addr.in.sa } },
-            std.posix.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6.sa } },
-            std.posix.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            aio.system.net.AF.INET => Address{ .ip = .{ .in = addr.in.sa } },
+            aio.system.net.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6.sa } },
+            aio.system.net.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
             else => unreachable,
         };
     }
@@ -375,12 +375,12 @@ pub const Address = extern union {
     fn fromStorageIp(data: []const u8) IpAddress {
         const sockaddr: *align(1) const aio.system.net.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
-            std.posix.AF.INET => blk: {
+            aio.system.net.AF.INET => blk: {
                 var addr: IpAddress = .{ .in = undefined };
                 @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
                 break :blk addr;
             },
-            std.posix.AF.INET6 => blk: {
+            aio.system.net.AF.INET6 => blk: {
                 var addr: IpAddress = .{ .in6 = undefined };
                 @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
                 break :blk addr;
@@ -394,8 +394,8 @@ pub const Address = extern union {
     fn fromStorage(data: []const u8) Address {
         const sockaddr: *align(1) const aio.system.net.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
-            std.posix.AF.INET, std.posix.AF.INET6 => Address{ .ip = fromStorageIp(data) },
-            std.posix.AF.UNIX => blk: {
+            aio.system.net.AF.INET, aio.system.net.AF.INET6 => Address{ .ip = fromStorageIp(data) },
+            aio.system.net.AF.UNIX => blk: {
                 if (!has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
                 const copy_len = @min(data.len, @sizeOf(aio.system.net.sockaddr.un));
@@ -408,16 +408,16 @@ pub const Address = extern union {
 
     pub fn format(self: Address, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
-            std.posix.AF.INET, std.posix.AF.INET6 => return self.ip.format(w),
-            std.posix.AF.UNIX => return self.unix.format(w),
+            aio.system.net.AF.INET, aio.system.net.AF.INET6 => return self.ip.format(w),
+            aio.system.net.AF.UNIX => return self.unix.format(w),
             else => unreachable,
         }
     }
 
     pub fn connect(self: Address, rt: *Runtime) !Stream {
         switch (self.any.family) {
-            std.posix.AF.INET, std.posix.AF.INET6 => return self.ip.connect(rt),
-            std.posix.AF.UNIX => return self.unix.connect(rt),
+            aio.system.net.AF.INET, aio.system.net.AF.INET6 => return self.ip.connect(rt),
+            aio.system.net.AF.UNIX => return self.unix.connect(rt),
             else => unreachable,
         }
     }

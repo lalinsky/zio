@@ -23,7 +23,7 @@ pub const IpAddressIterator = struct {
             self.current = info.next;
             const addr = info.addr orelse continue;
             // Skip unsupported address families
-            if (addr.family != std.posix.AF.INET and addr.family != std.posix.AF.INET6) continue;
+            if (addr.family != aio.system.net.AF.INET and addr.family != aio.system.net.AF.INET6) continue;
             return IpAddress.initPosix(addr, @intCast(info.addrlen));
         }
         return null;
@@ -90,7 +90,7 @@ fn lookupHostBlocking(
 
     const hints: std.posix.addrinfo = .{
         .flags = .{ .NUMERICSERV = true },
-        .family = std.posix.AF.UNSPEC,
+        .family = aio.system.net.AF.UNSPEC,
         .socktype = std.posix.SOCK.STREAM,
         .protocol = std.posix.IPPROTO.TCP,
         .canonname = null,
