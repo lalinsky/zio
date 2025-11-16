@@ -309,6 +309,15 @@ pub fn unregisterExecutor(rt: *Runtime, executor: *Executor) void {
     }
 }
 
+pub fn getNextExecutor(rt: *Runtime) *Executor {
+    rt.executors_lock.lock();
+    defer rt.executors_lock.unlock();
+
+    const executor = rt.executors.items[rt.next_executor_index % rt.executors.items.len];
+    rt.next_executor_index += 1;
+    return executor;
+}
+
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     loop: aio.Loop,
@@ -348,6 +357,7 @@ pub const Executor = struct {
 
     // Coordination for thread startup
     ready: std.Thread.ResetEvent = .{},
+    available: bool = true,
 
     // Executor dedicated to this thread
     pub threadlocal var current: ?*Executor = null;
@@ -831,7 +841,7 @@ pub const Runtime = struct {
     executors_lock: std.Thread.Mutex = .{},
     executors: std.ArrayList(*Executor) = .empty,
     main_executor: Executor,
-    next_executor: std.atomic.Value(usize),
+    next_executor_index: usize = 0,
 
     tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
@@ -849,7 +859,6 @@ pub const Runtime = struct {
             .thread_pool = undefined,
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
-            .next_executor = .init(0),
             .shutting_down = .init(false),
         };
 
@@ -876,11 +885,24 @@ pub const Runtime = struct {
             self.releaseAwaitable(awaitable, false);
         }
 
-        // Deinit all executors (they own their threads)
-        for (self.executors.items) |exec| {
+        while (true) {
+            var executor: ?*Executor = null;
+
+            self.executors_lock.lock();
+            if (self.executors.items.len > 0) {
+                executor = self.executors.items[0];
+            }
+            self.executors_lock.unlock();
+
+            const exec = executor orelse break;
             exec.deinit();
         }
-        self.executors.deinit(allocator);
+
+        {
+            self.executors_lock.lock();
+            self.executors.deinit(allocator);
+            self.executors_lock.unlock();
+        }
 
         // Clean up ThreadPool after executors
         self.thread_pool.deinit();
@@ -898,9 +920,7 @@ pub const Runtime = struct {
             return error.RuntimeShutdown;
         }
 
-        const executor_no = self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len;
-        const executor = self.executors.items[executor_no];
-
+        const executor = getNextExecutor(self);
         return executor.spawn(func, args, options);
     }
 
@@ -924,19 +944,12 @@ pub const Runtime = struct {
         errdefer _ = task.toAwaitable().ref_count.decr();
 
         // Add the work to an executor's loop (loop will submit to thread pool)
-        const executor_id = self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len;
-        self.executors.items[executor_id].loop.add(&task.task.work.c);
+        const executor = getNextExecutor(self);
+        executor.loop.add(&task.task.work.c);
 
         return JoinHandle(Result){
             .awaitable = task.toAwaitable(),
             .result = undefined,
-        };
-    }
-
-    /// Worker thread entry point
-    fn workerThreadFn(self: *Runtime, executor_index: usize) void {
-        self.executors.items[executor_index].run() catch |err| {
-            std.log.err("Worker executor {} failed: {}", .{ executor_index, err });
         };
     }
 
