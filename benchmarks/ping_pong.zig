@@ -38,7 +38,7 @@ pub fn main() !void {
 
     std.debug.print("Running ping-pong benchmark with {} rounds...\n", .{NUM_ROUNDS});
 
-    const start = std.time.nanoTimestamp();
+    var timer = try std.time.Timer.start();
 
     // Spawn pinger and ponger tasks
     var pinger_task = try runtime.spawn(pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS }, .{});
@@ -50,8 +50,7 @@ pub fn main() !void {
     // Run until both tasks complete
     try runtime.run();
 
-    const end = std.time.nanoTimestamp();
-    const elapsed_ns = @as(u64, @intCast(end - start));
+    const elapsed_ns = timer.read();
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
     const elapsed_s = elapsed_ms / 1000.0;
 
