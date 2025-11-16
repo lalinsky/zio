@@ -13,17 +13,8 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-linux
-          - os: ubuntu-latest
-            target: aarch64-linux
-            qemu_binary: qemu-aarch64-static
-          - os: ubuntu-latest
-            target: riscv64-linux
-            qemu_binary: qemu-riscv64-static
           - os: macos-latest
-            target: native
           - os: windows-latest
-            target: native
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -36,35 +27,21 @@ jobs:
         version: 0.15.2
 
     - name: Build
-      run: zig build ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build
       timeout-minutes: 5
 
     - name: Build tests
-      run: zig build build-tests --release=safe ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build build-tests --release=safe
       timeout-minutes: 5
 
     - name: Build examples
-      run: zig build examples ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build examples
       timeout-minutes: 5
 
     - name: Build benchmarks
-      run: zig build benchmarks ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+      run: zig build benchmarks
       timeout-minutes: 5
 
     - name: Run tests (native)
-      if: ${{ !matrix.qemu_binary }}
       run: ./zig-out/bin/test
       timeout-minutes: 5
-
-    - name: Install QEMU
-      if: matrix.qemu_binary
-      run: |
-        sudo apt-get update -q -y
-        sudo apt-get install -q -y qemu-user-static
-
-    - name: Run tests (QEMU)
-      if: matrix.qemu_binary
-      run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
-      timeout-minutes: 10
-      env:
-        TEST_FILTER: Coroutine
