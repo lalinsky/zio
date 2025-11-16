@@ -6,6 +6,38 @@ const Awaitable = @import("core/awaitable.zig").Awaitable;
 const select = @import("select.zig");
 const zio_net = @import("io/net.zig");
 const zio_file_io = @import("io/file.zig");
+const zio_mutex = @import("sync/Mutex.zig");
+const zio_condition = @import("sync/Condition.zig");
+const CompactWaitQueue = @import("utils/wait_queue.zig").CompactWaitQueue;
+const WaitNode = @import("core/WaitNode.zig");
+
+// Verify binary compatibility between std.Io.Mutex and zio.Mutex
+comptime {
+    if (@sizeOf(std.Io.Mutex) != @sizeOf(zio_mutex)) {
+        @compileError("std.Io.Mutex and zio.Mutex must have the same size");
+    }
+    if (@alignOf(std.Io.Mutex) != @alignOf(zio_mutex)) {
+        @compileError("std.Io.Mutex and zio.Mutex must have the same alignment");
+    }
+    // Verify sentinel values match between std.Io.Mutex and CompactWaitQueue
+    const State = CompactWaitQueue(WaitNode).State;
+    if (@intFromEnum(std.Io.Mutex.State.locked_once) != @intFromEnum(State.sentinel0)) {
+        @compileError("std.Io.Mutex.State.locked_once must match CompactWaitQueue.State.sentinel0");
+    }
+    if (@intFromEnum(std.Io.Mutex.State.unlocked) != @intFromEnum(State.sentinel1)) {
+        @compileError("std.Io.Mutex.State.unlocked must match CompactWaitQueue.State.sentinel1");
+    }
+}
+
+// Verify binary compatibility between std.Io.Condition and zio.Condition
+comptime {
+    if (@sizeOf(std.Io.Condition) != @sizeOf(zio_condition)) {
+        @compileError("std.Io.Condition and zio.Condition must have the same size");
+    }
+    if (@alignOf(std.Io.Condition) != @alignOf(zio_condition)) {
+        @compileError("std.Io.Condition and zio.Condition must have the same alignment");
+    }
+}
 
 fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*std.Io.AnyFuture {
     return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
@@ -111,45 +143,47 @@ fn selectImpl(userdata: ?*anyopaque, futures: []const *std.Io.AnyFuture) std.Io.
 }
 
 fn mutexLockImpl(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) std.Io.Cancelable!void {
-    _ = userdata;
     _ = prev_state;
-    _ = mutex;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_mtx: *zio_mutex = @ptrCast(mutex);
+    try zio_mtx.lock(rt);
 }
 
 fn mutexLockUncancelableImpl(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) void {
-    _ = userdata;
     _ = prev_state;
-    _ = mutex;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_mtx: *zio_mutex = @ptrCast(mutex);
+    zio_mtx.lockUncancelable(rt);
 }
 
 fn mutexUnlockImpl(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) void {
-    _ = userdata;
     _ = prev_state;
-    _ = mutex;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_mtx: *zio_mutex = @ptrCast(mutex);
+    zio_mtx.unlock(rt);
 }
 
 fn conditionWaitImpl(userdata: ?*anyopaque, cond: *std.Io.Condition, mutex: *std.Io.Mutex) std.Io.Cancelable!void {
-    _ = userdata;
-    _ = cond;
-    _ = mutex;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_cond: *zio_condition = @ptrCast(cond);
+    const zio_mtx: *zio_mutex = @ptrCast(mutex);
+    try zio_cond.wait(rt, zio_mtx);
 }
 
 fn conditionWaitUncancelableImpl(userdata: ?*anyopaque, cond: *std.Io.Condition, mutex: *std.Io.Mutex) void {
-    _ = userdata;
-    _ = cond;
-    _ = mutex;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_cond: *zio_condition = @ptrCast(cond);
+    const zio_mtx: *zio_mutex = @ptrCast(mutex);
+    zio_cond.waitUncancelable(rt, zio_mtx);
 }
 
 fn conditionWakeImpl(userdata: ?*anyopaque, cond: *std.Io.Condition, wake: std.Io.Condition.Wake) void {
-    _ = userdata;
-    _ = cond;
-    _ = wake;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_cond: *zio_condition = @ptrCast(cond);
+    switch (wake) {
+        .one => zio_cond.signal(rt),
+        .all => zio_cond.broadcast(rt),
+    }
 }
 
 fn dirMakeImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, mode: std.Io.Dir.Mode) std.Io.Dir.MakeError!void {
@@ -807,6 +841,164 @@ test "Io: UDP bind IPv6" {
 
             // Verify we got a valid address with ephemeral port
             try std.testing.expect(socket.address.ip6.port != 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Mutex lock/unlock" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            var mutex: std.Io.Mutex = .init;
+            var shared_counter: u32 = 0;
+
+            // Lock and increment counter
+            try mutex.lock(io);
+            shared_counter += 1;
+            mutex.unlock(io);
+
+            try std.testing.expectEqual(@as(u32, 1), shared_counter);
+
+            // Test tryLock
+            try std.testing.expect(mutex.tryLock());
+            shared_counter += 1;
+            mutex.unlock(io);
+
+            try std.testing.expectEqual(@as(u32, 2), shared_counter);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Mutex concurrent access" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            var mutex: std.Io.Mutex = .init;
+            var shared_counter: u32 = 0;
+
+            var future1 = try io.concurrent(incrementTask, .{ io, &mutex, &shared_counter });
+            defer future1.cancel(io) catch {};
+
+            var future2 = try io.concurrent(incrementTask, .{ io, &mutex, &shared_counter });
+            defer future2.cancel(io) catch {};
+
+            try future1.await(io);
+            try future2.await(io);
+
+            try std.testing.expectEqual(@as(u32, 200), shared_counter);
+        }
+
+        fn incrementTask(io: std.Io, mutex: *std.Io.Mutex, counter: *u32) !void {
+            for (0..100) |_| {
+                try mutex.lock(io);
+                defer mutex.unlock(io);
+                counter.* += 1;
+            }
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Condition wait/signal" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            var mutex: std.Io.Mutex = .init;
+            var condition: std.Io.Condition = .{};
+            var ready = false;
+
+            var waiter_future = try io.concurrent(waiterTask, .{ io, &mutex, &condition, &ready });
+            defer waiter_future.cancel(io) catch {};
+
+            var signaler_future = try io.concurrent(signalerTask, .{ io, &mutex, &condition, &ready });
+            defer signaler_future.cancel(io) catch {};
+
+            try waiter_future.await(io);
+            try signaler_future.await(io);
+
+            try std.testing.expect(ready);
+        }
+
+        fn waiterTask(io: std.Io, mutex: *std.Io.Mutex, condition: *std.Io.Condition, ready_flag: *bool) !void {
+            try mutex.lock(io);
+            defer mutex.unlock(io);
+
+            while (!ready_flag.*) {
+                try condition.wait(io, mutex);
+            }
+        }
+
+        fn signalerTask(io: std.Io, mutex: *std.Io.Mutex, condition: *std.Io.Condition, ready_flag: *bool) !void {
+            // Give waiter time to start waiting
+            try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+
+            try mutex.lock(io);
+            ready_flag.* = true;
+            mutex.unlock(io);
+
+            condition.signal(io);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Condition broadcast" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            var mutex: std.Io.Mutex = .init;
+            var condition: std.Io.Condition = .{};
+            var ready = false;
+            var count = std.atomic.Value(u32).init(0);
+
+            var waiter1 = try io.concurrent(waiterTask, .{ io, &mutex, &condition, &ready, &count });
+            defer waiter1.cancel(io) catch {};
+
+            var waiter2 = try io.concurrent(waiterTask, .{ io, &mutex, &condition, &ready, &count });
+            defer waiter2.cancel(io) catch {};
+
+            var waiter3 = try io.concurrent(waiterTask, .{ io, &mutex, &condition, &ready, &count });
+            defer waiter3.cancel(io) catch {};
+
+            // Give waiters time to start waiting
+            try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+
+            try mutex.lock(io);
+            ready = true;
+            mutex.unlock(io);
+
+            condition.broadcast(io);
+
+            try waiter1.await(io);
+            try waiter2.await(io);
+            try waiter3.await(io);
+
+            try std.testing.expectEqual(@as(u32, 3), count.load(.monotonic));
+        }
+
+        fn waiterTask(io: std.Io, mutex: *std.Io.Mutex, condition: *std.Io.Condition, ready_flag: *bool, counter: *std.atomic.Value(u32)) !void {
+            try mutex.lock(io);
+            defer mutex.unlock(io);
+
+            while (!ready_flag.*) {
+                try condition.wait(io, mutex);
+            }
+
+            _ = counter.fetchAdd(1, .monotonic);
         }
     };
 
