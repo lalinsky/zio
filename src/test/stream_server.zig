@@ -84,7 +84,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
                         .path = undefined,
                     };
                     const timestamp = time.now(.realtime);
-                    _ = std.fmt.bufPrintZ(&self.server_addr.path, "/tmp/zevent-test-{d}.sock", .{timestamp}) catch unreachable;
+                    _ = std.fmt.bufPrintZ(&self.server_addr.path, "aio-test-{d}.sock", .{timestamp}) catch unreachable;
                 },
                 else => unreachable,
             }
@@ -459,7 +459,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     defer {
         if (domain == .unix) {
             const path = std.mem.sliceTo(&server.server_addr.path, 0);
-            std.fs.deleteFileAbsolute(path) catch {};
+            std.fs.cwd().deleteFile(path) catch {};
         }
     }
     server.start();
@@ -502,6 +502,6 @@ test "Echo server and client - IPv6 TCP" {
 }
 
 test "Echo server and client - Unix stream" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!net.has_unix_sockets) return error.SkipZigTest;
     try testEcho(.unix, net.sockaddr.un);
 }

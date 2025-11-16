@@ -7,6 +7,18 @@ const unexpectedError = @import("base.zig").unexpectedError;
 
 const log = std.log.scoped(.zio_socket);
 
+pub const has_unix_sockets = switch (builtin.os.tag) {
+    .windows => builtin.os.version_range.windows.isAtLeast(.win10_rs4) orelse false,
+    .wasi => false,
+    else => true,
+};
+
+pub const has_unix_dgram_sockets = switch (builtin.os.tag) {
+    .windows => false, // Windows only supports stream Unix sockets
+    .wasi => false,
+    else => true,
+};
+
 var wsa_init_once = std.once(wsaInit);
 
 fn wsaInit() void {

@@ -115,8 +115,11 @@ pub const CompletionData = struct {
 // AcceptEx needs an extra buffer for address data
 pub const NetAcceptData = struct {
     // AcceptEx requires a buffer for address data (local + remote addresses)
-    // Buffer size: sizeof(sockaddr_in6) + 16 for each address
-    addr_buffer: [128]u8 = undefined,
+    // AcceptEx buffer layout: [receive_data][local_addr][remote_addr]
+    // Each address slot needs: sizeof(sockaddr.storage) + 16
+    // We use dwReceiveDataLength=0, so total = (sockaddr.storage + 16) * 2
+    const addr_slot_size = @sizeOf(windows.ws2_32.sockaddr.storage) + 16;
+    addr_buffer: [addr_slot_size * 2]u8 = undefined,
 };
 
 const ExtensionFunctions = struct {
@@ -489,7 +492,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
 
     // Call AcceptEx
     var bytes_received: windows.DWORD = 0;
-    const addr_size: windows.DWORD = @sizeOf(windows.ws2_32.sockaddr.in6) + 16;
+    const addr_size: windows.DWORD = NetAcceptData.addr_slot_size;
 
     const result = exts.acceptex(
         data.handle, // listening socket
@@ -698,6 +701,11 @@ fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
         addr.port = 0;
         addr.addr = [_]u8{0} ** 16; // IN6ADDR_ANY
         bind_addr_len = @sizeOf(windows.ws2_32.sockaddr.in6);
+    } else if (family == windows.ws2_32.AF.UNIX) {
+        const addr: *windows.ws2_32.sockaddr.un = @ptrCast(&bind_addr_buf);
+        addr.family = windows.ws2_32.AF.UNIX;
+        addr.path = [_]u8{0} ** 108; // Empty path for wildcard bind
+        bind_addr_len = @sizeOf(windows.ws2_32.sockaddr.un);
     } else {
         return error.Unexpected;
     }
@@ -986,7 +994,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 } else {
                     // Parse the address buffer to get the peer address
                     if (data.addr) |user_addr| {
-                        const addr_size: u32 = @sizeOf(windows.ws2_32.sockaddr.in6) + 16;
+                        const addr_size: u32 = NetAcceptData.addr_slot_size;
                         var local_addr: *windows.ws2_32.sockaddr = undefined;
                         var local_addr_len: i32 = undefined;
                         var remote_addr: *windows.ws2_32.sockaddr = undefined;
