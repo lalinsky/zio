@@ -1,0 +1,11 @@
+.{
+    .name = .coro,
+    .version = "0.4.0",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0x8b586c51c018563e,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
