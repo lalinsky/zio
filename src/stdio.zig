@@ -1,5 +1,6 @@
 const std = @import("std");
 const Runtime = @import("runtime.zig").Runtime;
+const getNextExecutor = @import("runtime.zig").getNextExecutor;
 const AnyTask = @import("core/task.zig").AnyTask;
 const CreateOptions = @import("core/task.zig").CreateOptions;
 const Awaitable = @import("core/awaitable.zig").Awaitable;
@@ -56,7 +57,7 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
     }
 
     // Pick an executor (round-robin)
-    const executor = rt.pickExecutor(.any) catch return error.ConcurrencyUnavailable;
+    const executor = getNextExecutor(rt);
 
     // Create the task using AnyTask.create
     const task = AnyTask.create(
@@ -70,8 +71,17 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
     ) catch return error.ConcurrencyUnavailable;
     errdefer task.closure.free(AnyTask, executor.allocator, task);
 
-    // Register and schedule the task
-    rt.registerAndScheduleTask(executor, task) catch return error.ConcurrencyUnavailable;
+    // Add to global awaitable registry (can fail if runtime is shutting down)
+    rt.tasks.add(&task.awaitable) catch return error.ConcurrencyUnavailable;
+    errdefer _ = rt.tasks.remove(&task.awaitable);
+
+    // Increment ref count for the Future BEFORE scheduling
+    // This prevents race where task completes before we create the Future
+    task.awaitable.ref_count.incr();
+    errdefer _ = task.awaitable.ref_count.decr();
+
+    // Schedule the task to run (handles cross-thread notification)
+    executor.scheduleTask(task, .maybe_remote);
 
     // Return the awaitable as AnyFuture
     return @ptrCast(&task.awaitable);
@@ -708,7 +718,7 @@ test "Io: now and sleep" {
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv4" {
-    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const TestContext = struct {
@@ -752,7 +762,7 @@ test "Io: TCP listen/accept/connect/read/write IPv4" {
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv6" {
-    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const TestContext = struct {
@@ -876,7 +886,7 @@ test "Io: Mutex lock/unlock" {
 }
 
 test "Io: Mutex concurrent access" {
-    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const TestContext = struct {
@@ -909,7 +919,7 @@ test "Io: Mutex concurrent access" {
 }
 
 test "Io: Condition wait/signal" {
-    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const TestContext = struct {
@@ -955,7 +965,7 @@ test "Io: Condition wait/signal" {
 }
 
 test "Io: Condition broadcast" {
-    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1008,7 +1018,7 @@ test "Io: Condition broadcast" {
 test "Io: Unix domain socket listen/accept/connect/read/write" {
     if (!zio_net.has_unix_sockets) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const TestContext = struct {
