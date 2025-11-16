@@ -157,3 +157,60 @@ test "File: rename/delete" {
     try std.testing.expectEqual(.dead, file_open_fail.c.state);
     try std.testing.expectError(error.FileNotFound, file_open_fail.getResult());
 }
+
+test "File: read EOF" {
+    var thread_pool: aio.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: aio.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+
+    const cwd = std.fs.cwd();
+
+    // Create and write a small file
+    var file_create = aio.FileCreate.init(cwd.fd, "test-eof", .{ .read = true, .truncate = true, .mode = 0o664 });
+    loop.add(&file_create.c);
+    try loop.run(.until_done);
+    const fd = try file_create.getResult();
+
+    const write_data = "Hello";
+    var write_iov: [1]aio.system.iovec_const = undefined;
+    var file_write = aio.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
+    loop.add(&file_write.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(write_data.len, try file_write.getResult());
+
+    // Read all data
+    var read_buffer1 = [_]u8{0} ** 64;
+    var read_iov1: [1]aio.system.iovec = undefined;
+    var file_read1 = aio.FileRead.init(fd, .fromSlice(&read_buffer1, &read_iov1), 0);
+    loop.add(&file_read1.c);
+    try loop.run(.until_done);
+    const bytes_read1 = try file_read1.getResult();
+    try std.testing.expectEqual(write_data.len, bytes_read1);
+    try std.testing.expectEqualStrings(write_data, read_buffer1[0..bytes_read1]);
+
+    // Read at EOF - should return 0 bytes, not an error
+    var read_buffer2 = [_]u8{0} ** 64;
+    var read_iov2: [1]aio.system.iovec = undefined;
+    var file_read2 = aio.FileRead.init(fd, .fromSlice(&read_buffer2, &read_iov2), write_data.len);
+    loop.add(&file_read2.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.dead, file_read2.c.state);
+    try std.testing.expectEqual(true, file_read2.c.has_result);
+    const bytes_read2 = try file_read2.getResult();
+    try std.testing.expectEqual(0, bytes_read2);
+
+    // Close and delete
+    var file_close = aio.FileClose.init(fd);
+    loop.add(&file_close.c);
+    try loop.run(.until_done);
+    try file_close.getResult();
+
+    var file_delete = aio.FileDelete.init(cwd.fd, "test-eof");
+    loop.add(&file_delete.c);
+    try loop.run(.until_done);
+    try file_delete.getResult();
+}

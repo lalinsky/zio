@@ -1174,7 +1174,12 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == 0) {
                 const err = windows.kernel32.GetLastError();
-                c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
+                // HANDLE_EOF is not an error - it means we successfully read 0 bytes (EOF)
+                if (err == .HANDLE_EOF) {
+                    c.setResult(.file_read, 0);
+                } else {
+                    c.setError(fs.errnoToFileReadError(err));
+                }
             } else {
                 c.setResult(.file_read, @intCast(bytes_transferred));
             }
