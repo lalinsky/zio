@@ -57,11 +57,11 @@ const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../core/task.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
-const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
+const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 const Timeout = @import("../core/timeout.zig").Timeout;
 
-wait_queue: WaitQueue(WaitNode) = .empty,
+wait_queue: CompactWaitQueue(WaitNode) = .empty,
 
 const Condition = @This();
 

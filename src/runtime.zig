@@ -998,7 +998,8 @@ pub const Runtime = struct {
                 return executor.sleep(milliseconds);
             }
         }
-        aio.system.time.sleep(@intCast(milliseconds));
+        // Not in coroutine - use blocking sleep (cannot be canceled)
+        aio.system.time.sleep(@min(milliseconds, std.math.maxInt(i32)));
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.
