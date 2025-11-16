@@ -59,18 +59,10 @@ pub fn main() !void {
     const messages_per_sec = @as(f64, @floatFromInt(total_messages)) / elapsed_s;
     const ns_per_round = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(NUM_ROUNDS));
 
-    // Get metrics
-    const metrics = runtime.getMetrics();
-
     std.debug.print("\nResults:\n", .{});
     std.debug.print("  Total rounds: {}\n", .{NUM_ROUNDS});
     std.debug.print("  Total time: {d:.2} ms ({d:.3} s)\n", .{ elapsed_ms, elapsed_s });
     std.debug.print("  Time per round: {d:.0} ns\n", .{ns_per_round});
     std.debug.print("  Messages/sec: {d:.0}\n", .{messages_per_sec});
     std.debug.print("  Rounds/sec: {d:.0}\n", .{messages_per_sec / 2.0});
-    std.debug.print("\nMetrics:\n", .{});
-    std.debug.print("  Total yields: {}\n", .{metrics.yields});
-    std.debug.print("  Tasks spawned: {}\n", .{metrics.tasks_spawned});
-    std.debug.print("  Tasks completed: {}\n", .{metrics.tasks_completed});
-    std.debug.print("  Avg yields per round: {d:.1}\n", .{@as(f64, @floatFromInt(metrics.yields)) / @as(f64, @floatFromInt(NUM_ROUNDS))});
 }

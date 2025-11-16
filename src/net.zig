@@ -182,7 +182,7 @@ test "lookupHost: localhost" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     const LookupHostTask = struct {
@@ -205,7 +205,7 @@ test "lookupHost: numeric IP" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     const LookupHostTask = struct {
@@ -325,7 +325,7 @@ test "tcpConnectToHost: basic" {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     var server_port_buf: [1]u16 = undefined;

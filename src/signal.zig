@@ -3,11 +3,13 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("xev");
+const aio = @import("aio");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
+const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("core/WaitNode.zig");
+const Timeout = @import("core/timeout.zig").Timeout;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -35,7 +37,7 @@ const MAX_HANDLERS = 32;
 const HandlerEntry = struct {
     kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
     counter: std.atomic.Value(usize) = .init(0),
-    event: xev.Async = undefined,
+    waiters: WaitQueue(WaitNode) = .empty,
 };
 
 const HandlerRegistryUnix = struct {
@@ -78,7 +80,9 @@ const HandlerRegistryUnix = struct {
             if (prev == null) {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
 
-                entry.event = try xev.Async.init();
+                // Initialize the wait queue and counter
+                entry.waiters = .empty;
+                entry.counter.store(0, .release);
                 entry.kind.store(signum, .release);
 
                 return entry;
@@ -101,11 +105,7 @@ const HandlerRegistryUnix = struct {
             std.posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
         }
 
-        // Now we can safely deinit the event
-        entry.event.deinit();
-        entry.event = undefined;
-
-        // Finally mark as available
+        // Mark as available
         entry.kind.store(NO_SIGNAL, .release);
     }
 };
@@ -142,8 +142,12 @@ const HandlerRegistryWindows = struct {
             const prev = entry.kind.cmpxchgStrong(NO_SIGNAL, INSTALLING, .acq_rel, .monotonic);
             if (prev == null) {
                 errdefer entry.kind.store(NO_SIGNAL, .release);
-                entry.event = try xev.Async.init();
+
+                // Initialize the wait queue and counter
+                entry.waiters = .empty;
+                entry.counter.store(0, .release);
                 entry.kind.store(signum, .release);
+
                 return entry;
             }
         }
@@ -164,11 +168,7 @@ const HandlerRegistryWindows = struct {
             _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 0);
         }
 
-        // Now we can safely deinit the event
-        entry.event.deinit();
-        entry.event = undefined;
-
-        // Finally mark as available
+        // Mark as available
         entry.kind.store(NO_SIGNAL, .release);
     }
 };
@@ -182,7 +182,11 @@ fn signalHandlerUnix(signum: c_int) callconv(.c) void {
         const kind = entry.kind.load(.acquire);
         if (kind == signum) {
             _ = entry.counter.fetchAdd(1, .release);
-            entry.event.notify() catch {};
+
+            // Wake all waiting tasks
+            while (entry.waiters.pop()) |wait_node| {
+                wait_node.wake();
+            }
         }
     }
 }
@@ -201,7 +205,12 @@ fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) 
         const kind = entry.kind.load(.acquire);
         if (kind == signal_value) {
             _ = entry.counter.fetchAdd(1, .release);
-            entry.event.notify() catch {};
+
+            // Wake all waiting tasks
+            while (entry.waiters.pop()) |wait_node| {
+                wait_node.wake();
+            }
+
             found_handler = true;
         }
     }
@@ -232,10 +241,6 @@ pub const Signal = struct {
 
     // Future protocol - allows Signal to be used with select()
     pub const Result = void;
-    pub const WaitContext = struct {
-        completion: xev.Completion = undefined,
-        parent_wait_node: ?*WaitNode = null,
-    };
 
     /// Initializes a new signal watcher for the specified signal kind.
     /// Multiple watchers can be registered for the same signal type.
@@ -272,26 +277,22 @@ pub const Signal = struct {
             return;
         }
 
-        const waitForIo = @import("io/base.zig").waitForIo;
-
         const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
 
-        var ctx = WaitContext{
-            .parent_wait_node = &task.awaitable.wait_node,
+        // Transition to preparing_to_wait state before adding to queue
+        task.state.store(.preparing_to_wait, .release);
+
+        // Add to wait queue
+        self.entry.waiters.push(&task.awaitable.wait_node);
+
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        // If signal arrives before the yield, the CAS inside yield() will fail and we won't suspend
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+            // On cancellation, remove from queue
+            _ = self.entry.waiters.remove(&task.awaitable.wait_node);
+            return err;
         };
-
-        // Register async wait callback (this also adds to the loop)
-        self.entry.event.wait(
-            &executor.loop,
-            &ctx.completion,
-            WaitContext,
-            &ctx,
-            waitCallback,
-        );
-
-        // Wait for signal (handles cancellation)
-        try waitForIo(rt, &ctx.completion);
 
         // Consume the counter
         _ = self.entry.counter.swap(0, .acquire);
@@ -316,26 +317,29 @@ pub const Signal = struct {
             return;
         }
 
-        const timedWaitForIo = @import("io/base.zig").timedWaitForIo;
-
         const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
 
-        var ctx = WaitContext{
-            .parent_wait_node = &task.awaitable.wait_node,
+        // Transition to preparing_to_wait state before adding to queue
+        task.state.store(.preparing_to_wait, .release);
+
+        // Add to wait queue
+        self.entry.waiters.push(&task.awaitable.wait_node);
+
+        // Set up timeout
+        var timeout = Timeout.init;
+        defer timeout.clear(rt);
+        timeout.set(rt, timeout_ns);
+
+        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
+        // If signal arrives before the yield, the CAS inside yield() will fail and we won't suspend
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+            // Try to remove from queue
+            _ = self.entry.waiters.remove(&task.awaitable.wait_node);
+
+            // Check if this timeout triggered, otherwise it was user cancellation
+            return rt.checkTimeout(&timeout, err);
         };
-
-        // Register async wait callback (this also adds to the loop)
-        self.entry.event.wait(
-            &executor.loop,
-            &ctx.completion,
-            WaitContext,
-            &ctx,
-            waitCallback,
-        );
-
-        // Wait for signal with timeout (handles cancellation)
-        try timedWaitForIo(rt, &ctx.completion, timeout_ns);
 
         // Consume the counter
         _ = self.entry.counter.swap(0, .acquire);
@@ -343,65 +347,23 @@ pub const Signal = struct {
 
     /// Registers a wait node to be notified when the signal is received.
     /// This is part of the Future protocol for select().
-    /// Returns false if the signal was already received (no wait needed), true if added to event loop.
-    pub fn asyncWait(self: *Signal, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
+    pub fn asyncWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) bool {
         // Fast path: signal already received
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return false;
         }
 
-        const task = rt.getCurrentTask() orelse unreachable;
-        const executor = task.getExecutor();
-
-        // Store parent_wait_node
-        ctx.parent_wait_node = wait_node;
-
-        // Register xev async wait - store context in userdata
-        self.entry.event.wait(
-            &executor.loop,
-            &ctx.completion,
-            WaitContext,
-            ctx,
-            waitCallback,
-        );
-
+        // Add to wait queue
+        self.entry.waiters.push(wait_node);
         return true;
     }
 
-    fn waitCallback(
-        userdata: ?*WaitContext,
-        _: *xev.Loop,
-        _: *xev.Completion,
-        result: xev.Async.WaitError!void,
-    ) xev.CallbackAction {
-        const ctx = userdata.?;
-        result catch {};
-
-        // Wake the parent if it's still registered
-        if (ctx.parent_wait_node) |parent| {
-            parent.wake();
-        }
-
-        return .disarm;
-    }
-
-    /// Cancels a pending wait operation by cancelling the xev completion.
+    /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
-    pub fn asyncCancelWait(self: *Signal, rt: *Runtime, _: *WaitNode, ctx: *WaitContext) void {
-        // Check if the xev operation already completed
-        const was_active = ctx.completion.state() == .active;
-
-        // Clear parent to prevent callback from waking
-        ctx.parent_wait_node = null;
-
-        // Cancel if still active
-        if (was_active) {
-            const cancelIo = @import("io/base.zig").cancelIo;
-            cancelIo(rt, &ctx.completion);
-        } else {
-            // Signal was delivered but not consumed; wake another waiter to handle it.
-            self.entry.event.notify() catch {};
-        }
+    pub fn asyncCancelWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) void {
+        // Simply remove from queue - no need to wake another waiter since signals broadcast to all
+        _ = self.entry.waiters.remove(wait_node);
     }
 
     /// Gets the result value.

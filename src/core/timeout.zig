@@ -1,9 +1,10 @@
 const std = @import("std");
-const xev = @import("xev");
+const aio = @import("aio");
 const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("task.zig").AnyTask;
 const resumeTask = @import("task.zig").resumeTask;
 const waitForIo = @import("../io/base.zig").waitForIo;
+const genericCallback = @import("../io/base.zig").genericCallback;
 
 /// A timeout that applies to all I/O operations on the current task.
 /// Multiple Timeout instances can be nested - each has its own independent timer.
@@ -12,46 +13,20 @@ const waitForIo = @import("../io/base.zig").waitForIo;
 /// When a timeout expires, operations return error.Canceled and the `triggered` field is set to true,
 /// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
 pub const Timeout = struct {
-    timer: xev.Timer = .{},
-    timer_c: xev.Completion = .{},
-    timer_cancel_c: xev.Completion = .{},
+    timer: aio.Timer = .init(0),
     triggered: bool = false,
     task: ?*AnyTask = null,
 
     pub const init: Timeout = .{};
 
     pub fn clear(self: *Timeout, rt: *Runtime) void {
+        if (self.timer.c.state != .running) return;
+
         const task = rt.getCurrentTask() orelse unreachable;
         const executor = task.getExecutor();
         std.debug.assert(executor.runtime == rt);
 
-        // Check if timer is even active
-        if (self.timer_c.state() != .active) {
-            return;
-        }
-
-        // Use shield to prevent cancellation during cleanup
-        rt.beginShield();
-        defer rt.endShield();
-
-        // Cancel the timer using a local completion
-        var cancel_c: xev.Completion = .{};
-        self.timer.cancel(
-            &executor.loop,
-            &self.timer_c,
-            &cancel_c,
-            Timeout,
-            self,
-            cancelCallback,
-        );
-
-        // Wait for the cancellation to complete properly
-        waitForIo(rt, &cancel_c) catch unreachable; // Shield prevents cancel
-
-        // Wait for the actual timer to finish
-        waitForIo(rt, &self.timer_c) catch unreachable; // Shield prevents cancel
-
-        // Clear task reference
+        executor.loop.clearTimer(&self.timer);
         self.task = null;
     }
 
@@ -67,42 +42,28 @@ pub const Timeout = struct {
         // Convert nanoseconds to milliseconds
         const timeout_ms: u64 = (timeout_ns + std.time.ns_per_ms / 2) / std.time.ns_per_ms;
 
-        self.timer.reset(
-            &executor.loop,
-            &self.timer_c,
-            &self.timer_cancel_c,
-            timeout_ms,
-            Timeout,
-            self,
-            timeoutCallback,
-        );
+        // Initialize aio.Timer
+        self.timer.c.userdata = self;
+        self.timer.c.callback = timeoutCallback;
+
+        // Activate the timer
+        executor.loop.setTimer(&self.timer, timeout_ms);
     }
 };
 
 /// Callback when timeout timer fires
 fn timeoutCallback(
-    userdata: ?*Timeout,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    result: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    const timeout = userdata orelse return .disarm;
-    const task = timeout.task orelse return .disarm;
+    _: *aio.Loop,
+    completion: *aio.Completion,
+) void {
+    const timeout: *Timeout = @ptrCast(@alignCast(completion.userdata.?));
+    const task = timeout.task orelse return;
 
-    result catch |err| switch (err) {
-        error.Canceled => {
-            resumeTask(task, .local);
-            return .disarm;
-        },
-        else => {
-            std.log.err("Timeout {*} failed: {}", .{ timeout, err });
-            return .disarm;
-        },
-    };
-
-    // Mark timeout as triggered and update cancellation status
-    if (task.setTimeout()) {
-        timeout.triggered = true;
+    // If there's no error, mark timeout as triggered
+    if (completion.err == null) {
+        if (task.setTimeout()) {
+            timeout.triggered = true;
+        }
     }
 
     // Resume the task
@@ -110,32 +71,7 @@ fn timeoutCallback(
 
     // Clear the associated task
     timeout.task = null;
-
-    return .disarm;
 }
-
-/// Callback when timer cancellation completes
-fn cancelCallback(
-    userdata: ?*Timeout,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    _: xev.CancelError!void,
-) xev.CallbackAction {
-    const timeout = userdata orelse return .disarm;
-    const task = timeout.task orelse return .disarm;
-
-    resumeTask(task, .local);
-
-    return .disarm;
-}
-
-/// Timeout heap comparator - orders by earliest deadline first
-fn timeoutLess(_: void, a: *Timeout, b: *Timeout) bool {
-    return a.deadline_ms < b.deadline_ms;
-}
-
-/// Heap type for storing timeouts, ordered by earliest deadline
-pub const TimeoutHeap = xev.heap.Intrusive(Timeout, void, timeoutLess);
 
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;

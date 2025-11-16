@@ -3,12 +3,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("xev");
+
+const aio = @import("aio");
 const StreamReader = @import("../stream.zig").StreamReader;
 const StreamWriter = @import("../stream.zig").StreamWriter;
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
-const runIo = @import("base.zig").runIo;
+const waitForIo = @import("base.zig").waitForIo;
+const genericCallback = @import("base.zig").genericCallback;
 
 const Handle = std.fs.File.Handle;
 
@@ -32,29 +34,38 @@ pub const File = struct {
     }
 
     pub fn read(self: *File, rt: *Runtime, buffer: []u8) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pread = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = buffer },
-                .offset = self.position,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_read = try runIo(rt, &completion, "pread");
+        var storage: [1]aio.system.iovec = undefined;
+        var op = aio.FileRead.init(self.fd, .fromSlice(buffer, &storage), self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_read = try op.getResult();
         self.position += bytes_read;
         return bytes_read;
     }
 
     pub fn write(self: *File, rt: *Runtime, data: []const u8) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pwrite = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = data },
-                .offset = self.position,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_written = try runIo(rt, &completion, "pwrite");
+        var storage: [1]aio.system.iovec_const = undefined;
+        var op = aio.FileWrite.init(self.fd, .fromSlice(data, &storage), self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_written = op.getResult() catch |err| {
+            std.log.err("write: getResult failed with error: {}", .{err});
+            return err;
+        };
         self.position += bytes_written;
         return bytes_written;
     }
@@ -84,82 +95,93 @@ pub const File = struct {
     }
 
     pub fn pread(self: *File, rt: *Runtime, buffer: []u8, offset: u64) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pread = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = buffer },
-                .offset = offset,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        return runIo(rt, &completion, "pread");
+        var storage: [1]aio.system.iovec = undefined;
+        var op = aio.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
     }
 
     pub fn pwrite(self: *File, rt: *Runtime, data: []const u8, offset: u64) !usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pwrite = .{
-                .fd = self.fd,
-                .buffer = .{ .slice = data },
-                .offset = offset,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        return runIo(rt, &completion, "pwrite");
+        var storage: [1]aio.system.iovec_const = undefined;
+        var op = aio.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
     }
 
-    /// Low-level read function that accepts xev.ReadBuffer directly.
+    /// Read from file into multiple slices (vectored read).
     /// Returns std.Io.Reader compatible errors.
-    pub fn readBuf(self: *File, rt: *Runtime, buffer: *xev.ReadBuffer) (Cancelable || std.Io.Reader.Error)!usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pread = .{
-                .fd = self.fd,
-                .buffer = buffer.*,
-                .offset = self.position,
-            },
-        } };
+    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8) (Cancelable || std.Io.Reader.Error)!usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_read = runIo(rt, &completion, "pread") catch |err| switch (err) {
-            error.EOF => return error.EndOfStream,
-            else => return error.ReadFailed,
-        };
+        var storage: [16]aio.system.iovec = undefined;
+        var op = aio.FileRead.init(self.fd, aio.ReadBuf.fromSlices(slices, &storage), self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
 
-        // Copy array data back to caller's buffer if needed
-        if (buffer.* == .array) {
-            buffer.array = completion.op.pread.buffer.array;
-        }
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_read = op.getResult() catch return error.ReadFailed;
+
+        // EOF is indicated by 0 bytes read
+        if (bytes_read == 0) return error.EndOfStream;
 
         self.position += bytes_read;
         return bytes_read;
     }
 
-    /// Low-level write function that accepts xev.WriteBuffer directly.
+    /// Write to file from multiple slices (vectored write).
     /// Returns std.Io.Writer compatible errors.
-    pub fn writeBuf(self: *File, rt: *Runtime, buffer: xev.WriteBuffer) (Cancelable || std.Io.Writer.Error)!usize {
-        var completion: xev.Completion = .{ .op = .{
-            .pwrite = .{
-                .fd = self.fd,
-                .buffer = buffer,
-                .offset = self.position,
-            },
-        } };
+    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8) (Cancelable || std.Io.Writer.Error)!usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
 
-        const bytes_written = runIo(rt, &completion, "pwrite") catch return error.WriteFailed;
+        var storage: [16]aio.system.iovec_const = undefined;
+        var op = aio.FileWrite.init(self.fd, aio.WriteBuf.fromSlices(slices, &storage), self.position);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        const bytes_written = op.getResult() catch return error.WriteFailed;
         self.position += bytes_written;
         return bytes_written;
     }
 
     pub fn close(self: *File, rt: *Runtime) void {
-        var completion: xev.Completion = .{ .op = .{
-            .close = .{
-                .fd = self.fd,
-            },
-        } };
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
+
+        var op = aio.FileClose.init(self.fd);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
 
         rt.beginShield();
         defer rt.endShield();
 
+        executor.loop.add(&op.c);
+        waitForIo(rt, &op.c) catch unreachable;
+
         // Ignore close errors, following Zig std lib pattern
-        runIo(rt, &completion, "close") catch {};
+        _ = op.getResult() catch {};
     }
 
     // Zig 0.15+ streaming interface
@@ -185,10 +207,9 @@ test "File: basic read and write" {
         fn run(rt: *Runtime) !void {
             std.log.info("TestTask: Starting file test", .{});
 
-            // Create a test file using the new fs module
+            const dir = fs.cwd();
             const file_path = "test_file_basic.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{});
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+            var zio_file = try dir.createFile(rt, file_path, .{});
             std.log.info("TestTask: Created file using fs module", .{});
 
             // Write test
@@ -203,15 +224,17 @@ test "File: basic read and write" {
             std.log.info("TestTask: Closed file after write", .{});
 
             // Read test - reopen the file for reading
-            var read_file = try fs.openFile(rt, file_path, .{ .mode = .read_only });
-            defer read_file.close(rt);
+            var read_file = try dir.openFile(rt, file_path, .{ .mode = .read_only });
             std.log.info("TestTask: Reopened file for reading", .{});
 
             var buffer: [100]u8 = undefined;
             const bytes_read = try read_file.read(rt, &buffer);
             std.log.info("TestTask: Read {} bytes", .{bytes_read});
             try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+            read_file.close(rt);
             std.log.info("TestTask: File test completed successfully", .{});
+
+            try dir.deleteFile(rt, file_path);
         }
     };
 
@@ -226,10 +249,9 @@ test "File: positional read and write" {
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
+            const dir = fs.cwd();
             const file_path = "test_file_positional.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{ .read = true });
-            defer zio_file.close(rt);
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+            var zio_file = try dir.createFile(rt, file_path, .{ .read = true });
 
             // Write at different positions
             try std.testing.expectEqual(5, try zio_file.pwrite(rt, "HELLO", 0));
@@ -246,6 +268,9 @@ test "File: positional read and write" {
             // Test reading from gap (should be zeros or random data)
             var gap_buf: [3]u8 = undefined;
             try std.testing.expectEqual(3, try zio_file.pread(rt, &gap_buf, 5));
+
+            zio_file.close(rt);
+            try dir.deleteFile(rt, file_path);
         }
     };
 
@@ -260,9 +285,9 @@ test "File: close operation" {
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
+            const dir = fs.cwd();
             const file_path = "test_file_close.txt";
-            var zio_file = try fs.createFile(rt, file_path, .{});
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+            var zio_file = try dir.createFile(rt, file_path, .{});
 
             // Write some data
             const bytes_written = try zio_file.write(rt, "test data");
@@ -271,7 +296,7 @@ test "File: close operation" {
             // Close the file using zio
             zio_file.close(rt);
 
-            // File should now be closed
+            try dir.deleteFile(rt, file_path);
         }
     };
 
@@ -286,12 +311,12 @@ test "File: reader and writer interface" {
 
     const TestTask = struct {
         fn run(rt: *Runtime) !void {
+            const dir = fs.cwd();
             const file_path = "test_file_rw_interface.txt";
-            defer std.fs.cwd().deleteFile(file_path) catch {};
 
             // Write using writer interface
             {
-                var file = try fs.createFile(rt, file_path, .{});
+                var file = try dir.createFile(rt, file_path, .{});
 
                 var write_buffer: [256]u8 = undefined;
                 var writer = file.writer(rt, &write_buffer);
@@ -306,7 +331,7 @@ test "File: reader and writer interface" {
 
             // Read using reader interface
             {
-                var file = try fs.openFile(rt, file_path, .{});
+                var file = try dir.openFile(rt, file_path, .{});
 
                 var read_buffer: [256]u8 = undefined;
                 var reader = file.reader(rt, &read_buffer);
@@ -319,6 +344,8 @@ test "File: reader and writer interface" {
 
                 file.close(rt);
             }
+
+            try dir.deleteFile(rt, file_path);
         }
     };
 
