@@ -290,6 +290,32 @@ comptime {
     std.debug.assert(@alignOf(WaitNode) == 8);
 }
 
+pub fn registerExecutor(rt: *Runtime, executor: *Executor) !void {
+    rt.executors_lock.lock();
+    defer rt.executors_lock.unlock();
+
+    if (builtin.mode == .Debug) {
+        for (rt.executors.items) |other_executor| {
+            std.debug.assert(other_executor != executor);
+        }
+    }
+
+    try rt.executors.append(rt.allocator, executor);
+}
+
+pub fn unregisterExecutor(rt: *Runtime, executor: *Executor) void {
+    rt.executors_lock.lock();
+    defer rt.executors_lock.unlock();
+
+    for (rt.executors.items, 0..) |other_executor, i| {
+        if (other_executor == executor) {
+            const removed = rt.executors.swapRemove(i);
+            std.debug.assert(removed == executor);
+            break;
+        }
+    }
+}
+
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     loop: aio.Loop,
@@ -333,6 +359,9 @@ pub const Executor = struct {
     // Coordination for thread startup
     ready: std.Thread.ResetEvent = .{},
 
+    // Executor dedicated to this thread
+    pub threadlocal var current: ?*Executor = null;
+
     /// Get the Executor instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
         return @fieldParentPtr("main_context", coro.parent_context_ptr);
@@ -346,10 +375,10 @@ pub const Executor = struct {
             .main_context = undefined,
             .runtime = runtime,
         };
-    }
 
-    fn initLoop(self: *Executor) !void {
-        // Initialize loop from the thread that will run it
+        try setupStackGrowth();
+        errdefer cleanupStackGrowth();
+
         try self.loop.init(.{
             .allocator = self.allocator,
             .thread_pool = &self.runtime.thread_pool,
@@ -357,24 +386,27 @@ pub const Executor = struct {
         });
         errdefer self.loop.deinit();
 
-        // Initialize shutdown async
         self.shutdown_async = aio.Async.init();
-        self.shutdown_async.loop = &self.loop;
         self.shutdown_async.c.userdata = self;
         self.shutdown_async.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown_async.c);
-    }
 
-    fn deinitLoop(self: *Executor) void {
-        self.loop.deinit();
+        try registerExecutor(self.runtime, self);
+        errdefer unregisterExecutor(self.runtime, self);
+
+        std.debug.assert(Executor.current == null);
+        Executor.current = self;
     }
 
     pub fn deinit(self: *Executor) void {
-        // Note: ThreadPool and loop are owned by thread that runs them
-        // Loop cleanup is handled in deinitLoop() called from run*()
-        // Task cleanup is handled by Runtime.deinit()
-        // Stack pool is owned by Runtime
-        _ = self;
+        std.debug.assert(Executor.current == self);
+        Executor.current = null;
+
+        unregisterExecutor(self.runtime, self);
+
+        self.loop.deinit();
+
+        cleanupStackGrowth();
     }
 
     pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
@@ -561,18 +593,6 @@ pub const Executor = struct {
     /// Main executor (id=0) orchestrates shutdown when all tasks complete.
     /// Worker executors (id>0) run until signaled to shut down by main executor.
     pub fn run(self: *Executor) !void {
-        // Setup stack growth signal handlers for this thread
-        try setupStackGrowth();
-        defer cleanupStackGrowth();
-
-        // Initialize loop on this thread
-        try self.initLoop();
-        self.loop_initialized.store(true, .release);
-        defer {
-            self.loop_initialized.store(false, .release);
-            self.deinitLoop();
-        }
-
         // Signal that executor is ready
         self.ready.set();
 
@@ -837,6 +857,7 @@ pub const Runtime = struct {
     allocator: Allocator,
     options: RuntimeOptions,
 
+    executors_lock: std.Thread.Mutex = .{},
     executors: std.ArrayList(*Executor) = .empty,
     main_executor: Executor,
     next_executor: std.atomic.Value(usize),
@@ -848,8 +869,6 @@ pub const Runtime = struct {
     pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
-        try setupStackGrowth();
-
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
@@ -866,13 +885,11 @@ pub const Runtime = struct {
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
 
-        try self.main_executor.init(allocator, options, self);
-        errdefer self.main_executor.deinit();
-
         try self.executors.ensureTotalCapacity(allocator, 16);
         errdefer self.executors.deinit(allocator);
 
-        self.executors.appendAssumeCapacity(&self.main_executor);
+        try self.main_executor.init(allocator, options, self);
+        errdefer self.main_executor.deinit();
 
         return self;
     }
@@ -892,8 +909,6 @@ pub const Runtime = struct {
         for (self.executors.items) |exec| {
             exec.deinit();
         }
-
-        // Free executors ArrayList
         self.executors.deinit(allocator);
 
         // Clean up ThreadPool after executors
@@ -904,9 +919,6 @@ pub const Runtime = struct {
 
         // Free the Runtime allocation
         allocator.destroy(self);
-
-        // Cleanup stack growth signal handlers for this thread
-        cleanupStackGrowth();
     }
 
     // High-level public API - delegates to appropriate Executor
@@ -958,32 +970,17 @@ pub const Runtime = struct {
     }
 
     pub fn run(self: *Runtime) !void {
-        // If single-threaded, just run the main executor
-        if (self.executors.items.len == 1) {
-            return self.executors.items[0].run();
+        if (Executor.current) |local_executor| {
+            try local_executor.run();
+            return;
         }
 
-        // Multi-threaded: spawn worker threads for executors[1..]
-        for (self.executors.items[1..], 1..) |executor, i| {
-            executor.thread = try std.Thread.spawn(.{}, workerThreadFn, .{ self, i });
-        }
+        var executor: Executor = undefined;
 
-        // Wait for all workers to be ready (loop initialized)
-        for (self.executors.items[1..]) |executor| {
-            executor.ready.wait();
-        }
+        try executor.init(self.allocator, self.options, self);
+        defer executor.deinit();
 
-        // Run main executor on current thread
-        const main_result = self.executors.items[0].run();
-
-        // Join all worker threads
-        for (self.executors.items[1..]) |executor| {
-            if (executor.thread) |thread| {
-                thread.join();
-            }
-        }
-
-        return main_result;
+        try executor.run();
     }
 
     pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
