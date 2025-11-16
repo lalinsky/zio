@@ -344,7 +344,6 @@ pub const Executor = struct {
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
-    loop_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Shutdown support
     shutdown_async: aio.Async = undefined,
@@ -739,9 +738,7 @@ pub const Executor = struct {
         self.next_ready_queue_remote.push(wait_node);
 
         // Wake the target executor's event loop (only if initialized)
-        if (self.loop_initialized.load(.acquire)) {
-            self.loop.wake();
-        }
+        self.loop.wake();
     }
 
     /// Schedule a task for execution. Called on the task's home executor (self).
