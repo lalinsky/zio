@@ -279,13 +279,6 @@ const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 
-// Executor metrics
-pub const ExecutorMetrics = struct {
-    yields: u64 = 0,
-    tasks_spawned: u64 = 0,
-    tasks_completed: u64 = 0,
-};
-
 comptime {
     std.debug.assert(@alignOf(WaitNode) == 8);
 }
@@ -346,9 +339,6 @@ pub const Executor = struct {
 
     // Shutdown support
     shutdown_async: aio.Async = undefined,
-
-    // Runtime metrics
-    metrics: ExecutorMetrics = .{},
 
     // Back-reference to runtime for global coordination
     runtime: *Runtime,
@@ -429,9 +419,6 @@ pub const Executor = struct {
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(task.task, .maybe_remote);
 
-        // Track task spawn
-        self.metrics.tasks_spawned += 1;
-
         return JoinHandle(Result){
             .awaitable = task.toAwaitable(),
             .result = undefined,
@@ -465,9 +452,6 @@ pub const Executor = struct {
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
-
-        // Track yield
-        self.metrics.yields += 1;
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
@@ -641,9 +625,6 @@ pub const Executor = struct {
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
                         current_awaitable.markComplete();
 
-                        // Track task completion
-                        self.metrics.tasks_completed += 1;
-
                         // Release runtime's reference and check for shutdown
                         self.runtime.releaseAwaitable(current_awaitable, true);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
@@ -812,16 +793,6 @@ pub const Executor = struct {
             assert(Runtime.current_executor == self);
             self.scheduleTaskLocal(task, false);
         }
-    }
-
-    /// Get a copy of the current metrics
-    pub fn getMetrics(self: *Executor) ExecutorMetrics {
-        return self.metrics;
-    }
-
-    /// Reset all metrics to zero
-    pub fn resetMetrics(self: *Executor) void {
-        self.metrics = .{};
     }
 };
 
@@ -1098,24 +1069,15 @@ pub const Runtime = struct {
         return Runtime.current_executor;
     }
 
-    /// Get a copy of the current executor metrics (from executor 0).
-    /// In multi-threaded mode, returns metrics from the main executor only.
-    pub fn getMetrics(self: *Runtime) ExecutorMetrics {
-        return self.executors.items[0].getMetrics();
-    }
-
-    /// Reset all executor metrics to zero
-    pub fn resetMetrics(self: *Runtime) void {
-        for (self.executors.items) |*executor| {
-            executor.resetMetrics();
-        }
-    }
-
     /// Get the current time in milliseconds.
     /// This uses the event loop's cached monotonic time for efficiency.
     /// In multi-threaded mode, uses the main executor's loop time.
-    pub fn now(self: *Runtime) i64 {
-        return @intCast(self.executors.items[0].loop.now());
+    pub fn now(self: *Runtime) u64 {
+        if (Executor.current) |local_executor| {
+            return local_executor.loop.now();
+        } else {
+            return self.main_executor.loop.now();
+        }
     }
 
     /// Check if task list is empty and initiate shutdown if so.
