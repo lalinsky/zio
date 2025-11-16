@@ -798,14 +798,6 @@ pub const Executor = struct {
             self.scheduleTaskLocal(task, false);
         }
     }
-
-    pub fn io(self: *Runtime) std.Io {
-        return stdio.fromRuntime(self);
-    }
-
-    pub fn fromIo(io_: std.Io) *Runtime {
-        return stdio.toRuntime(io_);
-    }
 };
 
 // ThreadWaiter - used by external threads to wait on Awaitables
@@ -1126,6 +1118,14 @@ pub const Runtime = struct {
             self.maybeShutdown();
         }
     }
+
+    pub fn io(self: *Runtime) std.Io {
+        return stdio.fromRuntime(self);
+    }
+
+    pub fn fromIo(io_: std.Io) *Runtime {
+        return stdio.toRuntime(io_);
+    }
 };
 
 test "runtime: spawnBlocking smoke test" {
@@ -1259,4 +1259,15 @@ test "runtime: sleep is cancelable" {
     };
 
     try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+}
+
+test "runtime: std.Io interface" {
+    const testing = std.testing;
+
+    const rt = try Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const rt2 = Runtime.fromIo(io);
+    _ = rt2;
 }
