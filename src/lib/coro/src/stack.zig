@@ -399,14 +399,13 @@ inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
         .macos, .ios, .tvos, .watchos, .visionos => info.addr,
         .freebsd, .dragonfly => info.addr,
         .netbsd => info.info.reason.fault.addr,
-        .solaris, .illumos => info.reason.fault.addr,
         else => @compileError("Stack growth not supported on this platform"),
     });
 }
 
 /// Invoke the previous signal handler or use default behavior.
 /// This allows proper signal handler chaining instead of unconditionally aborting.
-fn invokePreviousHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque) noreturn {
+fn invokePreviousHandler(sig: posix.SIG, info: *const posix.siginfo_t, ctx: ?*anyopaque) noreturn {
     // Get the appropriate old sigaction based on signal number
     const old_sa = if (sig == posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
 
@@ -422,8 +421,8 @@ fn invokePreviousHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopa
             if (h == posix.SIG.DFL or h == posix.SIG.IGN) {
                 // Restore the previous handler and re-raise the signal
                 // We must restore the handler first, otherwise the signal comes back to us
-                posix.sigaction(@intCast(sig), old_sa, null);
-                _ = posix.raise(@intCast(sig)) catch {};
+                posix.sigaction(sig, old_sa, null);
+                _ = posix.raise(sig) catch {};
             } else {
                 // Call the previous simple handler
                 h(sig);
@@ -439,7 +438,7 @@ fn invokePreviousHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopa
 /// Signal handler for automatic stack growth (SIGSEGV on Linux/BSD, SIGBUS on macOS).
 /// This handler checks if the fault is within a coroutine's uncommitted stack region
 /// and extends the stack if so. Real faults are propagated to the previous handler.
-fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
+fn stackFaultHandler(sig: posix.SIG, info: *const posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
     const fault_addr = getFaultAddress(info);
 
     // Get current_context from coroutines module

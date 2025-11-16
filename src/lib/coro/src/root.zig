@@ -11,7 +11,6 @@ pub const setupStackGrowth = @import("stack.zig").setupStackGrowth;
 pub const cleanupStackGrowth = @import("stack.zig").cleanupStackGrowth;
 
 pub const StackPool = @import("stack_pool.zig").StackPool;
-pub const StackPoolConfig = @import("stack_pool.zig").Config;
 
 test {
     _ = @import("coroutines.zig");
