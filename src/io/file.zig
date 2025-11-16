@@ -351,3 +351,37 @@ test "File: reader and writer interface" {
 
     try runtime.runUntilComplete(TestTask.run, .{runtime}, .{});
 }
+
+/// Positional write from vectored buffers (for std.Io compatibility).
+/// Does not update any file position.
+pub fn fileWritePositional(rt: *Runtime, fd: Handle, buffers: []const []const u8, offset: u64) !usize {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
+    var storage: [16]aio.system.iovec_const = undefined;
+    var op = aio.FileWrite.init(fd, aio.WriteBuf.fromSlices(buffers, &storage), offset);
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
+
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
+}
+
+/// Positional read into vectored buffers (for std.Io compatibility).
+/// Does not update any file position.
+pub fn fileReadPositional(rt: *Runtime, fd: Handle, buffers: [][]u8, offset: u64) !usize {
+    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const executor = task.getExecutor();
+
+    var storage: [16]aio.system.iovec = undefined;
+    var op = aio.FileRead.init(fd, aio.ReadBuf.fromSlices(buffers, &storage), offset);
+    op.c.userdata = task;
+    op.c.callback = genericCallback;
+
+    executor.loop.add(&op.c);
+    try waitForIo(rt, &op.c);
+
+    return try op.getResult();
+}
