@@ -53,6 +53,13 @@ const WSAID_CONNECTEX = windows.GUID{
     .Data4 = .{ 0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e },
 };
 
+const WSAID_GETACCEPTEXSOCKADDRS = windows.GUID{
+    .Data1 = 0xb5367df2,
+    .Data2 = 0xcbac,
+    .Data3 = 0x11cf,
+    .Data4 = .{ 0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92 },
+};
+
 // Winsock extension function types
 const LPFN_ACCEPTEX = *const fn (
     sListenSocket: windows.ws2_32.SOCKET,
@@ -74,6 +81,17 @@ const LPFN_CONNECTEX = *const fn (
     lpdwBytesSent: ?*windows.DWORD,
     lpOverlapped: *windows.OVERLAPPED,
 ) callconv(.winapi) windows.BOOL;
+
+const LPFN_GETACCEPTEXSOCKADDRS = *const fn (
+    lpOutputBuffer: *anyopaque,
+    dwReceiveDataLength: windows.DWORD,
+    dwLocalAddressLength: windows.DWORD,
+    dwRemoteAddressLength: windows.DWORD,
+    LocalSockaddr: **windows.ws2_32.sockaddr,
+    LocalSockaddrLength: *c_int,
+    RemoteSockaddr: **windows.ws2_32.sockaddr,
+    RemoteSockaddrLength: *c_int,
+) callconv(.winapi) void;
 
 fn loadWinsockExtension(comptime T: type, sock: windows.ws2_32.SOCKET, guid: windows.GUID) !T {
     var func_ptr: T = undefined;
@@ -120,11 +138,13 @@ pub const NetAcceptData = struct {
     // We use dwReceiveDataLength=0, so total = (sockaddr.storage + 16) * 2
     const addr_slot_size = @sizeOf(windows.ws2_32.sockaddr.storage) + 16;
     addr_buffer: [addr_slot_size * 2]u8 = undefined,
+    family: u16 = 0, // Socket family, stored from submitAccept
 };
 
 const ExtensionFunctions = struct {
     acceptex: LPFN_ACCEPTEX,
     connectex: LPFN_CONNECTEX,
+    getacceptexsockaddrs: LPFN_GETACCEPTEXSOCKADDRS,
 };
 
 pub const SharedState = struct {
@@ -205,9 +225,13 @@ pub const SharedState = struct {
         // Load ConnectEx
         const connectex = try loadWinsockExtension(LPFN_CONNECTEX, sock, WSAID_CONNECTEX);
 
+        // Load GetAcceptExSockaddrs
+        const getacceptexsockaddrs = try loadWinsockExtension(LPFN_GETACCEPTEXSOCKADDRS, sock, WSAID_GETACCEPTEXSOCKADDRS);
+
         return .{
             .acceptex = acceptex,
             .connectex = connectex,
+            .getacceptexsockaddrs = getacceptexsockaddrs,
         };
     }
 };
@@ -466,6 +490,9 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     }
 
     const family: u16 = @as(*const windows.ws2_32.sockaddr, @ptrCast(&addr_buf)).family;
+
+    // Store family for later use in processCompletion
+    data.internal.family = family;
 
     // Load AcceptEx extension function for this address family
     const exts = try self.shared_state.getExtensions(self.allocator, family);
@@ -894,7 +921,6 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
 }
 
 fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERLAPPED_ENTRY) void {
-    _ = self;
     // Get the OVERLAPPED pointer from the entry
     // Note: lpOverlapped can be null in error cases, despite Zig's type definition
     if (@intFromPtr(entry.lpOverlapped) == 0) {
@@ -994,13 +1020,21 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 } else {
                     // Parse the address buffer to get the peer address
                     if (data.addr) |user_addr| {
+                        // Load GetAcceptExSockaddrs extension function using the stored family
+                        const exts = self.shared_state.getExtensions(self.allocator, data.internal.family) catch |err| {
+                            net.close(data.result_private_do_not_touch);
+                            c.setError(err);
+                            state.markCompleted(c);
+                            return;
+                        };
+
                         const addr_size: u32 = NetAcceptData.addr_slot_size;
                         var local_addr: *windows.ws2_32.sockaddr = undefined;
                         var local_addr_len: i32 = undefined;
                         var remote_addr: *windows.ws2_32.sockaddr = undefined;
                         var remote_addr_len: i32 = undefined;
 
-                        windows.ws2_32.GetAcceptExSockaddrs(
+                        exts.getacceptexsockaddrs(
                             &data.internal.addr_buffer,
                             0, // dwReceiveDataLength
                             addr_size,

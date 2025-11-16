@@ -330,11 +330,10 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
             );
 
             if (success == w.FALSE) {
-                switch (w.kernel32.GetLastError()) {
+                const err = w.kernel32.GetLastError();
+                switch (err) {
                     .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
-                    .BROKEN_PIPE => return error.BrokenPipe,
-                    .IO_PENDING => return error.WouldBlock,
-                    else => |err| return unexpectedError(err),
+                    else => return errnoToFileReadError(err),
                 }
             }
 
@@ -376,12 +375,7 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
             );
 
             if (success == w.FALSE) {
-                switch (w.kernel32.GetLastError()) {
-                    .BROKEN_PIPE => return error.BrokenPipe,
-                    .DISK_FULL => return error.NoSpaceLeft,
-                    .IO_PENDING => return error.WouldBlock,
-                    else => |err| return unexpectedError(err),
-                }
+                return errnoToFileWriteError(w.kernel32.GetLastError());
             }
 
             total_written += bytes_written;
@@ -558,35 +552,69 @@ pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
     };
 }
 
-pub fn errnoToFileReadError(errno: posix.system.E) FileReadError {
-    return switch (errno) {
-        .SUCCESS => unreachable,
-        .ACCES => error.AccessDenied,
-        .AGAIN => error.WouldBlock,
-        .IO => error.InputOutput,
-        .CANCELED => error.Canceled,
-        .PIPE => error.BrokenPipe,
-        .NOMEM => error.SystemResources,
-        .BADF => error.NotOpenForReading,
-        else => |e| unexpectedError(e) catch error.Unexpected,
-    };
+pub const E = if (builtin.os.tag == .windows) std.os.windows.Win32Error else posix.system.E;
+
+pub fn errnoToFileReadError(err: E) FileReadError {
+    switch (builtin.os.tag) {
+        .windows => {
+            return switch (err) {
+                .SUCCESS => unreachable,
+                .INVALID_HANDLE => error.NotOpenForReading,
+                .ACCESS_DENIED => error.AccessDenied,
+                .BROKEN_PIPE => error.BrokenPipe,
+                .IO_INCOMPLETE, .IO_PENDING => error.WouldBlock,
+                .HANDLE_EOF => error.InputOutput,
+                .NOT_ENOUGH_MEMORY, .OUTOFMEMORY => error.SystemResources,
+                else => |e| unexpectedError(e) catch error.Unexpected,
+            };
+        },
+        else => {
+            return switch (err) {
+                .SUCCESS => unreachable,
+                .ACCES => error.AccessDenied,
+                .AGAIN => error.WouldBlock,
+                .IO => error.InputOutput,
+                .CANCELED => error.Canceled,
+                .PIPE => error.BrokenPipe,
+                .NOMEM => error.SystemResources,
+                .BADF => error.NotOpenForReading,
+                else => |e| unexpectedError(e) catch error.Unexpected,
+            };
+        },
+    }
 }
 
-pub fn errnoToFileWriteError(errno: posix.system.E) FileWriteError {
-    return switch (errno) {
-        .SUCCESS => unreachable,
-        .ACCES => error.AccessDenied,
-        .AGAIN => error.WouldBlock,
-        .IO => error.InputOutput,
-        .NOSPC => error.NoSpaceLeft,
-        .CANCELED => error.Canceled,
-        .PIPE => error.BrokenPipe,
-        .NOMEM => error.SystemResources,
-        .BADF => error.NotOpenForWriting,
-        .DQUOT => error.DiskQuota,
-        .FBIG => error.FileTooBig,
-        else => |e| unexpectedError(e) catch error.Unexpected,
-    };
+pub fn errnoToFileWriteError(err: E) FileWriteError {
+    switch (builtin.os.tag) {
+        .windows => {
+            return switch (err) {
+                .SUCCESS => unreachable,
+                .INVALID_HANDLE => error.NotOpenForWriting,
+                .ACCESS_DENIED => error.AccessDenied,
+                .BROKEN_PIPE => error.BrokenPipe,
+                .IO_INCOMPLETE, .IO_PENDING => error.WouldBlock,
+                .DISK_FULL, .HANDLE_DISK_FULL => error.NoSpaceLeft,
+                .NOT_ENOUGH_MEMORY, .OUTOFMEMORY => error.SystemResources,
+                else => |e| unexpectedError(e) catch error.Unexpected,
+            };
+        },
+        else => {
+            return switch (err) {
+                .SUCCESS => unreachable,
+                .ACCES => error.AccessDenied,
+                .AGAIN => error.WouldBlock,
+                .IO => error.InputOutput,
+                .NOSPC => error.NoSpaceLeft,
+                .CANCELED => error.Canceled,
+                .PIPE => error.BrokenPipe,
+                .NOMEM => error.SystemResources,
+                .BADF => error.NotOpenForWriting,
+                .DQUOT => error.DiskQuota,
+                .FBIG => error.FileTooBig,
+                else => |e| unexpectedError(e) catch error.Unexpected,
+            };
+        },
+    }
 }
 
 pub fn errnoToFileCloseError(errno: posix.system.E) FileCloseError {
