@@ -8,11 +8,11 @@
         "build.zig.zon",
         "src",
         "examples",
-        "vendor",
     },
     .dependencies = .{
-        .libxev = .{
-            .path = "vendor/libxev",
+        .aio = .{
+            .url = "git+https://github.com/lalinsky/aio.zig#9b6021878feeffa30092042ea6061a5dd2998d2f",
+            .hash = "aio-0.4.0-k5779lvZBQCccl75UnfqIm-EE9KvvuE4y3THa9AisbZL",
         },
         .coro = .{
             .url = "git+https://github.com/lalinsky/coro.zig#7228ad401a82bc7f74e39bc1e90b864a2f6f0a67",

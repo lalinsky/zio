@@ -148,9 +148,6 @@ fn benchmarkTask(
     for (latencies) |lat| sum += lat;
     const avg = sum / latencies.len;
 
-    // Get runtime metrics
-    const metrics = rt.getMetrics();
-
     std.debug.print("Results:\n", .{});
     std.debug.print("  Total time: {d:.2} ms ({d:.3} s)\n", .{ elapsed_ms, elapsed_s });
     std.debug.print("  Messages/sec: {d:.0}\n", .{messages_per_sec});
@@ -160,10 +157,6 @@ fn benchmarkTask(
     std.debug.print("  p50: {d:.1} µs\n", .{@as(f64, @floatFromInt(p50)) / 1000.0});
     std.debug.print("  p95: {d:.1} µs\n", .{@as(f64, @floatFromInt(p95)) / 1000.0});
     std.debug.print("  p99: {d:.1} µs\n", .{@as(f64, @floatFromInt(p99)) / 1000.0});
-    std.debug.print("\nMetrics:\n", .{});
-    std.debug.print("  Tasks spawned: {}\n", .{metrics.tasks_spawned});
-    std.debug.print("  Tasks completed: {}\n", .{metrics.tasks_completed});
-    std.debug.print("  Total yields: {}\n", .{metrics.yields});
 }
 
 pub fn main() !void {

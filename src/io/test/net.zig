@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const aio = @import("aio");
 const meta = @import("../../meta.zig");
 const Runtime = @import("../../runtime.zig").Runtime;
 const Server = @import("../net.zig").Server;
@@ -14,17 +15,17 @@ const has_unix_sockets = @import("../net.zig").has_unix_sockets;
 
 test "IpAddress: initIp4" {
     const addr = IpAddress.initIp4(.{0} ** 4, 8080);
-    try std.testing.expectEqual(std.posix.AF.INET, addr.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr.any.family);
 }
 
 test "IpAddress: initIp6" {
     const addr = IpAddress.initIp6(.{0} ** 16, 8080, 0, 0);
-    try std.testing.expectEqual(std.posix.AF.INET6, addr.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr.any.family);
 }
 
 test "IpAddress: parseIp4" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 8080);
-    try std.testing.expectEqual(std.posix.AF.INET, addr.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
 
     var buf: [32]u8 = undefined;
@@ -34,7 +35,7 @@ test "IpAddress: parseIp4" {
 
 test "IpAddress: parseIp6" {
     const addr = try IpAddress.parseIp6("::1", 8080);
-    try std.testing.expectEqual(std.posix.AF.INET6, addr.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
 
     var buf: [64]u8 = undefined;
@@ -44,17 +45,17 @@ test "IpAddress: parseIp6" {
 
 test "IpAddress: parseIp" {
     const addr1 = try IpAddress.parseIp("127.0.0.1", 8080);
-    try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.getPort());
 
     const addr2 = try IpAddress.parseIp("::1", 8080);
-    try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.getPort());
 }
 
 test "IpAddress: parseIpAndPort" {
     const addr1 = try IpAddress.parseIpAndPort("127.0.0.1:8080");
-    try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.getPort());
 
     var buf1: [32]u8 = undefined;
@@ -62,7 +63,7 @@ test "IpAddress: parseIpAndPort" {
     try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
 
     const addr2 = try IpAddress.parseIpAndPort("[::1]:8080");
-    try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.getPort());
 
     var buf2: [64]u8 = undefined;
@@ -72,17 +73,17 @@ test "IpAddress: parseIpAndPort" {
 
 test "Address: parseIp" {
     const addr1 = try Address.parseIp("127.0.0.1", 8080);
-    try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.ip.getPort());
 
     const addr2 = try Address.parseIp("::1", 8080);
-    try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.ip.getPort());
 }
 
 test "Address: parseIpAndHost" {
     const addr1 = try Address.parseIpAndHost("127.0.0.1:8080");
-    try std.testing.expectEqual(std.posix.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.ip.getPort());
 
     var buf1: [32]u8 = undefined;
@@ -90,7 +91,7 @@ test "Address: parseIpAndHost" {
     try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
 
     const addr2 = try Address.parseIpAndHost("[::1]:8080");
-    try std.testing.expectEqual(std.posix.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.ip.getPort());
 
     var buf2: [64]u8 = undefined;
@@ -105,7 +106,7 @@ test "UnixAddress: init" {
     defer std.fs.cwd().deleteFile(path) catch {};
 
     const addr = try UnixAddress.init(path);
-    try std.testing.expectEqual(std.posix.AF.UNIX, addr.any.family);
+    try std.testing.expectEqual(aio.system.net.AF.UNIX, addr.any.family);
 }
 
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
@@ -152,7 +153,7 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
@@ -241,7 +242,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options }, .{});

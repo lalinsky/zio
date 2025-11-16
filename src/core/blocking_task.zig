@@ -3,7 +3,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const xev = @import("xev");
+const aio = @import("aio");
+
 const Runtime = @import("../runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const WaitNode = @import("WaitNode.zig");
@@ -14,7 +15,7 @@ const assert = std.debug.assert;
 
 pub const AnyBlockingTask = struct {
     awaitable: Awaitable,
-    thread_pool_task: xev.ThreadPool.Task,
+    work: aio.Work,
     runtime: *Runtime,
     closure: Closure,
 
@@ -55,10 +56,14 @@ pub const AnyBlockingTask = struct {
                     .vtable = &AnyBlockingTask.wait_node_vtable,
                 },
             },
-            .thread_pool_task = .{ .callback = threadPoolCallback },
+            .work = aio.Work.init(workFunc, self),
             .runtime = runtime,
             .closure = alloc_result.closure,
         };
+
+        // Set up the completion callback to be called when work completes
+        self.work.c.userdata = self;
+        self.work.c.callback = completionCallback;
 
         // Copy context data into the allocation
         const context_dest = self.closure.getContextSlice(AnyBlockingTask, self);
@@ -68,18 +73,24 @@ pub const AnyBlockingTask = struct {
     }
 };
 
-// Thread pool callback for blocking tasks
-fn threadPoolCallback(task: *xev.ThreadPool.Task) void {
-    const any_blocking_task: *AnyBlockingTask = @fieldParentPtr("thread_pool_task", task);
+// Work function for blocking tasks - runs in thread pool
+fn workFunc(work: *aio.Work) void {
+    const any_blocking_task: *AnyBlockingTask = @ptrCast(@alignCast(work.userdata.?));
 
-    // Check if the task was canceled before it started executing
-    if (any_blocking_task.awaitable.canceled_status.load(.acquire) == 0) {
-        // Execute the user's blocking function only if not canceled
-        const c = &any_blocking_task.closure;
-        const result = c.getResultPtr(AnyBlockingTask, any_blocking_task);
-        const context = c.getContextPtr(AnyBlockingTask, any_blocking_task);
-        c.start(context, result);
-    }
+    // Execute the user's blocking function
+    // aio handles cancellation - if canceled, this won't be called
+    const c = &any_blocking_task.closure;
+    const result = c.getResultPtr(AnyBlockingTask, any_blocking_task);
+    const context = c.getContextPtr(AnyBlockingTask, any_blocking_task);
+    c.start(context, result);
+}
+
+// Completion callback - called by aio event loop when work finishes
+fn completionCallback(
+    _: *aio.Loop,
+    completion: *aio.Completion,
+) void {
+    const any_blocking_task: *AnyBlockingTask = @ptrCast(@alignCast(completion.userdata.?));
 
     // Mark awaitable as complete and wake all waiters (thread-safe)
     // Even if canceled, we still mark as complete so waiters wake up

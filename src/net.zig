@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const aio = @import("aio");
 const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
 
@@ -23,7 +24,7 @@ pub const IpAddressIterator = struct {
             self.current = info.next;
             const addr = info.addr orelse continue;
             // Skip unsupported address families
-            if (addr.family != std.posix.AF.INET and addr.family != std.posix.AF.INET6) continue;
+            if (addr.family != aio.system.net.AF.INET and addr.family != aio.system.net.AF.INET6) continue;
             return IpAddress.initPosix(addr, @intCast(info.addrlen));
         }
         return null;
@@ -90,7 +91,7 @@ fn lookupHostBlocking(
 
     const hints: std.posix.addrinfo = .{
         .flags = .{ .NUMERICSERV = true },
-        .family = std.posix.AF.UNSPEC,
+        .family = aio.system.net.AF.UNSPEC,
         .socktype = std.posix.SOCK.STREAM,
         .protocol = std.posix.IPPROTO.TCP,
         .canonname = null,
@@ -182,7 +183,7 @@ test "lookupHost: localhost" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     const LookupHostTask = struct {
@@ -205,7 +206,7 @@ test "lookupHost: numeric IP" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     const LookupHostTask = struct {
@@ -325,7 +326,7 @@ test "tcpConnectToHost: basic" {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{ .enabled = true } });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
     var server_port_buf: [1]u16 = undefined;

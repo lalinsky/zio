@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const std = @import("std");
-const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const xev = @import("xev");
+
+const aio = @import("aio");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
@@ -31,11 +31,6 @@ const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
 
-// Compile-time detection of whether the backend needs ThreadPool
-fn backendNeedsThreadPool() bool {
-    return @hasField(xev.Loop, "thread_pool");
-}
-
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
     /// Round-robin assignment across all executors
@@ -57,7 +52,6 @@ pub const ExecutorId = enum(usize) {
 
 /// Options for spawning a coroutine
 pub const SpawnOptions = struct {
-    executor: ExecutorId = .any,
     /// Pin task to its home executor (prevents cross-thread migration).
     /// Pinned tasks always run on their original executor, even when woken from other threads.
     /// Useful for tasks with executor-specific state or when thread affinity is desired.
@@ -66,7 +60,7 @@ pub const SpawnOptions = struct {
 
 // Runtime configuration options
 pub const RuntimeOptions = struct {
-    thread_pool: ThreadPoolOptions = .{},
+    thread_pool: aio.ThreadPool.Options = .{},
     stack_pool: StackPoolConfig = .{
         .maximum_size = 8 * 1024 * 1024, // 8MB reserved
         .committed_size = 64 * 1024, // 64KB initial commit
@@ -84,58 +78,24 @@ pub const RuntimeOptions = struct {
     /// Enabled by default as it also maintains backward-compatible timing
     /// (woken tasks run immediately instead of being deferred to next batch).
     lifo_slot_enabled: bool = true,
-
-    pub const ThreadPoolOptions = struct {
-        enabled: bool = backendNeedsThreadPool(),
-        max_threads: ?u32 = null, // null = CPU count
-        stack_size: ?u32 = null, // null = default stack size
-    };
 };
 
 // Noop callback for async timer cancellation
 fn noopTimerCancelCallback(
-    ud: ?*void,
-    l: *xev.Loop,
-    c: *xev.Completion,
-    r: xev.Timer.CancelError!void,
-) xev.CallbackAction {
-    _ = ud;
+    l: *aio.Loop,
+    c: *aio.Completion,
+) void {
     _ = l;
     _ = c;
-    _ = r catch {};
-    return .disarm;
-}
-
-// Async callback for remote ready tasks wakeup (cross-thread resumption)
-// This just wakes up the loop - the actual draining happens in run().
-fn remoteWakeupCallback(
-    executor: ?*Executor,
-    loop: *xev.Loop,
-    c: *xev.Completion,
-    result: xev.Async.WaitError!void,
-) xev.CallbackAction {
-    _ = result catch unreachable;
-    _ = loop;
-    _ = c;
-    _ = executor;
-
-    // Just wake up - draining happens in run() loop
-    return .rearm;
 }
 
 fn shutdownCallback(
-    executor: ?*Executor,
-    loop: *xev.Loop,
-    c: *xev.Completion,
-    result: xev.Async.WaitError!void,
-) xev.CallbackAction {
-    _ = result catch unreachable;
+    loop: *aio.Loop,
+    c: *aio.Completion,
+) void {
     _ = c;
-    _ = executor;
-
     // Stop the event loop
     loop.stop();
-    return .disarm;
 }
 
 const awaitable_module = @import("core/awaitable.zig");
@@ -319,21 +279,48 @@ const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 
-// Executor metrics
-pub const ExecutorMetrics = struct {
-    yields: u64 = 0,
-    tasks_spawned: u64 = 0,
-    tasks_completed: u64 = 0,
-};
-
 comptime {
     std.debug.assert(@alignOf(WaitNode) == 8);
 }
 
+pub fn registerExecutor(rt: *Runtime, executor: *Executor) !void {
+    rt.executors_lock.lock();
+    defer rt.executors_lock.unlock();
+
+    if (builtin.mode == .Debug) {
+        for (rt.executors.items) |other_executor| {
+            std.debug.assert(other_executor != executor);
+        }
+    }
+
+    try rt.executors.append(rt.allocator, executor);
+}
+
+pub fn unregisterExecutor(rt: *Runtime, executor: *Executor) void {
+    rt.executors_lock.lock();
+    defer rt.executors_lock.unlock();
+
+    for (rt.executors.items, 0..) |other_executor, i| {
+        if (other_executor == executor) {
+            const removed = rt.executors.swapRemove(i);
+            std.debug.assert(removed == executor);
+            break;
+        }
+    }
+}
+
+pub fn getNextExecutor(rt: *Runtime) *Executor {
+    rt.executors_lock.lock();
+    defer rt.executors_lock.unlock();
+
+    const executor = rt.executors.items[rt.next_executor_index % rt.executors.items.len];
+    rt.next_executor_index += 1;
+    return executor;
+}
+
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
-    id: usize,
-    loop: xev.Loop,
+    loop: aio.Loop,
     main_context: Context,
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
@@ -357,16 +344,9 @@ pub const Executor = struct {
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
-    remote_wakeup: xev.Async = undefined,
-    remote_completion: xev.Completion = undefined,
-    remote_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Shutdown support
-    shutdown_async: xev.Async = undefined,
-    shutdown_completion: xev.Completion = undefined,
-
-    // Runtime metrics
-    metrics: ExecutorMetrics = .{},
+    shutdown_async: aio.Async = undefined,
 
     // Back-reference to runtime for global coordination
     runtime: *Runtime,
@@ -376,82 +356,63 @@ pub const Executor = struct {
 
     // Coordination for thread startup
     ready: std.Thread.ResetEvent = .{},
+    available: bool = true,
+
+    // Executor dedicated to this thread
+    pub threadlocal var current: ?*Executor = null;
 
     /// Get the Executor instance from any coroutine that belongs to it
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
         return @fieldParentPtr("main_context", coro.parent_context_ptr);
     }
 
-    pub fn init(self: *Executor, id: usize, allocator: Allocator, options: RuntimeOptions, runtime: *Runtime) !void {
-        // Establish stable memory location with defaults
-        // Loop will be initialized later from the thread that runs it
+    pub fn init(self: *Executor, allocator: Allocator, options: RuntimeOptions, runtime: *Runtime) !void {
         self.* = .{
-            .id = id,
             .allocator = allocator,
             .loop = undefined,
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
-            .remote_wakeup = undefined,
-            .remote_completion = undefined,
             .runtime = runtime,
         };
-    }
 
-    fn initLoop(self: *Executor) !void {
-        // Initialize loop from the thread that will run it
-        self.loop = try xev.Loop.init(.{
-            .thread_pool = self.runtime.thread_pool,
+        try setupStackGrowth();
+        errdefer cleanupStackGrowth();
+
+        try self.loop.init(.{
+            .allocator = self.allocator,
+            .thread_pool = &self.runtime.thread_pool,
+            .defer_callbacks = false,
         });
         errdefer self.loop.deinit();
 
-        // Initialize remote wakeup
-        self.remote_wakeup = try xev.Async.init();
-        errdefer self.remote_wakeup.deinit();
+        self.shutdown_async = aio.Async.init();
+        self.shutdown_async.c.userdata = self;
+        self.shutdown_async.c.callback = shutdownCallback;
+        self.loop.add(&self.shutdown_async.c);
 
-        // Register async completion to wake up loop (self pointer is stable)
-        self.remote_wakeup.wait(
-            &self.loop,
-            &self.remote_completion,
-            Executor,
-            self,
-            remoteWakeupCallback,
-        );
+        try registerExecutor(self.runtime, self);
+        errdefer unregisterExecutor(self.runtime, self);
 
-        // Initialize shutdown async
-        self.shutdown_async = try xev.Async.init();
-        errdefer self.shutdown_async.deinit();
-
-        // Register shutdown callback
-        self.shutdown_async.wait(
-            &self.loop,
-            &self.shutdown_completion,
-            Executor,
-            self,
-            shutdownCallback,
-        );
-
-        self.remote_initialized.store(true, .release);
-    }
-
-    fn deinitLoop(self: *Executor) void {
-        self.shutdown_async.deinit();
-        self.remote_wakeup.deinit();
-        self.loop.deinit();
+        std.debug.assert(Executor.current == null);
+        Executor.current = self;
     }
 
     pub fn deinit(self: *Executor) void {
-        // Note: ThreadPool and loop are owned by thread that runs them
-        // Loop cleanup is handled in deinitLoop() called from run*()
-        // Task cleanup is handled by Runtime.deinit()
-        // Stack pool is owned by Runtime
-        _ = self;
+        std.debug.assert(Executor.current == self);
+        Executor.current = null;
+
+        unregisterExecutor(self.runtime, self);
+
+        self.loop.deinit();
+
+        cleanupStackGrowth();
     }
 
     pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
 
         const task = try Task(Result).create(self, func, args, .{
-            .pinned = options.pinned or options.executor.isId(),
+            .pinned = options.pinned,
         });
         errdefer task.destroy(self);
 
@@ -466,9 +427,6 @@ pub const Executor = struct {
 
         // Schedule the task to run (handles cross-thread notification)
         self.scheduleTask(task.task, .maybe_remote);
-
-        // Track task spawn
-        self.metrics.tasks_spawned += 1;
 
         return JoinHandle(Result){
             .awaitable = task.toAwaitable(),
@@ -503,9 +461,6 @@ pub const Executor = struct {
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const current_coro = self.current_coroutine orelse return;
         const current_task = AnyTask.fromCoroutine(current_coro);
-
-        // Track yield
-        self.metrics.yields += 1;
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
@@ -631,14 +586,6 @@ pub const Executor = struct {
     /// Main executor (id=0) orchestrates shutdown when all tasks complete.
     /// Worker executors (id>0) run until signaled to shut down by main executor.
     pub fn run(self: *Executor) !void {
-        // Setup stack growth signal handlers for this thread
-        try setupStackGrowth();
-        defer cleanupStackGrowth();
-
-        // Initialize loop on this thread
-        try self.initLoop();
-        defer self.deinitLoop();
-
         // Signal that executor is ready
         self.ready.set();
 
@@ -687,9 +634,6 @@ pub const Executor = struct {
                         // Mark awaitable as complete and wake all waiters (coroutines and threads)
                         current_awaitable.markComplete();
 
-                        // Track task completion
-                        self.metrics.tasks_completed += 1;
-
                         // Release runtime's reference and check for shutdown
                         self.runtime.releaseAwaitable(current_awaitable, true);
                         // If ref_count > 0, Task(T) handles still exist, keep the task alive
@@ -705,7 +649,7 @@ pub const Executor = struct {
             // Determine event loop run mode based on work availability and spin count
             // Spin briefly with non-blocking polls before blocking to reduce cross-thread wakeup latency
             const has_work = self.ready_queue.head != null or self.lifo_slot != null;
-            const run_mode: xev.RunMode = if (has_work or spin_count < 16) .no_wait else .once;
+            const run_mode: aio.RunMode = if (has_work or spin_count < 16) .no_wait else .once;
 
             // Run event loop
             try self.loop.run(run_mode);
@@ -793,13 +737,8 @@ pub const Executor = struct {
         // Push to remote ready queue (thread-safe)
         self.next_ready_queue_remote.push(wait_node);
 
-        // Notify the target executor's event loop (only if initialized)
-        const initialized = self.remote_initialized.load(.acquire);
-        if (initialized) {
-            self.remote_wakeup.notify() catch |err| {
-                std.log.warn("remote_wakeup.notify() failed for executor {}: {}", .{ self.id, err });
-            };
-        }
+        // Wake the target executor's event loop (only if initialized)
+        self.loop.wake();
     }
 
     /// Schedule a task for execution. Called on the task's home executor (self).
@@ -862,16 +801,6 @@ pub const Executor = struct {
             self.scheduleTaskLocal(task, false);
         }
     }
-
-    /// Get a copy of the current metrics
-    pub fn getMetrics(self: *Executor) ExecutorMetrics {
-        return self.metrics;
-    }
-
-    /// Reset all metrics to zero
-    pub fn resetMetrics(self: *Executor) void {
-        self.metrics = .{};
-    }
 };
 
 // ThreadWaiter - used by external threads to wait on Awaitables
@@ -901,14 +830,16 @@ pub const ThreadWaiter = struct {
 
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
-    executors: std.ArrayList(Executor),
-    thread_pool: ?*xev.ThreadPool,
+    thread_pool: aio.ThreadPool,
     stack_pool: StackPool,
     allocator: Allocator,
     options: RuntimeOptions,
 
-    // Multi-executor coordination
-    next_executor: std.atomic.Value(usize),
+    executors_lock: std.Thread.Mutex = .{},
+    executors: std.ArrayList(*Executor) = .empty,
+    main_executor: Executor,
+    next_executor_index: usize = 0,
+
     tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
 
@@ -916,98 +847,65 @@ pub const Runtime = struct {
     pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
-        // Setup stack growth signal handlers for this thread
-        try setupStackGrowth();
+        const self = try allocator.create(Runtime);
+        errdefer allocator.destroy(self);
 
-        // Allocate Runtime on heap for stable pointer
-        const runtime = try allocator.create(Runtime);
-        errdefer allocator.destroy(runtime);
-
-        // Determine number of executors
-        const num_executors = if (options.num_executors) |n|
-            n
-        else blk: {
-            // null = auto-detect CPU count
-            const cpu_count = std.Thread.getCpuCount() catch 1;
-            break :blk @max(1, cpu_count);
-        };
-
-        // Initialize ThreadPool if enabled (shared resource)
-        var thread_pool: ?*xev.ThreadPool = null;
-        if (options.thread_pool.enabled) {
-            thread_pool = try allocator.create(xev.ThreadPool);
-
-            var config = xev.ThreadPool.Config{};
-            if (options.thread_pool.max_threads) |max| config.max_threads = max;
-            if (options.thread_pool.stack_size) |size| config.stack_size = size;
-            thread_pool.?.* = xev.ThreadPool.init(config);
-        }
-        errdefer if (thread_pool) |tp| {
-            tp.shutdown();
-            tp.deinit();
-            allocator.destroy(tp);
-        };
-
-        // Initialize executors using ArrayList for clean error handling
-        var executors = try std.ArrayList(Executor).initCapacity(allocator, num_executors);
-        errdefer {
-            for (executors.items) |*exec| {
-                exec.deinit();
-            }
-            executors.deinit(allocator);
-        }
-
-        for (0..num_executors) |i| {
-            var executor: Executor = undefined;
-            try executor.init(i, allocator, options, runtime);
-            executors.appendAssumeCapacity(executor);
-        }
-
-        runtime.* = Runtime{
-            .executors = executors,
-            .thread_pool = thread_pool,
-            .stack_pool = StackPool.init(options.stack_pool),
+        self.* = .{
             .allocator = allocator,
             .options = options,
-            .next_executor = std.atomic.Value(usize).init(0),
-            .shutting_down = std.atomic.Value(bool).init(false),
+            .thread_pool = undefined,
+            .main_executor = undefined,
+            .stack_pool = .init(options.stack_pool),
+            .shutting_down = .init(false),
         };
 
-        return runtime;
+        try self.thread_pool.init(allocator, options.thread_pool);
+        errdefer self.thread_pool.deinit();
+
+        try self.executors.ensureTotalCapacity(allocator, 16);
+        errdefer self.executors.deinit(allocator);
+
+        try self.main_executor.init(allocator, options, self);
+        errdefer self.main_executor.deinit();
+
+        return self;
     }
 
     pub fn deinit(self: *Runtime) void {
         const allocator = self.allocator;
 
         // Shutdown ThreadPool before cleaning up executors
-        if (self.thread_pool) |tp| {
-            tp.shutdown();
-        }
+        self.thread_pool.stop();
 
         // Drain any remaining awaitables from global registry
         while (self.tasks.pop()) |awaitable| {
             self.releaseAwaitable(awaitable, false);
         }
 
-        // Deinit all executors (they own their threads)
-        for (self.executors.items) |*exec| {
+        while (true) {
+            var executor: ?*Executor = null;
+
+            self.executors_lock.lock();
+            if (self.executors.items.len > 0) {
+                executor = self.executors.items[0];
+            }
+            self.executors_lock.unlock();
+
+            const exec = executor orelse break;
             exec.deinit();
         }
 
-        // Free executors ArrayList
-        self.executors.deinit(allocator);
+        {
+            self.executors_lock.lock();
+            self.executors.deinit(allocator);
+            self.executors_lock.unlock();
+        }
 
         // Clean up ThreadPool after executors
-        if (self.thread_pool) |tp| {
-            tp.deinit();
-            allocator.destroy(tp);
-        }
+        self.thread_pool.deinit();
 
         // Clean up stack pool
         self.stack_pool.deinit();
-
-        // Cleanup stack growth signal handlers for this thread
-        cleanupStackGrowth();
 
         // Free the Runtime allocation
         allocator.destroy(self);
@@ -1015,29 +913,11 @@ pub const Runtime = struct {
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        // Check if runtime is shutting down
         if (self.tasks.isClosed()) {
             return error.RuntimeShutdown;
         }
 
-        // Determine target executor
-        const executor_id = switch (options.executor) {
-            .any => self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
-            .same => if (Runtime.current_executor) |current_exec|
-                current_exec.id
-            else
-                self.next_executor.fetchAdd(1, .monotonic) % self.executors.items.len,
-            _ => |id| blk: {
-                const raw_id = @intFromEnum(id);
-                if (raw_id >= self.executors.items.len) {
-                    return error.InvalidExecutorId;
-                }
-                break :blk raw_id;
-            },
-        };
-
-        const executor = &self.executors.items[executor_id];
-
+        const executor = getNextExecutor(self);
         return executor.spawn(func, args, options);
     }
 
@@ -1046,8 +926,6 @@ pub const Runtime = struct {
         if (self.tasks.isClosed()) {
             return error.RuntimeShutdown;
         }
-
-        const thread_pool = self.thread_pool orelse return error.NoThreadPool;
 
         const Result = meta.ReturnType(func);
         const task = try BlockingTask(Result).create(self, func, args);
@@ -1062,10 +940,9 @@ pub const Runtime = struct {
         task.toAwaitable().ref_count.incr();
         errdefer _ = task.toAwaitable().ref_count.decr();
 
-        // Schedule the task to run on the thread pool
-        thread_pool.schedule(
-            xev.ThreadPool.Batch.from(&task.task.thread_pool_task),
-        );
+        // Add the work to an executor's loop (loop will submit to thread pool)
+        const executor = getNextExecutor(self);
+        executor.loop.add(&task.task.work.c);
 
         return JoinHandle(Result){
             .awaitable = task.toAwaitable(),
@@ -1073,47 +950,22 @@ pub const Runtime = struct {
         };
     }
 
-    /// Worker thread entry point
-    fn workerThreadFn(self: *Runtime, executor_index: usize) void {
-        self.executors.items[executor_index].run() catch |err| {
-            std.log.err("Worker executor {} failed: {}", .{ executor_index, err });
-        };
-    }
-
     pub fn run(self: *Runtime) !void {
-        // If single-threaded, just run the main executor
-        if (self.executors.items.len == 1) {
-            return self.executors.items[0].run();
+        if (Executor.current) |local_executor| {
+            try local_executor.run();
+            return;
         }
 
-        // Multi-threaded: spawn worker threads for executors[1..]
-        for (self.executors.items[1..], 1..) |*executor, i| {
-            executor.thread = try std.Thread.spawn(.{}, workerThreadFn, .{ self, i });
-        }
+        var executor: Executor = undefined;
 
-        // Wait for all workers to be ready (loop initialized)
-        for (self.executors.items[1..]) |*executor| {
-            executor.ready.wait();
-        }
+        try executor.init(self.allocator, self.options, self);
+        defer executor.deinit();
 
-        // Run main executor on current thread
-        const main_result = self.executors.items[0].run();
-
-        // Join all worker threads
-        for (self.executors.items[1..]) |*executor| {
-            if (executor.thread) |thread| {
-                thread.join();
-            }
-        }
-
-        return main_result;
+        try executor.run();
     }
 
     pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
-        // Spawn on first executor (explicit pinning)
-        var spawn_options = options;
-        spawn_options.executor = ExecutorId.id(0);
-        var handle = try self.spawn(func, args, spawn_options);
+        var handle = try self.spawn(func, args, options);
         defer handle.cancel(self);
 
         // Run all executors
@@ -1227,24 +1079,15 @@ pub const Runtime = struct {
         return Runtime.current_executor;
     }
 
-    /// Get a copy of the current executor metrics (from executor 0).
-    /// In multi-threaded mode, returns metrics from the main executor only.
-    pub fn getMetrics(self: *Runtime) ExecutorMetrics {
-        return self.executors.items[0].getMetrics();
-    }
-
-    /// Reset all executor metrics to zero
-    pub fn resetMetrics(self: *Runtime) void {
-        for (self.executors.items) |*executor| {
-            executor.resetMetrics();
-        }
-    }
-
     /// Get the current time in milliseconds.
     /// This uses the event loop's cached monotonic time for efficiency.
     /// In multi-threaded mode, uses the main executor's loop time.
-    pub fn now(self: *Runtime) i64 {
-        return self.executors.items[0].loop.now();
+    pub fn now(self: *Runtime) u64 {
+        if (Executor.current) |local_executor| {
+            return local_executor.loop.now();
+        } else {
+            return self.main_executor.loop.now();
+        }
     }
 
     /// Check if task list is empty and initiate shutdown if so.
@@ -1258,8 +1101,8 @@ pub const Runtime = struct {
                 self.shutting_down.store(true, .release);
 
                 // Wake all executors (including main if sleeping in event loop)
-                for (self.executors.items) |*executor| {
-                    executor.shutdown_async.notify() catch {};
+                for (self.executors.items) |executor| {
+                    executor.shutdown_async.notify();
                 }
             } else |_| {
                 // Another executor is closing or tasks were added - do nothing
@@ -1284,174 +1127,21 @@ test "runtime with thread pool smoke test" {
     const testing = std.testing;
 
     const runtime = try Runtime.init(testing.allocator, .{
-        .thread_pool = .{ .enabled = true },
+        .thread_pool = .{},
     });
     defer runtime.deinit();
 
-    // Verify ThreadPool was created
-    testing.expect(runtime.thread_pool != null) catch |err| {
-        std.debug.print("ThreadPool was not created when enabled\n", .{});
-        return err;
-    };
+    // ThreadPool is always created (no need to check)
 
     // Run empty runtime (should exit immediately)
     try runtime.run();
-}
-
-test "runtime: multi-threaded with auto-detect executors" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = null, // Auto-detect CPU count
-    });
-    defer runtime.deinit();
-
-    // Verify we have multiple executors
-    try testing.expect(runtime.executors.items.len >= 1);
-
-    const TestContext = struct {
-        fn task(rt: *Runtime, id: usize) Cancelable!usize {
-            try rt.sleep(1);
-            return id * 2;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Spawn multiple tasks
-            var handles: [10]JoinHandle(Cancelable!usize) = undefined;
-            for (&handles, 0..) |*handle, i| {
-                handle.* = try rt.spawn(task, .{ rt, i }, .{});
-            }
-            defer for (&handles) |*handle| handle.cancel(rt);
-
-            // Wait for all tasks
-            for (&handles, 0..) |*handle, i| {
-                const result = try handle.join(rt);
-                try testing.expectEqual(i * 2, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
-}
-
-test "runtime: multi-threaded with explicit executor count" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = 4,
-    });
-    defer runtime.deinit();
-
-    // Verify we have exactly 4 executors
-    try testing.expectEqual(@as(usize, 4), runtime.executors.items.len);
-
-    const TestContext = struct {
-        fn task(rt: *Runtime, id: usize) Cancelable!usize {
-            try rt.sleep(1);
-            return id * 2;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Spawn multiple tasks
-            var handles: [10]JoinHandle(Cancelable!usize) = undefined;
-            var n: usize = 0;
-            defer {
-                for (handles[0..n]) |*handle| {
-                    handle.cancel(rt);
-                }
-            }
-            for (&handles, 0..) |*handle, i| {
-                handle.* = try rt.spawn(task, .{ rt, i }, .{});
-                n += 1;
-            }
-
-            // Wait for all tasks
-            for (&handles, 0..) |*handle, i| {
-                const result = try handle.join(rt);
-                try testing.expectEqual(i * 2, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
-}
-
-test "runtime: multi-threaded with executor pinning" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = 4,
-    });
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn task(executor_id: usize) usize {
-            return executor_id;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Pin tasks to specific executors
-            var handles: [4]JoinHandle(usize) = undefined;
-            for (&handles, 0..) |*handle, i| {
-                handle.* = try rt.spawn(task, .{i}, .{ .executor = ExecutorId.id(i) });
-            }
-            defer for (&handles) |*handle| handle.cancel(rt);
-
-            // Verify results
-            for (&handles, 0..) |*handle, i| {
-                const result = handle.join(rt);
-                try testing.expectEqual(i, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
-}
-
-test "runtime: task colocation with getExecutorId" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .num_executors = 4,
-    });
-    defer runtime.deinit();
-
-    const TestContext = struct {
-        fn getExecutorId() usize {
-            const executor = Runtime.current_executor.?;
-            return executor.id;
-        }
-
-        fn mainTask(rt: *Runtime) !void {
-            // Spawn first task on executor 2
-            var handle1 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(2) });
-            defer handle1.cancel(rt);
-
-            // Get the executor ID from the first task
-            const executor_id = handle1.getExecutorId();
-            try testing.expect(executor_id != null);
-            try testing.expectEqual(@as(usize, 2), executor_id.?);
-
-            // Spawn second task colocated with the first task
-            var handle2 = try rt.spawn(getExecutorId, .{}, .{ .executor = ExecutorId.id(executor_id.?) });
-            defer handle2.cancel(rt);
-
-            // Verify both tasks ran on the same executor
-            const result1 = handle1.join(rt);
-            const result2 = handle2.join(rt);
-            try testing.expectEqual(result1, result2);
-            try testing.expectEqual(@as(usize, 2), result1);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.mainTask, .{runtime}, .{});
 }
 
 test "runtime: spawnBlocking smoke test" {
     const testing = std.testing;
 
     const runtime = try Runtime.init(testing.allocator, .{
-        .thread_pool = .{ .enabled = true },
+        .thread_pool = .{},
     });
     defer runtime.deinit();
 

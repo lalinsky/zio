@@ -37,9 +37,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Enable thread pool for DNS resolution
+    // Thread pool is always enabled for DNS resolution
     var runtime = try zio.Runtime.init(allocator, .{
-        .thread_pool = .{ .enabled = true },
+        .thread_pool = .{},
     });
     defer runtime.deinit();
 

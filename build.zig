@@ -7,16 +7,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const xev_backend = b.option(
+    const backend = b.option(
         []const u8,
-        "xev_backend",
-        "Override the default xev backend (io_uring, epoll, kqueue, iocp, wasi_poll)",
+        "backend",
+        "Override the default aio backend (io_uring, epoll, kqueue, iocp, wasi_poll)",
     );
 
-    const xev = b.dependency("libxev", .{
+    const aio = b.dependency("aio", .{
         .target = target,
         .optimize = optimize,
-        .backend = xev_backend,
+        .backend = backend,
     });
 
     const coro = b.dependency("coro", .{
@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    zio.addImport("xev", xev.module("xev"));
+    zio.addImport("aio", aio.module("aio"));
     zio.addImport("coro", coro.module("coro"));
 
     const zio_lib = b.addLibrary(.{
