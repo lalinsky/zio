@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const aio = @import("aio");
 const meta = @import("../../meta.zig");
 const Runtime = @import("../../runtime.zig").Runtime;
 const Server = @import("../net.zig").Server;
