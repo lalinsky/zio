@@ -30,6 +30,7 @@ const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
 const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
+const stdio = @import("stdio.zig");
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -796,6 +797,14 @@ pub const Executor = struct {
             assert(Runtime.current_executor == self);
             self.scheduleTaskLocal(task, false);
         }
+    }
+
+    pub fn io(self: *Runtime) std.Io {
+        return stdio.fromRuntime(self);
+    }
+
+    pub fn fromIo(io_: std.Io) *Runtime {
+        return stdio.toRuntime(io_);
     }
 };
 
