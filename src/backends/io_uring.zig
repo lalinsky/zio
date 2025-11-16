@@ -1,0 +1,770 @@
+const std = @import("std");
+const linux = std.os.linux;
+const posix_os = @import("../os/posix.zig");
+const net = @import("../os/net.zig");
+const fs = @import("../os/fs.zig");
+const time = @import("../os/time.zig");
+const common = @import("common.zig");
+const ReadBuf = @import("../buf.zig").ReadBuf;
+const WriteBuf = @import("../buf.zig").WriteBuf;
+const LoopState = @import("../loop.zig").LoopState;
+const Completion = @import("../completion.zig").Completion;
+const Op = @import("../completion.zig").Op;
+const Queue = @import("../queue.zig").Queue;
+const Cancel = @import("../completion.zig").Cancel;
+
+// Special user_data values for internal operations
+const USER_DATA_WAKER: u64 = 0; // Waker eventfd POLL_ADD operations
+const USER_DATA_CANCEL: u64 = 1; // Cancel SQE operations (should be skipped)
+const NetOpen = @import("../completion.zig").NetOpen;
+const NetBind = @import("../completion.zig").NetBind;
+const NetListen = @import("../completion.zig").NetListen;
+const NetConnect = @import("../completion.zig").NetConnect;
+const NetAccept = @import("../completion.zig").NetAccept;
+const NetRecv = @import("../completion.zig").NetRecv;
+const NetSend = @import("../completion.zig").NetSend;
+const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
+const NetSendTo = @import("../completion.zig").NetSendTo;
+const NetClose = @import("../completion.zig").NetClose;
+const NetShutdown = @import("../completion.zig").NetShutdown;
+const FileOpen = @import("../completion.zig").FileOpen;
+const FileCreate = @import("../completion.zig").FileCreate;
+const FileRename = @import("../completion.zig").FileRename;
+const FileDelete = @import("../completion.zig").FileDelete;
+const FileClose = @import("../completion.zig").FileClose;
+const FileRead = @import("../completion.zig").FileRead;
+const FileWrite = @import("../completion.zig").FileWrite;
+const FileSync = @import("../completion.zig").FileSync;
+
+pub const NetHandle = net.fd_t;
+
+const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
+
+pub const capabilities: BackendCapabilities = .{
+    .file_read = true,
+    .file_write = true,
+    .file_open = true,
+    .file_create = true,
+    .file_close = true,
+    .file_sync = true,
+    .file_rename = true,
+    .file_delete = true,
+};
+
+pub const SharedState = struct {};
+
+pub const NetRecvData = struct {
+    msg: linux.msghdr = undefined,
+};
+
+pub const NetSendData = struct {
+    msg: linux.msghdr_const = undefined,
+};
+
+pub const NetRecvFromData = struct {
+    msg: linux.msghdr = undefined,
+};
+
+pub const NetSendToData = struct {
+    msg: linux.msghdr_const = undefined,
+};
+
+pub const FileOpenData = struct {
+    path: [:0]const u8 = "",
+};
+
+pub const FileCreateData = struct {
+    path: [:0]const u8 = "",
+};
+
+pub const FileRenameData = struct {
+    old_path: [:0]const u8 = "",
+    new_path: [:0]const u8 = "",
+};
+
+pub const FileDeleteData = struct {
+    path: [:0]const u8 = "",
+};
+
+const Self = @This();
+
+const log = std.log.scoped(.zio_uring);
+
+allocator: std.mem.Allocator,
+ring: linux.IoUring,
+waker: Waker,
+
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+    _ = shared_state;
+    var flags: u32 = 0;
+    flags |= linux.IORING_SETUP_SINGLE_ISSUER;
+    flags |= linux.IORING_SETUP_DEFER_TASKRUN;
+    flags |= linux.IORING_SETUP_COOP_TASKRUN;
+
+    var ring = try linux.IoUring.init(queue_size, flags);
+    errdefer ring.deinit();
+
+    self.* = .{
+        .allocator = allocator,
+        .ring = ring,
+        .waker = undefined,
+    };
+
+    try self.waker.init(&self.ring);
+}
+
+pub fn deinit(self: *Self) void {
+    self.waker.deinit();
+    self.ring.deinit();
+}
+
+pub fn wake(self: *Self) void {
+    self.waker.notify();
+}
+
+pub fn wakeFromAnywhere(self: *Self) void {
+    // eventfd is async-signal-safe, so we can use the same mechanism
+    self.waker.notify();
+}
+
+/// Submit a completion to the backend - infallible.
+/// On error, completes the operation immediately with error.Unexpected.
+pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
+    c.state = .running;
+    state.active += 1;
+
+    switch (c.op) {
+        .timer, .async, .work => unreachable, // Managed by the loop
+        .cancel => unreachable, // Handled separately via cancel() method
+
+        // Synchronous operations (no io_uring support or always immediate)
+        .net_open => {
+            const data = c.cast(NetOpen);
+            if (net.socket(
+                data.domain,
+                data.socket_type,
+                data.flags,
+            )) |handle| {
+                c.setResult(.net_open, handle);
+            } else |err| {
+                c.setError(err);
+            }
+            state.markCompleted(c);
+        },
+        .net_bind => {
+            common.handleNetBind(c);
+            state.markCompleted(c);
+        },
+        .net_listen => {
+            common.handleNetListen(c);
+            state.markCompleted(c);
+        },
+
+        // Async operations through io_uring
+        .net_connect => {
+            const data = c.cast(NetConnect);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for connect", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_connect(data.handle, data.addr, data.addr_len);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_accept => {
+            const data = c.cast(NetAccept);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for accept", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_accept(data.handle, data.addr, data.addr_len, 0);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_recv => {
+            const data = c.cast(NetRecv);
+            data.internal.msg = .{
+                .name = null,
+                .namelen = 0,
+                .iov = data.buffers.iovecs.ptr,
+                .iovlen = data.buffers.iovecs.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for recvmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_send => {
+            const data = c.cast(NetSend);
+            data.internal.msg = .{
+                .name = null,
+                .namelen = 0,
+                .iov = data.buffer.iovecs.ptr,
+                .iovlen = data.buffer.iovecs.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for sendmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_recvfrom => {
+            const data = c.cast(NetRecvFrom);
+            data.internal.msg = .{
+                .name = @ptrCast(data.addr),
+                .namelen = if (data.addr_len) |len| len.* else 0,
+                .iov = data.buffer.iovecs.ptr,
+                .iovlen = data.buffer.iovecs.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for recvmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_sendto => {
+            const data = c.cast(NetSendTo);
+            data.internal.msg = .{
+                .name = @ptrCast(data.addr),
+                .namelen = data.addr_len,
+                .iov = data.buffer.iovecs.ptr,
+                .iovlen = data.buffer.iovecs.len,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for sendmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_shutdown => {
+            const data = c.cast(NetShutdown);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for shutdown", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_shutdown(data.handle, @intFromEnum(data.how));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_close => {
+            const data = c.cast(NetClose);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for close", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_close(data.handle);
+            sqe.user_data = @intFromPtr(c);
+        },
+
+        .file_open => {
+            const data = c.cast(FileOpen);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for file_open", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            const flags = linux.O{
+                .ACCMODE = switch (data.flags.mode) {
+                    .read_only => .RDONLY,
+                    .write_only => .WRONLY,
+                    .read_write => .RDWR,
+                },
+                .CLOEXEC = true,
+            };
+            sqe.prep_openat(data.dir, path, flags, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+        .file_create => {
+            const data = c.cast(FileCreate);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for file_create", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            const flags = linux.O{
+                .ACCMODE = if (data.flags.read) .RDWR else .WRONLY,
+                .CLOEXEC = true,
+                .CREAT = true,
+                .TRUNC = data.flags.truncate,
+                .EXCL = data.flags.exclusive,
+            };
+            sqe.prep_openat(data.dir, path, flags, data.flags.mode);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+        .file_close => {
+            const data = c.cast(FileClose);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_close", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_close(data.handle);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_read => {
+            const data = c.cast(FileRead);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_read", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_readv(data.handle, data.buffer.iovecs, data.offset);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_write => {
+            const data = c.cast(FileWrite);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_write", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_writev(data.handle, data.buffer.iovecs, data.offset);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_sync => {
+            const data = c.cast(FileSync);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_sync", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            const flags: u32 = if (data.flags.only_data) linux.IORING_FSYNC_DATASYNC else 0;
+            sqe.prep_fsync(data.handle, flags);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_rename => {
+            const data = c.cast(FileRename);
+            const old_path = self.allocator.dupeZ(u8, data.old_path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const new_path = self.allocator.dupeZ(u8, data.new_path) catch {
+                self.allocator.free(old_path);
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(old_path);
+                self.allocator.free(new_path);
+                log.err("Failed to get io_uring SQE for file_rename", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_renameat(@intCast(data.old_dir), old_path.ptr, @intCast(data.new_dir), new_path.ptr, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.old_path = old_path;
+            data.internal.new_path = new_path;
+        },
+        .file_delete => {
+            const data = c.cast(FileDelete);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for file_delete", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_unlinkat(@intCast(data.dir), path.ptr, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+    }
+}
+
+/// Cancel a completion - infallible.
+/// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
+pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
+    switch (target.state) {
+        .new => {
+            // UNREACHABLE: When cancel is added via loop.add() and target.state == .new,
+            // loop.add() handles it directly and doesn't call backend.cancel().
+            unreachable;
+        },
+        .running => {
+            // Target is executing in io_uring. Submit a cancel SQE.
+            // This will generate TWO CQEs:
+            // 1. Cancel CQE (user_data=USER_DATA_CANCEL, res=0 or -ENOENT)
+            // 2. Target CQE (user_data=target, res=-ECANCELED or success if cancel was too late)
+            //
+            // In poll(), we:
+            // - Skip cancel CQEs with user_data=USER_DATA_CANCEL
+            // - Process target CQE and mark target complete
+            // - markCompleted(target) recursively completes the Cancel operation if canceled_by is set
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for cancel", .{});
+                // Cancel SQE failed - do nothing, let target complete naturally
+                // When target completes, markCompleted(target) will recursively complete cancel if canceled_by is set
+                return;
+            };
+            sqe.prep_cancel(@intFromPtr(target), 0);
+            sqe.user_data = USER_DATA_CANCEL;
+        },
+        .completed, .dead => {
+            // Target already completed (has result) or fully finished (callback called).
+            // No CQEs will arrive. This shouldn't happen as loop.add()/loop.cancel() check state first.
+            unreachable;
+        },
+    }
+}
+
+/// Get an SQE, flushing the queue with non-blocking poll if full
+fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
+    return self.ring.get_sqe() catch |err| {
+        if (err == error.SubmissionQueueFull) {
+            // Queue full - flush with non-blocking poll to drain completions
+            _ = try self.poll(state, 0);
+            // Retry after flush
+            return self.ring.get_sqe();
+        }
+        return err;
+    };
+}
+
+pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
+    const linux_os = @import("../os/linux.zig");
+
+    // Re-arm waker if needed (after drain() in previous tick)
+    try self.waker.rearm();
+
+    // Flush SQ to get number of pending submissions
+    const to_submit = self.ring.flush_sq();
+
+    // Setup timeout for io_uring_enter2 if finite
+    var ts: linux.kernel_timespec = undefined;
+    var arg: linux_os.io_uring_getevents_arg = .{};
+    var flags: u32 = linux.IORING_ENTER_GETEVENTS;
+
+    if (timeout_ms < std.math.maxInt(u64)) {
+        ts = .{
+            .sec = @intCast(timeout_ms / 1000),
+            .nsec = @intCast((timeout_ms % 1000) * 1_000_000),
+        };
+        arg.ts = @intFromPtr(&ts);
+        flags |= linux.IORING_ENTER_EXT_ARG;
+    }
+
+    // Submit and wait using io_uring_enter2 with timeout
+    const submitted = linux_os.io_uring_enter2(
+        self.ring.fd,
+        to_submit,
+        1, // min_complete = 1 to wait for at least one completion or timeout
+        flags,
+        if (flags & linux.IORING_ENTER_EXT_ARG != 0) &arg else null,
+        @sizeOf(linux_os.io_uring_getevents_arg),
+    ) catch |err| switch (err) {
+        error.SignalInterrupt => return true, // Interrupted, treat as timeout
+        else => return err,
+    };
+    _ = submitted;
+
+    // Process all available completions
+    var cqes: [256]linux.io_uring_cqe = undefined;
+    const count = try self.ring.copy_cqes(&cqes, 0);
+
+    if (count == 0) {
+        return true; // Timed out
+    }
+
+    for (cqes[0..count]) |cqe| {
+        // Handle internal operations with special user_data values
+        if (cqe.user_data == USER_DATA_WAKER) {
+            // Wake-up POLL_ADD completion
+            self.waker.drain();
+            state.loop.processAsyncHandles();
+            continue;
+        }
+
+        if (cqe.user_data == USER_DATA_CANCEL) {
+            // Cancel SQE completion - just skip it
+            continue;
+        }
+
+        // Extract completion pointer from user_data
+        const completion = @as(*Completion, @ptrFromInt(cqe.user_data));
+
+        // Skip if already completed (can happen with cancellations)
+        // When a target is canceled, it recursively completes the cancel operation
+        // So when we get the cancel's CQE, it's already completed
+        // Similarly, when we get the target's CQE after the cancel already completed it
+        if (completion.state == .completed or completion.state == .dead) {
+            continue;
+        }
+
+        // For cancel operations: NEVER complete the cancel directly from tick()
+        // The cancel should only be completed when the target completes (via markCompleted recursion)
+        // So we always skip cancel CQEs - either the target already completed it, or will complete it
+        if (completion.op == .cancel) {
+            continue;
+        }
+
+        // Store the result in the completion
+        self.storeResult(completion, cqe.res);
+
+        // Mark as completed, which invokes the callback
+        state.markCompleted(completion);
+    }
+
+    return false; // Did not timeout, woke up due to events
+}
+
+fn storeResult(self: *Self, c: *Completion, res: i32) void {
+    switch (c.op) {
+        .timer, .async, .work, .cancel => unreachable,
+        .net_open => unreachable,
+        .net_bind => unreachable,
+        .net_listen => unreachable,
+
+        .net_connect => {
+            if (res < 0) {
+                c.setError(net.errnoToConnectError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_connect, {});
+            }
+        },
+        .net_accept => {
+            if (res < 0) {
+                c.setError(net.errnoToAcceptError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_accept, @as(net.fd_t, @intCast(res)));
+            }
+        },
+        .net_recv => {
+            if (res < 0) {
+                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_recv, @as(usize, @intCast(res)));
+            }
+        },
+        .net_send => {
+            if (res < 0) {
+                c.setError(net.errnoToSendError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_send, @as(usize, @intCast(res)));
+            }
+        },
+        .net_recvfrom => {
+            if (res < 0) {
+                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_recvfrom, @as(usize, @intCast(res)));
+                // Propagate the peer address length filled in by the kernel
+                const data = c.cast(NetRecvFrom);
+                if (data.addr_len) |len_ptr| {
+                    len_ptr.* = data.internal.msg.namelen;
+                }
+            }
+        },
+        .net_sendto => {
+            if (res < 0) {
+                c.setError(net.errnoToSendError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_sendto, @as(usize, @intCast(res)));
+            }
+        },
+        .net_shutdown => {
+            if (res < 0) {
+                c.setError(net.errnoToShutdownError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_shutdown, {});
+            }
+        },
+        .net_close => {
+            // Close errors and cancelations are generally ignored
+            // But we still need to use setResult to handle cancelation race conditions
+            c.setResult(.net_close, {});
+        },
+
+        .file_open => {
+            const data = c.cast(FileOpen);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_open, res);
+            }
+        },
+
+        .file_create => {
+            const data = c.cast(FileCreate);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_create, res);
+            }
+        },
+
+        .file_close => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_close, {});
+            }
+        },
+
+        .file_read => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_read, @intCast(res));
+            }
+        },
+
+        .file_write => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_write, @intCast(res));
+            }
+        },
+
+        .file_sync => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileSyncError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_sync, {});
+            }
+        },
+
+        .file_rename => {
+            const data = c.cast(FileRename);
+            self.allocator.free(data.internal.old_path);
+            self.allocator.free(data.internal.new_path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileRenameError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_rename, {});
+            }
+        },
+
+        .file_delete => {
+            const data = c.cast(FileDelete);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileDeleteError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_delete, {});
+            }
+        },
+    }
+}
+
+fn recvFlagsToMsg(flags: net.RecvFlags) u32 {
+    var msg_flags: u32 = 0;
+    if (flags.peek) msg_flags |= linux.MSG.PEEK;
+    if (flags.waitall) msg_flags |= linux.MSG.WAITALL;
+    return msg_flags;
+}
+
+fn sendFlagsToMsg(flags: net.SendFlags) u32 {
+    var msg_flags: u32 = 0;
+    if (flags.no_signal) msg_flags |= linux.MSG.NOSIGNAL;
+    return msg_flags;
+}
+
+// Async notification mechanism using eventfd with POLL_ADD
+const Waker = struct {
+    const linux_os = @import("../os/linux.zig");
+
+    ring: *linux.IoUring,
+    eventfd: i32,
+    needs_rearm: bool,
+
+    fn init(self: *Waker, ring: *linux.IoUring) !void {
+        // Create an eventfd for wake-up notifications
+        const efd = try posix_os.eventfd(0, posix_os.EFD.CLOEXEC | posix_os.EFD.NONBLOCK);
+        errdefer _ = linux.close(efd);
+
+        self.* = .{
+            .ring = ring,
+            .eventfd = efd,
+            .needs_rearm = true, // Arm on first tick
+        };
+    }
+
+    fn deinit(self: *Waker) void {
+        _ = linux.close(self.eventfd);
+    }
+
+    fn notify(self: *Waker) void {
+        // Write to eventfd to wake up the POLL operation
+        posix_os.eventfd_write(self.eventfd, 1) catch {};
+    }
+
+    fn drain(self: *Waker) void {
+        // Read and clear the eventfd counter
+        _ = posix_os.eventfd_read(self.eventfd) catch {};
+
+        // Mark that we need to re-arm the POLL_ADD for next wake-up
+        // This will be done in tick() before io_uring_enter2
+        self.needs_rearm = true;
+    }
+
+    fn rearm(self: *Waker) !void {
+        if (!self.needs_rearm) return;
+
+        const sqe = try self.ring.get_sqe();
+        sqe.prep_poll_add(self.eventfd, linux.POLL.IN);
+        sqe.user_data = USER_DATA_WAKER;
+
+        self.needs_rearm = false;
+    }
+};

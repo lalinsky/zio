@@ -1,0 +1,12 @@
+.{
+    .name = .aio,
+    .version = "0.4.0",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0xdf66d422f6fb9e93,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+    },
+}
