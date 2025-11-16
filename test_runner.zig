@@ -176,7 +176,7 @@ pub fn main() !void {
 
                 Printer.fmt("{s}\n", .{BORDER});
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
+                    std.debug.dumpStackTrace(trace);
                 }
                 if (env.fail_first) {
                     break;

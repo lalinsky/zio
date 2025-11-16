@@ -355,7 +355,7 @@ pub const Executor = struct {
     thread: ?std.Thread = null,
 
     // Coordination for thread startup
-    ready: std.Thread.ResetEvent = .{},
+    ready: std.Thread.ResetEvent = .unset,
     available: bool = true,
 
     // Executor dedicated to this thread
@@ -998,8 +998,7 @@ pub const Runtime = struct {
                 return executor.sleep(milliseconds);
             }
         }
-        // Not in coroutine - use blocking sleep (cannot be canceled)
-        std.Thread.sleep(milliseconds * std.time.ns_per_ms);
+        aio.system.time.sleep(@intCast(milliseconds));
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.
