@@ -535,11 +535,11 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     // Store accept_socket so we can retrieve it later (needed for both success and error cases)
     data.result_private_do_not_touch = accept_socket;
 
-    // When AcceptEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
+    // When AcceptEx succeeds (result == TRUE) OR returns IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.FALSE) {
         const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             net.close(accept_socket);
             log.err("AcceptEx failed: {}", .{err});
@@ -573,12 +573,12 @@ fn submitRecv(self: *Self, state: *LoopState, data: *NetRecv) !void {
         null, // No completion routine
     );
 
-    // When WSARecv succeeds (result == 0) OR returns WSA_IO_PENDING,
+    // When WSARecv succeeds (result == 0) OR returns IO_PENDING,
     // the completion will be posted to the IOCP port. We should NOT
     // complete it immediately here.
     if (result == windows.ws2_32.SOCKET_ERROR) {
         const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSARecv failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
@@ -611,11 +611,11 @@ fn submitSend(self: *Self, state: *LoopState, data: *NetSend) !void {
         null, // No completion routine
     );
 
-    // When WSASend succeeds (result == 0) OR returns WSA_IO_PENDING,
+    // When WSASend succeeds (result == 0) OR returns IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.ws2_32.SOCKET_ERROR) {
         const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSASend failed: {}", .{err});
             data.c.setError(net.errnoToSendError(err));
@@ -650,11 +650,11 @@ fn submitRecvFrom(self: *Self, state: *LoopState, data: *NetRecvFrom) !void {
         null, // No completion routine
     );
 
-    // When WSARecvFrom succeeds (result == 0) OR returns WSA_IO_PENDING,
+    // When WSARecvFrom succeeds (result == 0) OR returns IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.ws2_32.SOCKET_ERROR) {
         const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSARecvFrom failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
@@ -689,11 +689,11 @@ fn submitSendTo(self: *Self, state: *LoopState, data: *NetSendTo) !void {
         null, // No completion routine
     );
 
-    // When WSASendTo succeeds (result == 0) OR returns WSA_IO_PENDING,
+    // When WSASendTo succeeds (result == 0) OR returns IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.ws2_32.SOCKET_ERROR) {
         const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSASendTo failed: {}", .{err});
             data.c.setError(net.errnoToSendError(err));
@@ -757,11 +757,11 @@ fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
         &data.c.internal.overlapped,
     );
 
-    // When ConnectEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
+    // When ConnectEx succeeds (result == TRUE) OR returns IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.FALSE) {
         const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("ConnectEx failed: {}", .{err});
             data.c.setError(net.errnoToConnectError(err));
