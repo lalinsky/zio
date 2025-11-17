@@ -63,7 +63,7 @@ pub const RuntimeOptions = struct {
     thread_pool: aio.ThreadPool.Options = .{},
     stack_pool: StackPoolConfig = .{
         .maximum_size = 8 * 1024 * 1024, // 8MB reserved
-        .committed_size = 64 * 1024, // 64KB initial commit
+        .committed_size = 256 * 1024, // 64KB initial commit
         .max_unused_stacks = 16,
         .max_age_ns = 60 * std.time.ns_per_s, // 60 seconds
     },
@@ -374,8 +374,8 @@ pub const Executor = struct {
             .runtime = runtime,
         };
 
-        try setupStackGrowth();
-        errdefer cleanupStackGrowth();
+        // try setupStackGrowth();
+        // errdefer cleanupStackGrowth();
 
         try self.loop.init(.{
             .allocator = self.allocator,
