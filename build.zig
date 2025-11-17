@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) void {
     // Optional: Enable sanitizers for debugging
     const use_sanitizer = b.option(bool, "sanitize", "Enable address sanitizer") orelse false;
     if (use_sanitizer) {
-        lib_unit_tests.root_module.sanitize_c = true;
+        lib_unit_tests.root_module.sanitize_c = .address;
     }
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
