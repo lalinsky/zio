@@ -688,3 +688,47 @@ test "Coroutine: message passing" {
 
     try std.testing.expectEqual(9, receiver_closure.result);
 }
+
+test "Coroutine: allocator inside coroutine" {
+    // This serves two purposes:
+    //  - it tests a fairly complex function inside a coroutine (uses a lot of stack)
+    //  - it tests the new `std.debug` refactor in Zig 0.16
+    //    (https://github.com/ziglang/zig/pull/25227)
+
+    const st = @import("stack.zig");
+
+    try st.setupStackGrowth();
+    defer st.cleanupStackGrowth();
+
+    var parent_context: Context = undefined;
+
+    var coro: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+    try stackAlloc(&coro.context.stack_info, 8 * 1024 * 1024, 4096);
+    defer stackFree(coro.context.stack_info);
+
+    const Fn = struct {
+        fn main(_: *Coroutine) !void {
+            for (0..8) |k| {
+                var buf = try std.testing.allocator.alloc(u8, 1024);
+                defer std.testing.allocator.free(buf);
+
+                for (0..1024) |i| {
+                    buf[i] = @intCast((i + k) & 0xff);
+                }
+            }
+        }
+    };
+
+    const C = Closure(Fn.main);
+    var closure = C.init(.{});
+    coro.setup(&C.start, &closure);
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    try std.testing.expectEqual({}, closure.result);
+}
