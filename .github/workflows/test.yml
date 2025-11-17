@@ -6,6 +6,9 @@ on:
     tags:
   pull_request:
 
+env:
+  TEST_FILTER: "Timeout"
+
 jobs:
   test:
     strategy:
