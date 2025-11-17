@@ -118,6 +118,12 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
 
+    // Optional: Enable sanitizers for debugging
+    const use_sanitizer = b.option(bool, "sanitize", "Enable address sanitizer") orelse false;
+    if (use_sanitizer) {
+        lib_unit_tests.root_module.sanitize_c = true;
+    }
+
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);

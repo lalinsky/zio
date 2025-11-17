@@ -47,5 +47,22 @@ jobs:
       timeout-minutes: 5
 
     - name: Run tests (native)
-      run: ./zig-out/bin/test
+      shell: bash
+      run: |
+        if [[ "$RUNNER_OS" == "macOS" ]]; then
+          echo "Running tests under LLDB to capture crash information..."
+          # Run under lldb to get backtrace on crash
+          cat > lldb_commands.txt <<EOF
+        run
+        bt all
+        frame variable
+        quit
+        EOF
+          lldb -s lldb_commands.txt ./zig-out/bin/test || {
+            echo "Test crashed with exit code $?"
+            exit 1
+          }
+        else
+          ./zig-out/bin/test
+        fi
       timeout-minutes: 5
