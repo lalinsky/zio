@@ -409,11 +409,11 @@ pub inline fn switchContext(
 ///
 /// x86_64 handles stack alignment here since we use JMP instead of CALL:
 /// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
-/// - CALL would push 8-byte return address, so we push 0 to simulate this
-/// - If the function unexpectedly returns, it will crash on null address (defensive)
+/// - CALL would push 8-byte return address, so we push sentinel label address
+/// - We use a real address (not 0) to avoid integer overflow in stack trace dumping
 ///
-/// ARM64 stores return address in x30 register (not stack). x30 is already 0 from
-/// Context.lr initialization, so no need to explicitly set it here.
+/// ARM64 stores return address in x30 register (not stack). x30 is set to the
+/// sentinel label address instead of 0.
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
@@ -422,30 +422,36 @@ fn coroEntry() callconv(.naked) noreturn {
                 // Allocate shadow space before return address to match call convention
                 asm volatile (
                     \\ subq $32, %%rsp
-                    \\ pushq $0
+                    \\ leaq 1f(%%rip), %%rax
+                    \\ pushq %%rax
                     \\ movq 48(%%rsp), %%rcx
                     \\ jmpq *40(%%rsp)
+                    \\1:
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
                 asm volatile (
-                    \\ pushq $0
+                    \\ leaq 1f(%%rip), %%rax
+                    \\ pushq %%rax
                     \\ movq 16(%%rsp), %%rdi
                     \\ jmpq *8(%%rsp)
+                    \\1:
                 );
             }
         },
         .aarch64 => asm volatile (
-            // x30 is already 0 from Context.lr initialization and switchContext restore
+            \\ adr x30, 1f
             \\ ldr x0, [sp, #8]
             \\ ldr x2, [sp]
             \\ br x2
+            \\1:
         ),
         .riscv64 => asm volatile (
-            \\ li ra, 0
+            \\ lla ra, 1f
             \\ ld a0, 8(sp)
             \\ ld t0, 0(sp)
             \\ jr t0
+            \\1:
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -732,3 +738,50 @@ test "Coroutine: allocator inside coroutine" {
 
     try std.testing.expectEqual({}, closure.result);
 }
+
+
+test "Coroutine: stack trace" {
+    const stack = @import("stack.zig");
+
+    var parent_ctx: Context = undefined;
+    var coro = Coroutine{
+        .parent_context_ptr = &parent_ctx,
+        .context = undefined,
+    };
+
+    try stack.stackAlloc(&coro.context.stack_info, 4 * 1024 * 1024, 4 * 1024 * 1024);
+    defer stack.stackFree(coro.context.stack_info);
+
+    const TestData = struct {
+        trace: std.builtin.StackTrace = undefined,
+        trace_addrs: [32]usize = undefined,
+
+        fn coroFunc(c: *Coroutine, userdata: ?*anyopaque) void {
+            c.yield(); // make it slightly more complicated and yield once
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                self.trace.index = 0;
+                self.trace.instruction_addresses = &self.trace_addrs;
+                std.debug.captureStackTrace(null, &self.trace);
+            } else {
+                self.trace = std.debug.captureCurrentStackTrace(.{}, &self.trace_addrs);
+            }
+        }
+    };
+
+    var test_data = TestData{};
+    coro.setup(&TestData.coroFunc, &test_data);
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+        std.debug.dumpStackTrace(test_data.trace);
+    } else {
+        std.debug.dumpStackTrace(&test_data.trace);
+    }
+
+    try std.testing.expect(test_data.trace.index > 1 and test_data.trace.index < 7);
+}
+
