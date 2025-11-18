@@ -61,7 +61,7 @@ jobs:
 
     - name: Build
       run: >
-        zig build -Dinstall-tests
+        zig build --release=safe -Dinstall-tests
         ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
       timeout-minutes: 5
 

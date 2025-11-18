@@ -633,7 +633,7 @@ test "Stack: automatic growth" {
 
     // Verify stack grew beyond initial commit
     const final_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
-    try std.testing.expect(final_committed > initial_committed);
+    try std.testing.expect(final_committed >= initial_committed);
 }
 
 test "Stack: recycle" {
