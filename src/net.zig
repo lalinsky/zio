@@ -16,8 +16,8 @@ pub const Server = io_net.Server;
 pub const Stream = io_net.Stream;
 
 pub const IpAddressIterator = struct {
-    head: ?*std.posix.addrinfo,
-    current: ?*std.posix.addrinfo,
+    head: ?*aio.system.net.addrinfo,
+    current: ?*aio.system.net.addrinfo,
 
     pub fn next(self: *IpAddressIterator) ?IpAddress {
         while (self.current) |info| {
@@ -32,11 +32,7 @@ pub const IpAddressIterator = struct {
 
     pub fn deinit(self: *IpAddressIterator) void {
         if (self.head) |head| {
-            if (builtin.os.tag == .windows) {
-                std.os.windows.ws2_32.freeaddrinfo(head);
-            } else {
-                std.posix.system.freeaddrinfo(head);
-            }
+            aio.system.net.freeaddrinfo(head);
         }
     }
 };
@@ -89,62 +85,21 @@ fn lookupHostBlocking(
     const name_c = try allocator.dupeZ(u8, name);
     const port_c = try std.fmt.allocPrintSentinel(allocator, "{d}", .{port}, 0);
 
-    const hints: std.posix.addrinfo = .{
-        .flags = .{ .NUMERICSERV = true },
-        .family = aio.system.net.AF.UNSPEC,
-        .socktype = std.posix.SOCK.STREAM,
-        .protocol = std.posix.IPPROTO.TCP,
-        .canonname = null,
-        .addr = null,
-        .addrlen = 0,
-        .next = null,
+    var hints: aio.system.net.addrinfo = std.mem.zeroes(aio.system.net.addrinfo);
+    hints.family = aio.system.net.AF.UNSPEC;
+    hints.socktype = std.posix.SOCK.STREAM;
+    hints.protocol = std.posix.IPPROTO.TCP;
+
+    var res: ?*aio.system.net.addrinfo = null;
+
+    aio.system.net.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res) catch |err| {
+        return switch (err) {
+            error.ServiceNotAvailable => error.ServiceUnavailable,
+            error.InvalidFlags => unreachable,
+            error.SocketTypeNotSupported => unreachable,
+            else => |e| e,
+        };
     };
-
-    var res: ?*std.posix.addrinfo = null;
-
-    if (builtin.os.tag == .windows) {
-        var first = true;
-        while (true) {
-            const rc = std.os.windows.ws2_32.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res);
-            switch (@as(std.os.windows.ws2_32.WinsockError, @enumFromInt(@as(u16, @intCast(rc))))) {
-                @as(std.os.windows.ws2_32.WinsockError, @enumFromInt(0)) => break,
-                .WSATRY_AGAIN => return error.TemporaryNameServerFailure,
-                .WSANO_RECOVERY => return error.NameServerFailure,
-                .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,
-                .WSA_NOT_ENOUGH_MEMORY => return error.OutOfMemory,
-                .WSAHOST_NOT_FOUND => return error.UnknownHostName,
-                .WSATYPE_NOT_FOUND => return error.ServiceUnavailable,
-                .WSANO_DATA => return error.HostLacksNetworkAddresses,
-                .WSAEINVAL => unreachable,
-                .WSAESOCKTNOSUPPORT => unreachable,
-                .WSANOTINITIALISED => {
-                    if (!first) return error.Unexpected;
-                    first = false;
-                    try std.os.windows.callWSAStartup();
-                    continue;
-                },
-                else => |err| return std.os.windows.unexpectedWSAError(err),
-            }
-        }
-    } else {
-        switch (std.posix.system.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res)) {
-            @as(std.posix.system.EAI, @enumFromInt(0)) => {},
-            .ADDRFAMILY => return error.HostLacksNetworkAddresses,
-            .AGAIN => return error.TemporaryNameServerFailure,
-            .BADFLAGS => unreachable, // Invalid hints
-            .FAIL => return error.NameServerFailure,
-            .FAMILY => return error.AddressFamilyNotSupported,
-            .MEMORY => return error.OutOfMemory,
-            .NODATA => return error.HostLacksNetworkAddresses,
-            .NONAME => return error.UnknownHostName,
-            .SERVICE => return error.ServiceUnavailable,
-            .SOCKTYPE => unreachable, // Invalid socket type requested in hints
-            .SYSTEM => switch (std.posix.errno(-1)) {
-                else => |e| return std.posix.unexpectedErrno(e),
-            },
-            else => unreachable,
-        }
-    }
 
     return .{
         .head = res,
