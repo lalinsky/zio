@@ -312,7 +312,6 @@ pub inline fn switchContext(
               .p15 = true,
               .fpcr = true,
               .fpsr = true,
-              .ffr = true,
               .memory = true,
             }),
         .riscv64 => asm volatile (
@@ -409,11 +408,11 @@ pub inline fn switchContext(
 ///
 /// x86_64 handles stack alignment here since we use JMP instead of CALL:
 /// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
-/// - CALL would push 8-byte return address, so we push 0 to simulate this
-/// - If the function unexpectedly returns, it will crash on null address (defensive)
+/// - CALL would push 8-byte return address, so we push sentinel label address
+/// - We use a real address (not 0) to avoid integer overflow in stack trace dumping
 ///
-/// ARM64 stores return address in x30 register (not stack). x30 is already 0 from
-/// Context.lr initialization, so no need to explicitly set it here.
+/// ARM64 stores return address in x30 register (not stack). x30 is set to the
+/// sentinel label address instead of 0.
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
@@ -422,29 +421,44 @@ fn coroEntry() callconv(.naked) noreturn {
                 // Allocate shadow space before return address to match call convention
                 asm volatile (
                     \\ subq $32, %%rsp
-                    \\ pushq $0
+                    \\ leaq 1f(%%rip), %%rax
+                    \\ pushq %%rax
                     \\ movq 48(%%rsp), %%rcx
                     \\ jmpq *40(%%rsp)
+                    \\1:
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
                 asm volatile (
-                    \\ pushq $0
+                    \\ leaq 1f(%%rip), %%rax
+                    \\ pushq %%rax
                     \\ movq 16(%%rsp), %%rdi
                     \\ jmpq *8(%%rsp)
+                    \\1:
                 );
             }
         },
         .aarch64 => asm volatile (
-            // x30 is already 0 from Context.lr initialization and switchContext restore
-            \\ ldr x0, [sp, #8]
-            \\ ldr x2, [sp]
+            // Create sentinel frame by pushing zeros for FP and LR (workaround for bug in Zig 0.16 unwinder)
+            \\ stp xzr, xzr, [sp, #-16]!
+            // Set FP to point past the sentinel frame, LR to 0
+            \\ mov x29, sp
+            \\ mov x30, xzr
+            // Load function pointer (x2) and context argument (x0) from adjusted offsets
+            \\ ldp x2, x0, [sp, #16]
             \\ br x2
         ),
         .riscv64 => asm volatile (
+            // Create sentinel frame by pushing zeros for old FP and old RA
+            \\ addi sp, sp, -16
+            \\ sd zero, 0(sp)
+            \\ sd zero, 8(sp)
+            // Set FP to point to CFA (SP before the push), RA to 0
+            \\ addi s0, sp, 16
             \\ li ra, 0
-            \\ ld a0, 8(sp)
-            \\ ld t0, 0(sp)
+            // Load function pointer (t0) and context argument (a0) and jump
+            \\ ld t0, 16(sp)
+            \\ ld a0, 24(sp)
             \\ jr t0
         ),
         else => @compileError("unsupported architecture"),
@@ -688,3 +702,94 @@ test "Coroutine: message passing" {
 
     try std.testing.expectEqual(9, receiver_closure.result);
 }
+
+test "Coroutine: allocator inside coroutine" {
+    // This serves two purposes:
+    //  - it tests a fairly complex function inside a coroutine (uses a lot of stack)
+    //  - it tests the new `std.debug` refactor in Zig 0.16
+    //    (https://github.com/ziglang/zig/pull/25227)
+
+    const st = @import("stack.zig");
+
+    try st.setupStackGrowth();
+    defer st.cleanupStackGrowth();
+
+    var parent_context: Context = undefined;
+
+    var coro: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+    try stackAlloc(&coro.context.stack_info, 8 * 1024 * 1024, 4096);
+    defer stackFree(coro.context.stack_info);
+
+    const Fn = struct {
+        fn main(_: *Coroutine) !void {
+            for (0..8) |k| {
+                var buf = try std.testing.allocator.alloc(u8, 1024);
+                defer std.testing.allocator.free(buf);
+
+                for (0..1024) |i| {
+                    buf[i] = @intCast((i + k) & 0xff);
+                }
+            }
+        }
+    };
+
+    const C = Closure(Fn.main);
+    var closure = C.init(.{});
+    coro.setup(&C.start, &closure);
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    try std.testing.expectEqual({}, closure.result);
+}
+
+
+test "Coroutine: stack trace" {
+    const stack = @import("stack.zig");
+
+    var parent_ctx: Context = undefined;
+    var coro = Coroutine{
+        .parent_context_ptr = &parent_ctx,
+        .context = undefined,
+    };
+
+    try stack.stackAlloc(&coro.context.stack_info, 4 * 1024 * 1024, 4 * 1024 * 1024);
+    defer stack.stackFree(coro.context.stack_info);
+
+    const TestData = struct {
+        trace: std.builtin.StackTrace = undefined,
+        trace_addrs: [32]usize = undefined,
+
+        fn coroFunc(c: *Coroutine, userdata: ?*anyopaque) void {
+            c.yield(); // make it slightly more complicated and yield once
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                self.trace.index = 0;
+                self.trace.instruction_addresses = &self.trace_addrs;
+                std.debug.captureStackTrace(null, &self.trace);
+            } else {
+                self.trace = std.debug.captureCurrentStackTrace(.{}, &self.trace_addrs);
+            }
+        }
+    };
+
+    var test_data = TestData{};
+    coro.setup(&TestData.coroFunc, &test_data);
+
+    while (!coro.finished) {
+        coro.step();
+    }
+
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+        std.debug.dumpStackTrace(test_data.trace);
+    } else {
+        std.debug.dumpStackTrace(&test_data.trace);
+    }
+
+    try std.testing.expect(test_data.trace.index > 1 and test_data.trace.index < 7);
+}
+
