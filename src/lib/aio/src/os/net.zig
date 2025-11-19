@@ -113,11 +113,11 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
                 }
                 const err = std.os.windows.ws2_32.WSAGetLastError();
                 switch (err) {
-                    .WSAEINTR => continue,
-                    .WSAENOBUFS => return error.SystemResources,
-                    .WSAEFAULT => unreachable,
-                    .WSAEINVAL => {
-                        log.err("WSAPoll returned WSAEINVAL - invalid parameter (fds.len={}, timeout={})", .{ fds.len, timeout });
+                    .EINTR => continue,
+                    .ENOBUFS => return error.SystemResources,
+                    .EFAULT => unreachable,
+                    .EINVAL => {
+                        log.err("WSAPoll returned EINVAL - invalid parameter (fds.len={}, timeout={})", .{ fds.len, timeout });
                         return unexpectedError(err);
                     },
                     else => return unexpectedError(err),
@@ -326,13 +326,13 @@ pub fn errnoToBindError(err: E) BindError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAEADDRINUSE => error.AddressInUse,
-                .WSAEADDRNOTAVAIL => error.AddressNotAvailable,
-                .WSAEAFNOSUPPORT => error.AddressFamilyNotSupported,
-                .WSAEACCES => error.AccessDenied,
-                .WSAENOTSOCK => error.FileDescriptorNotASocket,
-                .WSAENETDOWN => error.NetworkDown,
-                .WSAENOBUFS => error.SystemResources,
+                .EADDRINUSE => error.AddressInUse,
+                .EADDRNOTAVAIL => error.AddressNotAvailable,
+                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EACCES => error.AccessDenied,
+                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .ENETDOWN => error.NetworkDown,
+                .ENOBUFS => error.SystemResources,
                 else => unexpectedError(err),
             };
         },
@@ -395,12 +395,12 @@ pub fn errnoToListenError(err: E) ListenError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAEADDRINUSE => error.AddressInUse,
-                .WSAEISCONN => error.AlreadyConnected,
-                .WSAEOPNOTSUPP => error.OperationNotSupported,
-                .WSAENOTSOCK => error.FileDescriptorNotASocket,
-                .WSAENETDOWN => error.NetworkDown,
-                .WSAENOBUFS, .WSAEMFILE => error.SystemResources,
+                .EADDRINUSE => error.AddressInUse,
+                .EISCONN => error.AlreadyConnected,
+                .EOPNOTSUPP => error.OperationNotSupported,
+                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .ENETDOWN => error.NetworkDown,
+                .ENOBUFS, .EMFILE => error.SystemResources,
                 else => unexpectedError(err),
             };
         },
@@ -623,20 +623,20 @@ pub fn errnoToConnectError(err: E) ConnectError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAECONNREFUSED => error.ConnectionRefused,
-                .WSAETIMEDOUT => error.ConnectionTimedOut,
-                .WSAEHOSTUNREACH, .WSAENETUNREACH => error.NetworkUnreachable,
-                .WSAEACCES => error.AccessDenied,
-                .WSAEADDRINUSE => error.AddressInUse,
-                .WSAEADDRNOTAVAIL => error.AddressNotAvailable,
-                .WSAEAFNOSUPPORT => error.AddressFamilyNotSupported,
-                .WSAEISCONN => error.AlreadyConnected,
-                .WSAEALREADY => error.ConnectionPending,
-                .WSAEWOULDBLOCK => error.WouldBlock,
-                .WSAENOTSOCK => error.FileDescriptorNotASocket,
-                .WSAENETDOWN => error.NetworkDown,
-                .WSAENOBUFS => error.SystemResources,
-                .WSA_OPERATION_ABORTED => error.Canceled,
+                .ECONNREFUSED => error.ConnectionRefused,
+                .ETIMEDOUT => error.ConnectionTimedOut,
+                .EHOSTUNREACH, .ENETUNREACH => error.NetworkUnreachable,
+                .EACCES => error.AccessDenied,
+                .EADDRINUSE => error.AddressInUse,
+                .EADDRNOTAVAIL => error.AddressNotAvailable,
+                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EISCONN => error.AlreadyConnected,
+                .EALREADY => error.ConnectionPending,
+                .EWOULDBLOCK => error.WouldBlock,
+                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .ENETDOWN => error.NetworkDown,
+                .ENOBUFS => error.SystemResources,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
@@ -670,17 +670,17 @@ pub fn errnoToAcceptError(err: E) AcceptError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAEWOULDBLOCK => error.WouldBlock,
-                .WSAECONNABORTED => error.ConnectionAborted,
-                .WSAECONNRESET => error.ConnectionResetByPeer,
-                .WSAEMFILE => error.ProcessFdQuotaExceeded,
-                .WSAENOBUFS => error.SystemResources,
-                .WSAENOTSOCK => error.FileDescriptorNotASocket,
-                .WSAEINVAL => error.SocketNotListening,
-                .WSAEOPNOTSUPP => error.ProtocolFailure,
-                .WSAEPROTONOSUPPORT => error.ProtocolFailure,
-                .WSAENETDOWN => error.NetworkDown,
-                .WSA_OPERATION_ABORTED => error.Canceled,
+                .EWOULDBLOCK => error.WouldBlock,
+                .ECONNABORTED => error.ConnectionAborted,
+                .ECONNRESET => error.ConnectionResetByPeer,
+                .EMFILE => error.ProcessFdQuotaExceeded,
+                .ENOBUFS => error.SystemResources,
+                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .EINVAL => error.SocketNotListening,
+                .EOPNOTSUPP => error.ProtocolFailure,
+                .EPROTONOSUPPORT => error.ProtocolFailure,
+                .ENETDOWN => error.NetworkDown,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
@@ -710,18 +710,18 @@ pub fn errnoToRecvError(err: E) RecvError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAEWOULDBLOCK => error.WouldBlock,
-                .WSAECONNREFUSED => error.ConnectionRefused,
-                .WSAECONNRESET, .WSAENETRESET => error.ConnectionResetByPeer,
-                .WSAECONNABORTED => error.ConnectionAborted,
-                .WSAETIMEDOUT => error.ConnectionTimedOut,
-                .WSAENOTCONN => error.SocketNotConnected,
-                .WSAENOTSOCK => error.FileDescriptorNotASocket,
-                .WSAESHUTDOWN => error.SocketShutdown,
-                .WSAEOPNOTSUPP => error.OperationNotSupported,
-                .WSAENETDOWN => error.NetworkDown,
-                .WSAENOBUFS, .WSAEINVAL => error.SystemResources,
-                .WSA_OPERATION_ABORTED => error.Canceled,
+                .EWOULDBLOCK => error.WouldBlock,
+                .ECONNREFUSED => error.ConnectionRefused,
+                .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
+                .ECONNABORTED => error.ConnectionAborted,
+                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ENOTCONN => error.SocketNotConnected,
+                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .ESHUTDOWN => error.SocketShutdown,
+                .EOPNOTSUPP => error.OperationNotSupported,
+                .ENETDOWN => error.NetworkDown,
+                .ENOBUFS, .EINVAL => error.SystemResources,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
@@ -745,19 +745,19 @@ pub fn errnoToSendError(err: E) SendError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAEWOULDBLOCK => error.WouldBlock,
-                .WSAEACCES => error.AccessDenied,
-                .WSAECONNRESET, .WSAENETRESET => error.ConnectionResetByPeer,
-                .WSAECONNABORTED => error.ConnectionAborted,
-                .WSAETIMEDOUT => error.ConnectionTimedOut,
-                .WSAENOTCONN => error.SocketNotConnected,
-                .WSAENOTSOCK => error.FileDescriptorNotASocket,
-                .WSAEMSGSIZE => error.MessageTooBig,
-                .WSAESHUTDOWN => error.BrokenPipe,
-                .WSAEHOSTUNREACH, .WSAENETDOWN => error.NetworkUnreachable,
-                .WSAEOPNOTSUPP => error.OperationNotSupported,
-                .WSAENOBUFS => error.SystemResources,
-                .WSA_OPERATION_ABORTED => error.Canceled,
+                .EWOULDBLOCK => error.WouldBlock,
+                .EACCES => error.AccessDenied,
+                .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
+                .ECONNABORTED => error.ConnectionAborted,
+                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ENOTCONN => error.SocketNotConnected,
+                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .EMSGSIZE => error.MessageTooBig,
+                .ESHUTDOWN => error.BrokenPipe,
+                .EHOSTUNREACH, .ENETDOWN => error.NetworkUnreachable,
+                .EOPNOTSUPP => error.OperationNotSupported,
+                .ENOBUFS => error.SystemResources,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
@@ -784,12 +784,12 @@ pub fn errnoToShutdownError(err: E) ShutdownError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAENOTCONN => error.SocketNotConnected,
-                .WSAENOTSOCK => error.FileDescriptorNotASocket,
-                .WSAECONNABORTED => error.ConnectionAborted,
-                .WSAECONNRESET => error.ConnectionResetByPeer,
-                .WSAENETDOWN => error.NetworkDown,
-                .WSA_OPERATION_ABORTED => error.Canceled,
+                .ENOTCONN => error.SocketNotConnected,
+                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .ECONNABORTED => error.ConnectionAborted,
+                .ECONNRESET => error.ConnectionResetByPeer,
+                .ENETDOWN => error.NetworkDown,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
@@ -812,11 +812,11 @@ pub fn errnoToOpenError(err: E) OpenError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .WSAEAFNOSUPPORT => error.AddressFamilyNotSupported,
-                .WSAEPROTONOSUPPORT => error.ProtocolNotSupported,
-                .WSAEMFILE => error.ProcessFdQuotaExceeded,
-                .WSAENOBUFS => error.SystemResources,
-                .WSA_OPERATION_ABORTED => error.Canceled,
+                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EPROTONOSUPPORT => error.ProtocolNotSupported,
+                .EMFILE => error.ProcessFdQuotaExceeded,
+                .ENOBUFS => error.SystemResources,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },

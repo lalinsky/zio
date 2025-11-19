@@ -151,12 +151,11 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
 
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.InvalidWtf8 => error.InvalidUtf8,
             error.AccessDenied => error.AccessDenied,
             error.BadPathName => error.BadPathName,
             error.FileNotFound => error.FileNotFound,
             error.NameTooLong => error.NameTooLong,
-            error.Unexpected => error.Unexpected,
+            else => error.Unexpected,
         };
 
         const access_mask: w.DWORD = switch (flags.mode) {
@@ -221,12 +220,11 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
 
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.InvalidWtf8 => error.InvalidUtf8,
             error.AccessDenied => error.AccessDenied,
             error.BadPathName => error.BadPathName,
             error.FileNotFound => error.FileNotFound,
             error.NameTooLong => error.NameTooLong,
-            error.Unexpected => error.Unexpected,
+            else => error.Unexpected,
         };
 
         const access_mask: w.DWORD = if (flags.read)
@@ -432,20 +430,18 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
 
         // Convert paths to UTF-16 with proper prefixing and directory handling
         const old_path_w = w.sliceToPrefixedFileW(old_dir, old_path) catch |err| return switch (err) {
-            error.InvalidWtf8 => error.InvalidUtf8,
             error.AccessDenied => error.AccessDenied,
             error.BadPathName => error.FileNotFound,
             error.FileNotFound => error.FileNotFound,
             error.NameTooLong => error.NameTooLong,
-            error.Unexpected => error.Unexpected,
+            else => error.Unexpected,
         };
         const new_path_w = w.sliceToPrefixedFileW(new_dir, new_path) catch |err| return switch (err) {
-            error.InvalidWtf8 => error.InvalidUtf8,
             error.AccessDenied => error.AccessDenied,
             error.BadPathName => error.FileNotFound,
             error.FileNotFound => error.FileNotFound,
             error.NameTooLong => error.NameTooLong,
-            error.Unexpected => error.Unexpected,
+            else => error.Unexpected,
         };
 
         const success = w.kernel32.MoveFileExW(
@@ -490,12 +486,11 @@ pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileD
 
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.InvalidWtf8 => error.InvalidUtf8,
             error.AccessDenied => error.AccessDenied,
             error.BadPathName => error.FileNotFound,
             error.FileNotFound => error.FileNotFound,
             error.NameTooLong => error.NameTooLong,
-            error.Unexpected => error.Unexpected,
+            else => error.Unexpected,
         };
 
         w.DeleteFile(path_w.span(), .{ .dir = dir, .remove_dir = false }) catch |e| {

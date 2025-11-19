@@ -263,7 +263,7 @@ test "StackPool age-based expiration" {
     try testing.expectEqual(1, pool.pool_size);
 
     // Wait for it to expire
-    std.Thread.sleep(150_000_000); // 150ms
+    try testing.io.sleep(.fromMilliseconds(150), .awake);
 
     // Next acquire should allocate a new stack (old one expired)
     const stack2 = try pool.acquire();

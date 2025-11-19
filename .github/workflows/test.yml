@@ -12,7 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
           - os: macos-latest
           - os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -24,14 +25,14 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: master
 
     - name: Build
       run: zig build
       timeout-minutes: 5
 
     - name: Build tests
-      run: zig build build-tests --release=safe
+      run: zig build build-tests
       timeout-minutes: 5
 
     - name: Build examples
@@ -43,5 +44,7 @@ jobs:
       timeout-minutes: 5
 
     - name: Run tests (native)
-      run: ./zig-out/bin/test
+      shell: bash
+      run: |
+        ./zig-out/bin/test
       timeout-minutes: 5
