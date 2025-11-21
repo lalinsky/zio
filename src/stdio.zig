@@ -6,6 +6,7 @@ const CreateOptions = @import("core/task.zig").CreateOptions;
 const Awaitable = @import("core/awaitable.zig").Awaitable;
 const select = @import("select.zig");
 const zio_net = @import("io/net.zig");
+const zio_net_dns = @import("net.zig");
 const zio_file_io = @import("io/file.zig");
 const zio_mutex = @import("sync/Mutex.zig");
 const zio_condition = @import("sync/Condition.zig");
@@ -568,11 +569,49 @@ fn netInterfaceNameImpl(userdata: ?*anyopaque, interface: std.Io.net.Interface) 
 }
 
 fn netLookupImpl(userdata: ?*anyopaque, hostname: std.Io.net.HostName, queue: *std.Io.Queue(std.Io.net.HostName.LookupResult), options: std.Io.net.HostName.LookupOptions) void {
-    _ = userdata;
-    _ = hostname;
-    _ = queue;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const io = fromRuntime(rt);
+
+    // Call the zio DNS lookup (uses thread pool internally)
+    var iter = zio_net_dns.lookupHost(rt, hostname.bytes, options.port) catch |err| {
+        const mapped_err: std.Io.net.HostName.LookupError = switch (err) {
+            error.UnknownHostName => error.UnknownHostName,
+            error.NameServerFailure => error.NameServerFailure,
+            error.HostLacksNetworkAddresses => error.UnknownHostName,
+            error.TemporaryNameServerFailure => error.NameServerFailure,
+            else => error.NameServerFailure,
+        };
+        queue.putOneUncancelable(io, .{ .end = mapped_err });
+        return;
+    };
+    defer iter.deinit();
+
+    // Push canonical name first (use the original hostname)
+    @memcpy(options.canonical_name_buffer[0..hostname.bytes.len], hostname.bytes);
+    const canonical_name = std.Io.net.HostName{
+        .bytes = options.canonical_name_buffer[0..hostname.bytes.len],
+    };
+    queue.putOneUncancelable(io, .{ .canonical_name = canonical_name });
+
+    // Iterate through resolved addresses
+    while (iter.next()) |zio_addr| {
+        // Filter by address family if specified
+        if (options.family) |requested_family| {
+            const addr_family: std.Io.net.IpAddress.Family = switch (zio_addr.any.family) {
+                std.posix.AF.INET => .ip4,
+                std.posix.AF.INET6 => .ip6,
+                else => continue,
+            };
+            if (addr_family != requested_family) continue;
+        }
+
+        // Convert zio IpAddress to std.Io.net.IpAddress
+        const std_addr = zioIpToStdIo(zio_addr);
+        queue.putOneUncancelable(io, .{ .address = std_addr });
+    }
+
+    // Push end marker
+    queue.putOneUncancelable(io, .{ .end = {} });
 }
 
 pub const vtable = std.Io.VTable{
@@ -1085,6 +1124,145 @@ test "Io: File close" {
 
             // Test that close works
             file.close(io);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: DNS lookup localhost" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const hostname = try std.Io.net.HostName.init("localhost");
+
+            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+
+            hostname.lookup(io, &lookup_queue, .{
+                .port = 80,
+                .canonical_name_buffer = &canonical_name_buffer,
+            });
+
+            var saw_canonical_name = false;
+            var address_count: usize = 0;
+
+            while (lookup_queue.getOne(io)) |result| {
+                switch (result) {
+                    .address => |_| {
+                        address_count += 1;
+                    },
+                    .canonical_name => |_| {
+                        saw_canonical_name = true;
+                    },
+                    .end => |end_result| {
+                        try end_result;
+                        break;
+                    },
+                }
+            } else |err| switch (err) {
+                error.Canceled => return err,
+            }
+
+            try std.testing.expect(saw_canonical_name);
+            try std.testing.expect(address_count > 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: DNS lookup numeric IP" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const hostname = try std.Io.net.HostName.init("127.0.0.1");
+
+            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+
+            hostname.lookup(io, &lookup_queue, .{
+                .port = 8080,
+                .canonical_name_buffer = &canonical_name_buffer,
+            });
+
+            var saw_canonical_name = false;
+            var address_count: usize = 0;
+            var found_correct_port = false;
+
+            while (lookup_queue.getOne(io)) |result| {
+                switch (result) {
+                    .address => |addr| {
+                        address_count += 1;
+                        if (addr.ip4.port == 8080) {
+                            found_correct_port = true;
+                        }
+                    },
+                    .canonical_name => |_| {
+                        saw_canonical_name = true;
+                    },
+                    .end => |end_result| {
+                        try end_result;
+                        break;
+                    },
+                }
+            } else |err| switch (err) {
+                error.Canceled => return err,
+            }
+
+            try std.testing.expect(saw_canonical_name);
+            try std.testing.expectEqual(@as(usize, 1), address_count);
+            try std.testing.expect(found_correct_port);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: DNS lookup with family filter" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const hostname = try std.Io.net.HostName.init("localhost");
+
+            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+
+            hostname.lookup(io, &lookup_queue, .{
+                .port = 80,
+                .canonical_name_buffer = &canonical_name_buffer,
+                .family = .ip4,
+            });
+
+            var address_count: usize = 0;
+
+            while (lookup_queue.getOne(io)) |result| {
+                switch (result) {
+                    .address => |addr| {
+                        address_count += 1;
+                        // Verify it's IPv4
+                        try std.testing.expect(addr == .ip4);
+                    },
+                    .canonical_name => {},
+                    .end => |end_result| {
+                        try end_result;
+                        break;
+                    },
+                }
+            } else |err| switch (err) {
+                error.Canceled => return err,
+            }
+
+            try std.testing.expect(address_count > 0);
         }
     };
 
