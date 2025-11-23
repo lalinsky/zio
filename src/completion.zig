@@ -289,8 +289,8 @@ pub const Work = struct {
     func: *const WorkFn,
     userdata: ?*anyopaque,
 
-    loop: ?*Loop = null,
-    linked: ?*Completion = null,
+    completion_fn: *const CompletionFn,
+    completion_context: *anyopaque,
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.pending),
 
     pub const Error = error{NoThreadPool} || Cancelable;
@@ -303,12 +303,15 @@ pub const Work = struct {
     };
 
     pub const WorkFn = fn (work: *Work) void;
+    pub const CompletionFn = fn (ctx: *anyopaque, work: *Work) void;
 
     pub fn init(func: *const WorkFn, userdata: ?*anyopaque) Work {
         return .{
             .c = .init(.work),
             .func = func,
             .userdata = userdata,
+            .completion_fn = undefined,
+            .completion_context = undefined,
         };
     }
 
@@ -602,7 +605,7 @@ pub const FileOpen = struct {
     result_private_do_not_touch: fs.fd_t = undefined,
     internal: switch (Backend.capabilities.file_open) {
         true => if (@hasDecl(Backend, "FileOpenData")) Backend.FileOpenData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined },
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -629,7 +632,7 @@ pub const FileCreate = struct {
     result_private_do_not_touch: fs.fd_t = undefined,
     internal: switch (Backend.capabilities.file_create) {
         true => if (@hasDecl(Backend, "FileCreateData")) Backend.FileCreateData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined },
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -656,7 +659,7 @@ pub const FileClose = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_close) {
         true => if (@hasDecl(Backend, "FileCloseData")) Backend.FileCloseData else struct {},
-        false => struct { work: Work = undefined },
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     handle: fs.fd_t,
 
@@ -679,7 +682,7 @@ pub const FileRead = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.file_read) {
         true => if (@hasDecl(Backend, "FileReadData")) Backend.FileReadData else struct {},
-        false => struct { work: Work = undefined },
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     handle: fs.fd_t,
     buffer: ReadBuf,
@@ -706,7 +709,7 @@ pub const FileWrite = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.file_write) {
         true => if (@hasDecl(Backend, "FileWriteData")) Backend.FileWriteData else struct {},
-        false => struct { work: Work = undefined },
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     handle: fs.fd_t,
     buffer: WriteBuf,
@@ -733,7 +736,7 @@ pub const FileSync = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_sync) {
         true => if (@hasDecl(Backend, "FileSyncData")) Backend.FileSyncData else struct {},
-        false => struct { work: Work = undefined },
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     handle: fs.fd_t,
     flags: fs.FileSyncFlags,
@@ -758,7 +761,7 @@ pub const FileRename = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_rename) {
         true => if (@hasDecl(Backend, "FileRenameData")) Backend.FileRenameData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined },
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     old_dir: fs.fd_t,
     old_path: []const u8,
@@ -787,7 +790,7 @@ pub const FileDelete = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_delete) {
         true => if (@hasDecl(Backend, "FileDeleteData")) Backend.FileDeleteData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined },
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
