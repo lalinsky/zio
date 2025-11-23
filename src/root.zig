@@ -27,6 +27,7 @@ pub const NetRecv = completion.NetRecv;
 pub const NetSend = completion.NetSend;
 pub const NetRecvFrom = completion.NetRecvFrom;
 pub const NetSendTo = completion.NetSendTo;
+pub const NetPoll = completion.NetPoll;
 pub const NetClose = completion.NetClose;
 pub const NetShutdown = completion.NetShutdown;
 pub const FileOpen = completion.FileOpen;

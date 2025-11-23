@@ -17,6 +17,7 @@ const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
+const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 const FileOpen = @import("../completion.zig").FileOpen;
@@ -438,6 +439,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             };
         },
 
+        .net_poll => {
+            const data = c.cast(NetPoll);
+            self.submitPoll(state, data) catch |err| {
+                c.setError(err);
+                state.markCompleted(c);
+            };
+        },
+
         .file_open,
         .file_create,
         .file_close,
@@ -544,6 +553,56 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
             net.close(accept_socket);
             log.err("AcceptEx failed: {}", .{err});
             data.c.setError(net.errnoToAcceptError(err));
+            state.markCompleted(&data.c);
+            return;
+        }
+    }
+    // Operation will complete via IOCP (either immediate or async)
+}
+
+fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
+    _ = self;
+
+    // Initialize OVERLAPPED
+    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+
+    // Use zero-length WSARecv/WSASend to detect readiness
+    // Zero-length operations complete immediately if socket is ready
+    // Use pointer to a local variable instead of undefined to avoid passing undefined value to kernel
+    var dummy: u8 = 0;
+    var zero_buf = windows.ws2_32.WSABUF{ .len = 0, .buf = @ptrCast(&dummy) };
+
+    var bytes_transferred: windows.DWORD = 0;
+    var flags: windows.DWORD = 0;
+
+    // Choose WSARecv or WSASend based on which event is requested
+    const result = switch (data.event) {
+        .recv => windows.ws2_32.WSARecv(
+            data.handle,
+            @ptrCast(&zero_buf),
+            1,
+            &bytes_transferred,
+            &flags,
+            &data.c.internal.overlapped,
+            null,
+        ),
+        .send => windows.ws2_32.WSASend(
+            data.handle,
+            @ptrCast(&zero_buf),
+            1,
+            &bytes_transferred,
+            flags,
+            &data.c.internal.overlapped,
+            null,
+        ),
+    };
+
+    if (result == windows.ws2_32.SOCKET_ERROR) {
+        const err = windows.ws2_32.WSAGetLastError();
+        if (err != .WSA_IO_PENDING) {
+            // Real error - complete immediately with error
+            log.err("WSARecv/WSASend (poll) failed: {}", .{err});
+            data.c.setError(net.errnoToRecvError(err));
             state.markCompleted(&data.c);
             return;
         }
@@ -868,6 +927,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .net_send,
                 .net_recvfrom,
                 .net_sendto,
+                .net_poll,
                 => blk: {
                     // Get socket handle from the completion
                     const h = switch (target.op) {
@@ -877,6 +937,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                         .net_send => target.cast(NetSend).handle,
                         .net_recvfrom => target.cast(NetRecvFrom).handle,
                         .net_sendto => target.cast(NetSendTo).handle,
+                        .net_poll => target.cast(NetPoll).handle,
                         else => unreachable,
                     };
                     break :blk @as(windows.HANDLE, @ptrCast(h));
@@ -1156,6 +1217,30 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setError(net.errnoToSendError(err));
             } else {
                 c.setResult(.net_sendto, @intCast(bytes_transferred));
+            }
+
+            state.markCompleted(c);
+        },
+
+        .net_poll => {
+            const data = c.cast(NetPoll);
+            var bytes_transferred: windows.DWORD = 0;
+            var flags: windows.DWORD = 0;
+
+            const result = windows.ws2_32.WSAGetOverlappedResult(
+                data.handle,
+                &data.c.internal.overlapped,
+                &bytes_transferred,
+                windows.FALSE,
+                &flags,
+            );
+
+            if (result == windows.FALSE) {
+                const err = windows.ws2_32.WSAGetLastError();
+                c.setError(net.errnoToRecvError(err));
+            } else {
+                // Zero-length operation completed - socket is ready
+                c.setResult(.net_poll, {});
             }
 
             state.markCompleted(c);

@@ -37,6 +37,7 @@ pub const Op = enum {
     net_send,
     net_recvfrom,
     net_sendto,
+    net_poll,
     net_shutdown,
     net_close,
     file_open,
@@ -64,6 +65,7 @@ pub const Op = enum {
             .net_send => NetSend,
             .net_recvfrom => NetRecvFrom,
             .net_sendto => NetSendTo,
+            .net_poll => NetPoll,
             .net_close => NetClose,
             .net_shutdown => NetShutdown,
             .file_open => FileOpen,
@@ -93,6 +95,7 @@ pub const Op = enum {
             NetSend => .net_send,
             NetRecvFrom => .net_recvfrom,
             NetSendTo => .net_sendto,
+            NetPoll => .net_poll,
             NetClose => .net_close,
             NetShutdown => .net_shutdown,
             FileOpen => .file_open,
@@ -801,5 +804,32 @@ pub const FileDelete = struct {
 
     pub fn getResult(self: *const FileDelete) Error!void {
         return self.c.getResult(.file_delete);
+    }
+};
+
+pub const NetPoll = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    handle: Backend.NetHandle,
+    event: Event,
+
+    pub const Error = net.RecvError || Cancelable;
+
+    /// Event to monitor for
+    pub const Event = enum {
+        recv,
+        send,
+    };
+
+    pub fn init(handle: Backend.NetHandle, event: Event) NetPoll {
+        return .{
+            .c = .init(.net_poll),
+            .handle = handle,
+            .event = event,
+        };
+    }
+
+    pub fn getResult(self: *const NetPoll) Error!void {
+        return self.c.getResult(.net_poll);
     }
 };
