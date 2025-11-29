@@ -1,5 +1,6 @@
 const std = @import("std");
 const windows = std.os.windows;
+const w = @import("../os/windows.zig");
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 const common = @import("common.zig");
@@ -28,13 +29,6 @@ const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
 const FileRename = @import("../completion.zig").FileRename;
 const FileDelete = @import("../completion.zig").FileDelete;
-
-// Windows API functions not in std
-extern "kernel32" fn QueueUserAPC(
-    pfnAPC: *const fn (windows.ULONG_PTR) callconv(.winapi) void,
-    hThread: windows.HANDLE,
-    dwData: windows.ULONG_PTR,
-) callconv(.winapi) windows.DWORD;
 
 // WAIT_IO_COMPLETION is returned when an alertable wait is interrupted by an APC
 const WAIT_IO_COMPLETION: windows.Win32Error = @enumFromInt(0xC0);
@@ -267,7 +261,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     // Duplicate current thread handle for wake support
     const pseudo_handle = windows.GetCurrentThread();
     var thread_handle: windows.HANDLE = undefined;
-    const dup_result = windows.kernel32.DuplicateHandle(
+    const dup_result = w.DuplicateHandle(
         windows.GetCurrentProcess(),
         pseudo_handle,
         windows.GetCurrentProcess(),
@@ -322,9 +316,9 @@ fn wakeAPC(dwParam: windows.ULONG_PTR) callconv(.winapi) void {
 
 pub fn wake(self: *Self) void {
     // Queue an APC to wake the thread
-    const result = QueueUserAPC(wakeAPC, self.thread_handle, 0);
+    const result = w.QueueUserAPC(wakeAPC, self.thread_handle, 0);
     if (result == 0) {
-        log.err("QueueUserAPC failed: {}", .{windows.kernel32.GetLastError()});
+        log.err("QueueUserAPC failed: {}", .{w.GetLastError()});
     } else {
         log.debug("QueueUserAPC succeeded", .{});
     }
@@ -844,7 +838,7 @@ fn submitFileRead(self: *Self, state: *LoopState, data: *FileRead) !void {
     const buffer = data.buffer.iovecs[0];
     var bytes_read: windows.DWORD = 0;
 
-    const result = windows.kernel32.ReadFile(
+    const result = w.ReadFile(
         data.handle,
         buffer.buf,
         @intCast(buffer.len),
@@ -855,7 +849,7 @@ fn submitFileRead(self: *Self, state: *LoopState, data: *FileRead) !void {
     // When ReadFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == 0) {
-        const err = windows.kernel32.GetLastError();
+        const err = w.GetLastError();
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("ReadFile failed: {}", .{err});
@@ -880,7 +874,7 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
     const buffer = data.buffer.iovecs[0];
     var bytes_written: windows.DWORD = 0;
 
-    const result = windows.kernel32.WriteFile(
+    const result = w.WriteFile(
         data.handle,
         buffer.buf,
         @intCast(buffer.len),
@@ -891,7 +885,7 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
     // When WriteFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == 0) {
-        const err = windows.kernel32.GetLastError();
+        const err = w.GetLastError();
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WriteFile failed: {}", .{err});
@@ -963,9 +957,9 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
             };
 
             // Cancel the I/O operation
-            const result = windows.kernel32.CancelIoEx(handle, &target.internal.overlapped);
+            const result = w.CancelIoEx(handle, &target.internal.overlapped);
             if (result == 0) {
-                const err = windows.kernel32.GetLastError();
+                const err = w.GetLastError();
                 // ERROR_NOT_FOUND means the operation already completed - that's fine
                 if (err != .NOT_FOUND) {
                     log.warn("CancelIoEx failed: {}", .{err});
@@ -1250,7 +1244,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             const data = c.cast(FileRead);
             var bytes_transferred: windows.DWORD = 0;
 
-            const result = windows.kernel32.GetOverlappedResult(
+            const result = w.GetOverlappedResult(
                 data.handle,
                 &data.c.internal.overlapped,
                 &bytes_transferred,
@@ -1258,7 +1252,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == 0) {
-                const err = windows.kernel32.GetLastError();
+                const err = w.GetLastError();
                 // HANDLE_EOF is not an error - it means we successfully read 0 bytes (EOF)
                 if (err == .HANDLE_EOF) {
                     c.setResult(.file_read, 0);
@@ -1276,7 +1270,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             const data = c.cast(FileWrite);
             var bytes_transferred: windows.DWORD = 0;
 
-            const result = windows.kernel32.GetOverlappedResult(
+            const result = w.GetOverlappedResult(
                 data.handle,
                 &data.c.internal.overlapped,
                 &bytes_transferred,
@@ -1284,7 +1278,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == 0) {
-                const err = windows.kernel32.GetLastError();
+                const err = w.GetLastError();
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             } else {
                 c.setResult(.file_write, @intCast(bytes_transferred));
@@ -1305,7 +1299,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const timeout: u32 = std.math.cast(u32, timeout_ms) orelse std.math.maxInt(u32);
 
     var num_entries: u32 = 0;
-    const result = windows.kernel32.GetQueuedCompletionStatusEx(
+    const result = w.GetQueuedCompletionStatusEx(
         self.shared_state.iocp, // Safe to access without mutex - we hold a reference
         self.entries.ptr,
         @intCast(self.entries.len),
@@ -1315,7 +1309,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     );
 
     if (result == windows.FALSE) {
-        const err = windows.kernel32.GetLastError();
+        const err = w.GetLastError();
         switch (err) {
             .WAIT_TIMEOUT => {
                 log.debug("poll() timed out", .{});

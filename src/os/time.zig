@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
+const w = @import("windows.zig");
 
 pub const Clock = enum {
     monotonic,
@@ -65,11 +66,7 @@ pub fn sleep(timeout_ms: i32) void {
     switch (builtin.os.tag) {
         .windows => {
             if (timeout_ms > 0) {
-                if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-                    std.os.windows.kernel32.Sleep(@intCast(timeout_ms));
-                } else {
-                    _ = std.os.windows.kernel32.SleepEx(@intCast(timeout_ms), std.os.windows.FALSE);
-                }
+                _ = w.SleepEx(@intCast(timeout_ms), std.os.windows.FALSE);
             }
         },
         else => {

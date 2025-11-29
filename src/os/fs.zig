@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
+const w2 = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 
@@ -170,7 +171,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         else
             w.FILE_ATTRIBUTE_NORMAL;
 
-        const handle = w.kernel32.CreateFileW(
+        const handle = w2.CreateFileW(
             path_w.span().ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
@@ -181,7 +182,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         );
 
         if (handle == w.INVALID_HANDLE_VALUE) {
-            return switch (w.kernel32.GetLastError()) {
+            return switch (w2.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
@@ -246,7 +247,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         else
             w.FILE_ATTRIBUTE_NORMAL;
 
-        const handle = w.kernel32.CreateFileW(
+        const handle = w2.CreateFileW(
             path_w.span().ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
@@ -257,7 +258,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         );
 
         if (handle == w.INVALID_HANDLE_VALUE) {
-            return switch (w.kernel32.GetLastError()) {
+            return switch (w2.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
@@ -321,7 +322,7 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(offset + total_read);
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate((offset + total_read) >> 32);
 
-            const success = w.kernel32.ReadFile(
+            const success = w2.ReadFile(
                 fd,
                 buffer.buf,
                 @intCast(buffer.len),
@@ -330,7 +331,7 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
             );
 
             if (success == w.FALSE) {
-                const err = w.kernel32.GetLastError();
+                const err = w2.GetLastError();
                 switch (err) {
                     .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
                     else => return errnoToFileReadError(err),
@@ -366,7 +367,7 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(offset + total_written);
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate((offset + total_written) >> 32);
 
-            const success = w.kernel32.WriteFile(
+            const success = w2.WriteFile(
                 fd,
                 buffer.buf,
                 @intCast(buffer.len),
@@ -375,7 +376,7 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
             );
 
             if (success == w.FALSE) {
-                return errnoToFileWriteError(w.kernel32.GetLastError());
+                return errnoToFileWriteError(w2.GetLastError());
             }
 
             total_written += bytes_written;
@@ -400,9 +401,9 @@ pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
 
-        const success = w.kernel32.FlushFileBuffers(fd);
+        const success = w2.FlushFileBuffers(fd);
         if (success == w.FALSE) {
-            switch (w.kernel32.GetLastError()) {
+            switch (w2.GetLastError()) {
                 .ACCESS_DENIED => return error.NotOpenForWriting,
                 .INVALID_HANDLE => return error.InvalidFileDescriptor,
                 else => |err| return unexpectedError(err),
@@ -448,14 +449,14 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
             error.Unexpected => error.Unexpected,
         };
 
-        const success = w.kernel32.MoveFileExW(
+        const success = w2.MoveFileExW(
             old_path_w.span().ptr,
             new_path_w.span().ptr,
-            w.MOVEFILE_REPLACE_EXISTING,
+            w2.MOVEFILE_REPLACE_EXISTING,
         );
 
         if (success == w.FALSE) {
-            switch (w.kernel32.GetLastError()) {
+            switch (w2.GetLastError()) {
                 .FILE_NOT_FOUND => return error.FileNotFound,
                 .PATH_NOT_FOUND => return error.FileNotFound,
                 .ACCESS_DENIED => return error.AccessDenied,
