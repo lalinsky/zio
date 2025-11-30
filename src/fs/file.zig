@@ -211,7 +211,7 @@ pub const FileReader = struct {
     fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
         const r: *FileReader = @fieldParentPtr("interface", io_reader);
 
-        const max_vecs = switch (builtin.os.tag) {
+        const max_vecs = 1 + switch (builtin.os.tag) {
             .windows => 1,
             else => 16,
         };
