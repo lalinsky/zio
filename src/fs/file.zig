@@ -137,7 +137,7 @@ pub const FileReader = struct {
     }
 
     fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
+        const r: *FileReader = @fieldParentPtr("interface", io_reader);
         const dest = limit.slice(try w.writableSliceGreedy(1));
 
         var slices = [1][]u8{dest};
@@ -154,7 +154,7 @@ pub const FileReader = struct {
     }
 
     fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
+        const r: *FileReader = @fieldParentPtr("interface", io_reader);
         var total_discarded: usize = 0;
         const remaining = @intFromEnum(limit);
 
@@ -173,7 +173,7 @@ pub const FileReader = struct {
     }
 
     fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
-        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
+        const r: *FileReader = @fieldParentPtr("interface", io_reader);
 
         const max_vecs = 17;
         var buffer_storage: [max_vecs][]u8 = undefined;
@@ -226,7 +226,7 @@ pub const FileWriter = struct {
     }
 
     fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const w: *FileWriter = @alignCast(@fieldParentPtr("interface", io_writer));
+        const w: *FileWriter = @fieldParentPtr("interface", io_writer);
         const buffered = io_writer.buffered();
 
         const max_vecs = 16;
@@ -286,7 +286,7 @@ pub const FileWriter = struct {
     }
 
     fn flush(io_writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const w: *FileWriter = @alignCast(@fieldParentPtr("interface", io_writer));
+        const w: *FileWriter = @fieldParentPtr("interface", io_writer);
 
         while (io_writer.end > 0) {
             const buffered = io_writer.buffered();
