@@ -15,11 +15,14 @@ const Handle = std.fs.File.Handle;
 pub const File = struct {
     fd: Handle,
 
+    pub const ReadError = aio.system.fs.FileReadError || Cancelable;
+    pub const WriteError = aio.system.fs.FileWriteError || Cancelable;
+
     pub fn fromFd(fd: Handle) File {
         return .{ .fd = fd };
     }
 
-    pub fn read(self: *File, rt: *Runtime, buffer: []u8, offset: u64) !usize {
+    pub fn read(self: *File, rt: *Runtime, buffer: []u8, offset: u64) ReadError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -34,7 +37,7 @@ pub const File = struct {
         return try op.getResult();
     }
 
-    pub fn write(self: *File, rt: *Runtime, data: []const u8, offset: u64) !usize {
+    pub fn write(self: *File, rt: *Runtime, data: []const u8, offset: u64) WriteError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -50,8 +53,7 @@ pub const File = struct {
     }
 
     /// Read from file into multiple slices (vectored read).
-    /// Returns std.Io.Reader compatible errors.
-    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8, offset: u64) (Cancelable || std.Io.Reader.Error)!usize {
+    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8, offset: u64) ReadError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -63,17 +65,11 @@ pub const File = struct {
         executor.loop.add(&op.c);
         try waitForIo(rt, &op.c);
 
-        const bytes_read = op.getResult() catch return error.ReadFailed;
-
-        // EOF is indicated by 0 bytes read
-        if (bytes_read == 0) return error.EndOfStream;
-
-        return bytes_read;
+        return try op.getResult();
     }
 
     /// Write to file from multiple slices (vectored write).
-    /// Returns std.Io.Writer compatible errors.
-    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8, offset: u64) (Cancelable || std.Io.Writer.Error)!usize {
+    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8, offset: u64) WriteError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -85,7 +81,7 @@ pub const File = struct {
         executor.loop.add(&op.c);
         try waitForIo(rt, &op.c);
 
-        return op.getResult() catch error.WriteFailed;
+        return try op.getResult();
     }
 
     pub fn close(self: *File, rt: *Runtime) void {
@@ -120,6 +116,7 @@ pub const FileReader = struct {
     file: File,
     runtime: *Runtime,
     position: u64 = 0,
+    err: ?File.ReadError = null,
     interface: std.Io.Reader,
 
     pub fn init(file: File, runtime: *Runtime, buffer: []u8) FileReader {
@@ -146,8 +143,11 @@ pub const FileReader = struct {
         var slices = [1][]u8{dest};
         var file = r.file;
         const n = file.readVec(r.runtime, &slices, r.position) catch |err| {
-            return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
+            r.err = err;
+            return error.ReadFailed;
         };
+
+        if (n == 0) return error.EndOfStream;
 
         r.position += n;
         w.advance(n);
@@ -164,11 +164,12 @@ pub const FileReader = struct {
             var slices = [1][]u8{io_reader.buffer[0..to_read]};
             var file = r.file;
             const n = file.readVec(r.runtime, &slices, r.position) catch |err| {
-                if (err == error.EndOfStream) break;
+                r.err = err;
                 return error.ReadFailed;
             };
             r.position += n;
             total_discarded += n;
+            if (n == 0) break; // EOF
         }
         return total_discarded;
     }
@@ -188,8 +189,11 @@ pub const FileReader = struct {
 
         var file = r.file;
         const n = file.readVec(r.runtime, buffer_slice[0..dest_n], r.position) catch |err| {
-            return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
+            r.err = err;
+            return error.ReadFailed;
         };
+
+        if (n == 0) return error.EndOfStream;
 
         r.position += n;
 
@@ -206,6 +210,7 @@ pub const FileWriter = struct {
     file: File,
     runtime: *Runtime,
     position: u64 = 0,
+    err: ?File.WriteError = null,
     interface: std.Io.Writer,
 
     pub fn init(file: File, runtime: *Runtime, buffer: []u8) FileWriter {
@@ -276,7 +281,7 @@ pub const FileWriter = struct {
 
         var file = w.file;
         const n = file.writeVec(w.runtime, vecs[0..len], w.position) catch |err| {
-            if (err == error.Canceled) return error.WriteFailed;
+            w.err = err;
             return error.WriteFailed;
         };
 
@@ -292,7 +297,7 @@ pub const FileWriter = struct {
             var slices = [1][]const u8{buffered};
             var file = w.file;
             const n = file.writeVec(w.runtime, &slices, w.position) catch |err| {
-                if (err == error.Canceled) return error.WriteFailed;
+                w.err = err;
                 return error.WriteFailed;
             };
 
