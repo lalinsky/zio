@@ -32,6 +32,7 @@ const FileOpen = @import("../completion.zig").FileOpen;
 const FileCreate = @import("../completion.zig").FileCreate;
 const FileRename = @import("../completion.zig").FileRename;
 const FileDelete = @import("../completion.zig").FileDelete;
+const FileSize = @import("../completion.zig").FileSize;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
@@ -50,6 +51,7 @@ pub const capabilities: BackendCapabilities = .{
     .file_sync = true,
     .file_rename = true,
     .file_delete = true,
+    .file_size = true,
 };
 
 pub const SharedState = struct {};
@@ -85,6 +87,10 @@ pub const FileRenameData = struct {
 
 pub const FileDeleteData = struct {
     path: [:0]const u8 = "",
+};
+
+pub const FileSizeData = struct {
+    statx: linux.Statx = std.mem.zeroes(linux.Statx),
 };
 
 const Self = @This();
@@ -442,6 +448,21 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.user_data = @intFromPtr(c);
             data.internal.path = path;
         },
+
+        .file_size => {
+            const data = c.cast(FileSize);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_size", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            // Use statx with empty pathname to get stats for the fd itself
+            const mask = linux.STATX_SIZE;
+            const flags = linux.AT.EMPTY_PATH;
+            sqe.prep_statx(data.handle, "", flags, mask, &data.internal.statx);
+            sqe.user_data = @intFromPtr(c);
+        },
     }
 }
 
@@ -726,6 +747,15 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileDeleteError(@enumFromInt(-res)));
             } else {
                 c.setResult(.file_delete, {});
+            }
+        },
+
+        .file_size => {
+            const data = c.cast(FileSize);
+            if (res < 0) {
+                c.setError(fs.errnoToFileSizeError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_size, data.internal.statx.size);
             }
         },
     }

@@ -56,6 +56,11 @@ pub extern "kernel32" fn FlushFileBuffers(
     hFile: HANDLE,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn GetFileSizeEx(
+    hFile: HANDLE,
+    lpFileSize: *LARGE_INTEGER,
+) callconv(.winapi) BOOL;
+
 // IOCP functions
 pub extern "kernel32" fn GetQueuedCompletionStatusEx(
     CompletionPort: HANDLE,

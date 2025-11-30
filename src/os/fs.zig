@@ -145,6 +145,13 @@ pub const FileDeleteError = error{
     Unexpected,
 };
 
+pub const FileSizeError = error{
+    AccessDenied,
+    InvalidFileDescriptor,
+    Canceled,
+    Unexpected,
+};
+
 /// Open an existing file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
@@ -678,6 +685,46 @@ pub fn errnoToFileDeleteError(errno: posix.system.E) FileDeleteError {
         .NOMEM => error.SystemResources,
         .ROFS => error.ReadOnlyFileSystem,
         .NOTEMPTY => error.DirNotEmpty,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+/// Get the size of a file
+pub fn fsize(fd: fd_t) FileSizeError!u64 {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        var file_size: w.LARGE_INTEGER = undefined;
+        const success = w2.GetFileSizeEx(fd, &file_size);
+
+        if (success == w.FALSE) {
+            switch (w2.GetLastError()) {
+                .INVALID_HANDLE => return error.InvalidFileDescriptor,
+                .ACCESS_DENIED => return error.AccessDenied,
+                else => |err| return unexpectedError(err) catch error.Unexpected,
+            }
+        }
+
+        return @intCast(file_size);
+    }
+
+    while (true) {
+        var stat_buf: posix.system.Stat = undefined;
+        const rc = posix.system.fstat(fd, &stat_buf);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(stat_buf.size),
+            .INTR => continue,
+            else => |err| return errnoToFileSizeError(err),
+        }
+    }
+}
+
+pub fn errnoToFileSizeError(errno: posix.system.E) FileSizeError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .BADF => error.InvalidFileDescriptor,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };

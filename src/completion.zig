@@ -17,6 +17,7 @@ pub const BackendCapabilities = struct {
     file_sync: bool = false,
     file_rename: bool = false,
     file_delete: bool = false,
+    file_size: bool = false,
 
     pub fn supportsNonBlockingFileIo(comptime self: BackendCapabilities) bool {
         return self.file_read or self.file_write;
@@ -48,6 +49,7 @@ pub const Op = enum {
     file_sync,
     file_rename,
     file_delete,
+    file_size,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -76,6 +78,7 @@ pub const Op = enum {
             .file_sync => FileSync,
             .file_rename => FileRename,
             .file_delete => FileDelete,
+            .file_size => FileSize,
         };
     }
 
@@ -106,6 +109,7 @@ pub const Op = enum {
             FileSync => .file_sync,
             FileRename => .file_rename,
             FileDelete => .file_delete,
+            FileSize => .file_size,
             else => @compileError("unknown completion type"),
         };
     }
@@ -807,6 +811,29 @@ pub const FileDelete = struct {
 
     pub fn getResult(self: *const FileDelete) Error!void {
         return self.c.getResult(.file_delete);
+    }
+};
+
+pub const FileSize = struct {
+    c: Completion,
+    result_private_do_not_touch: u64 = undefined,
+    internal: switch (Backend.capabilities.file_size) {
+        true => if (@hasDecl(Backend, "FileSizeData")) Backend.FileSizeData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+
+    pub const Error = fs.FileSizeError || Cancelable;
+
+    pub fn init(handle: fs.fd_t) FileSize {
+        return .{
+            .c = .init(.file_size),
+            .handle = handle,
+        };
+    }
+
+    pub fn getResult(self: *const FileSize) Error!u64 {
+        return self.c.getResult(.file_size);
     }
 };
 

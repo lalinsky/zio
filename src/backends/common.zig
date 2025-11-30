@@ -15,6 +15,7 @@ const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
 const FileRename = @import("../completion.zig").FileRename;
 const FileDelete = @import("../completion.zig").FileDelete;
+const FileSize = @import("../completion.zig").FileSize;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 
@@ -242,4 +243,21 @@ pub fn fileDeleteWork(work: *Work) void {
     const internal: *@FieldType(FileDelete, "internal") = @fieldParentPtr("work", work);
     const file_delete: *FileDelete = @fieldParentPtr("internal", internal);
     handleFileDelete(&file_delete.c, file_delete.internal.allocator);
+}
+
+/// Helper to handle file size operation
+pub fn handleFileSize(c: *Completion) void {
+    const data = c.cast(FileSize);
+    if (fs.fsize(data.handle)) |size| {
+        c.setResult(.file_size, size);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for FileSize - performs blocking fstat() syscall
+pub fn fileSizeWork(work: *Work) void {
+    const internal: *@FieldType(FileSize, "internal") = @fieldParentPtr("work", work);
+    const file_size: *FileSize = @fieldParentPtr("internal", internal);
+    handleFileSize(&file_size.c);
 }

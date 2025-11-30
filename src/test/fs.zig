@@ -214,3 +214,73 @@ test "File: read EOF" {
     try loop.run(.until_done);
     try file_delete.getResult();
 }
+
+test "File: size" {
+    var thread_pool: aio.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: aio.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+
+    const cwd = std.fs.cwd();
+
+    // Create a file
+    var file_create = aio.FileCreate.init(cwd.fd, "test-size", .{ .read = true, .truncate = true, .mode = 0o664 });
+    loop.add(&file_create.c);
+    try loop.run(.until_done);
+    const fd = try file_create.getResult();
+
+    // Check size of empty file
+    var file_size1 = aio.FileSize.init(fd);
+    loop.add(&file_size1.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.dead, file_size1.c.state);
+    try std.testing.expectEqual(true, file_size1.c.has_result);
+    const size1 = try file_size1.getResult();
+    try std.testing.expectEqual(0, size1);
+
+    // Write some data
+    const write_data = "Hello, file size test!";
+    var write_iov: [1]aio.system.iovec_const = undefined;
+    var file_write = aio.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
+    loop.add(&file_write.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(write_data.len, try file_write.getResult());
+
+    // Check size after write
+    var file_size2 = aio.FileSize.init(fd);
+    loop.add(&file_size2.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.dead, file_size2.c.state);
+    try std.testing.expectEqual(true, file_size2.c.has_result);
+    const size2 = try file_size2.getResult();
+    try std.testing.expectEqual(write_data.len, size2);
+
+    // Write more data at different offset
+    const more_data = " More data!";
+    var write_iov2: [1]aio.system.iovec_const = undefined;
+    var file_write2 = aio.FileWrite.init(fd, .fromSlice(more_data, &write_iov2), write_data.len);
+    loop.add(&file_write2.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(more_data.len, try file_write2.getResult());
+
+    // Check final size
+    var file_size3 = aio.FileSize.init(fd);
+    loop.add(&file_size3.c);
+    try loop.run(.until_done);
+    const size3 = try file_size3.getResult();
+    try std.testing.expectEqual(write_data.len + more_data.len, size3);
+
+    // Close and delete
+    var file_close = aio.FileClose.init(fd);
+    loop.add(&file_close.c);
+    try loop.run(.until_done);
+    try file_close.getResult();
+
+    var file_delete = aio.FileDelete.init(cwd.fd, "test-size");
+    loop.add(&file_delete.c);
+    try loop.run(.until_done);
+    try file_delete.getResult();
+}

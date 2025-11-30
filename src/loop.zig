@@ -17,6 +17,7 @@ const FileWrite = @import("completion.zig").FileWrite;
 const FileSync = @import("completion.zig").FileSync;
 const FileRename = @import("completion.zig").FileRename;
 const FileDelete = @import("completion.zig").FileDelete;
+const FileSize = @import("completion.zig").FileSize;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const time = @import("os/time.zig");
 const net = @import("os/net.zig");
@@ -356,7 +357,7 @@ pub const Loop = struct {
                 }
             },
 
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size => |op| {
                 if (!@field(Backend.capabilities, @tagName(op))) {
                     const op_data = completion.cast(op.toType());
                     self.cancelFileOpViaThreadPool(completion, &op_data.internal.work);
@@ -477,7 +478,7 @@ pub const Loop = struct {
                 // Regular backend operation
                 // Route file operations to thread pool for backends without native support
                 switch (completion.op) {
-                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => |op| {
+                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size => |op| {
                         if (!@field(Backend.capabilities, @tagName(op))) {
                             self.submitFileOpToThreadPool(completion);
                             return;
@@ -580,7 +581,7 @@ pub const Loop = struct {
         self.state.active += 1;
 
         switch (completion.op) {
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size => |op| {
                 if (@field(Backend.capabilities, @tagName(op))) {
                     unreachable;
                 }
@@ -594,6 +595,7 @@ pub const Loop = struct {
                     .file_sync => common.fileSyncWork,
                     .file_rename => common.fileRenameWork,
                     .file_delete => common.fileDeleteWork,
+                    .file_size => common.fileSizeWork,
                     else => unreachable,
                 };
 

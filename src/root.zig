@@ -38,6 +38,7 @@ pub const FileWrite = completion.FileWrite;
 pub const FileSync = completion.FileSync;
 pub const FileRename = completion.FileRename;
 pub const FileDelete = completion.FileDelete;
+pub const FileSize = completion.FileSize;
 
 /// Low level system APIs
 pub const system = @import("system.zig");
