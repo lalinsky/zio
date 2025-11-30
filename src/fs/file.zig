@@ -9,6 +9,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
 const waitForIo = @import("../io.zig").waitForIo;
 const genericCallback = @import("../io.zig").genericCallback;
+const fillBuf = @import("../io.zig").fillBuf;
 
 const Handle = std.fs.File.Handle;
 
@@ -278,54 +279,14 @@ pub const FileWriter = struct {
             .windows => 1,
             else => 16,
         };
-        var iovec_storage: [max_vecs]aio.system.iovec_const = undefined;
-        var len: usize = 0;
 
-        if (buffered.len > 0) {
-            iovec_storage[len] = aio.system.iovecConstFromSlice(buffered);
-            len += 1;
-        }
+        var splat_buf: [64]u8 = undefined;
+        var slices: [max_vecs][]const u8 = undefined;
+        const buf_len = fillBuf(&slices, buffered, data, splat, &splat_buf);
 
-        for (data[0 .. data.len - 1]) |d| {
-            if (d.len == 0) continue;
-            iovec_storage[len] = aio.system.iovecConstFromSlice(d);
-            len += 1;
-            if (len == iovec_storage.len) break;
-        }
+        if (buf_len == 0) return 0;
 
-        const pattern = data[data.len - 1];
-        if (len < iovec_storage.len) switch (splat) {
-            0 => {},
-            1 => if (pattern.len != 0) {
-                iovec_storage[len] = aio.system.iovecConstFromSlice(pattern);
-                len += 1;
-            },
-            else => switch (pattern.len) {
-                0 => {},
-                1 => {
-                    const splat_buffer_candidate = io_writer.buffer[io_writer.end..];
-                    var backup_buffer: [64]u8 = undefined;
-                    const splat_buffer = if (splat_buffer_candidate.len >= backup_buffer.len)
-                        splat_buffer_candidate
-                    else
-                        &backup_buffer;
-                    const memset_len = @min(splat_buffer.len, splat);
-                    const buf = splat_buffer[0..memset_len];
-                    @memset(buf, pattern[0]);
-                    iovec_storage[len] = aio.system.iovecConstFromSlice(buf);
-                    len += 1;
-                },
-                else => {
-                    iovec_storage[len] = aio.system.iovecConstFromSlice(pattern);
-                    len += 1;
-                },
-            },
-        };
-
-        if (len == 0) return 0;
-
-        const buf = aio.WriteBuf{ .iovecs = iovec_storage[0..len] };
-        const n = w.file.writeBuf(w.runtime, buf, w.position) catch |err| {
+        const n = w.file.writeVec(w.runtime, slices[0..buf_len], w.position) catch |err| {
             w.err = err;
             return error.WriteFailed;
         };
