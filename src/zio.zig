@@ -18,10 +18,11 @@ pub const Cancelable = common.Cancelable;
 pub const Timeoutable = common.Timeoutable;
 
 // Re-export I/O functionality
-pub const File = @import("io/file.zig").File;
 // TODO: Migrate Pipe to aio
 // pub const Pipe = @import("io/pipe.zig").Pipe;
 pub const fs = @import("fs.zig");
+pub const File = fs.File;
+pub const Dir = fs.Dir;
 
 // Re-export network functionality
 pub const net = @import("net.zig");

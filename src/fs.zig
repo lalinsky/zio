@@ -5,8 +5,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Runtime = @import("runtime.zig").Runtime;
-const Dir = @import("io/dir.zig").Dir;
-const File = @import("io/file.zig").File;
+
+pub const Dir = @import("fs/dir.zig").Dir;
+pub const File = @import("fs/file.zig").File;
 
 pub const cwd = Dir.cwd;
 
