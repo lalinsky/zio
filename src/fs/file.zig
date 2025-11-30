@@ -105,16 +105,24 @@ pub const File = struct {
         // Ignore close errors, following Zig std lib pattern
         _ = op.getResult() catch {};
     }
+
+    pub fn reader(self: File, rt: *Runtime, buffer: []u8) FileReader {
+        return FileReader.init(self, rt, buffer);
+    }
+
+    pub fn writer(self: File, rt: *Runtime, buffer: []u8) FileWriter {
+        return FileWriter.init(self, rt, buffer);
+    }
 };
 
 /// File reader that tracks position and implements std.Io.Reader interface
 pub const FileReader = struct {
-    file: *File,
+    file: File,
     runtime: *Runtime,
     position: usize = 0,
     interface: std.Io.Reader,
 
-    pub fn init(file: *File, runtime: *Runtime, buffer: []u8) FileReader {
+    pub fn init(file: File, runtime: *Runtime, buffer: []u8) FileReader {
         return .{
             .file = file,
             .runtime = runtime,
@@ -136,7 +144,8 @@ pub const FileReader = struct {
         const dest = limit.slice(try w.writableSliceGreedy(1));
 
         var slices = [1][]u8{dest};
-        const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
+        var file = r.file;
+        const n = file.readVec(r.runtime, &slices, r.position) catch |err| {
             return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
         };
 
@@ -153,7 +162,8 @@ pub const FileReader = struct {
         while (total_discarded < remaining) {
             const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
             var slices = [1][]u8{io_reader.buffer[0..to_read]};
-            const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
+            var file = r.file;
+            const n = file.readVec(r.runtime, &slices, r.position) catch |err| {
                 if (err == error.EndOfStream) break;
                 return error.ReadFailed;
             };
@@ -176,7 +186,8 @@ pub const FileReader = struct {
         const dest_n, const data_size = try io_reader.writableVector(buffer_slice, data);
         if (dest_n == 0) return 0;
 
-        const n = r.file.readVec(r.runtime, buffer_slice[0..dest_n], r.position) catch |err| {
+        var file = r.file;
+        const n = file.readVec(r.runtime, buffer_slice[0..dest_n], r.position) catch |err| {
             return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
         };
 
@@ -192,12 +203,12 @@ pub const FileReader = struct {
 
 /// File writer that tracks position and implements std.Io.Writer interface
 pub const FileWriter = struct {
-    file: *File,
+    file: File,
     runtime: *Runtime,
     position: usize = 0,
     interface: std.Io.Writer,
 
-    pub fn init(file: *File, runtime: *Runtime, buffer: []u8) FileWriter {
+    pub fn init(file: File, runtime: *Runtime, buffer: []u8) FileWriter {
         return .{
             .file = file,
             .runtime = runtime,
@@ -263,7 +274,8 @@ pub const FileWriter = struct {
 
         if (len == 0) return 0;
 
-        const n = w.file.writeVec(w.runtime, vecs[0..len], w.position) catch |err| {
+        var file = w.file;
+        const n = file.writeVec(w.runtime, vecs[0..len], w.position) catch |err| {
             if (err == error.Canceled) return error.WriteFailed;
             return error.WriteFailed;
         };
@@ -278,7 +290,8 @@ pub const FileWriter = struct {
         while (io_writer.end > 0) {
             const buffered = io_writer.buffered();
             var slices = [1][]const u8{buffered};
-            const n = w.file.writeVec(w.runtime, &slices, w.position) catch |err| {
+            var file = w.file;
+            const n = file.writeVec(w.runtime, &slices, w.position) catch |err| {
                 if (err == error.Canceled) return error.WriteFailed;
                 return error.WriteFailed;
             };
@@ -419,7 +432,7 @@ test "File: reader and writer interface" {
                 var file = try dir.createFile(rt, file_path, .{});
 
                 var write_buffer: [256]u8 = undefined;
-                var writer = FileWriter.init(&file, rt, &write_buffer);
+                var writer = file.writer(rt, &write_buffer);
 
                 // Test writeSplatAll with single-character pattern
                 var data = [_][]const u8{"x"};
@@ -434,7 +447,7 @@ test "File: reader and writer interface" {
                 var file = try dir.openFile(rt, file_path, .{});
 
                 var read_buffer: [256]u8 = undefined;
-                var reader = FileReader.init(&file, rt, &read_buffer);
+                var reader = file.reader(rt, &read_buffer);
 
                 var result: [20]u8 = undefined;
                 const bytes_read = try reader.interface.readSliceShort(&result);
