@@ -19,7 +19,7 @@ pub const File = struct {
         return .{ .fd = fd };
     }
 
-    pub fn read(self: *File, rt: *Runtime, buffer: []u8, offset: usize) !usize {
+    pub fn read(self: *File, rt: *Runtime, buffer: []u8, offset: u64) !usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -34,7 +34,7 @@ pub const File = struct {
         return try op.getResult();
     }
 
-    pub fn write(self: *File, rt: *Runtime, data: []const u8, offset: usize) !usize {
+    pub fn write(self: *File, rt: *Runtime, data: []const u8, offset: u64) !usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -51,7 +51,7 @@ pub const File = struct {
 
     /// Read from file into multiple slices (vectored read).
     /// Returns std.Io.Reader compatible errors.
-    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8, offset: usize) (Cancelable || std.Io.Reader.Error)!usize {
+    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8, offset: u64) (Cancelable || std.Io.Reader.Error)!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -73,7 +73,7 @@ pub const File = struct {
 
     /// Write to file from multiple slices (vectored write).
     /// Returns std.Io.Writer compatible errors.
-    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8, offset: usize) (Cancelable || std.Io.Writer.Error)!usize {
+    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8, offset: u64) (Cancelable || std.Io.Writer.Error)!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -119,7 +119,7 @@ pub const File = struct {
 pub const FileReader = struct {
     file: File,
     runtime: *Runtime,
-    position: usize = 0,
+    position: u64 = 0,
     interface: std.Io.Reader,
 
     pub fn init(file: File, runtime: *Runtime, buffer: []u8) FileReader {
@@ -205,7 +205,7 @@ pub const FileReader = struct {
 pub const FileWriter = struct {
     file: File,
     runtime: *Runtime,
-    position: usize = 0,
+    position: u64 = 0,
     interface: std.Io.Writer,
 
     pub fn init(file: File, runtime: *Runtime, buffer: []u8) FileWriter {
