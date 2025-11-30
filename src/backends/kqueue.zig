@@ -22,6 +22,7 @@ const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
+const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 
@@ -118,14 +119,21 @@ pub fn wakeFromAnywhere(self: *Self) void {
     self.fd_waker.notify();
 }
 
-fn getFilter(op: Op) i16 {
-    return switch (op) {
+fn getFilter(completion: *Completion) i16 {
+    return switch (completion.op) {
         .net_connect => std.c.EVFILT.WRITE,
         .net_accept => std.c.EVFILT.READ,
         .net_recv => std.c.EVFILT.READ,
         .net_send => std.c.EVFILT.WRITE,
         .net_recvfrom => std.c.EVFILT.READ,
         .net_sendto => std.c.EVFILT.WRITE,
+        .net_poll => blk: {
+            const poll_data = completion.cast(NetPoll);
+            break :blk switch (poll_data.event) {
+                .recv => std.c.EVFILT.READ,
+                .send => std.c.EVFILT.WRITE,
+            };
+        },
         else => unreachable,
     };
 }
@@ -143,7 +151,7 @@ fn reserveChange(self: *Self, state: *LoopState) !*std.c.Kevent {
 /// Queue a kevent change to register a completion.
 /// If queuing fails, completes the completion with error.Unexpected.
 fn queueRegister(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
-    const filter = getFilter(completion.op);
+    const filter = getFilter(completion);
     const change = self.reserveChange(state) catch {
         log.err("Failed to reserve kevent change slot", .{});
         completion.setError(error.Unexpected);
@@ -164,7 +172,7 @@ fn queueRegister(self: *Self, state: *LoopState, fd: NetHandle, completion: *Com
 /// NOTE: Only used for cancellations; normal completions use EV_ONESHOT which auto-removes events
 /// Returns true if successfully queued, false if OOM (caller should let target complete naturally)
 fn queueUnregister(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) bool {
-    const filter = getFilter(completion.op);
+    const filter = getFilter(completion);
     const change = self.reserveChange(state) catch {
         log.err("Failed to reserve kevent change slot for unregister", .{});
         return false;
@@ -188,6 +196,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_send => completion.cast(NetSend).handle,
         .net_recvfrom => completion.cast(NetRecvFrom).handle,
         .net_sendto => completion.cast(NetSendTo).handle,
+        .net_poll => completion.cast(NetPoll).handle,
         else => unreachable,
     };
 }
@@ -262,6 +271,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
+            self.queueRegister(state, data.handle, c);
+        },
+        .net_poll => {
+            const data = c.cast(NetPoll);
             self.queueRegister(state, data.handle, c);
         },
 
@@ -470,6 +483,17 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                     return .completed;
                 },
             }
+        },
+        .net_poll => {
+            // For poll operations, EOF means the socket is "ready" (will return EOF on next read).
+            // Reuse handleKqueueError so we only fail on real socket errors (SO_ERROR != 0),
+            // consistent with the other net_* ops.
+            if (handleKqueueError(event, net.errnoToRecvError)) |err| {
+                comp.setError(err);
+            } else {
+                comp.setResult(.net_poll, {});
+            }
+            return .completed;
         },
         else => {
             std.debug.panic("unexpected completion type in complete: {}", .{comp.op});

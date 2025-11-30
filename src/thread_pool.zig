@@ -184,7 +184,6 @@ pub const ThreadPool = struct {
             defer self.queue_mutex.lock();
 
             const work = c.cast(Work);
-            const loop = work.loop orelse unreachable;
 
             // Try to claim the work by transitioning from pending to running
             if (work.state.cmpxchgStrong(.pending, .running, .acq_rel, .acquire)) |state| {
@@ -198,11 +197,8 @@ pub const ThreadPool = struct {
                 work.state.store(.completed, .release);
             }
 
-            // Notify the event loop
-            // If this work has a linked completion, push that instead
-            const completion_to_push = work.linked orelse c;
-            loop.state.work_completions.push(completion_to_push);
-            loop.wake();
+            // Notify via completion callback
+            work.completion_fn(work.completion_context, work);
         }
         return true;
     }
