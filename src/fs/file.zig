@@ -5,8 +5,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const aio = @import("aio");
-const StreamReader = @import("../stream.zig").StreamReader;
-const StreamWriter = @import("../stream.zig").StreamWriter;
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
 const waitForIo = @import("../io.zig").waitForIo;
@@ -16,85 +14,12 @@ const Handle = std.fs.File.Handle;
 
 pub const File = struct {
     fd: Handle,
-    /// File position for sequential read/write operations.
-    /// On Windows with overlapped I/O, we track this ourselves since the OS doesn't.
-    /// Starts at 0, matching POSIX behavior for newly opened files.
-    position: u64 = 0,
 
-    pub fn init(std_file: std.fs.File) File {
-        return File{
-            .fd = std_file.handle,
-        };
+    pub fn fromFd(fd: Handle) File {
+        return .{ .fd = fd };
     }
 
-    pub fn initFd(fd: Handle) File {
-        return File{
-            .fd = fd,
-        };
-    }
-
-    pub fn read(self: *File, rt: *Runtime, buffer: []u8) !usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
-        const executor = task.getExecutor();
-
-        var storage: [1]aio.system.iovec = undefined;
-        var op = aio.FileRead.init(self.fd, .fromSlice(buffer, &storage), self.position);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        const bytes_read = try op.getResult();
-        self.position += bytes_read;
-        return bytes_read;
-    }
-
-    pub fn write(self: *File, rt: *Runtime, data: []const u8) !usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
-        const executor = task.getExecutor();
-
-        var storage: [1]aio.system.iovec_const = undefined;
-        var op = aio.FileWrite.init(self.fd, .fromSlice(data, &storage), self.position);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        const bytes_written = op.getResult() catch |err| {
-            std.log.err("write: getResult failed with error: {}", .{err});
-            return err;
-        };
-        self.position += bytes_written;
-        return bytes_written;
-    }
-
-    /// Seek to a position in the file.
-    /// Updates the internal position used by read() and write().
-    /// Does not affect pread() or pwrite() operations.
-    pub fn seek(self: *File, offset: i64, whence: std.fs.File.SeekableStream.SeekFrom) !u64 {
-        const new_pos: u64 = switch (whence) {
-            .start => blk: {
-                if (offset < 0) return error.InvalidOffset;
-                break :blk @intCast(offset);
-            },
-            .current => blk: {
-                const current: i64 = @intCast(self.position);
-                const result = current + offset;
-                if (result < 0) return error.InvalidOffset;
-                break :blk @intCast(result);
-            },
-            .end => {
-                // Seeking from end requires getting file size, which we don't support yet
-                return error.Unsupported;
-            },
-        };
-        self.position = new_pos;
-        return new_pos;
-    }
-
-    pub fn pread(self: *File, rt: *Runtime, buffer: []u8, offset: u64) !usize {
+    pub fn read(self: *File, rt: *Runtime, buffer: []u8, offset: usize) !usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -109,7 +34,7 @@ pub const File = struct {
         return try op.getResult();
     }
 
-    pub fn pwrite(self: *File, rt: *Runtime, data: []const u8, offset: u64) !usize {
+    pub fn write(self: *File, rt: *Runtime, data: []const u8, offset: usize) !usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -126,12 +51,12 @@ pub const File = struct {
 
     /// Read from file into multiple slices (vectored read).
     /// Returns std.Io.Reader compatible errors.
-    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8) (Cancelable || std.Io.Reader.Error)!usize {
+    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8, offset: usize) (Cancelable || std.Io.Reader.Error)!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
         var storage: [16]aio.system.iovec = undefined;
-        var op = aio.FileRead.init(self.fd, aio.ReadBuf.fromSlices(slices, &storage), self.position);
+        var op = aio.FileRead.init(self.fd, aio.ReadBuf.fromSlices(slices, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -143,27 +68,24 @@ pub const File = struct {
         // EOF is indicated by 0 bytes read
         if (bytes_read == 0) return error.EndOfStream;
 
-        self.position += bytes_read;
         return bytes_read;
     }
 
     /// Write to file from multiple slices (vectored write).
     /// Returns std.Io.Writer compatible errors.
-    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8) (Cancelable || std.Io.Writer.Error)!usize {
+    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8, offset: usize) (Cancelable || std.Io.Writer.Error)!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
         var storage: [16]aio.system.iovec_const = undefined;
-        var op = aio.FileWrite.init(self.fd, aio.WriteBuf.fromSlices(slices, &storage), self.position);
+        var op = aio.FileWrite.init(self.fd, aio.WriteBuf.fromSlices(slices, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
         executor.loop.add(&op.c);
         try waitForIo(rt, &op.c);
 
-        const bytes_written = op.getResult() catch return error.WriteFailed;
-        self.position += bytes_written;
-        return bytes_written;
+        return op.getResult() catch error.WriteFailed;
     }
 
     pub fn close(self: *File, rt: *Runtime) void {
@@ -183,17 +105,195 @@ pub const File = struct {
         // Ignore close errors, following Zig std lib pattern
         _ = op.getResult() catch {};
     }
+};
 
-    // Zig 0.15+ streaming interface
-    pub const Reader = StreamReader(*File);
-    pub const Writer = StreamWriter(*File);
+/// File reader that tracks position and implements std.Io.Reader interface
+pub const FileReader = struct {
+    file: *File,
+    runtime: *Runtime,
+    position: usize = 0,
+    interface: std.Io.Reader,
 
-    pub fn reader(self: *File, rt: *Runtime, buffer: []u8) Reader {
-        return Reader.init(self, rt, buffer);
+    pub fn init(file: *File, runtime: *Runtime, buffer: []u8) FileReader {
+        return .{
+            .file = file,
+            .runtime = runtime,
+            .interface = .{
+                .vtable = &.{
+                    .stream = stream,
+                    .discard = discard,
+                    .readVec = readVec,
+                },
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
     }
 
-    pub fn writer(self: *File, rt: *Runtime, buffer: []u8) Writer {
-        return Writer.init(self, rt, buffer);
+    fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
+        const dest = limit.slice(try w.writableSliceGreedy(1));
+
+        var slices = [1][]u8{dest};
+        const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
+            return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
+        };
+
+        r.position += n;
+        w.advance(n);
+        return n;
+    }
+
+    fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
+        var total_discarded: usize = 0;
+        const remaining = @intFromEnum(limit);
+
+        while (total_discarded < remaining) {
+            const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
+            var slices = [1][]u8{io_reader.buffer[0..to_read]};
+            const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
+                if (err == error.EndOfStream) break;
+                return error.ReadFailed;
+            };
+            r.position += n;
+            total_discarded += n;
+        }
+        return total_discarded;
+    }
+
+    fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
+
+        const max_vecs = 17;
+        var buffer_storage: [max_vecs][]u8 = undefined;
+        const buffer_slice = if (data.len + 1 <= max_vecs)
+            buffer_storage[0 .. data.len + 1]
+        else
+            buffer_storage[0..];
+
+        const dest_n, const data_size = try io_reader.writableVector(buffer_slice, data);
+        if (dest_n == 0) return 0;
+
+        const n = r.file.readVec(r.runtime, buffer_slice[0..dest_n], r.position) catch |err| {
+            return if (err == error.Canceled) error.ReadFailed else @errorCast(err);
+        };
+
+        r.position += n;
+
+        if (n > data_size) {
+            io_reader.end += n - data_size;
+            return data_size;
+        }
+        return n;
+    }
+};
+
+/// File writer that tracks position and implements std.Io.Writer interface
+pub const FileWriter = struct {
+    file: *File,
+    runtime: *Runtime,
+    position: usize = 0,
+    interface: std.Io.Writer,
+
+    pub fn init(file: *File, runtime: *Runtime, buffer: []u8) FileWriter {
+        return .{
+            .file = file,
+            .runtime = runtime,
+            .interface = .{
+                .vtable = &.{
+                    .drain = drain,
+                    .flush = flush,
+                },
+                .buffer = buffer,
+                .end = 0,
+            },
+        };
+    }
+
+    fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const w: *FileWriter = @alignCast(@fieldParentPtr("interface", io_writer));
+        const buffered = io_writer.buffered();
+
+        const max_vecs = 16;
+        var vecs: [max_vecs][]const u8 = undefined;
+        var len: usize = 0;
+
+        if (buffered.len > 0) {
+            vecs[len] = buffered;
+            len += 1;
+        }
+
+        for (data[0 .. data.len - 1]) |d| {
+            if (d.len == 0) continue;
+            vecs[len] = d;
+            len += 1;
+            if (len == vecs.len) break;
+        }
+
+        const pattern = data[data.len - 1];
+        if (len < vecs.len) switch (splat) {
+            0 => {},
+            1 => if (pattern.len != 0) {
+                vecs[len] = pattern;
+                len += 1;
+            },
+            else => switch (pattern.len) {
+                0 => {},
+                1 => {
+                    const splat_buffer_candidate = io_writer.buffer[io_writer.end..];
+                    var backup_buffer: [64]u8 = undefined;
+                    const splat_buffer = if (splat_buffer_candidate.len >= backup_buffer.len)
+                        splat_buffer_candidate
+                    else
+                        &backup_buffer;
+                    const memset_len = @min(splat_buffer.len, splat);
+                    const buf = splat_buffer[0..memset_len];
+                    @memset(buf, pattern[0]);
+                    vecs[len] = buf;
+                    len += 1;
+                },
+                else => {
+                    vecs[len] = pattern;
+                    len += 1;
+                },
+            },
+        };
+
+        if (len == 0) return 0;
+
+        const n = w.file.writeVec(w.runtime, vecs[0..len], w.position) catch |err| {
+            if (err == error.Canceled) return error.WriteFailed;
+            return error.WriteFailed;
+        };
+
+        w.position += n;
+        return io_writer.consume(n);
+    }
+
+    fn flush(io_writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const w: *FileWriter = @alignCast(@fieldParentPtr("interface", io_writer));
+
+        while (io_writer.end > 0) {
+            const buffered = io_writer.buffered();
+            var slices = [1][]const u8{buffered};
+            const n = w.file.writeVec(w.runtime, &slices, w.position) catch |err| {
+                if (err == error.Canceled) return error.WriteFailed;
+                return error.WriteFailed;
+            };
+
+            if (n == 0) return error.WriteFailed;
+
+            w.position += n;
+
+            if (n < buffered.len) {
+                std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
+                io_writer.end -= n;
+            } else {
+                io_writer.end = 0;
+            }
+        }
     }
 };
 
@@ -215,7 +315,7 @@ test "File: basic read and write" {
             // Write test
             const write_data = "Hello, zio!";
             std.log.info("TestTask: About to write data", .{});
-            const bytes_written = try zio_file.write(rt, write_data);
+            const bytes_written = try zio_file.write(rt, write_data, 0);
             std.log.info("TestTask: Wrote {} bytes", .{bytes_written});
             try std.testing.expectEqual(write_data.len, bytes_written);
 
@@ -228,7 +328,7 @@ test "File: basic read and write" {
             std.log.info("TestTask: Reopened file for reading", .{});
 
             var buffer: [100]u8 = undefined;
-            const bytes_read = try read_file.read(rt, &buffer);
+            const bytes_read = try read_file.read(rt, &buffer, 0);
             std.log.info("TestTask: Read {} bytes", .{bytes_read});
             try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
             read_file.close(rt);
@@ -254,20 +354,20 @@ test "File: positional read and write" {
             var zio_file = try dir.createFile(rt, file_path, .{ .read = true });
 
             // Write at different positions
-            try std.testing.expectEqual(5, try zio_file.pwrite(rt, "HELLO", 0));
-            try std.testing.expectEqual(5, try zio_file.pwrite(rt, "WORLD", 10));
+            try std.testing.expectEqual(5, try zio_file.write(rt, "HELLO", 0));
+            try std.testing.expectEqual(5, try zio_file.write(rt, "WORLD", 10));
 
             // Read from positions
             var buf: [5]u8 = undefined;
-            try std.testing.expectEqual(5, try zio_file.pread(rt, &buf, 0));
+            try std.testing.expectEqual(5, try zio_file.read(rt, &buf, 0));
             try std.testing.expectEqualStrings("HELLO", &buf);
 
-            try std.testing.expectEqual(5, try zio_file.pread(rt, &buf, 10));
+            try std.testing.expectEqual(5, try zio_file.read(rt, &buf, 10));
             try std.testing.expectEqualStrings("WORLD", &buf);
 
             // Test reading from gap (should be zeros or random data)
             var gap_buf: [3]u8 = undefined;
-            try std.testing.expectEqual(3, try zio_file.pread(rt, &gap_buf, 5));
+            try std.testing.expectEqual(3, try zio_file.read(rt, &gap_buf, 5));
 
             zio_file.close(rt);
             try dir.deleteFile(rt, file_path);
@@ -290,7 +390,7 @@ test "File: close operation" {
             var zio_file = try dir.createFile(rt, file_path, .{});
 
             // Write some data
-            const bytes_written = try zio_file.write(rt, "test data");
+            const bytes_written = try zio_file.write(rt, "test data", 0);
             try std.testing.expectEqual(9, bytes_written);
 
             // Close the file using zio
@@ -319,7 +419,7 @@ test "File: reader and writer interface" {
                 var file = try dir.createFile(rt, file_path, .{});
 
                 var write_buffer: [256]u8 = undefined;
-                var writer = file.writer(rt, &write_buffer);
+                var writer = FileWriter.init(&file, rt, &write_buffer);
 
                 // Test writeSplatAll with single-character pattern
                 var data = [_][]const u8{"x"};
@@ -334,7 +434,7 @@ test "File: reader and writer interface" {
                 var file = try dir.openFile(rt, file_path, .{});
 
                 var read_buffer: [256]u8 = undefined;
-                var reader = file.reader(rt, &read_buffer);
+                var reader = FileReader.init(&file, rt, &read_buffer);
 
                 var result: [20]u8 = undefined;
                 const bytes_read = try reader.interface.readSliceShort(&result);
