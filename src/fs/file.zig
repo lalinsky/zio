@@ -190,6 +190,9 @@ pub const FileReader = struct {
         const r: *FileReader = @fieldParentPtr("interface", io_reader);
         const to_discard = @intFromEnum(limit);
 
+        // Nothing to discard
+        if (to_discard == 0) return 0;
+
         // For physical files, we can just seek forward
         r.position += to_discard;
 
