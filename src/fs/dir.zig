@@ -25,7 +25,7 @@ pub const Dir = struct {
         try waitForIo(rt, &op.c);
 
         const fd = try op.getResult();
-        return .initFd(fd);
+        return .fromFd(fd);
     }
 
     pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: aio.system.fs.FileCreateFlags) !File {
@@ -40,7 +40,7 @@ pub const Dir = struct {
         try waitForIo(rt, &op.c);
 
         const fd = try op.getResult();
-        return .initFd(fd);
+        return .fromFd(fd);
     }
 
     pub fn rename(self: Dir, rt: *Runtime, old_path: []const u8, new_path: []const u8) !void {

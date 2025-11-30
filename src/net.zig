@@ -9,6 +9,7 @@ const Channel = @import("sync/channel.zig").Channel;
 
 const waitForIo = @import("io.zig").waitForIo;
 const genericCallback = @import("io.zig").genericCallback;
+const fillBuf = @import("io.zig").fillBuf;
 
 const Handle = aio.Backend.NetHandle;
 
@@ -925,69 +926,6 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
     try waitForIo(rt, &op.c);
 
     return try op.getResult();
-}
-
-fn fillBuf(out: [][]const u8, header: []const u8, data: []const []const u8, splat: usize, splat_buffer: []u8) usize {
-    var len: usize = 0;
-    const max_len = out.len;
-
-    // Add header
-    if (header.len > 0 and len < max_len) {
-        out[len] = header;
-        len += 1;
-    }
-
-    if (data.len == 0) return len;
-
-    // Add data slices (except last which might be pattern)
-    const last_index = data.len - 1;
-    for (data[0..last_index]) |bytes| {
-        if (bytes.len > 0 and len < max_len) {
-            out[len] = bytes;
-            len += 1;
-        }
-    }
-
-    // Handle pattern/splat
-    const pattern = data[last_index];
-    switch (splat) {
-        0 => {},
-        1 => if (pattern.len > 0 and len < max_len) {
-            out[len] = pattern;
-            len += 1;
-        },
-        else => switch (pattern.len) {
-            0 => {},
-            1 => {
-                const memset_len = @min(splat_buffer.len, splat);
-                const buf = splat_buffer[0..memset_len];
-                @memset(buf, pattern[0]);
-                if (len < max_len) {
-                    out[len] = buf;
-                    len += 1;
-                }
-                var remaining_splat = splat - buf.len;
-                while (remaining_splat > splat_buffer.len and len < max_len) {
-                    out[len] = splat_buffer;
-                    len += 1;
-                    remaining_splat -= splat_buffer.len;
-                }
-                if (remaining_splat > 0 and len < max_len) {
-                    out[len] = splat_buffer[0..remaining_splat];
-                    len += 1;
-                }
-            },
-            else => {
-                var i: usize = 0;
-                while (i < splat and len < max_len) : (i += 1) {
-                    out[len] = pattern;
-                    len += 1;
-                }
-            },
-        },
-    }
-
-    return len;
 }
 
 pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []const u8, splat: usize) !usize {

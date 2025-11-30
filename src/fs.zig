@@ -26,13 +26,13 @@ test "fs: openFile and createFile with different modes" {
             var file = try dir.createFile(rt, file_path, .{});
 
             const write_data = "Hello, zio fs!";
-            _ = try file.write(rt, write_data);
+            _ = try file.write(rt, write_data, 0);
             file.close(rt);
 
             var read_file = try dir.openFile(rt, file_path, .{ .mode = .read_only });
 
             var buffer: [100]u8 = undefined;
-            const bytes_read = try read_file.read(rt, &buffer);
+            const bytes_read = try read_file.read(rt, &buffer, 0);
             try testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
             read_file.close(rt);
 
