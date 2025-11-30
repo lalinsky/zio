@@ -22,7 +22,7 @@ pub const File = struct {
         return .{ .fd = fd };
     }
 
-    pub fn read(self: *File, rt: *Runtime, buffer: []u8, offset: u64) ReadError!usize {
+    pub fn read(self: File, rt: *Runtime, buffer: []u8, offset: u64) ReadError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -37,7 +37,7 @@ pub const File = struct {
         return try op.getResult();
     }
 
-    pub fn write(self: *File, rt: *Runtime, data: []const u8, offset: u64) WriteError!usize {
+    pub fn write(self: File, rt: *Runtime, data: []const u8, offset: u64) WriteError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -53,7 +53,7 @@ pub const File = struct {
     }
 
     /// Read from file into multiple slices (vectored read).
-    pub fn readVec(self: *File, rt: *Runtime, slices: [][]u8, offset: u64) ReadError!usize {
+    pub fn readVec(self: File, rt: *Runtime, slices: [][]u8, offset: u64) ReadError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -69,7 +69,7 @@ pub const File = struct {
     }
 
     /// Write to file from multiple slices (vectored write).
-    pub fn writeVec(self: *File, rt: *Runtime, slices: []const []const u8, offset: u64) WriteError!usize {
+    pub fn writeVec(self: File, rt: *Runtime, slices: []const []const u8, offset: u64) WriteError!usize {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -84,7 +84,7 @@ pub const File = struct {
         return try op.getResult();
     }
 
-    pub fn close(self: *File, rt: *Runtime) void {
+    pub fn close(self: File, rt: *Runtime) void {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
 
@@ -141,8 +141,7 @@ pub const FileReader = struct {
         const dest = limit.slice(try w.writableSliceGreedy(1));
 
         var slices = [1][]u8{dest};
-        var file = r.file;
-        const n = file.readVec(r.runtime, &slices, r.position) catch |err| {
+        const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
             r.err = err;
             return error.ReadFailed;
         };
@@ -162,8 +161,7 @@ pub const FileReader = struct {
         while (total_discarded < remaining) {
             const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
             var slices = [1][]u8{io_reader.buffer[0..to_read]};
-            var file = r.file;
-            const n = file.readVec(r.runtime, &slices, r.position) catch |err| {
+            const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -187,8 +185,7 @@ pub const FileReader = struct {
         const dest_n, const data_size = try io_reader.writableVector(buffer_slice, data);
         if (dest_n == 0) return 0;
 
-        var file = r.file;
-        const n = file.readVec(r.runtime, buffer_slice[0..dest_n], r.position) catch |err| {
+        const n = r.file.readVec(r.runtime, buffer_slice[0..dest_n], r.position) catch |err| {
             r.err = err;
             return error.ReadFailed;
         };
@@ -279,8 +276,7 @@ pub const FileWriter = struct {
 
         if (len == 0) return 0;
 
-        var file = w.file;
-        const n = file.writeVec(w.runtime, vecs[0..len], w.position) catch |err| {
+        const n = w.file.writeVec(w.runtime, vecs[0..len], w.position) catch |err| {
             w.err = err;
             return error.WriteFailed;
         };
@@ -295,8 +291,7 @@ pub const FileWriter = struct {
         while (io_writer.end > 0) {
             const buffered = io_writer.buffered();
             var slices = [1][]const u8{buffered};
-            var file = w.file;
-            const n = file.writeVec(w.runtime, &slices, w.position) catch |err| {
+            const n = w.file.writeVec(w.runtime, &slices, w.position) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
