@@ -2,8 +2,8 @@ const std = @import("std");
 const aio = @import("aio");
 const Runtime = @import("../runtime.zig").Runtime;
 const File = @import("file.zig").File;
-const waitForIo = @import("../io/base.zig").waitForIo;
-const genericCallback = @import("../io/base.zig").genericCallback;
+const waitForIo = @import("../io.zig").waitForIo;
+const genericCallback = @import("../io.zig").genericCallback;
 
 pub const Dir = struct {
     fd: aio.system.fs.fd_t,

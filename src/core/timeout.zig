@@ -3,8 +3,8 @@ const aio = @import("aio");
 const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("task.zig").AnyTask;
 const resumeTask = @import("task.zig").resumeTask;
-const waitForIo = @import("../io/base.zig").waitForIo;
-const genericCallback = @import("../io/base.zig").genericCallback;
+const waitForIo = @import("../io.zig").waitForIo;
+const genericCallback = @import("../io.zig").genericCallback;
 
 /// A timeout that applies to all I/O operations on the current task.
 /// Multiple Timeout instances can be nested - each has its own independent timer.

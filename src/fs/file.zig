@@ -9,8 +9,8 @@ const StreamReader = @import("../stream.zig").StreamReader;
 const StreamWriter = @import("../stream.zig").StreamWriter;
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
-const waitForIo = @import("../io/base.zig").waitForIo;
-const genericCallback = @import("../io/base.zig").genericCallback;
+const waitForIo = @import("../io.zig").waitForIo;
+const genericCallback = @import("../io.zig").genericCallback;
 
 const Handle = std.fs.File.Handle;
 

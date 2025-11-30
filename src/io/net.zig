@@ -6,8 +6,8 @@ const builtin = @import("builtin");
 
 const aio = @import("aio");
 const Runtime = @import("../runtime.zig").Runtime;
-const waitForIo = @import("base.zig").waitForIo;
-const genericCallback = @import("base.zig").genericCallback;
+const waitForIo = @import("../io.zig").waitForIo;
+const genericCallback = @import("../io.zig").genericCallback;
 
 const Handle = aio.Backend.NetHandle;
 
