@@ -132,9 +132,9 @@ pub fn handleFileSync(c: *Completion) void {
 
 /// Work function for FileOpen - performs blocking openat() syscall
 pub fn fileOpenWork(work: *Work) void {
-    const loop = work.loop.?;
     const internal: *@FieldType(FileOpen, "internal") = @fieldParentPtr("work", work);
     const file_open: *FileOpen = @fieldParentPtr("internal", internal);
+    const loop = internal.linked_context.loop;
 
     if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
         file_open.flags.nonblocking = true;
@@ -158,9 +158,9 @@ pub fn fileOpenWork(work: *Work) void {
 
 /// Work function for FileCreate - performs blocking openat() syscall with O_CREAT
 pub fn fileCreateWork(work: *Work) void {
-    const loop = work.loop.?;
     const internal: *@FieldType(FileCreate, "internal") = @fieldParentPtr("work", work);
     const file_create: *FileCreate = @fieldParentPtr("internal", internal);
+    const loop = internal.linked_context.loop;
 
     if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
         file_create.flags.nonblocking = true;

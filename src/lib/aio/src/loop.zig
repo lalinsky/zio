@@ -340,7 +340,6 @@ pub const Loop = struct {
             },
             .work => {
                 const work = completion.cast(Work);
-                std.debug.assert(work.linked == null); // User Work should never have linked set
 
                 if (self.thread_pool) |thread_pool| {
                     // Try to atomically cancel the work
@@ -436,7 +435,8 @@ pub const Loop = struct {
             },
             .work => {
                 const work = completion.cast(Work);
-                work.loop = self;
+                work.completion_fn = loopWorkComplete;
+                work.completion_context = @ptrCast(self);
                 work.c.state = .running;
                 self.state.active += 1;
                 if (self.thread_pool) |thread_pool| {
@@ -518,6 +518,27 @@ pub const Loop = struct {
         return false;
     }
 
+    /// Standard completion callback for user-submitted Work
+    pub fn loopWorkComplete(ctx: *anyopaque, work: *Work) void {
+        const loop: *Loop = @ptrCast(@alignCast(ctx));
+        loop.state.work_completions.push(&work.c);
+        loop.wake();
+    }
+
+    /// Linked work context for file operations
+    pub const LinkedWorkContext = struct {
+        loop: *Loop,
+        linked: *Completion,
+    };
+
+    /// Completion callback for internal file ops with linked completion
+    pub fn loopLinkedWorkComplete(ctx: *anyopaque, work: *Work) void {
+        _ = work;
+        const context: *LinkedWorkContext = @ptrCast(@alignCast(ctx));
+        context.loop.state.work_completions.push(context.linked);
+        context.loop.wake();
+    }
+
     pub fn processAsyncHandles(self: *Loop) void {
         // Check all async handles for pending notifications
         var c = self.state.async_handles.head;
@@ -580,9 +601,13 @@ pub const Loop = struct {
                 if (@hasField(@TypeOf(op_data.internal), "allocator")) {
                     op_data.internal.allocator = self.allocator;
                 }
+                op_data.internal.linked_context = .{
+                    .loop = self,
+                    .linked = completion,
+                };
                 op_data.internal.work = Work.init(op_func, null);
-                op_data.internal.work.loop = self;
-                op_data.internal.work.linked = completion;
+                op_data.internal.work.completion_fn = loopLinkedWorkComplete;
+                op_data.internal.work.completion_context = @ptrCast(&op_data.internal.linked_context);
                 tp.submit(&op_data.internal.work);
             },
             else => unreachable,

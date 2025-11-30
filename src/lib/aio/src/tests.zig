@@ -11,6 +11,7 @@ const time = @import("os/time.zig");
 test {
     _ = @import("test/thread_pool.zig");
     _ = @import("test/stream_server.zig");
+    _ = @import("test/poll_server.zig");
     _ = @import("test/dgram_server.zig");
     _ = @import("test/fs.zig");
     _ = @import("test/timer.zig");

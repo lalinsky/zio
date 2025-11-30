@@ -21,6 +21,7 @@ const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
+const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 
@@ -110,14 +111,21 @@ pub fn wakeFromAnywhere(self: *Self) void {
     self.waker.notify();
 }
 
-fn getEvents(op: Op) u32 {
-    return switch (op) {
+fn getEvents(completion: *Completion) u32 {
+    return switch (completion.op) {
         .net_connect => std.os.linux.EPOLL.OUT,
         .net_accept => std.os.linux.EPOLL.IN,
         .net_recv => std.os.linux.EPOLL.IN,
         .net_send => std.os.linux.EPOLL.OUT,
         .net_recvfrom => std.os.linux.EPOLL.IN,
         .net_sendto => std.os.linux.EPOLL.OUT,
+        .net_poll => blk: {
+            const poll_data = completion.cast(NetPoll);
+            break :blk switch (poll_data.event) {
+                .recv => std.os.linux.EPOLL.IN,
+                .send => std.os.linux.EPOLL.OUT,
+            };
+        },
         else => unreachable,
     };
 }
@@ -130,6 +138,7 @@ fn getPollType(op: Op) PollEntryType {
         .net_send => .send_or_recv,
         .net_recvfrom => .send_or_recv,
         .net_sendto => .send_or_recv,
+        .net_poll => .send_or_recv,
         else => unreachable,
     };
 }
@@ -156,7 +165,7 @@ fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Co
     };
 
     var entry = gop.value_ptr;
-    const op_events = getEvents(completion.op);
+    const op_events = getEvents(completion);
 
     if (!gop.found_existing) {
         var event = std.os.linux.epoll_event{
@@ -230,7 +239,7 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
     var new_events: u32 = 0;
     var iter: ?*Completion = entry.completions.head;
     while (iter) |c| : (iter = c.next) {
-        new_events |= getEvents(c.op);
+        new_events |= getEvents(c);
     }
 
     if (new_events != entry.events) {
@@ -256,6 +265,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_send => completion.cast(NetSend).handle,
         .net_recvfrom => completion.cast(NetRecvFrom).handle,
         .net_sendto => completion.cast(NetSendTo).handle,
+        .net_poll => completion.cast(NetPoll).handle,
         else => unreachable,
     };
 }
@@ -330,6 +340,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
+            self.addToPollQueue(state, data.handle, c);
+        },
+        .net_poll => {
+            const data = c.cast(NetPoll);
             self.addToPollQueue(state, data.handle, c);
         },
 
@@ -509,6 +523,29 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
                     return .completed;
                 },
             }
+        },
+        .net_poll => {
+            // For poll operations, we want to know when the socket is "ready"
+            // This includes error conditions (EPOLLERR, EPOLLHUP) because they
+            // indicate the socket is ready to return an error on the next I/O
+            const has_error = (event.events & std.os.linux.EPOLL.ERR) != 0;
+            const has_hup = (event.events & std.os.linux.EPOLL.HUP) != 0;
+
+            if (has_error or has_hup) {
+                // Socket has error or hangup - it's "ready"
+                c.setResult(.net_poll, {});
+                return .completed;
+            }
+
+            // Check if the requested events are actually ready
+            const requested_events = getEvents(c);
+            const ready_events = event.events & requested_events;
+            if (ready_events != 0) {
+                c.setResult(.net_poll, {});
+                return .completed;
+            }
+            // Requested events not ready yet - requeue
+            return .requeue;
         },
         else => {
             std.debug.panic("unexpected completion type in complete: {}", .{c.op});
