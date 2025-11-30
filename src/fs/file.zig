@@ -84,6 +84,36 @@ pub const File = struct {
         return try op.getResult();
     }
 
+    /// Read from file using ReadBuf (direct iovec access).
+    pub fn readBuf(self: File, rt: *Runtime, buf: aio.ReadBuf, offset: u64) ReadError!usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
+
+        var op = aio.FileRead.init(self.fd, buf, offset);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
+    }
+
+    /// Write to file using WriteBuf (direct iovec access).
+    pub fn writeBuf(self: File, rt: *Runtime, buf: aio.WriteBuf, offset: u64) WriteError!usize {
+        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const executor = task.getExecutor();
+
+        var op = aio.FileWrite.init(self.fd, buf, offset);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
+    }
+
     pub fn close(self: File, rt: *Runtime) void {
         const task = rt.getCurrentTask() orelse @panic("no active task");
         const executor = task.getExecutor();
@@ -136,12 +166,15 @@ pub const FileReader = struct {
         };
     }
 
+    pub fn logicalPos(self: *const FileReader) u64 {
+        return self.position - self.interface.end + self.interface.seek;
+    }
+
     fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const r: *FileReader = @fieldParentPtr("interface", io_reader);
         const dest = limit.slice(try w.writableSliceGreedy(1));
 
-        var slices = [1][]u8{dest};
-        const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
+        const n = r.file.read(r.runtime, dest, r.position) catch |err| {
             r.err = err;
             return error.ReadFailed;
         };
@@ -155,37 +188,42 @@ pub const FileReader = struct {
 
     fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const r: *FileReader = @fieldParentPtr("interface", io_reader);
-        var total_discarded: usize = 0;
-        const remaining = @intFromEnum(limit);
+        const to_discard = @intFromEnum(limit);
 
-        while (total_discarded < remaining) {
-            const to_read = @min(remaining - total_discarded, io_reader.buffer.len);
-            var slices = [1][]u8{io_reader.buffer[0..to_read]};
-            const n = r.file.readVec(r.runtime, &slices, r.position) catch |err| {
-                r.err = err;
-                return error.ReadFailed;
-            };
-            r.position += n;
-            total_discarded += n;
-            if (n == 0) break; // EOF
-        }
-        return total_discarded;
+        // For physical files, we can just seek forward
+        r.position += to_discard;
+
+        // Verify we didn't seek past EOF by reading 2 bytes:
+        // - 1 byte at position-1 (last byte we claim to have discarded)
+        // - 1 byte at position (to verify there's more data or we're exactly at EOF)
+        var buf: [2]u8 = undefined;
+        const n = r.file.read(r.runtime, &buf, r.position - 1) catch |err| {
+            r.err = err;
+            return error.ReadFailed;
+        };
+
+        // If we couldn't read even 1 byte, we went past EOF
+        if (n == 0) return error.EndOfStream;
+
+        return to_discard;
     }
 
     fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
         const r: *FileReader = @fieldParentPtr("interface", io_reader);
 
-        const max_vecs = 17;
-        var buffer_storage: [max_vecs][]u8 = undefined;
-        const buffer_slice = if (data.len + 1 <= max_vecs)
-            buffer_storage[0 .. data.len + 1]
+        const max_vecs = switch (builtin.os.tag) {
+            .windows => 1,
+            else => 16,
+        };
+        var iovec_storage: [max_vecs]aio.system.iovec = undefined;
+        const dest_n, const data_size = if (builtin.os.tag == .windows)
+            try io_reader.writableVectorWsa(&iovec_storage, data)
         else
-            buffer_storage[0..];
-
-        const dest_n, const data_size = try io_reader.writableVector(buffer_slice, data);
+            try io_reader.writableVectorPosix(&iovec_storage, data);
         if (dest_n == 0) return 0;
 
-        const n = r.file.readVec(r.runtime, buffer_slice[0..dest_n], r.position) catch |err| {
+        const buf = aio.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
+        const n = r.file.readBuf(r.runtime, buf, r.position) catch |err| {
             r.err = err;
             return error.ReadFailed;
         };
@@ -225,31 +263,38 @@ pub const FileWriter = struct {
         };
     }
 
+    pub fn logicalPos(self: *const FileWriter) u64 {
+        return self.position + self.interface.end;
+    }
+
     fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const w: *FileWriter = @fieldParentPtr("interface", io_writer);
         const buffered = io_writer.buffered();
 
-        const max_vecs = 16;
-        var vecs: [max_vecs][]const u8 = undefined;
+        const max_vecs = switch (builtin.os.tag) {
+            .windows => 1,
+            else => 16,
+        };
+        var iovec_storage: [max_vecs]aio.system.iovec_const = undefined;
         var len: usize = 0;
 
         if (buffered.len > 0) {
-            vecs[len] = buffered;
+            iovec_storage[len] = aio.system.iovecConstFromSlice(buffered);
             len += 1;
         }
 
         for (data[0 .. data.len - 1]) |d| {
             if (d.len == 0) continue;
-            vecs[len] = d;
+            iovec_storage[len] = aio.system.iovecConstFromSlice(d);
             len += 1;
-            if (len == vecs.len) break;
+            if (len == iovec_storage.len) break;
         }
 
         const pattern = data[data.len - 1];
-        if (len < vecs.len) switch (splat) {
+        if (len < iovec_storage.len) switch (splat) {
             0 => {},
             1 => if (pattern.len != 0) {
-                vecs[len] = pattern;
+                iovec_storage[len] = aio.system.iovecConstFromSlice(pattern);
                 len += 1;
             },
             else => switch (pattern.len) {
@@ -264,11 +309,11 @@ pub const FileWriter = struct {
                     const memset_len = @min(splat_buffer.len, splat);
                     const buf = splat_buffer[0..memset_len];
                     @memset(buf, pattern[0]);
-                    vecs[len] = buf;
+                    iovec_storage[len] = aio.system.iovecConstFromSlice(buf);
                     len += 1;
                 },
                 else => {
-                    vecs[len] = pattern;
+                    iovec_storage[len] = aio.system.iovecConstFromSlice(pattern);
                     len += 1;
                 },
             },
@@ -276,7 +321,8 @@ pub const FileWriter = struct {
 
         if (len == 0) return 0;
 
-        const n = w.file.writeVec(w.runtime, vecs[0..len], w.position) catch |err| {
+        const buf = aio.WriteBuf{ .iovecs = iovec_storage[0..len] };
+        const n = w.file.writeBuf(w.runtime, buf, w.position) catch |err| {
             w.err = err;
             return error.WriteFailed;
         };
@@ -290,8 +336,7 @@ pub const FileWriter = struct {
 
         while (io_writer.end > 0) {
             const buffered = io_writer.buffered();
-            var slices = [1][]const u8{buffered};
-            const n = w.file.writeVec(w.runtime, &slices, w.position) catch |err| {
+            const n = w.file.write(w.runtime, buffered, w.position) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
