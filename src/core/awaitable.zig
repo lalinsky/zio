@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 
 const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("WaitNode.zig");
+const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitResult = @import("../select.zig").WaitResult;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -53,6 +54,9 @@ pub const Awaitable = struct {
     next: ?*Awaitable = null,
     prev: ?*Awaitable = null,
     in_list: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+
+    // Group membership - group_node.group is null if standalone
+    group_node: GroupNode = .{},
 
     // Future protocol - type-erased result type
     pub const Result = void;

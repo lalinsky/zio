@@ -12,6 +12,9 @@ pub const JoinHandle = runtime.JoinHandle;
 // Re-export timeout functionality
 pub const Timeout = @import("core/timeout.zig").Timeout;
 
+// Re-export task group functionality
+pub const Group = @import("core/group.zig").Group;
+
 // Re-export common error sets
 const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
