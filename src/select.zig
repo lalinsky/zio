@@ -145,28 +145,37 @@ fn hasWaitContext(comptime future_type: type) bool {
 /// Build a struct type containing WaitContext fields for each future that needs one
 fn WaitContextsType(comptime futures_type: type) type {
     const fields = @typeInfo(futures_type).@"struct".fields;
-    var context_fields: []const std.builtin.Type.StructField = &.{};
 
+    // Count how many fields have non-void WaitContext
+    comptime var count: usize = 0;
     inline for (fields) |field| {
-        const WaitCtx = FutureWaitContext(field.type);
-        if (WaitCtx != void) {
-            const ctx_field = std.builtin.Type.StructField{
-                .name = field.name,
-                .type = WaitCtx,
-                .default_value_ptr = null,
-                .is_comptime = false,
-                .alignment = @alignOf(WaitCtx),
-            };
-            context_fields = context_fields ++ &[_]std.builtin.Type.StructField{ctx_field};
+        if (FutureWaitContext(field.type) != void) {
+            count += 1;
         }
     }
 
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = context_fields,
-        .decls = &.{},
-        .is_tuple = false,
-    } });
+    // Handle the zero-field case
+    if (count == 0) {
+        return @Struct(.auto, null, &.{}, &.{}, &.{});
+    }
+
+    // Build arrays of field names, types, and attributes
+    var field_names: [count][:0]const u8 = undefined;
+    var field_types: [count]type = undefined;
+    var field_attrs: [count]std.builtin.Type.StructField.Attributes = undefined;
+
+    comptime var i: usize = 0;
+    inline for (fields) |field| {
+        const WaitCtx = FutureWaitContext(field.type);
+        if (WaitCtx != void) {
+            field_names[i] = field.name;
+            field_types[i] = WaitCtx;
+            field_attrs[i] = .{};
+            i += 1;
+        }
+    }
+
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
 /// Wrapper for wait() result to avoid nested error unions
@@ -191,22 +200,19 @@ pub const WaitFlags = struct {
 
 pub fn SelectResult(comptime S: type) type {
     const struct_fields = @typeInfo(S).@"struct".fields;
-    var fields: [struct_fields.len]std.builtin.Type.UnionField = undefined;
-    for (&fields, struct_fields) |*union_field, struct_field| {
+
+    var field_names: [struct_fields.len][:0]const u8 = undefined;
+    var field_types: [struct_fields.len]type = undefined;
+    var field_attrs: [struct_fields.len]std.builtin.Type.UnionField.Attributes = undefined;
+
+    for (struct_fields, 0..) |struct_field, i| {
         const Future = FutureType(struct_field.type);
-        const Result = Future.Result;
-        union_field.* = .{
-            .name = struct_field.name,
-            .type = Result,
-            .alignment = @alignOf(Result),
-        };
+        field_names[i] = struct_field.name;
+        field_types[i] = Future.Result;
+        field_attrs[i] = .{};
     }
-    return @Type(.{ .@"union" = .{
-        .layout = .auto,
-        .tag_type = std.meta.FieldEnum(S),
-        .fields = &fields,
-        .decls = &.{},
-    } });
+
+    return @Union(.auto, std.meta.FieldEnum(S), &field_names, &field_types, &field_attrs);
 }
 
 test "SelectResult: result types" {
