@@ -15,8 +15,8 @@
             .hash = "aio-0.4.0-k5779gHcBgDaPq8pM2EnhXXL-GhLNLEI740wtNZgGUzt",
         },
         .coro = .{
-            .url = "git+https://github.com/lalinsky/coro.zig#c2f6ee86f08f09dc636bd7e2fada4ac7041f1bf8",
-            .hash = "coro-0.4.0-PlYYwB5LAQC74z-2I1aFodebvqTCgDtWK3B9FtoWO110",
+            .url = "git+https://github.com/lalinsky/coro.zig?ref=zig-0.16#4bb1a60186952636e6d3e409d62d9e8cf50b1560",
+            .hash = "coro-0.4.0-PlYYwDlNAQDajwoM6gvvT__merg34jKq5m6oHEuZib-2",
         },
     },
 }
