@@ -5,9 +5,8 @@ const AnyTask = @import("core/task.zig").AnyTask;
 const CreateOptions = @import("core/task.zig").CreateOptions;
 const Awaitable = @import("core/awaitable.zig").Awaitable;
 const select = @import("select.zig");
-const zio_net = @import("io/net.zig");
-const zio_net_dns = @import("net.zig");
-const zio_file_io = @import("io/file.zig");
+const zio_net = @import("net.zig");
+const zio_file_io = @import("fs/file.zig");
 const zio_mutex = @import("sync/Mutex.zig");
 const zio_condition = @import("sync/Condition.zig");
 const CompactWaitQueue = @import("utils/wait_queue.zig").CompactWaitQueue;
@@ -125,6 +124,15 @@ fn cancelRequestedImpl(userdata: ?*anyopaque) bool {
 }
 
 fn groupAsyncImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (*std.Io.Group, context: *const anyopaque) void) void {
+    _ = userdata;
+    _ = group;
+    _ = context;
+    _ = context_alignment;
+    _ = start;
+    @panic("TODO");
+}
+
+fn groupConcurrentImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (*std.Io.Group, context: *const anyopaque) void) std.Io.ConcurrentError!void {
     _ = userdata;
     _ = group;
     _ = context;
@@ -281,7 +289,7 @@ fn fileStatImpl(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!
 
 fn fileCloseImpl(userdata: ?*anyopaque, file: std.Io.File) void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var zio_file = zio_file_io.File.initFd(file.handle);
+    var zio_file = zio_file_io.File.fromFd(file.handle);
     zio_file.close(rt);
 }
 
@@ -573,7 +581,7 @@ fn netLookupImpl(userdata: ?*anyopaque, hostname: std.Io.net.HostName, queue: *s
     const io = fromRuntime(rt);
 
     // Call the zio DNS lookup (uses thread pool internally)
-    var iter = zio_net_dns.lookupHost(rt, hostname.bytes, options.port) catch |err| {
+    var iter = zio_net.lookupHost(rt, hostname.bytes, options.port) catch |err| {
         const mapped_err: std.Io.net.HostName.LookupError = switch (err) {
             error.UnknownHostName => error.UnknownHostName,
             error.NameServerFailure => error.NameServerFailure,
@@ -621,6 +629,7 @@ pub const vtable = std.Io.VTable{
     .cancel = cancelImpl,
     .cancelRequested = cancelRequestedImpl,
     .groupAsync = groupAsyncImpl,
+    .groupConcurrent = groupConcurrentImpl,
     .groupWait = groupWaitImpl,
     .groupCancel = groupCancelImpl,
     .select = selectImpl,
