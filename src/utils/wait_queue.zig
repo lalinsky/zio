@@ -647,6 +647,16 @@ pub fn CompactWaitQueue(comptime T: type) type {
             .head = std.atomic.Value(usize).init(@intFromEnum(State.sentinel0)),
         };
 
+        /// Create a queue from a raw pointer (e.g., from std.Io.Group.token)
+        pub fn fromPtr(ptr: *anyopaque) Self {
+            return .{ .head = std.atomic.Value(usize).init(@intFromPtr(ptr)) };
+        }
+
+        /// Create a queue from a raw usize value
+        pub fn fromInt(value: usize) Self {
+            return .{ .head = std.atomic.Value(usize).init(value) };
+        }
+
         pub const State = enum(usize) {
             sentinel0 = 0b00,
             sentinel1 = 0b01,

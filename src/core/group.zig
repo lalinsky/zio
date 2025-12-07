@@ -15,81 +15,38 @@ pub const Group = struct {
 
     pub const init: Group = .{ .state = 0, .context = null, .token = null };
 
-    fn getList(self: *Group) *CompactWaitQueue(GroupNode) {
+    pub fn getList(self: *Group) *CompactWaitQueue(GroupNode) {
         return @ptrCast(&self.token);
     }
 
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: meta.ArgsType(func)) !void {
         const handle = try rt.spawn(func, args, .{});
         if (handle.awaitable) |awaitable| {
-            const list = self.getList();
             awaitable.group_node.group = self;
-            list.push(&awaitable.group_node);
+            self.getList().push(&awaitable.group_node);
         }
     }
 
     pub fn spawnBlocking(self: *Group, rt: *Runtime, func: anytype, args: meta.ArgsType(func)) !void {
         const handle = try rt.spawnBlocking(func, args);
         if (handle.awaitable) |awaitable| {
-            const list = self.getList();
             awaitable.group_node.group = self;
-            list.push(&awaitable.group_node);
+            self.getList().push(&awaitable.group_node);
         }
     }
 
-    pub fn wait(group: *Group, rt: *Runtime) void {
-        const list = group.getList();
-        while (list.pop()) |node| {
-            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-            node.group = null;
-
-            // Wait for completion - if canceled, cancel remaining tasks
-            _ = select.wait(rt, awaitable) catch {
-                // We were canceled while waiting - push the node back
-                node.group = group;
-                list.push(node);
-
-                // Enter shield mode and cancel all remaining tasks
-                rt.beginShield();
-                group.cancel(rt);
-                rt.endShield();
-                return;
-            };
-
-            // Release the awaitable
-            rt.releaseAwaitable(awaitable, false);
-        }
+    pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
+        const token = group.token orelse return;
+        group.token = null;
+        var list = CompactWaitQueue(GroupNode).fromPtr(token);
+        return groupWait(rt, group, &list);
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
-        const list = group.getList();
-
-        while (true) {
-            // Pop all nodes into a local list, canceling as we go
-            var local_list: SimpleWaitQueue(GroupNode) = .empty;
-            while (list.pop()) |node| {
-                node.group = null;
-                const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-                if (awaitable.done.load(.acquire)) {
-                    // Already done, just release
-                    rt.releaseAwaitable(awaitable, false);
-                } else {
-                    // Request cancellation and queue for waiting
-                    awaitable.cancel();
-                    local_list.push(node);
-                }
-            }
-
-            // If nothing needs waiting, we're done
-            if (local_list.isEmpty()) break;
-
-            // Wait for completion and release
-            while (local_list.pop()) |node| {
-                const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-                select.waitUntilComplete(rt, awaitable);
-                rt.releaseAwaitable(awaitable, false);
-            }
-        }
+        const token = group.token orelse return;
+        group.token = null;
+        var list = CompactWaitQueue(GroupNode).fromPtr(token);
+        groupCancel(rt, &list);
     }
 };
 
@@ -102,6 +59,62 @@ pub const GroupNode = struct {
 
     userdata: usize = undefined,
 };
+
+const Cancelable = @import("../common.zig").Cancelable;
+
+/// Wait for all tasks in the group list to complete.
+/// On cancellation, remaining tasks are canceled in shield mode.
+/// Returns error.Canceled if the wait was canceled.
+pub fn groupWait(rt: *Runtime, group: *Group, list: *CompactWaitQueue(GroupNode)) Cancelable!void {
+    _ = group;
+    while (list.pop()) |node| {
+        const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
+
+        // Wait for completion - if canceled, cancel remaining tasks
+        _ = select.wait(rt, awaitable) catch {
+            // We were canceled while waiting - push the node back
+            list.push(node);
+
+            // Enter shield mode and cancel all remaining tasks
+            rt.beginShield();
+            groupCancel(rt, list);
+            rt.endShield();
+            return error.Canceled;
+        };
+
+        // Release the awaitable
+        rt.releaseAwaitable(awaitable, false);
+    }
+}
+
+/// Cancel all tasks in the group list and wait for them to complete.
+pub fn groupCancel(rt: *Runtime, list: *CompactWaitQueue(GroupNode)) void {
+    while (true) {
+        // Pop all nodes into a local list, canceling as we go
+        var local_list: SimpleWaitQueue(GroupNode) = .empty;
+        while (list.pop()) |node| {
+            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
+            if (awaitable.done.load(.acquire)) {
+                // Already done, just release
+                rt.releaseAwaitable(awaitable, false);
+            } else {
+                // Request cancellation and queue for waiting
+                awaitable.cancel();
+                local_list.push(node);
+            }
+        }
+
+        // If nothing needs waiting, we're done
+        if (local_list.isEmpty()) break;
+
+        // Wait for completion and release
+        while (local_list.pop()) |node| {
+            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
+            select.waitUntilComplete(rt, awaitable);
+            rt.releaseAwaitable(awaitable, false);
+        }
+    }
+}
 
 fn testFn(arg: usize) usize {
     return arg + 1;
@@ -118,7 +131,7 @@ test "Group: spawn" {
 
             try group.spawn(runtime, testFn, .{0});
 
-            group.wait(runtime);
+            try group.wait(runtime);
         }
     };
 
@@ -146,7 +159,7 @@ test "Group: wait for multiple tasks" {
             try group.spawn(runtime, task, .{runtime});
             try group.spawn(runtime, task, .{runtime});
 
-            group.wait(runtime);
+            try group.wait(runtime);
 
             try std.testing.expectEqual(@as(usize, 3), completed);
         }
@@ -187,7 +200,7 @@ test "Group: cancellation while waiting" {
             try group.spawn(runtime, slowTask, .{runtime});
 
             // This wait should be interrupted by cancellation
-            group.wait(runtime);
+            group.wait(runtime) catch {};
         }
 
         fn asyncTask(runtime: *Runtime) !void {
