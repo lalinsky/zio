@@ -1120,10 +1120,16 @@ pub const Runtime = struct {
     }
 
     pub fn io(self: *Runtime) std.Io {
+        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+            @panic("std.Io requires Zig 0.16 or later");
+        }
         return stdio.fromRuntime(self);
     }
 
     pub fn fromIo(io_: std.Io) *Runtime {
+        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+            @panic("std.Io requires Zig 0.16 or later");
+        }
         return stdio.toRuntime(io_);
     }
 };
