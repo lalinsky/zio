@@ -21,12 +21,14 @@ pub const Group = struct {
     pub const init: Group = .{ .state = 0, .context = null, .token = null };
 
     // State encoding:
-    // - Bits 0-61: pending task counter
+    // - Bits 0-60: pending task counter
+    // - Bit 61: fail_fast flag (if set, signal event early on error)
     // - Bit 62: failed flag (set when any task returns an error)
     // - Bit 63: canceled flag (set when group is canceled)
     const canceled_flag: usize = 1 << (@bitSizeOf(usize) - 1);
     const failed_flag: usize = 1 << (@bitSizeOf(usize) - 2);
-    const counter_mask: usize = ~(canceled_flag | failed_flag);
+    const fail_fast_flag: usize = 1 << (@bitSizeOf(usize) - 3);
+    const counter_mask: usize = ~(canceled_flag | failed_flag | fail_fast_flag);
 
     /// Get the state as an atomic.
     fn getState(self: *Group) *std.atomic.Value(usize) {
@@ -49,9 +51,12 @@ pub const Group = struct {
         return self.getState().load(.acquire) & counter_mask;
     }
 
-    /// Set the failed flag.
+    /// Set the failed flag. If fail_fast is set, also signals the event.
     pub fn setFailed(self: *Group) void {
-        _ = self.getState().fetchOr(failed_flag, .acq_rel);
+        const prev = self.getState().fetchOr(failed_flag, .acq_rel);
+        if ((prev & fail_fast_flag) != 0) {
+            self.getEvent().set();
+        }
     }
 
     /// Check if the failed flag is set.
@@ -59,14 +64,27 @@ pub const Group = struct {
         return (self.getState().load(.acquire) & failed_flag) != 0;
     }
 
-    /// Set the canceled flag.
+    /// Set the canceled flag. If fail_fast is set, also signals the event.
     pub fn setCanceled(self: *Group) void {
-        _ = self.getState().fetchOr(canceled_flag, .acq_rel);
+        const prev = self.getState().fetchOr(canceled_flag, .acq_rel);
+        if ((prev & fail_fast_flag) != 0) {
+            self.getEvent().set();
+        }
     }
 
     /// Check if the canceled flag is set.
     pub fn isCanceled(self: *Group) bool {
         return (self.getState().load(.acquire) & canceled_flag) != 0;
+    }
+
+    /// Set the fail_fast flag. When set, the group will signal early on first error.
+    pub fn setFailFast(self: *Group) void {
+        _ = self.getState().fetchOr(fail_fast_flag, .acq_rel);
+    }
+
+    /// Check if the fail_fast flag is set.
+    pub fn isFailFast(self: *Group) bool {
+        return (self.getState().load(.acquire) & fail_fast_flag) != 0;
     }
 
     /// Get the event for coroutines waiting on the group.
@@ -88,7 +106,7 @@ pub const Group = struct {
                 const a: *const Args = @ptrCast(@alignCast(ctx));
                 const result = @call(.auto, func, a.*);
 
-                // If the result is an error union and it's an error, set flag and signal early
+                // If the result is an error union and it's an error, set the appropriate flag
                 if (@typeInfo(ReturnType) == .error_union) {
                     if (result) |_| {} else |err| {
                         if (err == error.Canceled) {
@@ -96,7 +114,6 @@ pub const Group = struct {
                         } else {
                             group.setFailed();
                         }
-                        group.getEvent().set();
                     }
                 }
             }
