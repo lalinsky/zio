@@ -2,8 +2,12 @@ const std = @import("std");
 const Runtime = @import("runtime.zig").Runtime;
 const getNextExecutor = @import("runtime.zig").getNextExecutor;
 const AnyTask = @import("core/task.zig").AnyTask;
+const Closure = @import("core/task.zig").Closure;
 const CreateOptions = @import("core/task.zig").CreateOptions;
 const Awaitable = @import("core/awaitable.zig").Awaitable;
+const zio_group = @import("core/group.zig");
+const Group = zio_group.Group;
+const GroupNode = zio_group.GroupNode;
 const select = @import("select.zig");
 const zio_net = @import("net.zig");
 const zio_file_io = @import("fs/file.zig");
@@ -40,6 +44,35 @@ comptime {
     }
 }
 
+// Verify binary compatibility between std.Io.Group and zio.Group
+comptime {
+    if (@sizeOf(std.Io.Group) != @sizeOf(Group)) {
+        @compileError("std.Io.Group and zio.Group must have the same size");
+    }
+    if (@alignOf(std.Io.Group) != @alignOf(Group)) {
+        @compileError("std.Io.Group and zio.Group must have the same alignment");
+    }
+    // Verify field offsets and sizes match
+    if (@offsetOf(std.Io.Group, "state") != @offsetOf(Group, "state")) {
+        @compileError("std.Io.Group.state offset must match zio.Group.state");
+    }
+    if (@offsetOf(std.Io.Group, "context") != @offsetOf(Group, "context")) {
+        @compileError("std.Io.Group.context offset must match zio.Group.context");
+    }
+    if (@offsetOf(std.Io.Group, "token") != @offsetOf(Group, "token")) {
+        @compileError("std.Io.Group.token offset must match zio.Group.token");
+    }
+    if (@sizeOf(@TypeOf(@as(std.Io.Group, undefined).state)) != @sizeOf(@TypeOf(@as(Group, undefined).state))) {
+        @compileError("std.Io.Group.state size must match zio.Group.state");
+    }
+    if (@sizeOf(@TypeOf(@as(std.Io.Group, undefined).context)) != @sizeOf(@TypeOf(@as(Group, undefined).context))) {
+        @compileError("std.Io.Group.context size must match zio.Group.context");
+    }
+    if (@sizeOf(@TypeOf(@as(std.Io.Group, undefined).token)) != @sizeOf(@TypeOf(@as(Group, undefined).token))) {
+        @compileError("std.Io.Group.token size must match zio.Group.token");
+    }
+}
+
 fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*std.Io.AnyFuture {
     return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
         // If we can't schedule asynchronously, execute synchronously
@@ -66,7 +99,7 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
         result_alignment,
         context,
         context_alignment,
-        start,
+        .{ .regular = start },
         CreateOptions{},
     ) catch return error.ConcurrencyUnavailable;
     errdefer task.closure.free(AnyTask, executor.allocator, task);
@@ -124,35 +157,68 @@ fn cancelRequestedImpl(userdata: ?*anyopaque) bool {
 }
 
 fn groupAsyncImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (*std.Io.Group, context: *const anyopaque) void) void {
-    _ = userdata;
-    _ = group;
-    _ = context;
-    _ = context_alignment;
-    _ = start;
-    @panic("TODO");
+    groupConcurrentImpl(userdata, group, context, context_alignment, start) catch {
+        // Fall back to synchronous execution
+        start(group, context.ptr);
+    };
 }
 
 fn groupConcurrentImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (*std.Io.Group, context: *const anyopaque) void) std.Io.ConcurrentError!void {
-    _ = userdata;
-    _ = group;
-    _ = context;
-    _ = context_alignment;
-    _ = start;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Check if runtime is shutting down
+    if (rt.tasks.isClosed()) {
+        return error.ConcurrencyUnavailable;
+    }
+
+    // Pick an executor (round-robin)
+    const executor = getNextExecutor(rt);
+
+    // Create the task using AnyTask.create with group start function
+    const task = AnyTask.create(
+        executor,
+        0, // no result for group tasks
+        .@"1",
+        context,
+        context_alignment,
+        .{ .group = @ptrCast(start) },
+        CreateOptions{},
+    ) catch return error.ConcurrencyUnavailable;
+    errdefer task.closure.free(AnyTask, executor.allocator, task);
+
+    // Add to global awaitable registry (can fail if runtime is shutting down)
+    rt.tasks.add(&task.awaitable) catch return error.ConcurrencyUnavailable;
+    errdefer _ = rt.tasks.remove(&task.awaitable);
+
+    // Set group_node.group for startFn to access
+    const zio_grp: *Group = @ptrCast(group);
+    task.awaitable.group_node.group = zio_grp;
+
+    // Increment counter before spawning
+    zio_grp.incrCounter();
+
+    // Add to group's task list
+    zio_grp.getTaskList().push(&task.awaitable.group_node);
+
+    // Increment ref count for the group tracking
+    task.awaitable.ref_count.incr();
+
+    // Schedule the task to run
+    executor.scheduleTask(task, .maybe_remote);
 }
 
 fn groupWaitImpl(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) void {
-    _ = userdata;
-    _ = group;
-    _ = token;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_grp: *Group = @ptrCast(group);
+    var list = CompactWaitQueue(GroupNode).fromPtr(token);
+    zio_group.groupWait(rt, zio_grp, &list) catch {};
 }
 
 fn groupCancelImpl(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) void {
-    _ = userdata;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
     _ = group;
-    _ = token;
-    @panic("TODO");
+    var list = CompactWaitQueue(GroupNode).fromPtr(token);
+    zio_group.groupCancel(rt, &list);
 }
 
 fn selectImpl(userdata: ?*anyopaque, futures: []const *std.Io.AnyFuture) std.Io.Cancelable!usize {
@@ -1272,6 +1338,105 @@ test "Io: DNS lookup with family filter" {
             }
 
             try std.testing.expect(address_count > 0);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Group async/wait" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        var counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+        fn increment() void {
+            _ = counter.fetchAdd(1, .monotonic);
+        }
+
+        fn mainTask(io: std.Io) !void {
+            counter.store(0, .monotonic);
+
+            var group: std.Io.Group = .init;
+            defer group.cancel(io);
+
+            // Spawn one task into the group
+            group.async(io, increment, .{});
+
+            // Wait for all to complete
+            group.wait(io);
+
+            // Verify task completed
+            try std.testing.expectEqual(@as(u32, 1), counter.load(.monotonic));
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Group concurrent/wait" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        var counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+        fn increment() void {
+            _ = counter.fetchAdd(1, .monotonic);
+        }
+
+        fn mainTask(io: std.Io) !void {
+            counter.store(0, .monotonic);
+
+            var group: std.Io.Group = .init;
+            defer group.cancel(io);
+
+            // Spawn multiple tasks into the group using concurrent
+            try group.concurrent(io, increment, .{});
+            try group.concurrent(io, increment, .{});
+            try group.concurrent(io, increment, .{});
+
+            // Wait for all to complete
+            group.wait(io);
+
+            // Verify all tasks completed
+            try std.testing.expectEqual(@as(u32, 3), counter.load(.monotonic));
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Group cancel" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        var started: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+        fn slowTask(io: std.Io) void {
+            _ = started.fetchAdd(1, .monotonic);
+            io.sleep(.{ .nanoseconds = 1000 * std.time.ns_per_ms }, .awake) catch {};
+        }
+
+        fn mainTask(io: std.Io) !void {
+            started.store(0, .monotonic);
+
+            var group: std.Io.Group = .init;
+
+            // Spawn slow tasks
+            group.async(io, slowTask, .{io});
+            group.async(io, slowTask, .{io});
+
+            // Give them time to start
+            try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+
+            // Cancel should complete quickly (not wait for 1 second sleeps)
+            group.cancel(io);
+
+            // Verify tasks started
+            try std.testing.expectEqual(@as(u32, 2), started.load(.monotonic));
         }
     };
 
