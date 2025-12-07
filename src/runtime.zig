@@ -1280,6 +1280,10 @@ test "runtime: sleep is cancelable" {
 }
 
 test "runtime: std.Io interface" {
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+        return error.SkipZigTest;
+    }
+
     const testing = std.testing;
 
     const rt = try Runtime.init(testing.allocator, .{});
