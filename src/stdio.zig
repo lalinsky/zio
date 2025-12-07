@@ -194,8 +194,11 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []c
     const zio_grp: *Group = @ptrCast(group);
     task.awaitable.group_node.group = zio_grp;
 
-    // Add to group's list
-    zio_grp.getList().push(&task.awaitable.group_node);
+    // Increment counter before spawning
+    zio_grp.incrCounter();
+
+    // Add to group's task list
+    zio_grp.getTaskList().push(&task.awaitable.group_node);
 
     // Increment ref count for the group tracking
     task.awaitable.ref_count.incr();

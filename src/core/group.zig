@@ -2,10 +2,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 const meta = @import("../meta.zig");
 const Runtime = @import("../runtime.zig").Runtime;
+const Executor = @import("../runtime.zig").Executor;
+const getNextExecutor = @import("../runtime.zig").getNextExecutor;
 const JoinHandle = @import("../runtime.zig").JoinHandle;
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
+const AnyTask = @import("task.zig").AnyTask;
+const CreateOptions = @import("task.zig").CreateOptions;
+const ResetEvent = @import("../sync/ResetEvent.zig");
 const select = @import("../select.zig");
 
 pub const Group = struct {
@@ -15,24 +20,113 @@ pub const Group = struct {
 
     pub const init: Group = .{ .state = 0, .context = null, .token = null };
 
-    pub fn getList(self: *Group) *CompactWaitQueue(GroupNode) {
+    // State encoding:
+    // - Bits 0-61: pending task counter
+    // - Bit 62: failed flag (set when any task returns an error)
+    // - Bit 63: canceled flag (set when group is canceled)
+    const canceled_flag: usize = 1 << (@bitSizeOf(usize) - 1);
+    const failed_flag: usize = 1 << (@bitSizeOf(usize) - 2);
+    const counter_mask: usize = ~(canceled_flag | failed_flag);
+
+    /// Get the state as an atomic.
+    fn getState(self: *Group) *std.atomic.Value(usize) {
+        return @ptrCast(&self.state);
+    }
+
+    /// Increment the pending task counter.
+    pub fn incrCounter(self: *Group) void {
+        _ = self.getState().fetchAdd(1, .acq_rel);
+    }
+
+    /// Decrement the pending task counter. Returns true if this was the last task.
+    pub fn decrCounter(self: *Group) bool {
+        const prev = self.getState().fetchSub(1, .acq_rel);
+        return (prev & counter_mask) == 1;
+    }
+
+    /// Get the current counter value.
+    pub fn getCounter(self: *Group) usize {
+        return self.getState().load(.acquire) & counter_mask;
+    }
+
+    /// Set the failed flag.
+    pub fn setFailed(self: *Group) void {
+        _ = self.getState().fetchOr(failed_flag, .acq_rel);
+    }
+
+    /// Check if the failed flag is set.
+    pub fn hasFailed(self: *Group) bool {
+        return (self.getState().load(.acquire) & failed_flag) != 0;
+    }
+
+    /// Set the canceled flag.
+    pub fn setCanceled(self: *Group) void {
+        _ = self.getState().fetchOr(canceled_flag, .acq_rel);
+    }
+
+    /// Check if the canceled flag is set.
+    pub fn isCanceled(self: *Group) bool {
+        return (self.getState().load(.acquire) & canceled_flag) != 0;
+    }
+
+    /// Get the event for coroutines waiting on the group.
+    pub fn getEvent(self: *Group) *ResetEvent {
+        return @ptrCast(&self.context);
+    }
+
+    /// Get the list of spawned tasks (for cancellation).
+    pub fn getTaskList(self: *Group) *CompactWaitQueue(GroupNode) {
         return @ptrCast(&self.token);
     }
 
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: meta.ArgsType(func)) !void {
-        const handle = try rt.spawn(func, args, .{});
-        if (handle.awaitable) |awaitable| {
-            awaitable.group_node.group = self;
-            self.getList().push(&awaitable.group_node);
-        }
-    }
+        const Args = @TypeOf(args);
+        const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+        const Wrapper = struct {
+            fn start(group_ptr: *anyopaque, ctx: *const anyopaque) void {
+                const group: *Group = @ptrCast(@alignCast(group_ptr));
+                const a: *const Args = @ptrCast(@alignCast(ctx));
+                const result = @call(.auto, func, a.*);
 
-    pub fn spawnBlocking(self: *Group, rt: *Runtime, func: anytype, args: meta.ArgsType(func)) !void {
-        const handle = try rt.spawnBlocking(func, args);
-        if (handle.awaitable) |awaitable| {
-            awaitable.group_node.group = self;
-            self.getList().push(&awaitable.group_node);
-        }
+                // If the result is an error union and it's an error, set flag and signal early
+                if (@typeInfo(ReturnType) == .error_union) {
+                    if (result) |_| {} else |err| {
+                        if (err == error.Canceled) {
+                            group.setCanceled();
+                        } else {
+                            group.setFailed();
+                        }
+                        group.getEvent().set();
+                    }
+                }
+            }
+        };
+
+        // Increment counter before spawning
+        self.incrCounter();
+        errdefer _ = self.decrCounter();
+
+        const executor = getNextExecutor(rt);
+        const task = try AnyTask.create(
+            executor,
+            0, // result_len - group tasks return void
+            .@"1", // result_alignment
+            std.mem.asBytes(&args),
+            .fromByteUnits(@alignOf(Args)),
+            .{ .group = &Wrapper.start },
+            .{},
+        );
+        errdefer task.closure.free(AnyTask, rt.allocator, task);
+
+        // Associate the task with the group
+        task.awaitable.group_node.group = self;
+        self.getTaskList().push(&task.awaitable.group_node);
+        errdefer _ = self.getTaskList().remove(&task.awaitable.group_node);
+
+        try rt.tasks.add(&task.awaitable);
+
+        task.awaitable.ref_count.incr();
+        executor.scheduleTask(task, .maybe_remote);
     }
 
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
@@ -66,23 +160,18 @@ const Cancelable = @import("../common.zig").Cancelable;
 /// On cancellation, remaining tasks are canceled in shield mode.
 /// Returns error.Canceled if the wait was canceled.
 pub fn groupWait(rt: *Runtime, group: *Group, list: *CompactWaitQueue(GroupNode)) Cancelable!void {
-    _ = group;
+    // Wait for the event to be set (counter reached 0)
+    group.getEvent().wait(rt) catch |err| {
+        // On cancellation, cancel all remaining tasks in shield mode
+        rt.beginShield();
+        groupCancel(rt, list);
+        rt.endShield();
+        return err;
+    };
+
+    // All tasks completed - release all awaitables
     while (list.pop()) |node| {
         const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-
-        // Wait for completion - if canceled, cancel remaining tasks
-        _ = select.wait(rt, awaitable) catch {
-            // We were canceled while waiting - push the node back
-            list.push(node);
-
-            // Enter shield mode and cancel all remaining tasks
-            rt.beginShield();
-            groupCancel(rt, list);
-            rt.endShield();
-            return error.Canceled;
-        };
-
-        // Release the awaitable
         rt.releaseAwaitable(awaitable, false);
     }
 }

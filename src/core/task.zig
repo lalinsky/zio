@@ -14,6 +14,7 @@ const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("timeout.zig").Timeout;
+const Group = @import("group.zig").Group;
 
 /// Options for creating a task
 pub const CreateOptions = struct {
@@ -307,7 +308,14 @@ pub const AnyTask = struct {
                 start(context, result);
             },
             .group => |start| {
-                start(self.awaitable.group_node.group.?, context);
+                const group: *Group = @ptrCast(@alignCast(self.awaitable.group_node.group.?));
+                start(group, context);
+
+                // Decrement counter and signal event if this was the last task
+                if (group.decrCounter()) {
+                    // Last task completed - signal the event to wake all waiters
+                    group.getEvent().set();
+                }
             },
         }
     }
