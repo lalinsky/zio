@@ -65,6 +65,28 @@ pub const Closure = struct {
         return context[0..self.context_len];
     }
 
+    /// Call the start function with the appropriate arguments.
+    /// For group tasks, handles counter decrement and event signaling.
+    pub fn call(self: *const Closure, comptime TaskType: type, task: *TaskType, group_ptr: ?*Group) void {
+        const context = self.getContextPtr(TaskType, task);
+
+        switch (self.start) {
+            .regular => |start| {
+                const result = self.getResultPtr(TaskType, task);
+                start(context, result);
+            },
+            .group => |start| {
+                const group = group_ptr.?;
+                start(group, context);
+
+                // Decrement counter and signal event if this was the last task
+                if (group.decrCounter()) {
+                    group.getEvent().set();
+                }
+            },
+        }
+    }
+
     pub fn getAllocationSlice(self: *const Closure, comptime TaskType: type, task: *TaskType) []align(task_alignment) u8 {
         var allocation_size: usize = @sizeOf(TaskType);
         allocation_size += self.result_padding;
@@ -299,25 +321,7 @@ pub const AnyTask = struct {
 
     pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
         const self = fromCoroutine(coro);
-        const c = &self.closure;
-        const context = c.getContextPtr(AnyTask, self);
-
-        switch (c.start) {
-            .regular => |start| {
-                const result = c.getResultPtr(AnyTask, self);
-                start(context, result);
-            },
-            .group => |start| {
-                const group: *Group = @ptrCast(@alignCast(self.awaitable.group_node.group.?));
-                start(group, context);
-
-                // Decrement counter and signal event if this was the last task
-                if (group.decrCounter()) {
-                    // Last task completed - signal the event to wake all waiters
-                    group.getEvent().set();
-                }
-            },
-        }
+        self.closure.call(AnyTask, self, self.awaitable.group_node.group);
     }
 
     pub fn create(

@@ -79,18 +79,7 @@ fn workFunc(work: *aio.Work) void {
 
     // Execute the user's blocking function
     // aio handles cancellation - if canceled, this won't be called
-    const c = &any_blocking_task.closure;
-    const context = c.getContextPtr(AnyBlockingTask, any_blocking_task);
-
-    switch (c.start) {
-        .regular => |start| {
-            const result = c.getResultPtr(AnyBlockingTask, any_blocking_task);
-            start(context, result);
-        },
-        .group => |start| {
-            start(any_blocking_task.awaitable.group_node.group.?, context);
-        },
-    }
+    any_blocking_task.closure.call(AnyBlockingTask, any_blocking_task, any_blocking_task.awaitable.group_node.group);
 }
 
 // Completion callback - called by aio event loop when work finishes
