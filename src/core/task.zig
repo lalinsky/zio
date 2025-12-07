@@ -14,6 +14,7 @@ const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("timeout.zig").Timeout;
+const Group = @import("group.zig").Group;
 
 /// Options for creating a task
 pub const CreateOptions = struct {
@@ -21,11 +22,18 @@ pub const CreateOptions = struct {
 };
 
 pub const Closure = struct {
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Start,
     result_len: u12,
     result_padding: u4,
     context_len: u12,
     context_padding: u4,
+
+    pub const Start = union(enum) {
+        /// Regular task: fn(context, result) -> void
+        regular: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        /// Group task: fn(group, context) -> void, group comes from awaitable.group_node.group
+        group: *const fn (group: *anyopaque, context: *const anyopaque) void,
+    };
 
     pub const max_result_len = 1 << 12;
     pub const max_result_alignment = 1 << 4;
@@ -57,6 +65,28 @@ pub const Closure = struct {
         return context[0..self.context_len];
     }
 
+    /// Call the start function with the appropriate arguments.
+    /// For group tasks, handles counter decrement and event signaling.
+    pub fn call(self: *const Closure, comptime TaskType: type, task: *TaskType, group_ptr: ?*Group) void {
+        const context = self.getContextPtr(TaskType, task);
+
+        switch (self.start) {
+            .regular => |start| {
+                const result = self.getResultPtr(TaskType, task);
+                start(context, result);
+            },
+            .group => |start| {
+                const group = group_ptr.?;
+                start(group, context);
+
+                // Decrement counter and signal event if this was the last task
+                if (group.decrCounter()) {
+                    group.getEvent().set();
+                }
+            },
+        }
+    }
+
     pub fn getAllocationSlice(self: *const Closure, comptime TaskType: type, task: *TaskType) []align(task_alignment) u8 {
         var allocation_size: usize = @sizeOf(TaskType);
         allocation_size += self.result_padding;
@@ -80,7 +110,7 @@ pub const Closure = struct {
         result_alignment: std.mem.Alignment,
         context_len: usize,
         context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        start: Start,
     ) !AllocResult(TaskType) {
         var allocation_size: usize = @sizeOf(TaskType);
 
@@ -291,12 +321,7 @@ pub const AnyTask = struct {
 
     pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
         const self = fromCoroutine(coro);
-        const c = &self.closure;
-
-        const result = c.getResultPtr(AnyTask, self);
-        const context = c.getContextPtr(AnyTask, self);
-
-        c.start(context, result);
+        self.closure.call(AnyTask, self, self.awaitable.group_node.group);
     }
 
     pub fn create(
@@ -305,7 +330,7 @@ pub const AnyTask = struct {
         result_alignment: std.mem.Alignment,
         context: []const u8,
         context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        start: Closure.Start,
         options: CreateOptions,
     ) !*AnyTask {
         // Allocate task with closure
@@ -405,7 +430,7 @@ pub fn Task(comptime T: type) type {
                 .fromByteUnits(@alignOf(T)),
                 std.mem.asBytes(&args),
                 .fromByteUnits(@alignOf(@TypeOf(args))),
-                &Wrapper.start,
+                .{ .regular = &Wrapper.start },
                 options,
             );
 

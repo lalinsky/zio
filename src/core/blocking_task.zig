@@ -32,7 +32,7 @@ pub const AnyBlockingTask = struct {
         result_alignment: std.mem.Alignment,
         context: []const u8,
         context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        start: Closure.Start,
         destroy_fn: *const fn (*Runtime, *Awaitable) void,
     ) !*AnyBlockingTask {
         // Allocate task with closure
@@ -79,10 +79,7 @@ fn workFunc(work: *aio.Work) void {
 
     // Execute the user's blocking function
     // aio handles cancellation - if canceled, this won't be called
-    const c = &any_blocking_task.closure;
-    const result = c.getResultPtr(AnyBlockingTask, any_blocking_task);
-    const context = c.getContextPtr(AnyBlockingTask, any_blocking_task);
-    c.start(context, result);
+    any_blocking_task.closure.call(AnyBlockingTask, any_blocking_task, any_blocking_task.awaitable.group_node.group);
 }
 
 // Completion callback - called by aio event loop when work finishes
@@ -181,7 +178,7 @@ pub fn BlockingTask(comptime T: type) type {
                 .fromByteUnits(@alignOf(T)),
                 std.mem.asBytes(&args),
                 .fromByteUnits(@alignOf(@TypeOf(args))),
-                &Wrapper.start,
+                .{ .regular = &Wrapper.start },
                 &Self.destroyFn,
             );
 
