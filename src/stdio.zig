@@ -1,4 +1,5 @@
 const std = @import("std");
+const aio = @import("aio");
 const Runtime = @import("runtime.zig").Runtime;
 const getNextExecutor = @import("runtime.zig").getNextExecutor;
 const AnyTask = @import("core/task.zig").AnyTask;
@@ -11,6 +12,7 @@ const GroupNode = zio_group.GroupNode;
 const select = @import("select.zig");
 const zio_net = @import("net.zig");
 const zio_file_io = @import("fs/file.zig");
+const zio_dir_io = @import("fs/dir.zig");
 const zio_mutex = @import("sync/Mutex.zig");
 const zio_condition = @import("sync/Condition.zig");
 const CompactWaitQueue = @import("utils/wait_queue.zig").CompactWaitQueue;
@@ -318,19 +320,92 @@ fn dirAccessImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, o
 }
 
 fn dirCreateFileImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = flags;
-    @panic("TODO");
+    // Unsupported options
+    if (flags.lock != .none or flags.lock_nonblocking) return error.Unexpected;
+
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_dir = zio_dir_io.Dir{ .fd = dir.handle };
+
+    const aio_flags: aio.system.fs.FileCreateFlags = .{
+        .read = flags.read,
+        .truncate = flags.truncate,
+        .exclusive = flags.exclusive,
+        .mode = flags.mode,
+    };
+
+    const file = zio_dir.createFile(rt, sub_path, aio_flags) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.AccessDenied => return error.AccessDenied,
+        error.PermissionDenied => return error.PermissionDenied,
+        error.SymLinkLoop => return error.SymLinkLoop,
+        error.ProcessFdQuotaExceeded => return error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => return error.SystemFdQuotaExceeded,
+        error.NoDevice => return error.NoDevice,
+        error.FileNotFound => return error.FileNotFound,
+        error.NameTooLong => return error.NameTooLong,
+        error.SystemResources => return error.SystemResources,
+        error.FileTooBig => return error.FileTooBig,
+        error.IsDir => return error.IsDir,
+        error.NoSpaceLeft => return error.NoSpaceLeft,
+        error.NotDir => return error.NotDir,
+        error.PathAlreadyExists => return error.PathAlreadyExists,
+        error.DeviceBusy => return error.DeviceBusy,
+        error.FileLocksNotSupported => return error.FileLocksNotSupported,
+        error.BadPathName => return error.BadPathName,
+        error.InvalidUtf8 => return error.Unexpected,
+        error.NetworkNotFound => return error.NetworkNotFound,
+        error.ProcessNotFound => return error.ProcessNotFound,
+        error.FileBusy => return error.FileBusy,
+        else => return error.Unexpected,
+    };
+
+    return .{ .handle = file.fd };
 }
 
 fn dirOpenFileImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = flags;
-    @panic("TODO");
+    // Unsupported options
+    if (flags.lock != .none or flags.lock_nonblocking or flags.allow_ctty or !flags.follow_symlinks) {
+        return error.Unexpected;
+    }
+
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_dir = zio_dir_io.Dir{ .fd = dir.handle };
+
+    const aio_flags: aio.system.fs.FileOpenFlags = .{
+        .mode = switch (flags.mode) {
+            .read_only => .read_only,
+            .write_only => .write_only,
+            .read_write => .read_write,
+        },
+    };
+
+    const file = zio_dir.openFile(rt, sub_path, aio_flags) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.AccessDenied => return error.AccessDenied,
+        error.PermissionDenied => return error.PermissionDenied,
+        error.SymLinkLoop => return error.SymLinkLoop,
+        error.ProcessFdQuotaExceeded => return error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => return error.SystemFdQuotaExceeded,
+        error.NoDevice => return error.NoDevice,
+        error.FileNotFound => return error.FileNotFound,
+        error.NameTooLong => return error.NameTooLong,
+        error.SystemResources => return error.SystemResources,
+        error.FileTooBig => return error.FileTooBig,
+        error.IsDir => return error.IsDir,
+        error.NoSpaceLeft => return error.NoSpaceLeft,
+        error.NotDir => return error.NotDir,
+        error.PathAlreadyExists => return error.PathAlreadyExists,
+        error.DeviceBusy => return error.DeviceBusy,
+        error.FileLocksNotSupported => return error.FileLocksNotSupported,
+        error.BadPathName => return error.BadPathName,
+        error.InvalidUtf8 => return error.Unexpected,
+        error.NetworkNotFound => return error.NetworkNotFound,
+        error.ProcessNotFound => return error.ProcessNotFound,
+        error.FileBusy => return error.FileBusy,
+        else => return error.Unexpected,
+    };
+
+    return .{ .handle = file.fd };
 }
 
 fn dirOpenDirImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
@@ -1437,6 +1512,40 @@ test "Io: Group cancel" {
 
             // Verify tasks started
             try std.testing.expectEqual(@as(u32, 2), started.load(.monotonic));
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: Dir createFile/openFile" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const file_path = "test_stdio_dir_file.txt";
+            const cwd = std.Io.Dir.cwd();
+
+            // Create a new file
+            const created_file = try cwd.createFile(io, file_path, .{});
+            defer std.fs.cwd().deleteFile(file_path) catch {};
+
+            // Write some data
+            var write_buf = [_][]const u8{"hello world"};
+            _ = try created_file.writePositional(io, &write_buf, 0);
+            created_file.close(io);
+
+            // Open the file for reading
+            const opened_file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
+            defer opened_file.close(io);
+
+            // Read the data back
+            var read_buf: [32]u8 = undefined;
+            var read_slices = [_][]u8{&read_buf};
+            const bytes_read = try opened_file.readPositional(io, &read_slices, 0);
+
+            try std.testing.expectEqualStrings("hello world", read_buf[0..bytes_read]);
         }
     };
 
