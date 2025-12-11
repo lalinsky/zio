@@ -224,9 +224,9 @@ fn groupCancelImpl(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaqu
 }
 
 fn selectImpl(userdata: ?*anyopaque, futures: []const *std.Io.AnyFuture) std.Io.Cancelable!usize {
-    _ = userdata;
-    _ = futures;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const awaitables: []const *Awaitable = @ptrCast(futures);
+    return select.selectAwaitables(rt, awaitables);
 }
 
 fn mutexLockImpl(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) std.Io.Cancelable!void {
@@ -918,6 +918,39 @@ test "Io: realtime clock" {
             const t2 = try std.Io.Clock.Timestamp.now(io, .real);
             const elapsed = t1.durationTo(t2);
             try std.testing.expect(elapsed.raw.nanoseconds >= 10 * 1_000_000);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: select" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn fastTask() i32 {
+            return 42;
+        }
+
+        fn slowTask(io: std.Io) !i32 {
+            try io.sleep(.{ .nanoseconds = 100 * 1_000_000 }, .awake);
+            return 99;
+        }
+
+        fn mainTask(io: std.Io) !void {
+            var fast = io.async(fastTask, .{});
+            defer _ = fast.cancel(io);
+
+            var slow = io.async(slowTask, .{io});
+            defer _ = slow.cancel(io) catch {};
+
+            const result = try io.select(.{ .fast = &fast, .slow = &slow });
+            switch (result) {
+                .fast => |val| try std.testing.expectEqual(42, val),
+                .slow => |val| try std.testing.expectEqual(99, try val),
+            }
+            try std.testing.expectEqual(.fast, std.meta.activeTag(result));
         }
     };
 

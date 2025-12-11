@@ -7,6 +7,7 @@ const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const AnyTask = @import("core/task.zig").AnyTask;
+const Awaitable = @import("core/awaitable.zig").Awaitable;
 const WaitNode = @import("core/WaitNode.zig");
 const meta = @import("meta.zig");
 
@@ -376,6 +377,58 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 
     // Should never reach here - we were woken up, so something must be signaled
     unreachable;
+}
+
+/// Select on a runtime slice of type-erased Awaitables.
+/// Returns the index of the first awaitable to complete.
+/// Used by std.Io.selectImpl.
+pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable!usize {
+    const max_awaitables = 64;
+    if (awaitables.len > max_awaitables) {
+        @panic("selectAwaitables: too many awaitables (max 64)");
+    }
+
+    const task = rt.getCurrentTask() orelse @panic("selectAwaitables requires active task");
+    const executor = task.getExecutor();
+
+    task.state.store(.preparing_to_wait, .release);
+    defer {
+        const prev = task.state.swap(.ready, .release);
+        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
+    }
+
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiters: [max_awaitables]SelectWaiter = undefined;
+
+    for (waiters[0..awaitables.len], 0..) |*waiter, i| {
+        waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &winner, i);
+    }
+
+    var registered_count: usize = 0;
+    defer {
+        const winner_index = winner.load(.acquire);
+        for (awaitables[0..registered_count], 0..) |awaitable, i| {
+            if (winner_index != i) {
+                awaitable.asyncCancelWait(rt, &waiters[i].wait_node);
+            }
+        }
+    }
+
+    for (awaitables, 0..) |awaitable, i| {
+        const waiting = awaitable.asyncWait(rt, &waiters[i].wait_node);
+        registered_count += 1;
+
+        if (!waiting) {
+            winner.store(i, .release);
+            return i;
+        }
+    }
+
+    try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+
+    const winner_index = winner.load(.acquire);
+    std.debug.assert(winner_index != NO_WINNER);
+    return winner_index;
 }
 
 /// Internal wait implementation with configurable cancellation behavior.
