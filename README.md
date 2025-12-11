@@ -117,6 +117,12 @@ zig build
 # Run tests
 zig build test
 ```
+## Sub-projects
+
+To make CI testing easier, I've extracted platform-specific code to separate packages:
+
+* [aio.zig](https://github.com/lalinsky/aio.zig) - callback-based asynchronous file/network library for Linux, Windows, macOS and most BSDs
+* [coro.zig](https://github.com/lalinsky/coro.zig) - stackful coroutine library for x86_64, aarch64 and riscv64 architectures
 
 ## FAQ
 
