@@ -495,18 +495,13 @@ fn openSelfExeImpl(userdata: ?*anyopaque, flags: std.Io.File.OpenFlags) std.Io.F
 }
 
 fn nowImpl(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Clock.Error!std.Io.Timestamp {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-
-    return switch (clock) {
-        // libxev uses CLOCK_MONOTONIC which maps to .awake
-        // We treat .boot the same since both are monotonic clocks
-        .awake, .boot => {
-            const ms = rt.now(); // Returns milliseconds from libxev
-            const ns = ms * std.time.ns_per_ms;
-            return .{ .nanoseconds = ns };
-        },
-        .real, .cpu_process, .cpu_thread => error.UnsupportedClock,
-    };
+    _ = userdata;
+    const ms = aio.system.time.now(switch (clock) {
+        .awake, .boot => .monotonic,
+        .real => .realtime,
+        .cpu_process, .cpu_thread => return error.UnsupportedClock,
+    });
+    return .{ .nanoseconds = @as(i96, ms) * 1_000_000 };
 }
 
 fn sleepImpl(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.SleepError!void {
@@ -900,6 +895,29 @@ test "Io: now and sleep" {
             // Verify time moved forward
             const elapsed = t1.durationTo(t2);
             try std.testing.expect(elapsed.nanoseconds >= 10 * std.time.ns_per_ms);
+        }
+    };
+
+    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+}
+
+test "Io: realtime clock" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const TestContext = struct {
+        fn mainTask(io: std.Io) !void {
+            const t1 = try std.Io.Clock.Timestamp.now(io, .real);
+
+            // Realtime clock should return a reasonable timestamp (after 2020-01-01)
+            const jan_2020_ns: i96 = 1577836800 * 1_000_000_000;
+            try std.testing.expect(t1.raw.nanoseconds >= jan_2020_ns);
+
+            try io.sleep(.{ .nanoseconds = 10 * 1_000_000 }, .real);
+
+            const t2 = try std.Io.Clock.Timestamp.now(io, .real);
+            const elapsed = t1.durationTo(t2);
+            try std.testing.expect(elapsed.raw.nanoseconds >= 10 * 1_000_000);
         }
     };
 
