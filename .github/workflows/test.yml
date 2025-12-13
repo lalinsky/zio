@@ -10,6 +10,9 @@ jobs:
   # Native build+test jobs (no artifact overhead needed)
   test-linux-native:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zig-version: ['0.15.2', 'master']
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -17,7 +20,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: ${{ matrix.zig-version }}
 
     - name: Build and test
       shell: bash
@@ -31,6 +34,9 @@ jobs:
 
   test-macos-native:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        zig-version: ['0.15.2', 'master']
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -38,7 +44,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: ${{ matrix.zig-version }}
 
     - name: Build and test
       shell: bash
@@ -52,6 +58,9 @@ jobs:
 
   test-windows-native:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        zig-version: ['0.15.2', 'master']
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -59,7 +68,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: ${{ matrix.zig-version }}
 
     - name: Build and test
       shell: bash
@@ -74,6 +83,9 @@ jobs:
   # Build jobs for cross-compiled targets
   build-freebsd:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zig-version: ['0.15.2', 'master']
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -81,7 +93,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: ${{ matrix.zig-version }}
 
     - name: Build tests
       shell: bash
@@ -96,12 +108,15 @@ jobs:
     - name: Upload test binaries
       uses: actions/upload-artifact@v4
       with:
-        name: freebsd-tests
+        name: freebsd-tests-${{ matrix.zig-version }}
         path: zig-out/bin/test-*
         retention-days: 1
 
   build-netbsd:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zig-version: ['0.15.2', 'master']
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -109,7 +124,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: ${{ matrix.zig-version }}
 
     - name: Build tests
       shell: bash
@@ -124,7 +139,7 @@ jobs:
     - name: Upload test binaries
       uses: actions/upload-artifact@v4
       with:
-        name: netbsd-tests
+        name: netbsd-tests-${{ matrix.zig-version }}
         path: zig-out/bin/test-*
         retention-days: 1
 
@@ -132,11 +147,14 @@ jobs:
   test-freebsd-vm:
     needs: build-freebsd
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zig-version: ['0.15.2', 'master']
     steps:
     - name: Download test binaries
       uses: actions/download-artifact@v4
       with:
-        name: freebsd-tests
+        name: freebsd-tests-${{ matrix.zig-version }}
 
     - name: Run tests in FreeBSD VM
       uses: vmactions/freebsd-vm@v1
@@ -151,11 +169,14 @@ jobs:
   test-netbsd-vm:
     needs: build-netbsd
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zig-version: ['0.15.2', 'master']
     steps:
     - name: Download test binaries
       uses: actions/download-artifact@v4
       with:
-        name: netbsd-tests
+        name: netbsd-tests-${{ matrix.zig-version }}
 
     - name: Run tests in NetBSD VM
       uses: vmactions/netbsd-vm@v1
