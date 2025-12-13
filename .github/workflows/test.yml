@@ -11,6 +11,7 @@ jobs:
   test-linux-native:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         zig-version: ['0.15.2', 'master']
     steps:
@@ -35,6 +36,7 @@ jobs:
   test-macos-native:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         zig-version: ['0.15.2', 'master']
     steps:
@@ -59,6 +61,7 @@ jobs:
   test-windows-native:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         zig-version: ['0.15.2', 'master']
     steps:
@@ -84,6 +87,7 @@ jobs:
   build-freebsd:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         zig-version: ['0.15.2', 'master']
     steps:
@@ -115,6 +119,7 @@ jobs:
   build-netbsd:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         zig-version: ['0.15.2', 'master']
     steps:
@@ -148,6 +153,7 @@ jobs:
     needs: build-freebsd
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         zig-version: ['0.15.2', 'master']
     steps:
@@ -170,6 +176,7 @@ jobs:
     needs: build-netbsd
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         zig-version: ['0.15.2', 'master']
     steps:
