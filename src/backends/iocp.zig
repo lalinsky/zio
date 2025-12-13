@@ -543,8 +543,8 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     // When AcceptEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.FALSE) {
-        const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        const err = w.WSAGetLastError();
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             net.close(accept_socket);
             log.err("AcceptEx failed: {}", .{err});
@@ -594,8 +594,8 @@ fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
     };
 
     if (result == windows.ws2_32.SOCKET_ERROR) {
-        const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        const err = w.WSAGetLastError();
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSARecv/WSASend (poll) failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
@@ -632,8 +632,8 @@ fn submitRecv(self: *Self, state: *LoopState, data: *NetRecv) !void {
     // the completion will be posted to the IOCP port. We should NOT
     // complete it immediately here.
     if (result == windows.ws2_32.SOCKET_ERROR) {
-        const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        const err = w.WSAGetLastError();
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSARecv failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
@@ -669,8 +669,8 @@ fn submitSend(self: *Self, state: *LoopState, data: *NetSend) !void {
     // When WSASend succeeds (result == 0) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.ws2_32.SOCKET_ERROR) {
-        const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        const err = w.WSAGetLastError();
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSASend failed: {}", .{err});
             data.c.setError(net.errnoToSendError(err));
@@ -708,8 +708,8 @@ fn submitRecvFrom(self: *Self, state: *LoopState, data: *NetRecvFrom) !void {
     // When WSARecvFrom succeeds (result == 0) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.ws2_32.SOCKET_ERROR) {
-        const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        const err = w.WSAGetLastError();
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSARecvFrom failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
@@ -747,8 +747,8 @@ fn submitSendTo(self: *Self, state: *LoopState, data: *NetSendTo) !void {
     // When WSASendTo succeeds (result == 0) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.ws2_32.SOCKET_ERROR) {
-        const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        const err = w.WSAGetLastError();
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSASendTo failed: {}", .{err});
             data.c.setError(net.errnoToSendError(err));
@@ -815,8 +815,8 @@ fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
     // When ConnectEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
     if (result == windows.FALSE) {
-        const err = windows.ws2_32.WSAGetLastError();
-        if (err != .WSA_IO_PENDING) {
+        const err = w.WSAGetLastError();
+        if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("ConnectEx failed: {}", .{err});
             data.c.setError(net.errnoToConnectError(err));
@@ -1012,7 +1012,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == windows.FALSE) {
-                const err = windows.ws2_32.WSAGetLastError();
+                const err = w.WSAGetLastError();
                 c.setError(net.errnoToConnectError(err));
             } else {
                 // Success - need to call setsockopt to update socket context
@@ -1027,7 +1027,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
                 if (setsockopt_result == windows.ws2_32.SOCKET_ERROR) {
                     // setsockopt failed - close the socket and report error
-                    const err = windows.ws2_32.WSAGetLastError();
+                    const err = w.WSAGetLastError();
                     net.close(data.handle);
                     c.setError(net.errnoToConnectError(err));
                 } else {
@@ -1054,7 +1054,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == windows.FALSE) {
-                const err = windows.ws2_32.WSAGetLastError();
+                const err = w.WSAGetLastError();
                 // Error occurred - close the accept socket
                 net.close(data.result_private_do_not_touch);
                 c.setError(net.errnoToAcceptError(err));
@@ -1071,7 +1071,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
                 if (setsockopt_result == windows.ws2_32.SOCKET_ERROR) {
                     // setsockopt failed - close the socket and report error
-                    const err = windows.ws2_32.WSAGetLastError();
+                    const err = w.WSAGetLastError();
                     net.close(data.result_private_do_not_touch);
                     c.setError(net.errnoToAcceptError(err));
                 } else {
@@ -1139,7 +1139,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == windows.FALSE) {
-                const err = windows.ws2_32.WSAGetLastError();
+                const err = w.WSAGetLastError();
                 c.setError(net.errnoToRecvError(err));
             } else {
                 c.setResult(.net_recv, @intCast(bytes_transferred));
@@ -1162,7 +1162,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == windows.FALSE) {
-                const err = windows.ws2_32.WSAGetLastError();
+                const err = w.WSAGetLastError();
                 c.setError(net.errnoToSendError(err));
             } else {
                 c.setResult(.net_send, @intCast(bytes_transferred));
@@ -1185,7 +1185,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == windows.FALSE) {
-                const err = windows.ws2_32.WSAGetLastError();
+                const err = w.WSAGetLastError();
                 c.setError(net.errnoToRecvError(err));
             } else {
                 // addr_len was updated by WSARecvFrom during the async operation
@@ -1209,7 +1209,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == windows.FALSE) {
-                const err = windows.ws2_32.WSAGetLastError();
+                const err = w.WSAGetLastError();
                 c.setError(net.errnoToSendError(err));
             } else {
                 c.setResult(.net_sendto, @intCast(bytes_transferred));
@@ -1232,7 +1232,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             );
 
             if (result == windows.FALSE) {
-                const err = windows.ws2_32.WSAGetLastError();
+                const err = w.WSAGetLastError();
                 c.setError(net.errnoToRecvError(err));
             } else {
                 // Zero-length operation completed - socket is ready
