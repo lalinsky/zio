@@ -33,6 +33,7 @@ const FileCreate = @import("../completion.zig").FileCreate;
 const FileRename = @import("../completion.zig").FileRename;
 const FileDelete = @import("../completion.zig").FileDelete;
 const FileSize = @import("../completion.zig").FileSize;
+const FileStat = @import("../completion.zig").FileStat;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
@@ -52,6 +53,7 @@ pub const capabilities: BackendCapabilities = .{
     .file_rename = true,
     .file_delete = true,
     .file_size = true,
+    .file_stat = true,
 };
 
 pub const SharedState = struct {};
@@ -91,6 +93,11 @@ pub const FileDeleteData = struct {
 
 pub const FileSizeData = struct {
     statx: linux.Statx = std.mem.zeroes(linux.Statx),
+};
+
+pub const FileStatData = struct {
+    statx: linux.Statx = std.mem.zeroes(linux.Statx),
+    path: [:0]const u8 = "",
 };
 
 const Self = @This();
@@ -463,6 +470,42 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_statx(data.handle, "", flags, mask, &data.internal.statx);
             sqe.user_data = @intFromPtr(c);
         },
+
+        .file_stat => {
+            const data = c.cast(FileStat);
+            const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO |
+                linux.STATX_SIZE | linux.STATX_ATIME | linux.STATX_MTIME |
+                linux.STATX_CTIME;
+
+            if (data.path) |user_path| {
+                // Path provided - stat relative to handle
+                const path = self.allocator.dupeZ(u8, user_path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompleted(c);
+                    return;
+                };
+                const sqe = self.getSqe(state) catch {
+                    self.allocator.free(path);
+                    log.err("Failed to get io_uring SQE for file_stat", .{});
+                    c.setError(error.Unexpected);
+                    state.markCompleted(c);
+                    return;
+                };
+                sqe.prep_statx(@intCast(data.handle), path.ptr, 0, mask, &data.internal.statx);
+                sqe.user_data = @intFromPtr(c);
+                data.internal.path = path;
+            } else {
+                // No path - use AT_EMPTY_PATH to stat the fd itself
+                const sqe = self.getSqe(state) catch {
+                    log.err("Failed to get io_uring SQE for file_stat", .{});
+                    c.setError(error.Unexpected);
+                    state.markCompleted(c);
+                    return;
+                };
+                sqe.prep_statx(data.handle, "", linux.AT.EMPTY_PATH, mask, &data.internal.statx);
+                sqe.user_data = @intFromPtr(c);
+            }
+        },
     }
 }
 
@@ -758,7 +801,48 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setResult(.file_size, data.internal.statx.size);
             }
         },
+
+        .file_stat => {
+            const data = c.cast(FileStat);
+            // Free path if it was allocated (only when user provided a path)
+            if (data.path != null) {
+                self.allocator.free(data.internal.path);
+            }
+            if (res < 0) {
+                c.setError(fs.errnoToFileStatError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_stat, statxToFileStat(data.internal.statx));
+            }
+        },
     }
+}
+
+fn statxToFileStat(statx: linux.Statx) fs.FileStatInfo {
+    const S = linux.S;
+    const kind: fs.FileKind = switch (statx.mode & S.IFMT) {
+        S.IFBLK => .block_device,
+        S.IFCHR => .character_device,
+        S.IFDIR => .directory,
+        S.IFIFO => .named_pipe,
+        S.IFLNK => .sym_link,
+        S.IFREG => .file,
+        S.IFSOCK => .unix_domain_socket,
+        else => .unknown,
+    };
+
+    return .{
+        .inode = statx.ino,
+        .size = statx.size,
+        .mode = statx.mode,
+        .kind = kind,
+        .atime = statxTimeToNanos(statx.atime),
+        .mtime = statxTimeToNanos(statx.mtime),
+        .ctime = statxTimeToNanos(statx.ctime),
+    };
+}
+
+fn statxTimeToNanos(ts: linux.statx_timestamp) i64 {
+    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
 fn recvFlagsToMsg(flags: net.RecvFlags) u32 {

@@ -18,6 +18,7 @@ pub const BackendCapabilities = struct {
     file_rename: bool = false,
     file_delete: bool = false,
     file_size: bool = false,
+    file_stat: bool = false,
 
     pub fn supportsNonBlockingFileIo(comptime self: BackendCapabilities) bool {
         return self.file_read or self.file_write;
@@ -50,6 +51,7 @@ pub const Op = enum {
     file_rename,
     file_delete,
     file_size,
+    file_stat,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -79,6 +81,7 @@ pub const Op = enum {
             .file_rename => FileRename,
             .file_delete => FileDelete,
             .file_size => FileSize,
+            .file_stat => FileStat,
         };
     }
 
@@ -110,6 +113,7 @@ pub const Op = enum {
             FileRename => .file_rename,
             FileDelete => .file_delete,
             FileSize => .file_size,
+            FileStat => .file_stat,
             else => @compileError("unknown completion type"),
         };
     }
@@ -834,6 +838,34 @@ pub const FileSize = struct {
 
     pub fn getResult(self: *const FileSize) Error!u64 {
         return self.c.getResult(.file_size);
+    }
+};
+
+pub const FileStat = struct {
+    c: Completion,
+    result_private_do_not_touch: fs.FileStatInfo = undefined,
+    internal: switch (Backend.capabilities.file_stat) {
+        true => if (@hasDecl(Backend, "FileStatData")) Backend.FileStatData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    path: ?[]const u8,
+
+    pub const Error = fs.FileStatError || Cancelable;
+
+    /// Initialize a file stat operation.
+    /// If path is null, stats the file descriptor directly (fstat).
+    /// If path is provided, stats the file at path relative to handle (fstatat).
+    pub fn init(handle: fs.fd_t, path: ?[]const u8) FileStat {
+        return .{
+            .c = .init(.file_stat),
+            .handle = handle,
+            .path = path,
+        };
+    }
+
+    pub fn getResult(self: *const FileStat) Error!fs.FileStatInfo {
+        return self.c.getResult(.file_stat);
     }
 };
 

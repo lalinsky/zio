@@ -14,6 +14,34 @@ pub const iovec = @import("base.zig").iovec;
 pub const iovec_const = @import("base.zig").iovec_const;
 
 pub const mode_t = std.posix.mode_t;
+pub const ino_t = std.posix.ino_t;
+
+pub const FileKind = enum {
+    block_device,
+    character_device,
+    directory,
+    named_pipe,
+    sym_link,
+    file,
+    unix_domain_socket,
+    whiteout,
+    door,
+    event_port,
+    unknown,
+};
+
+pub const FileStatInfo = struct {
+    inode: ino_t,
+    size: u64,
+    mode: mode_t,
+    kind: FileKind,
+    /// Access time in nanoseconds since Unix epoch
+    atime: i64,
+    /// Modification time in nanoseconds since Unix epoch
+    mtime: i64,
+    /// Change time (POSIX) / Creation time (Windows) in nanoseconds since Unix epoch
+    ctime: i64,
+};
 
 pub const FileOpenMode = enum {
     read_only,
@@ -148,6 +176,18 @@ pub const FileDeleteError = error{
 pub const FileSizeError = error{
     AccessDenied,
     InvalidFileDescriptor,
+    Canceled,
+    Unexpected,
+};
+
+pub const FileStatError = error{
+    AccessDenied,
+    InvalidFileDescriptor,
+    FileNotFound,
+    NameTooLong,
+    NotDir,
+    SymLinkLoop,
+    SystemResources,
     Canceled,
     Unexpected,
 };
@@ -709,6 +749,19 @@ pub fn fsize(fd: fd_t) FileSizeError!u64 {
         return @intCast(file_size);
     }
 
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var statx_buf: linux.Statx = undefined;
+        while (true) {
+            const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX_SIZE, &statx_buf);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return statx_buf.size,
+                .INTR => continue,
+                else => |err| return errnoToFileSizeError(err),
+            }
+        }
+    }
+
     while (true) {
         var stat_buf: posix.system.Stat = undefined;
         const rc = posix.system.fstat(fd, &stat_buf);
@@ -725,6 +778,210 @@ pub fn errnoToFileSizeError(errno: posix.system.E) FileSizeError {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
         .BADF => error.InvalidFileDescriptor,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+/// Get file metadata by file descriptor
+pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        var info: w2.BY_HANDLE_FILE_INFORMATION = undefined;
+        const success = w2.GetFileInformationByHandle(fd, &info);
+
+        if (success == w.FALSE) {
+            switch (w2.GetLastError()) {
+                .INVALID_HANDLE => return error.InvalidFileDescriptor,
+                .ACCESS_DENIED => return error.AccessDenied,
+                else => |err| return unexpectedError(err) catch error.Unexpected,
+            }
+        }
+
+        const size: u64 = (@as(u64, info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+        const inode: ino_t = @bitCast((@as(u64, info.nFileIndexHigh) << 32) | info.nFileIndexLow);
+
+        const kind: FileKind = if (info.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY != 0)
+            .directory
+        else if (info.dwFileAttributes & w.FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            .sym_link
+        else
+            .file;
+
+        return .{
+            .inode = inode,
+            .size = size,
+            .mode = 0, // Windows doesn't have POSIX modes
+            .kind = kind,
+            .atime = w2.fileTimeToNanos(info.ftLastAccessTime),
+            .mtime = w2.fileTimeToNanos(info.ftLastWriteTime),
+            .ctime = w2.fileTimeToNanos(info.ftCreationTime),
+        };
+    }
+
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO |
+            linux.STATX_SIZE | linux.STATX_ATIME | linux.STATX_MTIME |
+            linux.STATX_CTIME;
+        var statx_buf: linux.Statx = undefined;
+        while (true) {
+            const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, mask, &statx_buf);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return statxToFileStat(statx_buf),
+                .INTR => continue,
+                else => |err| return errnoToFileStatError(err),
+            }
+        }
+    }
+
+    while (true) {
+        var stat_buf: posix.system.Stat = undefined;
+        const rc = posix.system.fstat(fd, &stat_buf);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return statToFileStat(stat_buf),
+            .INTR => continue,
+            else => |err| return errnoToFileStatError(err),
+        }
+    }
+}
+
+/// Get file metadata by path relative to directory
+pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileStatError!FileStatInfo {
+    if (builtin.os.tag == .windows) {
+        // On Windows, we need to open the file first, then stat it
+        const w = std.os.windows;
+
+        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
+            error.InvalidWtf8 => error.Unexpected,
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.FileNotFound,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            error.Unexpected => error.Unexpected,
+        };
+
+        // Open with minimal access just to query attributes
+        const handle = w2.CreateFileW(
+            path_w.span().ptr,
+            0, // No access needed, just want to query attributes
+            w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
+            null,
+            w.OPEN_EXISTING,
+            w.FILE_FLAG_BACKUP_SEMANTICS, // Required to open directories
+            null,
+        );
+
+        if (handle == w.INVALID_HANDLE_VALUE) {
+            return switch (w2.GetLastError()) {
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .PATH_NOT_FOUND => error.FileNotFound,
+                .ACCESS_DENIED => error.AccessDenied,
+                else => |err| return unexpectedError(err) catch error.Unexpected,
+            };
+        }
+        defer _ = w.CloseHandle(handle);
+
+        return fstat(handle);
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO |
+            linux.STATX_SIZE | linux.STATX_ATIME | linux.STATX_MTIME |
+            linux.STATX_CTIME;
+        var statx_buf: linux.Statx = undefined;
+        while (true) {
+            const rc = linux.statx(dir, path_z.ptr, 0, mask, &statx_buf);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return statxToFileStat(statx_buf),
+                .INTR => continue,
+                else => |err| return errnoToFileStatError(err),
+            }
+        }
+    }
+
+    while (true) {
+        var stat_buf: posix.system.Stat = undefined;
+        const rc = posix.system.fstatat(dir, path_z.ptr, &stat_buf, 0);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return statToFileStat(stat_buf),
+            .INTR => continue,
+            else => |err| return errnoToFileStatError(err),
+        }
+    }
+}
+
+fn statToFileStat(stat_buf: posix.system.Stat) FileStatInfo {
+    const S = posix.system.S;
+    const kind: FileKind = switch (stat_buf.mode & S.IFMT) {
+        S.IFBLK => .block_device,
+        S.IFCHR => .character_device,
+        S.IFDIR => .directory,
+        S.IFIFO => .named_pipe,
+        S.IFLNK => .sym_link,
+        S.IFREG => .file,
+        S.IFSOCK => .unix_domain_socket,
+        else => .unknown,
+    };
+
+    return .{
+        .inode = stat_buf.ino,
+        .size = @intCast(stat_buf.size),
+        .mode = stat_buf.mode,
+        .kind = kind,
+        .atime = timespecToNanos(stat_buf.atime()),
+        .mtime = timespecToNanos(stat_buf.mtime()),
+        .ctime = timespecToNanos(stat_buf.ctime()),
+    };
+}
+
+fn timespecToNanos(ts: posix.system.timespec) i64 {
+    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+fn statxToFileStat(statx_buf: std.os.linux.Statx) FileStatInfo {
+    const S = std.os.linux.S;
+    const kind: FileKind = switch (statx_buf.mode & S.IFMT) {
+        S.IFBLK => .block_device,
+        S.IFCHR => .character_device,
+        S.IFDIR => .directory,
+        S.IFIFO => .named_pipe,
+        S.IFLNK => .sym_link,
+        S.IFREG => .file,
+        S.IFSOCK => .unix_domain_socket,
+        else => .unknown,
+    };
+
+    return .{
+        .inode = statx_buf.ino,
+        .size = statx_buf.size,
+        .mode = statx_buf.mode,
+        .kind = kind,
+        .atime = statxTimeToNanos(statx_buf.atime),
+        .mtime = statxTimeToNanos(statx_buf.mtime),
+        .ctime = statxTimeToNanos(statx_buf.ctime),
+    };
+}
+
+fn statxTimeToNanos(ts: std.os.linux.statx_timestamp) i64 {
+    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+pub fn errnoToFileStatError(errno: posix.system.E) FileStatError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .BADF => error.InvalidFileDescriptor,
+        .NOENT => error.FileNotFound,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOTDIR => error.NotDir,
+        .LOOP => error.SymLinkLoop,
+        .NOMEM => error.SystemResources,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };

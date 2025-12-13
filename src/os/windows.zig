@@ -61,6 +61,39 @@ pub extern "kernel32" fn GetFileSizeEx(
     lpFileSize: *LARGE_INTEGER,
 ) callconv(.winapi) BOOL;
 
+pub const FILETIME = extern struct {
+    dwLowDateTime: DWORD,
+    dwHighDateTime: DWORD,
+};
+
+pub const BY_HANDLE_FILE_INFORMATION = extern struct {
+    dwFileAttributes: DWORD,
+    ftCreationTime: FILETIME,
+    ftLastAccessTime: FILETIME,
+    ftLastWriteTime: FILETIME,
+    dwVolumeSerialNumber: DWORD,
+    nFileSizeHigh: DWORD,
+    nFileSizeLow: DWORD,
+    nNumberOfLinks: DWORD,
+    nFileIndexHigh: DWORD,
+    nFileIndexLow: DWORD,
+};
+
+pub extern "kernel32" fn GetFileInformationByHandle(
+    hFile: HANDLE,
+    lpFileInformation: *BY_HANDLE_FILE_INFORMATION,
+) callconv(.winapi) BOOL;
+
+/// Convert Windows FILETIME to nanoseconds since Unix epoch.
+/// FILETIME is 100-nanosecond intervals since January 1, 1601.
+/// Unix epoch is January 1, 1970.
+pub fn fileTimeToNanos(ft: FILETIME) i64 {
+    // 100-nanosecond intervals between 1601 and 1970
+    const EPOCH_DIFF: i64 = 116444736000000000;
+    const ticks: i64 = (@as(i64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    return (ticks - EPOCH_DIFF) * 100;
+}
+
 // IOCP functions
 pub extern "kernel32" fn GetQueuedCompletionStatusEx(
     CompletionPort: HANDLE,

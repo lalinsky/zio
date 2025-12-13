@@ -16,6 +16,7 @@ const FileSync = @import("../completion.zig").FileSync;
 const FileRename = @import("../completion.zig").FileRename;
 const FileDelete = @import("../completion.zig").FileDelete;
 const FileSize = @import("../completion.zig").FileSize;
+const FileStat = @import("../completion.zig").FileStat;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 
@@ -260,4 +261,28 @@ pub fn fileSizeWork(work: *Work) void {
     const internal: *@FieldType(FileSize, "internal") = @fieldParentPtr("work", work);
     const file_size: *FileSize = @fieldParentPtr("internal", internal);
     handleFileSize(&file_size.c);
+}
+
+/// Helper to handle file stat operation
+/// If path is null, stats the file descriptor directly (fstat).
+/// If path is provided, stats the file at path relative to handle (fstatat).
+pub fn handleFileStat(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(FileStat);
+    const result = if (data.path) |path|
+        fs.fstatat(allocator, data.handle, path)
+    else
+        fs.fstat(data.handle);
+
+    if (result) |stat| {
+        c.setResult(.file_stat, stat);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for FileStat - performs blocking fstat()/fstatat() syscall
+pub fn fileStatWork(work: *Work) void {
+    const internal: *@FieldType(FileStat, "internal") = @fieldParentPtr("work", work);
+    const file_stat: *FileStat = @fieldParentPtr("internal", internal);
+    handleFileStat(&file_stat.c, file_stat.internal.allocator);
 }

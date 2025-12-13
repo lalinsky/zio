@@ -284,3 +284,110 @@ test "File: size" {
     try loop.run(.until_done);
     try file_delete.getResult();
 }
+
+test "File: stat" {
+    var thread_pool: aio.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: aio.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+
+    const cwd = std.fs.cwd();
+
+    // Create a file
+    var file_create = aio.FileCreate.init(cwd.fd, "test-stat", .{ .read = true, .truncate = true, .mode = 0o664 });
+    loop.add(&file_create.c);
+    try loop.run(.until_done);
+    const fd = try file_create.getResult();
+
+    // Stat empty file (by fd - path is null)
+    var file_stat1 = aio.FileStat.init(fd, null);
+    loop.add(&file_stat1.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.dead, file_stat1.c.state);
+    try std.testing.expectEqual(true, file_stat1.c.has_result);
+    const stat1 = try file_stat1.getResult();
+    try std.testing.expectEqual(0, stat1.size);
+    try std.testing.expectEqual(.file, stat1.kind);
+    try std.testing.expect(stat1.inode != 0);
+
+    // Write some data
+    const write_data = "Hello, file stat test!";
+    var write_iov: [1]aio.system.iovec_const = undefined;
+    var file_write = aio.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
+    loop.add(&file_write.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(write_data.len, try file_write.getResult());
+
+    // Stat after write (by fd - path is null)
+    var file_stat2 = aio.FileStat.init(fd, null);
+    loop.add(&file_stat2.c);
+    try loop.run(.until_done);
+    const stat2 = try file_stat2.getResult();
+    try std.testing.expectEqual(write_data.len, stat2.size);
+    try std.testing.expectEqual(.file, stat2.kind);
+    // mtime should be updated
+    try std.testing.expect(stat2.mtime >= stat1.mtime);
+
+    // Close and delete
+    var file_close = aio.FileClose.init(fd);
+    loop.add(&file_close.c);
+    try loop.run(.until_done);
+    try file_close.getResult();
+
+    var file_delete = aio.FileDelete.init(cwd.fd, "test-stat");
+    loop.add(&file_delete.c);
+    try loop.run(.until_done);
+    try file_delete.getResult();
+}
+
+test "File: stat_path" {
+    var thread_pool: aio.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: aio.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+
+    const cwd = std.fs.cwd();
+
+    // Create a file
+    var file_create = aio.FileCreate.init(cwd.fd, "test-stat-path", .{ .read = true, .truncate = true, .mode = 0o664 });
+    loop.add(&file_create.c);
+    try loop.run(.until_done);
+    const fd = try file_create.getResult();
+
+    // Write some data
+    const write_data = "Hello, file stat_path test!";
+    var write_iov: [1]aio.system.iovec_const = undefined;
+    var file_write = aio.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
+    loop.add(&file_write.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(write_data.len, try file_write.getResult());
+
+    // Close file so we can stat by path
+    var file_close = aio.FileClose.init(fd);
+    loop.add(&file_close.c);
+    try loop.run(.until_done);
+    try file_close.getResult();
+
+    // Stat by path (using FileStat with non-null path)
+    var file_stat = aio.FileStat.init(cwd.fd, "test-stat-path");
+    loop.add(&file_stat.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.dead, file_stat.c.state);
+    try std.testing.expectEqual(true, file_stat.c.has_result);
+    const stat = try file_stat.getResult();
+    try std.testing.expectEqual(write_data.len, stat.size);
+    try std.testing.expectEqual(.file, stat.kind);
+    try std.testing.expect(stat.inode != 0);
+
+    // Delete the file
+    var file_delete = aio.FileDelete.init(cwd.fd, "test-stat-path");
+    loop.add(&file_delete.c);
+    try loop.run(.until_done);
+    try file_delete.getResult();
+}
