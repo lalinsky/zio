@@ -277,7 +277,7 @@ pub const Signal = struct {
             return;
         }
 
-        const task = rt.getCurrentTask() orelse unreachable;
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         // Transition to preparing_to_wait state before adding to queue
@@ -317,7 +317,7 @@ pub const Signal = struct {
             return;
         }
 
-        const task = rt.getCurrentTask() orelse unreachable;
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         // Transition to preparing_to_wait state before adding to queue

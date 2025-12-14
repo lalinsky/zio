@@ -31,10 +31,11 @@ pub fn cancelIo(rt: *Runtime, completion: *aio.Completion) void {
         .c = aio.Completion.init(.cancel),
         .target = completion,
     };
-    cancel.c.userdata = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
+    cancel.c.userdata = task;
     cancel.c.callback = genericCallback;
 
-    const executor = rt.getCurrentTask().?.getExecutor();
+    const executor = task.getExecutor();
     executor.loop.add(&cancel.c);
     waitForIo(rt, &cancel.c) catch {};
 
@@ -44,7 +45,7 @@ pub fn cancelIo(rt: *Runtime, completion: *aio.Completion) void {
 }
 
 pub fn waitForIo(rt: *Runtime, completion: *aio.Completion) Cancelable!void {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     var executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before yielding
@@ -70,7 +71,7 @@ pub fn waitForIo(rt: *Runtime, completion: *aio.Completion) Cancelable!void {
 }
 
 pub fn timedWaitForIo(rt: *Runtime, completion: *aio.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     var executor = task.getExecutor();
 
     // Set up timeout

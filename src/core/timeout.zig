@@ -22,7 +22,7 @@ pub const Timeout = struct {
     pub fn clear(self: *Timeout, rt: *Runtime) void {
         if (self.timer.c.state != .running) return;
 
-        const task = rt.getCurrentTask() orelse unreachable;
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
         std.debug.assert(executor.runtime == rt);
 
@@ -31,7 +31,7 @@ pub const Timeout = struct {
     }
 
     pub fn set(self: *Timeout, rt: *Runtime, timeout_ns: u64) void {
-        const task = rt.getCurrentTask() orelse unreachable;
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
         std.debug.assert(executor.runtime == rt);
 

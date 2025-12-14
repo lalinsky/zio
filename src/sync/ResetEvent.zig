@@ -121,7 +121,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     }
 
     // Add to wait queue and suspend
-    const task = runtime.getCurrentTask() orelse unreachable;
+    const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
@@ -171,7 +171,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     }
 
     // Add to wait queue and wait with timeout
-    const task = runtime.getCurrentTask() orelse unreachable;
+    const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue

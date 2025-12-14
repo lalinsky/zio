@@ -107,7 +107,7 @@ pub fn broadcast(self: *Notify) void {
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
     // Add to wait queue and suspend
-    const task = runtime.getCurrentTask() orelse unreachable;
+    const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
     // Transition to preparing_to_wait state before adding to queue
@@ -151,7 +151,7 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     // Add to wait queue and wait with timeout
-    const task = runtime.getCurrentTask() orelse unreachable;
+    const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
     // Set up timeout

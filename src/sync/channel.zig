@@ -91,7 +91,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
-            const task = rt.getCurrentTask() orelse unreachable;
+            const task = rt.getCurrentTask();
             const executor = task.getExecutor();
 
             while (true) {
@@ -183,7 +183,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            const task = rt.getCurrentTask() orelse unreachable;
+            const task = rt.getCurrentTask();
             const executor = task.getExecutor();
 
             while (true) {

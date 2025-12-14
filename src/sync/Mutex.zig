@@ -67,7 +67,7 @@ pub fn tryLock(self: *Mutex) bool {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
-    const task = runtime.getCurrentTask() orelse unreachable;
+    const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
     // Fast path: try to acquire unlocked mutex

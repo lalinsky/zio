@@ -157,7 +157,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// Returns `error.Closed` if the channel is closed and no more messages are available.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, runtime: *Runtime, consumer: *Consumer) !T {
-            const task = runtime.getCurrentTask() orelse unreachable;
+            const task = runtime.getCurrentTask();
             const executor = task.getExecutor();
 
             while (true) {

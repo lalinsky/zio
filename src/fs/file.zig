@@ -24,7 +24,7 @@ pub const File = struct {
     }
 
     pub fn read(self: File, rt: *Runtime, buffer: []u8, offset: u64) ReadError!usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var storage: [1]aio.system.iovec = undefined;
@@ -39,7 +39,7 @@ pub const File = struct {
     }
 
     pub fn write(self: File, rt: *Runtime, data: []const u8, offset: u64) WriteError!usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var storage: [1]aio.system.iovec_const = undefined;
@@ -55,7 +55,7 @@ pub const File = struct {
 
     /// Read from file into multiple slices (vectored read).
     pub fn readVec(self: File, rt: *Runtime, slices: [][]u8, offset: u64) ReadError!usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var storage: [16]aio.system.iovec = undefined;
@@ -71,7 +71,7 @@ pub const File = struct {
 
     /// Write to file from multiple slices (vectored write).
     pub fn writeVec(self: File, rt: *Runtime, slices: []const []const u8, offset: u64) WriteError!usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var storage: [16]aio.system.iovec_const = undefined;
@@ -87,7 +87,7 @@ pub const File = struct {
 
     /// Read from file using ReadBuf (direct iovec access).
     pub fn readBuf(self: File, rt: *Runtime, buf: aio.ReadBuf, offset: u64) ReadError!usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.FileRead.init(self.fd, buf, offset);
@@ -102,7 +102,7 @@ pub const File = struct {
 
     /// Write to file using WriteBuf (direct iovec access).
     pub fn writeBuf(self: File, rt: *Runtime, buf: aio.WriteBuf, offset: u64) WriteError!usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.FileWrite.init(self.fd, buf, offset);
@@ -116,7 +116,7 @@ pub const File = struct {
     }
 
     pub fn close(self: File, rt: *Runtime) void {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.FileClose.init(self.fd);
@@ -477,7 +477,7 @@ test "File: reader and writer interface" {
 /// Positional write from vectored buffers (for std.Io compatibility).
 /// Does not update any file position.
 pub fn fileWritePositional(rt: *Runtime, fd: Handle, buffers: []const []const u8, offset: u64) !usize {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var storage: [16]aio.system.iovec_const = undefined;
@@ -494,7 +494,7 @@ pub fn fileWritePositional(rt: *Runtime, fd: Handle, buffers: []const []const u8
 /// Positional read into vectored buffers (for std.Io compatibility).
 /// Does not update any file position.
 pub fn fileReadPositional(rt: *Runtime, fd: Handle, buffers: [][]u8, offset: u64) !usize {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var storage: [16]aio.system.iovec = undefined;
