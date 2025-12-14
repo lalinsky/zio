@@ -241,7 +241,8 @@ test "Group: spawn" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    try handle.join(rt);
 }
 
 test "Group: wait for multiple tasks" {
@@ -271,7 +272,8 @@ test "Group: wait for multiple tasks" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    try handle.join(rt);
 }
 
 test "Group: cancellation while waiting" {
@@ -329,5 +331,6 @@ test "Group: cancellation while waiting" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    try handle.join(rt);
 }

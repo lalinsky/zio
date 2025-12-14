@@ -189,7 +189,8 @@ test "Timeout: user cancel has priority over timeout" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    try rt.runUntilComplete(Test.main, .{rt}, .{});
+    var handle = try rt.spawn(Test.main, .{rt}, .{});
+    try handle.join(rt);
 }
 
 test "Timeout: multiple timeouts with different deadlines" {

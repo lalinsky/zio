@@ -408,7 +408,8 @@ test "Signal: basic signal handling" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    try handle.join(rt);
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -453,7 +454,8 @@ test "Signal: multiple handlers for same signal" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    try handle.join(rt);
 
     try std.testing.expectEqual(@as(usize, 3), ctx.count.load(.monotonic));
 }
@@ -482,7 +484,8 @@ test "Signal: timedWait timeout" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    try handle.join(rt);
 
     try std.testing.expect(ctx.timed_out);
 }
@@ -521,7 +524,8 @@ test "Signal: timedWait receives signal before timeout" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    try handle.join(rt);
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -567,7 +571,8 @@ test "Signal: select on multiple signals" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    try handle.join(rt);
 
     try std.testing.expectEqual(@intFromEnum(SignalKind.user2), ctx.signal_received.load(.monotonic));
 }
@@ -602,7 +607,8 @@ test "Signal: select with signal already received (fast path)" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    try handle.join(rt);
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -653,7 +659,8 @@ test "Signal: select with signal and task" {
     };
 
     var ctx = TestContext{};
-    try rt.runUntilComplete(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    try handle.join(rt);
 
     try std.testing.expectEqual(.signal, ctx.winner);
 }

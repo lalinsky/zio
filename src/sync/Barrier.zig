@@ -250,7 +250,8 @@ test "Barrier: single coroutine barrier" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.worker, .{ runtime, &barrier, &is_leader_result }, .{});
+    var handle = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &is_leader_result }, .{});
+    try handle.join(runtime);
 
     try testing.expect(is_leader_result);
 }

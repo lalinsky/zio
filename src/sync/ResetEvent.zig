@@ -399,5 +399,6 @@ test "ResetEvent: select" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }

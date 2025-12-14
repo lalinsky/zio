@@ -374,7 +374,8 @@ test "Notify timedWait timeout" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &notify, &timed_out }, .{});
+    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &timed_out }, .{});
+    try handle.join(runtime);
 
     try testing.expect(timed_out);
 }
@@ -441,5 +442,6 @@ test "Notify: select" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }

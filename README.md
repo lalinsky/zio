@@ -100,7 +100,8 @@ pub fn main() !void {
     const rt = try zio.Runtime.init(gpa.allocator(), .{});
     defer rt.deinit();
 
-    try rt.runUntilComplete(serverTask, .{rt}, .{});
+    var handle = try rt.spawn(serverTask, .{rt}, .{});
+    try handle.join(rt);
 }
 ```
 

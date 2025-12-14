@@ -851,7 +851,8 @@ test "Io: async/await pattern" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: concurrent/await pattern" {
@@ -874,7 +875,8 @@ test "Io: concurrent/await pattern" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: now and sleep" {
@@ -946,7 +948,8 @@ test "Io: select" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv4" {
@@ -990,7 +993,8 @@ test "Io: TCP listen/accept/connect/read/write IPv4" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv6" {
@@ -1042,7 +1046,8 @@ test "Io: TCP listen/accept/connect/read/write IPv6" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: UDP bind IPv4" {
@@ -1135,7 +1140,8 @@ test "Io: Mutex concurrent access" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Condition wait/signal" {
@@ -1181,7 +1187,8 @@ test "Io: Condition wait/signal" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Condition broadcast" {
@@ -1232,7 +1239,8 @@ test "Io: Condition broadcast" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Unix domain socket listen/accept/connect/read/write" {
@@ -1287,7 +1295,8 @@ test "Io: Unix domain socket listen/accept/connect/read/write" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: File close" {
@@ -1458,7 +1467,8 @@ test "Io: Group async/wait" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Group concurrent/wait" {
@@ -1491,7 +1501,8 @@ test "Io: Group concurrent/wait" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Group cancel" {
@@ -1526,7 +1537,8 @@ test "Io: Group cancel" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Dir createFile/openFile" {

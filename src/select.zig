@@ -540,7 +540,8 @@ test "select: basic - first completes" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "select: already complete - fast path" {
@@ -579,7 +580,8 @@ test "select: already complete - fast path" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "select: heterogeneous types" {
@@ -635,7 +637,8 @@ test "select: heterogeneous types" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "select: with cancellation" {
@@ -685,7 +688,8 @@ test "select: with cancellation" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "select: with error unions - success case" {
@@ -743,7 +747,8 @@ test "select: with error unions - success case" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "select: with error unions - error case" {
@@ -791,7 +796,8 @@ test "select: with error unions - error case" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "select: with mixed error types" {
@@ -853,7 +859,8 @@ test "select: with mixed error types" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "wait: plain type" {
@@ -881,7 +888,8 @@ test "wait: plain type" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "wait: error union" {
@@ -912,7 +920,8 @@ test "wait: error union" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "wait: error union with error" {
@@ -942,7 +951,8 @@ test "wait: error union with error" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "wait: already complete (fast path)" {
@@ -963,7 +973,8 @@ test "wait: already complete (fast path)" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "select: wait on JoinHandle from spawned task" {
@@ -1007,5 +1018,6 @@ test "select: wait on JoinHandle from spawned task" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }

@@ -156,7 +156,8 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
+    try handle.join(runtime);
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
@@ -202,7 +203,8 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(Test.mainFn, .{ runtime, server_addr, client_addr }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr }, .{});
+    try handle.join(runtime);
 }
 
 pub fn checkShutdown(addr: anytype, options: anytype) !void {
@@ -245,7 +247,8 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    try runtime.runUntilComplete(Test.mainFn, .{ runtime, addr, options }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options }, .{});
+    try handle.join(runtime);
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {

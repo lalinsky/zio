@@ -963,16 +963,6 @@ pub const Runtime = struct {
         try executor.run();
     }
 
-    pub fn runUntilComplete(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !meta.Payload(meta.ReturnType(func)) {
-        var handle = try self.spawn(func, args, options);
-        defer handle.cancel(self);
-
-        // Run all executors
-        try self.run();
-
-        return handle.join(self);
-    }
-
     // Convenience methods that operate on the current coroutine context
     // These delegate to the current executor automatically
     // Most are no-op if not called from within a coroutine

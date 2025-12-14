@@ -320,7 +320,8 @@ test "Condition timedWait timeout" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &mutex, &condition, &timed_out }, .{});
+    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &timed_out }, .{});
+    try handle.join(runtime);
 
     try testing.expect(timed_out);
 }
