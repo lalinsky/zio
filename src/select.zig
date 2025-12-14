@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
+const Executor = @import("runtime.zig").Executor;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const AnyTask = @import("core/task.zig").AnyTask;
@@ -13,31 +14,6 @@ const meta = @import("meta.zig");
 
 /// Sentinel value indicating no winner has been selected yet
 const NO_WINNER = std.math.maxInt(usize);
-
-/// Thread waiter for non-coroutine contexts
-const ThreadWaiter = struct {
-    wait_node: WaitNode,
-    futex_state: std.atomic.Value(u32),
-
-    const wait_node_vtable = WaitNode.VTable{
-        .wake = waitNodeWake,
-    };
-
-    pub fn init() ThreadWaiter {
-        return .{
-            .wait_node = .{
-                .vtable = &wait_node_vtable,
-            },
-            .futex_state = std.atomic.Value(u32).init(0),
-        };
-    }
-
-    fn waitNodeWake(wait_node: *WaitNode) void {
-        const self: *ThreadWaiter = @fieldParentPtr("wait_node", wait_node);
-        self.futex_state.store(1, .release);
-        std.Thread.Futex.wake(&self.futex_state, 1);
-    }
-};
 
 // Future protocol - Any type implementing these methods can be used with select():
 //
@@ -292,7 +268,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 
     // Multi-wait path: Create separate waiter awaitables for each handle
     // We can't add the same awaitable to multiple lists (next/prev pointers conflict)
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     // Self-wait detection: check all futures for self-wait
@@ -382,7 +358,7 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         @panic("selectAwaitables: too many awaitables (max 64)");
     }
 
-    const task = rt.getCurrentTask() orelse @panic("selectAwaitables requires active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     task.state.store(.preparing_to_wait, .release);
@@ -427,21 +403,16 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
 
 /// Internal wait implementation with configurable cancellation behavior.
 fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
-    var thread_waiter = ThreadWaiter.init();
     const task = rt.getCurrentTask();
-    const wait_node = if (task) |t| &t.awaitable.wait_node else &thread_waiter.wait_node;
+    const wait_node = &task.awaitable.wait_node;
 
     // Self-wait detection: check if waiting on own task (would deadlock)
-    if (task) |t| checkSelfWait(t, future);
+    checkSelfWait(task, future);
 
-    if (task) |t| {
-        t.state.store(.preparing_to_wait, .release);
-    }
+    task.state.store(.preparing_to_wait, .release);
     defer {
-        if (task) |t| {
-            const prev = t.state.swap(.ready, .release);
-            std.debug.assert(prev == .preparing_to_wait or prev == .ready);
-        }
+        const prev = task.state.swap(.ready, .release);
+        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
     }
 
     // Winner tracking: for single future, winner is always 0 if signaled
@@ -475,36 +446,28 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
         }
     }
 
-    if (task) |t| {
-        // Coroutine path: yield with cancellation handling
-        const executor = t.getExecutor();
+    const executor = task.getExecutor();
 
-        if (flags.on_cancel == .cancel_and_continue) {
-            // Stay subscribed to wait queue during cancel-and-retry
-            var shielded = false;
-            defer if (shielded) rt.endShield();
+    if (flags.on_cancel == .cancel_and_continue) {
+        // Stay subscribed to wait queue during cancel-and-retry
+        var shielded = false;
+        defer if (shielded) rt.endShield();
 
-            while (true) {
-                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| switch (err) {
-                    error.Canceled => {
-                        if (shielded) unreachable;
-                        rt.beginShield();
-                        shielded = true;
-                        fut.cancel();
-                        continue;
-                    },
-                };
-                break;
-            }
-        } else {
-            // Propagate cancellation to caller
-            try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+        while (true) {
+            executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| switch (err) {
+                error.Canceled => {
+                    if (shielded) unreachable;
+                    rt.beginShield();
+                    shielded = true;
+                    fut.cancel();
+                    continue;
+                },
+            };
+            break;
         }
     } else {
-        // Thread path: park on futex
-        while (thread_waiter.futex_state.load(.acquire) == 0) {
-            std.Thread.Futex.wait(&thread_waiter.futex_state, 0);
-        }
+        // Propagate cancellation to caller
+        try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
     }
 
     // We should have been signaled

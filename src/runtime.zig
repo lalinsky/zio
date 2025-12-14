@@ -94,7 +94,9 @@ fn shutdownCallback(
     loop: *aio.Loop,
     c: *aio.Completion,
 ) void {
-    _ = c;
+    const executor: *Executor = @ptrCast(@alignCast(c.userdata.?));
+    // Wake main_task so runSchedulerLoop() exits
+    executor.main_task.state.store(.ready, .release);
     // Stop the event loop
     loop.stop();
 }
@@ -358,6 +360,12 @@ pub const Executor = struct {
     // Coordination for thread startup
     available: bool = true,
 
+    // Main task for non-coroutine contexts (e.g., main thread calling rt.sleep())
+    // This allows the main thread to use the same yield/wake mechanisms as spawned tasks.
+    // Note: main_task.coro is not a real coroutine - scheduleTask handles it specially
+    // by setting state to .ready without queuing.
+    main_task: AnyTask = undefined,
+
     // Executor dedicated to this thread
     pub threadlocal var current: ?*Executor = null;
 
@@ -373,6 +381,22 @@ pub const Executor = struct {
             .lifo_slot_enabled = options.lifo_slot_enabled,
             .main_context = undefined,
             .runtime = runtime,
+        };
+
+        // Initialize main_task for non-coroutine yield support
+        self.main_task = .{
+            .state = std.atomic.Value(AnyTask.State).init(.ready),
+            .awaitable = .{
+                .kind = .task,
+                .destroy_fn = undefined, // main_task is never destroyed via this
+                .wait_node = .{
+                    .vtable = &AnyTask.wait_node_vtable,
+                },
+            },
+            .coro = .{
+                .parent_context_ptr = &self.main_context,
+            },
+            .closure = undefined, // main_task has no closure
         };
 
         try setupStackGrowth();
@@ -459,8 +483,8 @@ pub const Executor = struct {
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        const current_coro = self.current_coroutine orelse return;
-        const current_task = AnyTask.fromCoroutine(current_coro);
+        const is_main = self.current_coroutine == null;
+        const current_task = if (is_main) &self.main_task else AnyTask.fromCoroutine(self.current_coroutine.?);
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
@@ -484,25 +508,97 @@ pub const Executor = struct {
             self.scheduleTaskLocal(current_task, true); // is_yield = true
         }
 
-        // Try to switch directly to the next ready task (checks LIFO slot first)
-        if (self.getNextTask()) |next_wait_node| {
-            const next_task = AnyTask.fromWaitNode(next_wait_node);
-
-            self.current_coroutine = &next_task.coro;
-            current_coro.yieldTo(&next_task.coro);
+        if (is_main) {
+            // Main thread: run scheduler loop until main_task is ready
+            self.runSchedulerLoop() catch |err| {
+                std.debug.panic("Event loop error during yield: {}", .{err});
+            };
         } else {
-            // No ready tasks - return to scheduler
-            current_coro.yield();
+            // Coroutine: context switch
+            const current_coro = self.current_coroutine.?;
+
+            // Try to switch directly to the next ready task (checks LIFO slot first)
+            if (self.getNextTask()) |next_wait_node| {
+                const next_task = AnyTask.fromWaitNode(next_wait_node);
+
+                self.current_coroutine = &next_task.coro;
+                current_coro.yieldTo(&next_task.coro);
+            } else {
+                // No ready tasks - return to scheduler
+                current_coro.yield();
+            }
+
+            // After resuming, the task may have migrated to a different executor.
+            // Re-derive the current executor from TLS instead of using the captured `self`.
+            const resumed_executor = Executor.current orelse unreachable;
+            std.debug.assert(resumed_executor.current_coroutine == current_coro);
         }
 
-        // After resuming, the task may have migrated to a different executor.
-        // Re-derive the current executor from TLS instead of using the captured `self`.
-        const resumed_executor = Runtime.current_executor orelse unreachable;
-        std.debug.assert(resumed_executor.current_coroutine == current_coro);
-
-        // Check again after resuming in case we were canceled while suspended (unless no_cancel)
+        // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCanceled(resumed_executor.runtime);
+            try current_task.checkCanceled(self.runtime);
+        }
+    }
+
+    /// Run the scheduler loop until main_task is ready.
+    /// This is called from yield() when yielding from the main thread (non-coroutine context),
+    /// and also from run() which sets main_task to waiting until shutdown.
+    fn runSchedulerLoop(self: *Executor) !void {
+        std.debug.assert(Executor.current == self);
+
+        while (true) {
+            // Drain remote ready queue (cross-thread tasks)
+            var drained = self.next_ready_queue_remote.popAll();
+            while (drained.pop()) |task| {
+                self.ready_queue.push(task);
+            }
+
+            // Process ready coroutines
+            while (self.getNextTask()) |wait_node| {
+                const task = AnyTask.fromWaitNode(wait_node);
+
+                self.current_coroutine = &task.coro;
+                defer self.current_coroutine = null;
+
+                task.coro.step();
+
+                // Handle finished coroutines
+                if (self.current_coroutine) |current_coro| {
+                    if (current_coro.finished) {
+                        const current_task = AnyTask.fromCoroutine(current_coro);
+                        const current_awaitable = &current_task.awaitable;
+
+                        // Release stack immediately
+                        if (current_coro.context.stack_info.allocation_len > 0) {
+                            self.runtime.stack_pool.release(current_coro.context.stack_info);
+                            current_coro.context.stack_info.allocation_len = 0;
+                        }
+
+                        // Mark awaitable as complete and wake all waiters
+                        current_awaitable.markComplete();
+
+                        // Release runtime's reference and check for shutdown
+                        self.runtime.releaseAwaitable(current_awaitable, true);
+                    }
+                }
+            }
+
+            // Check if main_task is ready (woken by timer, I/O, or shutdown)
+            if (self.main_task.state.load(.acquire) == .ready) {
+                return;
+            }
+
+            // Also check if loop was stopped (shutdown sets both)
+            if (self.loop.stopped()) {
+                return;
+            }
+
+            // Move yielded coroutines back to ready queue
+            self.ready_queue.concatByMoving(&self.next_ready_queue);
+
+            // Run event loop - non-blocking if there's work, otherwise wait for I/O
+            const has_work = self.ready_queue.head != null or self.lifo_slot != null;
+            try self.loop.run(if (has_work) .no_wait else .once);
         }
     }
 
@@ -554,9 +650,12 @@ pub const Executor = struct {
         current_task.pin_count -= 1;
     }
 
-    pub fn getCurrentTask(self: *Executor) ?*AnyTask {
-        const coro = self.current_coroutine orelse return null;
-        return AnyTask.fromCoroutine(coro);
+    pub fn getCurrentTask(self: *Executor) *AnyTask {
+        if (self.current_coroutine) |coro| {
+            return AnyTask.fromCoroutine(coro);
+        } else {
+            return &self.main_task;
+        }
     }
 
     pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
@@ -582,82 +681,17 @@ pub const Executor = struct {
         unreachable; // Should always be canceled (by timeout or user)
     }
 
-    /// Run the executor event loop.
-    /// Main executor (id=0) orchestrates shutdown when all tasks complete.
-    /// Worker executors (id>0) run until signaled to shut down by main executor.
+    /// Run the executor event loop until shutdown.
+    /// Shutdown occurs when all tasks complete, triggering shutdownCallback
+    /// which sets main_task.state to .ready and stops the loop.
     pub fn run(self: *Executor) !void {
-        // Set thread-local current executor
-        Runtime.current_executor = self;
-        defer Runtime.current_executor = null;
-
         // Check if we're starting with an empty task list
         // If so, immediately initiate shutdown (no work to do)
         self.runtime.maybeShutdown();
 
-        var spin_count: u8 = 0;
-        while (true) {
-            // Exit if loop was stopped (by shutdown callback)
-            if (self.loop.stopped()) break;
-
-            // Drain remote ready queue (cross-thread tasks)
-            // Atomically drain all remote ready tasks and append to ready queue
-            var drained = self.next_ready_queue_remote.popAll();
-            while (drained.pop()) |task| {
-                self.ready_queue.push(task);
-            }
-
-            // Process all ready coroutines (once)
-            // getNextTask() checks LIFO slot first for cache locality, then ready_queue
-            while (self.getNextTask()) |wait_node| {
-                const task = AnyTask.fromWaitNode(wait_node);
-
-                self.current_coroutine = &task.coro;
-                defer self.current_coroutine = null;
-
-                task.coro.step();
-
-                // Handle finished coroutines (checks current_coroutine to catch tasks that died via direct switch in yield())
-                if (self.current_coroutine) |current_coro| {
-                    if (current_coro.finished) {
-                        const current_task = AnyTask.fromCoroutine(current_coro);
-                        const current_awaitable = &current_task.awaitable;
-
-                        // Release stack immediately since coroutine execution is complete
-                        if (current_coro.context.stack_info.allocation_len > 0) {
-                            self.runtime.stack_pool.release(current_coro.context.stack_info);
-                            current_coro.context.stack_info.allocation_len = 0;
-                        }
-
-                        // Mark awaitable as complete and wake all waiters (coroutines and threads)
-                        current_awaitable.markComplete();
-
-                        // Release runtime's reference and check for shutdown
-                        self.runtime.releaseAwaitable(current_awaitable, true);
-                        // If ref_count > 0, Task(T) handles still exist, keep the task alive
-                    }
-                }
-
-                // Other states (.ready, .waiting) are handled by yield() or markReady()
-            }
-
-            // Move yielded coroutines back to ready queue
-            self.ready_queue.concatByMoving(&self.next_ready_queue);
-
-            // Determine event loop run mode based on work availability and spin count
-            // Spin briefly with non-blocking polls before blocking to reduce cross-thread wakeup latency
-            const has_work = self.ready_queue.head != null or self.lifo_slot != null;
-            const run_mode: aio.RunMode = if (has_work or spin_count < 16) .no_wait else .once;
-
-            // Run event loop
-            try self.loop.run(run_mode);
-
-            // Update spin count: reset if work found, increment if spinning, don't change if blocked
-            if (has_work) {
-                spin_count = 0;
-            } else if (run_mode == .no_wait) {
-                spin_count +%= 1;
-            }
-        }
+        // Set main_task to waiting so runSchedulerLoop will block until shutdown
+        self.main_task.state.store(.waiting, .release);
+        try self.runSchedulerLoop();
     }
 
     /// Get the next task to run, checking LIFO slot first for cache locality.
@@ -763,10 +797,19 @@ pub const Executor = struct {
             std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
         }
 
+        // main_task is never queued - it just checks state in runSchedulerLoop
+        if (task == &self.main_task) {
+            // Wake the loop if called from another thread
+            if (Executor.current != self) {
+                self.loop.wake();
+            }
+            return;
+        }
+
         // Migration is allowed only when mode == .maybe_remote
         // (I/O callbacks, timeouts, cancellation use .local mode and don't migrate)
         if (old_state == .waiting and mode == .maybe_remote and task.canMigrate()) {
-            const current_exec = Runtime.current_executor orelse {
+            const current_exec = Executor.current orelse {
                 self.scheduleTaskRemote(task);
                 return;
             };
@@ -788,40 +831,15 @@ pub const Executor = struct {
 
         // Default path: schedule on appropriate executor
         if (mode == .maybe_remote) {
-            if (Runtime.current_executor == self) {
+            if (Executor.current == self) {
                 self.scheduleTaskLocal(task, false);
             } else {
                 self.scheduleTaskRemote(task);
             }
         } else {
-            assert(Runtime.current_executor == self);
+            assert(Executor.current == self);
             self.scheduleTaskLocal(task, false);
         }
-    }
-};
-
-// ThreadWaiter - used by external threads to wait on Awaitables
-pub const ThreadWaiter = struct {
-    wait_node: WaitNode,
-    futex_state: std.atomic.Value(u32),
-
-    const wait_node_vtable = WaitNode.VTable{
-        .wake = waitNodeWake,
-    };
-
-    pub fn init() ThreadWaiter {
-        return .{
-            .wait_node = .{
-                .vtable = &wait_node_vtable,
-            },
-            .futex_state = std.atomic.Value(u32).init(0),
-        };
-    }
-
-    fn waitNodeWake(wait_node: *WaitNode) void {
-        const self: *ThreadWaiter = @fieldParentPtr("wait_node", wait_node);
-        self.futex_state.store(1, .release);
-        std.Thread.Futex.wake(&self.futex_state, 1);
     }
 };
 
@@ -839,9 +857,6 @@ pub const Runtime = struct {
 
     tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
     shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
-
-    /// Thread-local storage for the current executor
-    pub threadlocal var current_executor: ?*Executor = null;
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
         const self = try allocator.create(Runtime);
@@ -947,14 +962,17 @@ pub const Runtime = struct {
         };
     }
 
+    /// Run the executor event loop on the current thread.
+    /// If the thread already has an executor (e.g., main thread), uses that.
+    /// Otherwise, creates a new executor for this thread (e.g., worker threads).
     pub fn run(self: *Runtime) !void {
-        if (Executor.current) |local_executor| {
-            try local_executor.run();
+        if (Executor.current) |executor| {
+            try executor.run();
             return;
         }
 
+        // Create a new executor for this thread
         var executor: Executor = undefined;
-
         try executor.init(self.allocator, self.options, self);
         defer executor.deinit();
 
@@ -980,30 +998,22 @@ pub const Runtime = struct {
     /// No-op if not called from within a coroutine.
     pub fn yield(self: *Runtime) Cancelable!void {
         _ = self;
-        const executor = Runtime.current_executor orelse return;
+        const executor = Executor.current orelse return;
         if (executor.current_coroutine == null) return;
         return executor.yield(.ready, .ready, .allow_cancel);
     }
 
     /// Sleep for the specified number of milliseconds.
-    /// Uses async sleep if in a coroutine, blocking sleep otherwise.
-    /// Returns error.Canceled if the coroutine was canceled during sleep.
+    /// Returns error.Canceled if the task was canceled during sleep.
     pub fn sleep(self: *Runtime, milliseconds: u64) Cancelable!void {
-        _ = self;
-        if (Runtime.current_executor) |executor| {
-            if (executor.current_coroutine != null) {
-                return executor.sleep(milliseconds);
-            }
-        }
-        // Not in coroutine - use blocking sleep (cannot be canceled)
-        aio.system.time.sleep(@min(milliseconds, std.math.maxInt(i32)));
+        return self.getCurrentExecutor().sleep(milliseconds);
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.
     /// No-op if not called from within a coroutine.
     pub fn beginShield(self: *Runtime) void {
         _ = self;
-        const executor = Runtime.current_executor orelse return;
+        const executor = Executor.current orelse return;
         if (executor.current_coroutine == null) return;
         executor.beginShield();
     }
@@ -1012,7 +1022,7 @@ pub const Runtime = struct {
     /// No-op if not called from within a coroutine.
     pub fn endShield(self: *Runtime) void {
         _ = self;
-        const executor = Runtime.current_executor orelse return;
+        const executor = Executor.current orelse return;
         if (executor.current_coroutine == null) return;
         executor.endShield();
     }
@@ -1022,11 +1032,8 @@ pub const Runtime = struct {
     /// If the error is not error.Canceled, returns the original error unchanged.
     /// If the timeout was triggered, returns error.Timeout.
     /// Otherwise, returns the original error (error.Canceled from user cancellation).
-    /// No-op (returns void) if not called from within a coroutine.
     pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: anytype) !void {
-        const executor = Runtime.current_executor orelse return;
-        const current_coro = executor.current_coroutine orelse return;
-        const current_task = AnyTask.fromCoroutine(current_coro);
+        const current_task = self.getCurrentTask();
         try current_task.checkTimeout(self, timeout, err);
     }
 
@@ -1037,7 +1044,7 @@ pub const Runtime = struct {
     /// No-op if not called from within a coroutine.
     pub fn beginPin(self: *Runtime) void {
         _ = self;
-        const executor = Runtime.current_executor orelse return;
+        const executor = Executor.current orelse return;
         if (executor.current_coroutine == null) return;
         executor.beginPin();
     }
@@ -1047,7 +1054,7 @@ pub const Runtime = struct {
     /// No-op if not called from within a coroutine.
     pub fn endPin(self: *Runtime) void {
         _ = self;
-        const executor = Runtime.current_executor orelse return;
+        const executor = Executor.current orelse return;
         if (executor.current_coroutine == null) return;
         executor.endPin();
     }
@@ -1058,33 +1065,28 @@ pub const Runtime = struct {
     /// No-op (returns successfully) if not called from within a coroutine.
     pub fn checkCanceled(self: *Runtime) Cancelable!void {
         _ = self;
-        const executor = Runtime.current_executor orelse return;
+        const executor = Executor.current orelse return;
         if (executor.current_coroutine == null) return;
         return executor.checkCanceled();
     }
 
-    /// Get the currently executing task, or null if not in a coroutine.
-    /// Uses the threadlocal current_executor to support multiple executors.
-    pub fn getCurrentTask(self: *Runtime) ?*AnyTask {
-        const executor = self.getCurrentExecutor() orelse return null;
-        const current = executor.current_coroutine orelse return null;
-        return AnyTask.fromCoroutine(current);
+    /// Get the currently executing task.
+    /// Panics if called from a thread without an active executor context.
+    pub fn getCurrentTask(self: *Runtime) *AnyTask {
+        return self.getCurrentExecutor().getCurrentTask();
     }
 
-    pub fn getCurrentExecutor(self: *Runtime) ?*Executor {
+    /// Get the current thread's executor.
+    /// Panics if called from a thread without an active executor context.
+    pub fn getCurrentExecutor(self: *Runtime) *Executor {
         _ = self;
-        return Runtime.current_executor;
+        return Executor.current orelse @panic("getCurrentExecutor called outside of executor context");
     }
 
     /// Get the current time in milliseconds.
     /// This uses the event loop's cached monotonic time for efficiency.
-    /// In multi-threaded mode, uses the main executor's loop time.
     pub fn now(self: *Runtime) u64 {
-        if (Executor.current) |local_executor| {
-            return local_executor.loop.now();
-        } else {
-            return self.main_executor.loop.now();
-        }
+        return self.getCurrentExecutor().loop.now();
     }
 
     /// Check if task list is empty and initiate shutdown if so.
@@ -1214,6 +1216,45 @@ test "runtime: JoinHandle.cast() error set conversion" {
     };
 
     try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+}
+
+test "Runtime: implicit run" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        fn asyncTask(rt: *Runtime) !void {
+            const start = rt.now();
+            try testing.expect(start > 0);
+
+            // Sleep to ensure time advances
+            try rt.sleep(10);
+
+            const end = rt.now();
+            try testing.expect(end > start);
+            try testing.expect(end - start >= 10);
+        }
+    };
+
+    var task = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try task.join(runtime);
+}
+
+test "Runtime: sleep from main" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    // Call sleep directly from main thread - no spawn needed
+    const start = runtime.now();
+    try runtime.sleep(10);
+    const end = runtime.now();
+
+    try testing.expect(end > start);
+    try testing.expect(end - start >= 10);
 }
 
 test "runtime: now() returns monotonic time" {
