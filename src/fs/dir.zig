@@ -14,7 +14,7 @@ pub const Dir = struct {
     }
 
     pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: aio.system.fs.FileOpenFlags) !File {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.FileOpen.init(self.fd, path, flags);
@@ -29,7 +29,7 @@ pub const Dir = struct {
     }
 
     pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: aio.system.fs.FileCreateFlags) !File {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.FileCreate.init(self.fd, path, flags);
@@ -44,7 +44,7 @@ pub const Dir = struct {
     }
 
     pub fn rename(self: Dir, rt: *Runtime, old_path: []const u8, new_path: []const u8) !void {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.FileRename.init(self.fd, old_path, new_path);
@@ -58,7 +58,7 @@ pub const Dir = struct {
     }
 
     pub fn deleteFile(self: Dir, rt: *Runtime, path: []const u8) !void {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.FileDelete.init(self.fd, path);

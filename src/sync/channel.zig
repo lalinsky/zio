@@ -91,7 +91,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
-            const task = rt.getCurrentTask() orelse unreachable;
+            const task = rt.getCurrentTask();
             const executor = task.getExecutor();
 
             while (true) {
@@ -183,7 +183,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            const task = rt.getCurrentTask() orelse unreachable;
+            const task = rt.getCurrentTask();
             const executor = task.getExecutor();
 
             while (true) {
@@ -714,7 +714,8 @@ test "Channel: trySend and tryReceive" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.testTry, .{ runtime, &channel }, .{});
+    var handle = try runtime.spawn(TestFn.testTry, .{ runtime, &channel }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: blocking behavior when empty" {
@@ -915,7 +916,8 @@ test "Channel: send on closed channel" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.testClosed, .{ runtime, &channel }, .{});
+    var handle = try runtime.spawn(TestFn.testClosed, .{ runtime, &channel }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: ring buffer wrapping" {
@@ -955,7 +957,8 @@ test "Channel: ring buffer wrapping" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.testWrap, .{ runtime, &channel }, .{});
+    var handle = try runtime.spawn(TestFn.testWrap, .{ runtime, &channel }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: asyncReceive with select - basic" {
@@ -1016,7 +1019,8 @@ test "Channel: asyncReceive with select - already ready" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.test_ready, .{ runtime, &channel }, .{});
+    var handle = try runtime.spawn(TestFn.test_ready, .{ runtime, &channel }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: asyncReceive with select - closed channel" {
@@ -1042,7 +1046,8 @@ test "Channel: asyncReceive with select - closed channel" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.test_closed, .{ runtime, &channel }, .{});
+    var handle = try runtime.spawn(TestFn.test_closed, .{ runtime, &channel }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: asyncSend with select - basic" {
@@ -1108,7 +1113,8 @@ test "Channel: asyncSend with select - already ready" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.test_ready, .{ runtime, &channel }, .{});
+    var handle = try runtime.spawn(TestFn.test_ready, .{ runtime, &channel }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: asyncSend with select - closed channel" {
@@ -1134,7 +1140,8 @@ test "Channel: asyncSend with select - closed channel" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.test_closed, .{ runtime, &channel }, .{});
+    var handle = try runtime.spawn(TestFn.test_closed, .{ runtime, &channel }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: select on both send and receive" {
@@ -1192,7 +1199,8 @@ test "Channel: select on both send and receive" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.testMain, .{ runtime, &channel1, &channel2 }, .{});
+    var handle = try runtime.spawn(TestFn.testMain, .{ runtime, &channel1, &channel2 }, .{});
+    try handle.join(runtime);
 }
 
 test "Channel: select with multiple receivers" {

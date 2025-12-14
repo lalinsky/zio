@@ -158,7 +158,8 @@ test "Future: basic set and get" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "Future: await from coroutine" {
@@ -197,7 +198,8 @@ test "Future: await from coroutine" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }
 
 test "Future: multiple waiters" {
@@ -242,5 +244,6 @@ test "Future: multiple waiters" {
         }
     };
 
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    try handle.join(runtime);
 }

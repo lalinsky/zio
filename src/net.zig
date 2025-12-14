@@ -486,7 +486,7 @@ pub const Socket = struct {
 
     /// Bind the socket to an address
     pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         // Copy addr to self.address so NetBind can update it with actual bound address
@@ -504,7 +504,7 @@ pub const Socket = struct {
 
     /// Mark the socket as a listening socket
     pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.NetListen.init(self.handle, backlog);
@@ -543,7 +543,7 @@ pub const Socket = struct {
     }
 
     fn receiveFromRecvfrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var storage: [1]aio.system.iovec = undefined;
@@ -575,7 +575,7 @@ pub const Socket = struct {
     }
 
     fn sendToSendto(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var storage: [1]aio.system.iovec_const = undefined;
@@ -635,7 +635,7 @@ pub const Stream = struct {
     /// Returns the number of bytes read, which may be less than requested.
     /// A return value of 0 indicates end-of-stream.
     pub fn readBuf(self: Stream, rt: *Runtime, buffers: []aio.ReadBuf) !usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.NetRecv.init(self.socket.handle, buffers, .{});
@@ -672,7 +672,7 @@ pub const Stream = struct {
     /// Low-level write function that accepts aio.WriteBuf slice directly.
     /// Returns the number of bytes written, which may be less than requested.
     pub fn writeBuf(self: Stream, rt: *Runtime, buffers: []const aio.WriteBuf) !usize {
-        const task = rt.getCurrentTask() orelse @panic("no active task");
+        const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
         var op = aio.NetSend.init(self.socket.handle, buffers, .{});
@@ -799,7 +799,7 @@ pub const Stream = struct {
 };
 
 fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var op = aio.NetOpen.init(@enumFromInt(family), .stream, .{});
@@ -813,7 +813,7 @@ fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
 }
 
 fn createDatagramSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var op = aio.NetOpen.init(@enumFromInt(family), .dgram, .{});
@@ -911,7 +911,7 @@ pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
 }
 
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     // Convert [][]u8 to ReadBuf
@@ -929,7 +929,7 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
 }
 
 pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []const u8, splat: usize) !usize {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var splat_buf: [64]u8 = undefined;
@@ -948,7 +948,7 @@ pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []co
 }
 
 pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var peer_addr: Address = undefined;
@@ -967,7 +967,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
 }
 
 pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var addr_copy = addr;
@@ -984,7 +984,7 @@ pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
 }
 
 pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var op = aio.NetShutdown.init(fd, how);
@@ -998,7 +998,7 @@ pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
 }
 
 pub fn netClose(rt: *Runtime, fd: Handle) void {
-    const task = rt.getCurrentTask() orelse @panic("no active task");
+    const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
     var op = aio.NetClose.init(fd);
@@ -1137,49 +1137,37 @@ test "lookupHost: localhost" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
-    defer runtime.deinit();
+    const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
 
-    const LookupHostTask = struct {
-        fn run(rt: *Runtime) !void {
-            var iter = try lookupHost(rt, "localhost", 80);
-            defer iter.deinit();
+    var iter = try lookupHost(rt, "localhost", 80);
+    defer iter.deinit();
 
-            var count: usize = 0;
-            while (iter.next()) |_| {
-                count += 1;
-            }
-            try testing.expect(count > 0);
-        }
-    };
-
-    try runtime.runUntilComplete(LookupHostTask.run, .{runtime}, .{});
+    var count: usize = 0;
+    while (iter.next()) |_| {
+        count += 1;
+    }
+    try testing.expect(count > 0);
 }
 
 test "lookupHost: numeric IP" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
-    defer runtime.deinit();
+    const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
 
-    const LookupHostTask = struct {
-        fn run(rt: *Runtime) !void {
-            var iter = try lookupHost(rt, "127.0.0.1", 8080);
-            defer iter.deinit();
+    var iter = try lookupHost(rt, "127.0.0.1", 8080);
+    defer iter.deinit();
 
-            var count: usize = 0;
-            var first_addr: ?IpAddress = null;
-            while (iter.next()) |addr| {
-                if (first_addr == null) first_addr = addr;
-                count += 1;
-            }
-            try testing.expectEqual(1, count);
-            try testing.expectEqual(8080, first_addr.?.getPort());
-        }
-    };
-
-    try runtime.runUntilComplete(LookupHostTask.run, .{runtime}, .{});
+    var count: usize = 0;
+    var first_addr: ?IpAddress = null;
+    while (iter.next()) |addr| {
+        if (first_addr == null) first_addr = addr;
+        count += 1;
+    }
+    try testing.expectEqual(1, count);
+    try testing.expectEqual(8080, first_addr.?.getPort());
 }
 
 test "tcpConnectToAddress: basic" {

@@ -87,7 +87,7 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
     // Check if runtime is shutting down
-    if (rt.tasks.isClosed()) {
+    if (rt.shutting_down.load(.acquire)) {
         return error.ConcurrencyUnavailable;
     }
 
@@ -106,8 +106,8 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
     ) catch return error.ConcurrencyUnavailable;
     errdefer task.closure.free(AnyTask, executor.allocator, task);
 
-    // Add to global awaitable registry (can fail if runtime is shutting down)
-    rt.tasks.add(&task.awaitable) catch return error.ConcurrencyUnavailable;
+    // Add to global awaitable registry
+    rt.tasks.add(&task.awaitable);
     errdefer _ = rt.tasks.remove(&task.awaitable);
 
     // Increment ref count for the Future BEFORE scheduling
@@ -169,7 +169,7 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []c
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
     // Check if runtime is shutting down
-    if (rt.tasks.isClosed()) {
+    if (rt.shutting_down.load(.acquire)) {
         return error.ConcurrencyUnavailable;
     }
 
@@ -188,8 +188,8 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []c
     ) catch return error.ConcurrencyUnavailable;
     errdefer task.closure.free(AnyTask, executor.allocator, task);
 
-    // Add to global awaitable registry (can fail if runtime is shutting down)
-    rt.tasks.add(&task.awaitable) catch return error.ConcurrencyUnavailable;
+    // Add to global awaitable registry
+    rt.tasks.add(&task.awaitable);
     errdefer _ = rt.tasks.remove(&task.awaitable);
 
     // Set group_node.group for startFn to access
@@ -851,7 +851,8 @@ test "Io: async/await pattern" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: concurrent/await pattern" {
@@ -874,54 +875,47 @@ test "Io: concurrent/await pattern" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: now and sleep" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            // Get current time
-            const t1 = try std.Io.Clock.now(.awake, io);
+    const io = rt.io();
 
-            // Sleep for 10ms
-            try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    // Get current time
+    const t1 = try std.Io.Clock.now(.awake, io);
 
-            // Get time after sleep
-            const t2 = try std.Io.Clock.now(.awake, io);
+    // Sleep for 10ms
+    try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
 
-            // Verify time moved forward
-            const elapsed = t1.durationTo(t2);
-            try std.testing.expect(elapsed.nanoseconds >= 10 * std.time.ns_per_ms);
-        }
-    };
+    // Get time after sleep
+    const t2 = try std.Io.Clock.now(.awake, io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Verify time moved forward
+    const elapsed = t1.durationTo(t2);
+    try std.testing.expect(elapsed.nanoseconds >= 10 * std.time.ns_per_ms);
 }
 
 test "Io: realtime clock" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const t1 = try std.Io.Clock.Timestamp.now(io, .real);
+    const io = rt.io();
 
-            // Realtime clock should return a reasonable timestamp (after 2020-01-01)
-            const jan_2020_ns: i96 = 1577836800 * 1_000_000_000;
-            try std.testing.expect(t1.raw.nanoseconds >= jan_2020_ns);
+    const t1 = try std.Io.Clock.Timestamp.now(io, .real);
 
-            try io.sleep(.{ .nanoseconds = 10 * 1_000_000 }, .real);
+    // Realtime clock should return a reasonable timestamp (after 2020-01-01)
+    const jan_2020_ns: i96 = 1577836800 * 1_000_000_000;
+    try std.testing.expect(t1.raw.nanoseconds >= jan_2020_ns);
 
-            const t2 = try std.Io.Clock.Timestamp.now(io, .real);
-            const elapsed = t1.durationTo(t2);
-            try std.testing.expect(elapsed.raw.nanoseconds >= 10 * 1_000_000);
-        }
-    };
+    try io.sleep(.{ .nanoseconds = 10 * 1_000_000 }, .real);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    const t2 = try std.Io.Clock.Timestamp.now(io, .real);
+    const elapsed = t1.durationTo(t2);
+    try std.testing.expect(elapsed.raw.nanoseconds >= 10 * 1_000_000);
 }
 
 test "Io: select" {
@@ -954,7 +948,8 @@ test "Io: select" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv4" {
@@ -998,7 +993,8 @@ test "Io: TCP listen/accept/connect/read/write IPv4" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv6" {
@@ -1050,79 +1046,68 @@ test "Io: TCP listen/accept/connect/read/write IPv6" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: UDP bind IPv4" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
-            const socket = try addr.bind(io, .{ .mode = .dgram });
-            defer socket.close(io);
+    const io = rt.io();
 
-            // Verify we got a valid address with ephemeral port
-            try std.testing.expect(socket.address.ip4.port != 0);
-        }
-    };
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
+    const socket = try addr.bind(io, .{ .mode = .dgram });
+    defer socket.close(io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Verify we got a valid address with ephemeral port
+    try std.testing.expect(socket.address.ip4.port != 0);
 }
 
 test "Io: UDP bind IPv6" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const addr = std.Io.net.IpAddress{
-                .ip6 = .{
-                    .bytes = .{0} ** 15 ++ .{1}, // ::1
-                    .port = 0,
-                },
-            };
-            const socket = addr.bind(io, .{ .mode = .dgram }) catch |err| {
-                if (err == error.AddressNotAvailable) return error.SkipZigTest;
-                return err;
-            };
-            defer socket.close(io);
+    const io = rt.io();
 
-            // Verify we got a valid address with ephemeral port
-            try std.testing.expect(socket.address.ip6.port != 0);
-        }
+    const addr = std.Io.net.IpAddress{
+        .ip6 = .{
+            .bytes = .{0} ** 15 ++ .{1}, // ::1
+            .port = 0,
+        },
     };
+    const socket = addr.bind(io, .{ .mode = .dgram }) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
+    defer socket.close(io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Verify we got a valid address with ephemeral port
+    try std.testing.expect(socket.address.ip6.port != 0);
 }
 
 test "Io: Mutex lock/unlock" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            var mutex: std.Io.Mutex = .init;
-            var shared_counter: u32 = 0;
+    const io = rt.io();
 
-            // Lock and increment counter
-            try mutex.lock(io);
-            shared_counter += 1;
-            mutex.unlock(io);
+    var mutex: std.Io.Mutex = .init;
+    var shared_counter: u32 = 0;
 
-            try std.testing.expectEqual(@as(u32, 1), shared_counter);
+    // Lock and increment counter
+    try mutex.lock(io);
+    shared_counter += 1;
+    mutex.unlock(io);
 
-            // Test tryLock
-            try std.testing.expect(mutex.tryLock());
-            shared_counter += 1;
-            mutex.unlock(io);
+    try std.testing.expectEqual(@as(u32, 1), shared_counter);
 
-            try std.testing.expectEqual(@as(u32, 2), shared_counter);
-        }
-    };
+    // Test tryLock
+    try std.testing.expect(mutex.tryLock());
+    shared_counter += 1;
+    mutex.unlock(io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expectEqual(@as(u32, 2), shared_counter);
 }
 
 test "Io: Mutex concurrent access" {
@@ -1155,7 +1140,8 @@ test "Io: Mutex concurrent access" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Condition wait/signal" {
@@ -1201,7 +1187,8 @@ test "Io: Condition wait/signal" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Condition broadcast" {
@@ -1252,7 +1239,8 @@ test "Io: Condition broadcast" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Unix domain socket listen/accept/connect/read/write" {
@@ -1307,167 +1295,148 @@ test "Io: Unix domain socket listen/accept/connect/read/write" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: File close" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const file_path = "test_stdio_file_close.txt";
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+    const io = rt.io();
+    const file_path = "test_stdio_file_close.txt";
+    defer std.fs.cwd().deleteFile(file_path) catch {};
 
-            // Create file using std.fs
-            const std_file = try std.fs.cwd().createFile(file_path, .{});
-            const file: std.Io.File = .{ .handle = std_file.handle };
+    // Create file using std.fs
+    const std_file = try std.fs.cwd().createFile(file_path, .{});
+    const file: std.Io.File = .{ .handle = std_file.handle };
 
-            // Test that close works
-            file.close(io);
-        }
-    };
-
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Test that close works
+    file.close(io);
 }
 
 test "Io: DNS lookup localhost" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const hostname = try std.Io.net.HostName.init("localhost");
+    const io = rt.io();
+    const hostname = try std.Io.net.HostName.init("localhost");
 
-            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
-            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+    var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-            hostname.lookup(io, &lookup_queue, .{
-                .port = 80,
-                .canonical_name_buffer = &canonical_name_buffer,
-            });
+    hostname.lookup(io, &lookup_queue, .{
+        .port = 80,
+        .canonical_name_buffer = &canonical_name_buffer,
+    });
 
-            var saw_canonical_name = false;
-            var address_count: usize = 0;
+    var saw_canonical_name = false;
+    var address_count: usize = 0;
 
-            while (lookup_queue.getOne(io)) |result| {
-                switch (result) {
-                    .address => |_| {
-                        address_count += 1;
-                    },
-                    .canonical_name => |_| {
-                        saw_canonical_name = true;
-                    },
-                    .end => |end_result| {
-                        try end_result;
-                        break;
-                    },
-                }
-            } else |err| switch (err) {
-                error.Canceled => return err,
-            }
-
-            try std.testing.expect(saw_canonical_name);
-            try std.testing.expect(address_count > 0);
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |_| {
+                address_count += 1;
+            },
+            .canonical_name => |_| {
+                saw_canonical_name = true;
+            },
+            .end => |end_result| {
+                try end_result;
+                break;
+            },
         }
-    };
+    } else |err| switch (err) {
+        error.Canceled => return err,
+    }
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expect(saw_canonical_name);
+    try std.testing.expect(address_count > 0);
 }
 
 test "Io: DNS lookup numeric IP" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const hostname = try std.Io.net.HostName.init("127.0.0.1");
+    const io = rt.io();
+    const hostname = try std.Io.net.HostName.init("127.0.0.1");
 
-            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
-            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+    var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-            hostname.lookup(io, &lookup_queue, .{
-                .port = 8080,
-                .canonical_name_buffer = &canonical_name_buffer,
-            });
+    hostname.lookup(io, &lookup_queue, .{
+        .port = 8080,
+        .canonical_name_buffer = &canonical_name_buffer,
+    });
 
-            var saw_canonical_name = false;
-            var address_count: usize = 0;
-            var found_correct_port = false;
+    var saw_canonical_name = false;
+    var address_count: usize = 0;
+    var found_correct_port = false;
 
-            while (lookup_queue.getOne(io)) |result| {
-                switch (result) {
-                    .address => |addr| {
-                        address_count += 1;
-                        if (addr.ip4.port == 8080) {
-                            found_correct_port = true;
-                        }
-                    },
-                    .canonical_name => |_| {
-                        saw_canonical_name = true;
-                    },
-                    .end => |end_result| {
-                        try end_result;
-                        break;
-                    },
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| {
+                address_count += 1;
+                if (addr.ip4.port == 8080) {
+                    found_correct_port = true;
                 }
-            } else |err| switch (err) {
-                error.Canceled => return err,
-            }
-
-            try std.testing.expect(saw_canonical_name);
-            try std.testing.expectEqual(@as(usize, 1), address_count);
-            try std.testing.expect(found_correct_port);
+            },
+            .canonical_name => |_| {
+                saw_canonical_name = true;
+            },
+            .end => |end_result| {
+                try end_result;
+                break;
+            },
         }
-    };
+    } else |err| switch (err) {
+        error.Canceled => return err,
+    }
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expect(saw_canonical_name);
+    try std.testing.expectEqual(@as(usize, 1), address_count);
+    try std.testing.expect(found_correct_port);
 }
 
 test "Io: DNS lookup with family filter" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const hostname = try std.Io.net.HostName.init("localhost");
+    const io = rt.io();
+    const hostname = try std.Io.net.HostName.init("localhost");
 
-            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
-            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+    var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-            hostname.lookup(io, &lookup_queue, .{
-                .port = 80,
-                .canonical_name_buffer = &canonical_name_buffer,
-                .family = .ip4,
-            });
+    hostname.lookup(io, &lookup_queue, .{
+        .port = 80,
+        .canonical_name_buffer = &canonical_name_buffer,
+        .family = .ip4,
+    });
 
-            var address_count: usize = 0;
+    var address_count: usize = 0;
 
-            while (lookup_queue.getOne(io)) |result| {
-                switch (result) {
-                    .address => |addr| {
-                        address_count += 1;
-                        // Verify it's IPv4
-                        try std.testing.expect(addr == .ip4);
-                    },
-                    .canonical_name => {},
-                    .end => |end_result| {
-                        try end_result;
-                        break;
-                    },
-                }
-            } else |err| switch (err) {
-                error.Canceled => return err,
-            }
-
-            try std.testing.expect(address_count > 0);
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| {
+                address_count += 1;
+                // Verify it's IPv4
+                try std.testing.expect(addr == .ip4);
+            },
+            .canonical_name => {},
+            .end => |end_result| {
+                try end_result;
+                break;
+            },
         }
-    };
+    } else |err| switch (err) {
+        error.Canceled => return err,
+    }
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expect(address_count > 0);
 }
 
 test "Io: Group async/wait" {
@@ -1498,7 +1467,8 @@ test "Io: Group async/wait" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Group concurrent/wait" {
@@ -1531,7 +1501,8 @@ test "Io: Group concurrent/wait" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Group cancel" {
@@ -1566,39 +1537,35 @@ test "Io: Group cancel" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    try handle.join(rt);
 }
 
 test "Io: Dir createFile/openFile" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const file_path = "test_stdio_dir_file.txt";
-            const cwd = std.Io.Dir.cwd();
+    const io = rt.io();
+    const file_path = "test_stdio_dir_file.txt";
+    const cwd = std.Io.Dir.cwd();
 
-            // Create a new file
-            const created_file = try cwd.createFile(io, file_path, .{});
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+    // Create a new file
+    const created_file = try cwd.createFile(io, file_path, .{});
+    defer std.fs.cwd().deleteFile(file_path) catch {};
 
-            // Write some data
-            var write_buf = [_][]const u8{"hello world"};
-            _ = try created_file.writePositional(io, &write_buf, 0);
-            created_file.close(io);
+    // Write some data
+    var write_buf = [_][]const u8{"hello world"};
+    _ = try created_file.writePositional(io, &write_buf, 0);
+    created_file.close(io);
 
-            // Open the file for reading
-            const opened_file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
-            defer opened_file.close(io);
+    // Open the file for reading
+    const opened_file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
+    defer opened_file.close(io);
 
-            // Read the data back
-            var read_buf: [32]u8 = undefined;
-            var read_slices = [_][]u8{&read_buf};
-            const bytes_read = try opened_file.readPositional(io, &read_slices, 0);
+    // Read the data back
+    var read_buf: [32]u8 = undefined;
+    var read_slices = [_][]u8{&read_buf};
+    const bytes_read = try opened_file.readPositional(io, &read_slices, 0);
 
-            try std.testing.expectEqualStrings("hello world", read_buf[0..bytes_read]);
-        }
-    };
-
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expectEqualStrings("hello world", read_buf[0..bytes_read]);
 }

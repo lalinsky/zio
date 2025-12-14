@@ -140,7 +140,7 @@ pub const Group = struct {
         self.getTaskList().push(&task.awaitable.group_node);
         errdefer _ = self.getTaskList().remove(&task.awaitable.group_node);
 
-        try rt.tasks.add(&task.awaitable);
+        rt.tasks.add(&task.awaitable);
 
         task.awaitable.ref_count.incr();
         executor.scheduleTask(task, .maybe_remote);
@@ -241,7 +241,8 @@ test "Group: spawn" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    try handle.join(rt);
 }
 
 test "Group: wait for multiple tasks" {
@@ -271,7 +272,8 @@ test "Group: wait for multiple tasks" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    try handle.join(rt);
 }
 
 test "Group: cancellation while waiting" {
@@ -329,5 +331,6 @@ test "Group: cancellation while waiting" {
         }
     };
 
-    try rt.runUntilComplete(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    try handle.join(rt);
 }

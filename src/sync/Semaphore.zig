@@ -204,7 +204,8 @@ test "Semaphore: timedWait timeout" {
         }
     };
 
-    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &sem, &timed_out }, .{});
+    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &timed_out }, .{});
+    handle.join(runtime);
 
     try testing.expect(timed_out);
     try testing.expectEqual(@as(usize, 0), sem.permits);
