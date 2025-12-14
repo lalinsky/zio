@@ -425,8 +425,8 @@ pub const Executor = struct {
         });
         errdefer task.destroy(self);
 
-        // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.runtime.tasks.add(task.toAwaitable());
+        // Add to global awaitable registry
+        self.runtime.tasks.add(task.toAwaitable());
         errdefer _ = self.runtime.tasks.remove(task.toAwaitable());
 
         // Increment ref count for JoinHandle BEFORE scheduling
@@ -840,6 +840,7 @@ pub const Runtime = struct {
     next_executor_index: usize = 0,
 
     tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
+    shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
         const self = try allocator.create(Runtime);
@@ -868,28 +869,13 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         const allocator = self.allocator;
 
-        // Close task registry to prevent new spawns
-        self.tasks.close() catch {}; // OK if already closed or not empty
+        // Gracefully shutdown - cancel tasks, stop executors, stop thread pool
+        self.shutdown() catch |err| {
+            std.log.err("Runtime shutdown error: {}", .{err});
+        };
 
-        // Stop all non-main executor event loops
-        {
-            self.executors_lock.lock();
-            defer self.executors_lock.unlock();
-            for (self.executors.items) |executor| {
-                if (executor != &self.main_executor) {
-                    executor.loop.stop();
-                    executor.loop.wake();
-                }
-            }
-        }
-
-        // Shutdown ThreadPool before cleaning up executors
-        self.thread_pool.stop();
-
-        // Drain any remaining awaitables from global registry
-        while (self.tasks.pop()) |awaitable| {
-            self.releaseAwaitable(awaitable, false);
-        }
+        // After shutdown(), tasks should be empty
+        std.debug.assert(self.tasks.isEmpty());
 
         while (true) {
             var executor: ?*Executor = null;
@@ -922,7 +908,7 @@ pub const Runtime = struct {
 
     // High-level public API - delegates to appropriate Executor
     pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        if (self.tasks.isClosed()) {
+        if (self.shutting_down.load(.acquire)) {
             return error.RuntimeShutdown;
         }
 
@@ -932,7 +918,7 @@ pub const Runtime = struct {
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
         // Check if runtime is shutting down
-        if (self.tasks.isClosed()) {
+        if (self.shutting_down.load(.acquire)) {
             return error.RuntimeShutdown;
         }
 
@@ -940,8 +926,8 @@ pub const Runtime = struct {
         const task = try BlockingTask(Result).create(self, func, args);
         errdefer task.destroy(self);
 
-        // Add to global awaitable registry (can fail if runtime is shutting down)
-        try self.tasks.add(task.toAwaitable());
+        // Add to global awaitable registry
+        self.tasks.add(task.toAwaitable());
         errdefer _ = self.tasks.remove(task.toAwaitable());
 
         // Increment ref count for JoinHandle BEFORE scheduling
@@ -1098,6 +1084,39 @@ pub const Runtime = struct {
             self.main_executor.main_task.state.store(.ready, .release);
             self.main_executor.loop.wake();
         }
+    }
+
+    /// Gracefully shutdown the runtime.
+    /// Cancels all remaining tasks, stops all executors, and stops the thread pool.
+    /// This allows errors to be propagated to the caller.
+    pub fn shutdown(self: *Runtime) !void {
+        // Set shutting_down flag to prevent new spawns
+        self.shutting_down.store(true, .release);
+
+        // Cancel all tasks by walking the linked list
+        var awaitable = self.tasks.queue.getState().getPtr();
+        while (awaitable) |a| {
+            a.cancel();
+            awaitable = a.next;
+        }
+
+        // Run until all tasks complete
+        try self.main_executor.run();
+
+        // Stop all non-main executor event loops
+        {
+            self.executors_lock.lock();
+            defer self.executors_lock.unlock();
+            for (self.executors.items) |executor| {
+                if (executor != &self.main_executor) {
+                    executor.loop.stop();
+                    executor.loop.wake();
+                }
+            }
+        }
+
+        // Shutdown thread pool
+        self.thread_pool.stop();
     }
 
     pub fn io(self: *Runtime) std.Io {

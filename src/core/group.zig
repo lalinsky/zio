@@ -140,7 +140,7 @@ pub const Group = struct {
         self.getTaskList().push(&task.awaitable.group_node);
         errdefer _ = self.getTaskList().remove(&task.awaitable.group_node);
 
-        try rt.tasks.add(&task.awaitable);
+        rt.tasks.add(&task.awaitable);
 
         task.awaitable.ref_count.incr();
         executor.scheduleTask(task, .maybe_remote);

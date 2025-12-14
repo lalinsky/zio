@@ -87,7 +87,7 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
     // Check if runtime is shutting down
-    if (rt.tasks.isClosed()) {
+    if (rt.shutting_down.load(.acquire)) {
         return error.ConcurrencyUnavailable;
     }
 
@@ -106,8 +106,8 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
     ) catch return error.ConcurrencyUnavailable;
     errdefer task.closure.free(AnyTask, executor.allocator, task);
 
-    // Add to global awaitable registry (can fail if runtime is shutting down)
-    rt.tasks.add(&task.awaitable) catch return error.ConcurrencyUnavailable;
+    // Add to global awaitable registry
+    rt.tasks.add(&task.awaitable);
     errdefer _ = rt.tasks.remove(&task.awaitable);
 
     // Increment ref count for the Future BEFORE scheduling
@@ -169,7 +169,7 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []c
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
     // Check if runtime is shutting down
-    if (rt.tasks.isClosed()) {
+    if (rt.shutting_down.load(.acquire)) {
         return error.ConcurrencyUnavailable;
     }
 
@@ -188,8 +188,8 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *std.Io.Group, context: []c
     ) catch return error.ConcurrencyUnavailable;
     errdefer task.closure.free(AnyTask, executor.allocator, task);
 
-    // Add to global awaitable registry (can fail if runtime is shutting down)
-    rt.tasks.add(&task.awaitable) catch return error.ConcurrencyUnavailable;
+    // Add to global awaitable registry
+    rt.tasks.add(&task.awaitable);
     errdefer _ = rt.tasks.remove(&task.awaitable);
 
     // Set group_node.group for startFn to access
