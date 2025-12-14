@@ -294,8 +294,12 @@ pub const IpAddress = extern union {
         reuse_address: bool = false,
     };
 
-    pub fn bind(self: IpAddress, rt: *Runtime) !Socket {
-        return netBindIp(rt, self);
+    pub const BindOptions = struct {
+        reuse_address: bool = false,
+    };
+
+    pub fn bind(self: IpAddress, rt: *Runtime, options: BindOptions) !Socket {
+        return netBindIp(rt, self, options);
     }
 
     pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
@@ -326,6 +330,10 @@ pub const UnixAddress = extern union {
         kernel_backlog: u31 = default_kernel_backlog,
     };
 
+    pub const BindOptions = struct {
+        reuse_address: bool = false,
+    };
+
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
@@ -334,8 +342,8 @@ pub const UnixAddress = extern union {
         }
     }
 
-    pub fn bind(self: UnixAddress, rt: *Runtime) !Socket {
-        return netBindUnix(rt, self);
+    pub fn bind(self: UnixAddress, rt: *Runtime, options: BindOptions) !Socket {
+        return netBindUnix(rt, self, options);
     }
 
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
@@ -880,7 +888,7 @@ pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress) !Stream {
     return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
 }
 
-pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
+pub fn netBindIp(rt: *Runtime, addr: IpAddress, options: IpAddress.BindOptions) !Socket {
     const fd = try createDatagramSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
@@ -889,12 +897,16 @@ pub fn netBindIp(rt: *Runtime, addr: IpAddress) !Socket {
         .address = .{ .ip = addr },
     };
 
+    if (options.reuse_address) {
+        try socket.setReuseAddress(true);
+    }
+
     try socket.bind(rt, .{ .ip = addr });
 
     return socket;
 }
 
-pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
+pub fn netBindUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.BindOptions) !Socket {
     if (!has_unix_sockets) unreachable;
 
     const fd = try createDatagramSocket(rt, addr.any.family);
@@ -904,6 +916,10 @@ pub fn netBindUnix(rt: *Runtime, addr: UnixAddress) !Socket {
         .handle = fd,
         .address = .{ .unix = addr },
     };
+
+    if (options.reuse_address) {
+        try socket.setReuseAddress(true);
+    }
 
     try socket.bind(rt, .{ .unix = addr });
 
