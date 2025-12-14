@@ -839,8 +839,9 @@ pub const Runtime = struct {
     main_executor: Executor,
     next_executor_index: usize = 0,
 
-    tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
+    tasks: AwaitableList = .{}, // Global awaitable registry
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    shutdown_mutex: std.Thread.Mutex = .{}, // Protects task list iteration during shutdown
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
         const self = try allocator.create(Runtime);
@@ -1074,7 +1075,14 @@ pub const Runtime = struct {
 
     pub fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable, comptime done: bool) void {
         if (done) {
-            _ = self.tasks.remove(awaitable);
+            // Lock during shutdown to prevent race with task list iteration
+            if (self.shutting_down.load(.acquire)) {
+                self.shutdown_mutex.lock();
+                defer self.shutdown_mutex.unlock();
+                _ = self.tasks.remove(awaitable);
+            } else {
+                _ = self.tasks.remove(awaitable);
+            }
         }
         if (awaitable.ref_count.decr()) {
             awaitable.destroy_fn(self, awaitable);
@@ -1094,10 +1102,16 @@ pub const Runtime = struct {
         self.shutting_down.store(true, .release);
 
         // Cancel all tasks by walking the linked list
-        var awaitable = self.tasks.queue.getState().getPtr();
-        while (awaitable) |a| {
-            a.cancel();
-            awaitable = a.next;
+        // Lock prevents concurrent removes from invalidating our iteration
+        {
+            self.shutdown_mutex.lock();
+            defer self.shutdown_mutex.unlock();
+
+            var awaitable = self.tasks.queue.getState().getPtr();
+            while (awaitable) |a| {
+                a.cancel();
+                awaitable = a.next;
+            }
         }
 
         // Run until all tasks complete
