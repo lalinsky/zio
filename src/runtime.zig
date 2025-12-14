@@ -324,7 +324,6 @@ pub fn getNextExecutor(rt: *Runtime) *Executor {
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     loop: aio.Loop,
-    main_context: Context,
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
@@ -369,9 +368,13 @@ pub const Executor = struct {
     // Executor dedicated to this thread
     pub threadlocal var current: ?*Executor = null;
 
-    /// Get the Executor instance from any coroutine that belongs to it
+    /// Get the Executor instance from any coroutine that belongs to it.
+    /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
+    /// so we navigate: context -> coro -> main_task -> executor
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
-        return @fieldParentPtr("main_context", coro.parent_context_ptr);
+        const main_coro: *Coroutine = @fieldParentPtr("context", coro.parent_context_ptr);
+        const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
+        return @fieldParentPtr("main_task", main_task);
     }
 
     pub fn init(self: *Executor, allocator: Allocator, options: RuntimeOptions, runtime: *Runtime) !void {
@@ -379,11 +382,12 @@ pub const Executor = struct {
             .allocator = allocator,
             .loop = undefined,
             .lifo_slot_enabled = options.lifo_slot_enabled,
-            .main_context = undefined,
             .runtime = runtime,
         };
 
-        // Initialize main_task for non-coroutine yield support
+        // Initialize main_task - this serves as both the scheduler context and
+        // the task context for async operations called from main.
+        // main_task.coro.context is where spawned tasks yield back to.
         self.main_task = .{
             .state = std.atomic.Value(AnyTask.State).init(.ready),
             .awaitable = .{
@@ -394,7 +398,7 @@ pub const Executor = struct {
                 },
             },
             .coro = .{
-                .parent_context_ptr = &self.main_context,
+                .parent_context_ptr = &self.main_task.coro.context, // points to itself
             },
             .closure = undefined, // main_task has no closure
         };
@@ -818,7 +822,7 @@ pub const Executor = struct {
             if (current_exec.runtime == self.runtime) {
                 // Same runtime - migrate to current executor for cache locality
                 if (current_exec != self) {
-                    task.coro.parent_context_ptr = &current_exec.main_context;
+                    task.coro.parent_context_ptr = &current_exec.main_task.coro.context;
                 }
                 current_exec.scheduleTaskLocal(task, false);
                 return;

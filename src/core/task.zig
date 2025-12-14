@@ -356,7 +356,7 @@ pub const AnyTask = struct {
                 },
             },
             .coro = .{
-                .parent_context_ptr = &executor.main_context,
+                .parent_context_ptr = &executor.main_task.coro.context,
             },
             .closure = alloc_result.closure,
             .pin_count = if (options.pinned) 1 else 0,
