@@ -90,17 +90,6 @@ fn noopTimerCancelCallback(
     _ = c;
 }
 
-fn shutdownCallback(
-    loop: *aio.Loop,
-    c: *aio.Completion,
-) void {
-    const executor: *Executor = @ptrCast(@alignCast(c.userdata.?));
-    // Wake main_task so runSchedulerLoop() exits
-    executor.main_task.state.store(.ready, .release);
-    // Stop the event loop
-    loop.stop();
-}
-
 const awaitable_module = @import("core/awaitable.zig");
 const Awaitable = awaitable_module.Awaitable;
 const AwaitableKind = awaitable_module.AwaitableKind;
@@ -347,9 +336,6 @@ pub const Executor = struct {
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
 
-    // Shutdown support
-    shutdown_async: aio.Async = undefined,
-
     // Back-reference to runtime for global coordination
     runtime: *Runtime,
 
@@ -412,11 +398,6 @@ pub const Executor = struct {
             .defer_callbacks = false,
         });
         errdefer self.loop.deinit();
-
-        self.shutdown_async = aio.Async.init();
-        self.shutdown_async.c.userdata = self;
-        self.shutdown_async.c.callback = shutdownCallback;
-        self.loop.add(&self.shutdown_async.c);
 
         try registerExecutor(self.runtime, self);
         errdefer unregisterExecutor(self.runtime, self);
@@ -512,29 +493,28 @@ pub const Executor = struct {
             self.scheduleTaskLocal(current_task, true); // is_yield = true
         }
 
-        const current_coro = &current_task.coro;
-
-        // Try to switch directly to the next ready task (works for both main and spawned tasks)
-        if (self.getNextTask()) |next_wait_node| {
-            const next_task = AnyTask.fromWaitNode(next_wait_node);
-            self.current_coroutine = &next_task.coro;
-            current_coro.yieldTo(&next_task.coro);
-        } else if (!is_main) {
-            // Spawned task with no ready tasks: return to scheduler
-            current_coro.yield();
-        }
-
-        // Main: continue scheduling until ready
-        if (is_main and self.main_task.state.load(.acquire) != .ready) {
+        if (is_main) {
+            // Main: always use scheduler loop (no direct scheduling)
             self.runSchedulerLoop() catch |err| {
                 std.debug.panic("Event loop error during yield: {}", .{err});
             };
+        } else {
+            // Spawned task: try direct scheduling via yieldTo
+            const current_coro = &current_task.coro;
+            if (self.getNextTask()) |next_wait_node| {
+                const next_task = AnyTask.fromWaitNode(next_wait_node);
+                self.current_coroutine = &next_task.coro;
+                current_coro.yieldTo(&next_task.coro);
+            } else {
+                // No ready tasks: return to scheduler
+                current_coro.yield();
+            }
         }
 
         // After resuming, the task may have migrated to a different executor.
         if (!is_main) {
             const resumed_executor = Executor.current orelse unreachable;
-            std.debug.assert(resumed_executor.current_coroutine == current_coro);
+            std.debug.assert(resumed_executor.current_coroutine == &current_task.coro);
         }
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
@@ -586,14 +566,17 @@ pub const Executor = struct {
                 }
             }
 
-            // Check if main_task is ready (woken by timer, I/O, or shutdown)
-            if (self.main_task.state.load(.acquire) == .ready) {
-                return;
-            }
-
-            // Also check if loop was stopped (shutdown sets both)
-            if (self.loop.stopped()) {
-                return;
+            // Exit conditions differ based on executor type
+            if (self == &self.runtime.main_executor) {
+                // Main executor: exit when main_task is ready (woken by timer, I/O, or tasks empty)
+                if (self.main_task.state.load(.acquire) == .ready) {
+                    return;
+                }
+            } else {
+                // Non-main executor: exit only when loop is stopped (from deinit)
+                if (self.loop.stopped()) {
+                    return;
+                }
             }
 
             // Move yielded coroutines back to ready queue
@@ -684,15 +667,13 @@ pub const Executor = struct {
         unreachable; // Should always be canceled (by timeout or user)
     }
 
-    /// Run the executor event loop until shutdown.
-    /// Shutdown occurs when all tasks complete, triggering shutdownCallback
-    /// which sets main_task.state to .ready and stops the loop.
+    /// Run the executor event loop until all tasks complete.
+    /// Exits when the task list becomes empty (releaseAwaitable wakes main_task).
     pub fn run(self: *Executor) !void {
-        // Check if we're starting with an empty task list
-        // If so, immediately initiate shutdown (no work to do)
-        self.runtime.maybeShutdown();
-
-        // Set main_task to waiting so runSchedulerLoop will block until shutdown
+        // If no tasks, nothing to do
+        if (self.runtime.tasks.isEmpty()) {
+            return;
+        }
         self.main_task.state.store(.waiting, .release);
         try self.runSchedulerLoop();
     }
@@ -859,7 +840,6 @@ pub const Runtime = struct {
     next_executor_index: usize = 0,
 
     tasks: AwaitableList = .{}, // Global awaitable registry with built-in closed state
-    shutting_down: std.atomic.Value(bool), // Signals executors to stop (set once)
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
         const self = try allocator.create(Runtime);
@@ -871,7 +851,6 @@ pub const Runtime = struct {
             .thread_pool = undefined,
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
-            .shutting_down = .init(false),
         };
 
         try self.thread_pool.init(allocator, options.thread_pool);
@@ -888,6 +867,21 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         const allocator = self.allocator;
+
+        // Close task registry to prevent new spawns
+        self.tasks.close() catch {}; // OK if already closed or not empty
+
+        // Stop all non-main executor event loops
+        {
+            self.executors_lock.lock();
+            defer self.executors_lock.unlock();
+            for (self.executors.items) |executor| {
+                if (executor != &self.main_executor) {
+                    executor.loop.stop();
+                    executor.loop.wake();
+                }
+            }
+        }
 
         // Shutdown ThreadPool before cleaning up executors
         self.thread_pool.stop();
@@ -1092,26 +1086,6 @@ pub const Runtime = struct {
         return self.getCurrentExecutor().loop.now();
     }
 
-    /// Check if task list is empty and initiate shutdown if so.
-    /// Only one executor will succeed in closing the registry due to atomic transition.
-    /// Can be called by any executor.
-    fn maybeShutdown(self: *Runtime) void {
-        if (self.tasks.isEmpty()) {
-            // Try to atomically close the registry (empty_open → empty_closed)
-            if (self.tasks.close()) {
-                // We won the race - initiate shutdown
-                self.shutting_down.store(true, .release);
-
-                // Wake all executors (including main if sleeping in event loop)
-                for (self.executors.items) |executor| {
-                    executor.shutdown_async.notify();
-                }
-            } else |_| {
-                // Another executor is closing or tasks were added - do nothing
-            }
-        }
-    }
-
     pub fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable, comptime done: bool) void {
         if (done) {
             _ = self.tasks.remove(awaitable);
@@ -1119,8 +1093,10 @@ pub const Runtime = struct {
         if (awaitable.ref_count.decr()) {
             awaitable.destroy_fn(self, awaitable);
         }
-        if (done) {
-            self.maybeShutdown();
+        // Wake main executor when all tasks complete (for run() to exit)
+        if (done and self.tasks.isEmpty()) {
+            self.main_executor.main_task.state.store(.ready, .release);
+            self.main_executor.loop.wake();
         }
     }
 
@@ -1161,21 +1137,17 @@ test "runtime: spawnBlocking smoke test" {
     });
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn blockingWork(x: i32) i32 {
+    const blockingWork = struct {
+        fn call(x: i32) i32 {
             return x * 2;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var handle = try rt.spawnBlocking(blockingWork, .{21});
-            defer handle.cancel(rt);
+    var handle = try runtime.spawnBlocking(blockingWork, .{21});
+    defer handle.cancel(runtime);
 
-            const result = handle.join(rt);
-            try testing.expectEqual(@as(i32, 42), result);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    const result = handle.join(runtime);
+    try testing.expectEqual(@as(i32, 42), result);
 }
 
 test "runtime: JoinHandle.cast() error set conversion" {
@@ -1184,41 +1156,39 @@ test "runtime: JoinHandle.cast() error set conversion" {
     const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        const MyError = error{ Foo, Bar };
+    const MyError = error{ Foo, Bar };
 
-        fn taskSuccess() MyError!i32 {
+    const taskSuccess = struct {
+        fn call() MyError!i32 {
             return 42;
         }
+    }.call;
 
-        fn taskError() MyError!i32 {
+    const taskError = struct {
+        fn call() MyError!i32 {
             return error.Foo;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            // Test casting success case
-            {
-                var handle = try rt.spawn(taskSuccess, .{}, .{});
-                var casted = handle.cast(anyerror!i32);
-                defer casted.cancel(rt);
+    // Test casting success case
+    {
+        var handle = try runtime.spawn(taskSuccess, .{}, .{});
+        var casted = handle.cast(anyerror!i32);
+        defer casted.cancel(runtime);
 
-                const result = try casted.join(rt);
-                try testing.expectEqual(@as(i32, 42), result);
-            }
+        const result = try casted.join(runtime);
+        try testing.expectEqual(@as(i32, 42), result);
+    }
 
-            // Test casting error case
-            {
-                var handle = try rt.spawn(taskError, .{}, .{});
-                var casted = handle.cast(anyerror!i32);
-                defer casted.cancel(rt);
+    // Test casting error case
+    {
+        var handle = try runtime.spawn(taskError, .{}, .{});
+        var casted = handle.cast(anyerror!i32);
+        defer casted.cancel(runtime);
 
-                const result = casted.join(rt);
-                try testing.expectError(error.Foo, result);
-            }
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+        const result = casted.join(runtime);
+        try testing.expectError(error.Foo, result);
+    }
 }
 
 test "Runtime: implicit run" {
