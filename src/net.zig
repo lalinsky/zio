@@ -1137,49 +1137,37 @@ test "lookupHost: localhost" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
-    defer runtime.deinit();
+    const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
 
-    const LookupHostTask = struct {
-        fn run(rt: *Runtime) !void {
-            var iter = try lookupHost(rt, "localhost", 80);
-            defer iter.deinit();
+    var iter = try lookupHost(rt, "localhost", 80);
+    defer iter.deinit();
 
-            var count: usize = 0;
-            while (iter.next()) |_| {
-                count += 1;
-            }
-            try testing.expect(count > 0);
-        }
-    };
-
-    try runtime.runUntilComplete(LookupHostTask.run, .{runtime}, .{});
+    var count: usize = 0;
+    while (iter.next()) |_| {
+        count += 1;
+    }
+    try testing.expect(count > 0);
 }
 
 test "lookupHost: numeric IP" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const runtime = try Runtime.init(allocator, .{ .thread_pool = .{} });
-    defer runtime.deinit();
+    const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
 
-    const LookupHostTask = struct {
-        fn run(rt: *Runtime) !void {
-            var iter = try lookupHost(rt, "127.0.0.1", 8080);
-            defer iter.deinit();
+    var iter = try lookupHost(rt, "127.0.0.1", 8080);
+    defer iter.deinit();
 
-            var count: usize = 0;
-            var first_addr: ?IpAddress = null;
-            while (iter.next()) |addr| {
-                if (first_addr == null) first_addr = addr;
-                count += 1;
-            }
-            try testing.expectEqual(1, count);
-            try testing.expectEqual(8080, first_addr.?.getPort());
-        }
-    };
-
-    try runtime.runUntilComplete(LookupHostTask.run, .{runtime}, .{});
+    var count: usize = 0;
+    var first_addr: ?IpAddress = null;
+    while (iter.next()) |addr| {
+        if (first_addr == null) first_addr = addr;
+        count += 1;
+    }
+    try testing.expectEqual(1, count);
+    try testing.expectEqual(8080, first_addr.?.getPort());
 }
 
 test "tcpConnectToAddress: basic" {

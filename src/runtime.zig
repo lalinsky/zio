@@ -1269,21 +1269,15 @@ test "runtime: now() returns monotonic time" {
     const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
-            const start = rt.now();
-            try testing.expect(start > 0);
+    const start = runtime.now();
+    try testing.expect(start > 0);
 
-            // Sleep to ensure time advances
-            try rt.sleep(10);
+    // Sleep to ensure time advances
+    try runtime.sleep(10);
 
-            const end = rt.now();
-            try testing.expect(end > start);
-            try testing.expect(end - start >= 10);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    const end = runtime.now();
+    try testing.expect(end > start);
+    try testing.expect(end - start >= 10);
 }
 
 test "runtime: sleep is cancelable" {
@@ -1292,38 +1286,30 @@ test "runtime: sleep is cancelable" {
     const runtime = try Runtime.init(testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn sleepingTask(rt: *Runtime) !void {
+    const sleepingTask = struct {
+        fn call(rt: *Runtime) !void {
             // This will sleep for 1 second but should be canceled before completion
             try rt.sleep(1000);
             // Should not reach here
             return error.TestUnexpectedResult;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var timer = try std.time.Timer.start();
+    var timer = try std.time.Timer.start();
 
-            var handle = try rt.spawn(sleepingTask, .{rt}, .{});
-            defer handle.cancel(rt);
+    var handle = try runtime.spawn(sleepingTask, .{runtime}, .{});
+    defer handle.cancel(runtime);
 
-            // Give it a chance to start sleeping
-            try rt.yield();
-            try rt.yield();
+    // Cancel the sleeping task
+    handle.cancel(runtime);
 
-            // Cancel the sleeping task
-            handle.cancel(rt);
+    // Should return error.Canceled
+    const result = handle.join(runtime);
+    try testing.expectError(error.Canceled, result);
 
-            // Should return error.Canceled
-            const result = handle.join(rt);
-            try testing.expectError(error.Canceled, result);
-
-            // Ensure the sleep was canceled before completion
-            const elapsed = timer.read();
-            try testing.expect(elapsed <= 500 * std.time.ns_per_ms);
-        }
-    };
-
-    try runtime.runUntilComplete(TestContext.asyncTask, .{runtime}, .{});
+    // Ensure the sleep was canceled before completion
+    const elapsed = timer.read();
+    try testing.expect(elapsed <= 500 * std.time.ns_per_ms);
 }
 
 test "runtime: std.Io interface" {
