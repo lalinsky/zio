@@ -901,23 +901,19 @@ test "Io: realtime clock" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const t1 = try std.Io.Clock.Timestamp.now(io, .real);
+    const io = rt.io();
 
-            // Realtime clock should return a reasonable timestamp (after 2020-01-01)
-            const jan_2020_ns: i96 = 1577836800 * 1_000_000_000;
-            try std.testing.expect(t1.raw.nanoseconds >= jan_2020_ns);
+    const t1 = try std.Io.Clock.Timestamp.now(io, .real);
 
-            try io.sleep(.{ .nanoseconds = 10 * 1_000_000 }, .real);
+    // Realtime clock should return a reasonable timestamp (after 2020-01-01)
+    const jan_2020_ns: i96 = 1577836800 * 1_000_000_000;
+    try std.testing.expect(t1.raw.nanoseconds >= jan_2020_ns);
 
-            const t2 = try std.Io.Clock.Timestamp.now(io, .real);
-            const elapsed = t1.durationTo(t2);
-            try std.testing.expect(elapsed.raw.nanoseconds >= 10 * 1_000_000);
-        }
-    };
+    try io.sleep(.{ .nanoseconds = 10 * 1_000_000 }, .real);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    const t2 = try std.Io.Clock.Timestamp.now(io, .real);
+    const elapsed = t1.durationTo(t2);
+    try std.testing.expect(elapsed.raw.nanoseconds >= 10 * 1_000_000);
 }
 
 test "Io: select" {
@@ -1053,72 +1049,60 @@ test "Io: UDP bind IPv4" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
-            const socket = try addr.bind(io, .{ .mode = .dgram });
-            defer socket.close(io);
+    const io = rt.io();
 
-            // Verify we got a valid address with ephemeral port
-            try std.testing.expect(socket.address.ip4.port != 0);
-        }
-    };
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
+    const socket = try addr.bind(io, .{ .mode = .dgram });
+    defer socket.close(io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Verify we got a valid address with ephemeral port
+    try std.testing.expect(socket.address.ip4.port != 0);
 }
 
 test "Io: UDP bind IPv6" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const addr = std.Io.net.IpAddress{
-                .ip6 = .{
-                    .bytes = .{0} ** 15 ++ .{1}, // ::1
-                    .port = 0,
-                },
-            };
-            const socket = addr.bind(io, .{ .mode = .dgram }) catch |err| {
-                if (err == error.AddressNotAvailable) return error.SkipZigTest;
-                return err;
-            };
-            defer socket.close(io);
+    const io = rt.io();
 
-            // Verify we got a valid address with ephemeral port
-            try std.testing.expect(socket.address.ip6.port != 0);
-        }
+    const addr = std.Io.net.IpAddress{
+        .ip6 = .{
+            .bytes = .{0} ** 15 ++ .{1}, // ::1
+            .port = 0,
+        },
     };
+    const socket = addr.bind(io, .{ .mode = .dgram }) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
+    defer socket.close(io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Verify we got a valid address with ephemeral port
+    try std.testing.expect(socket.address.ip6.port != 0);
 }
 
 test "Io: Mutex lock/unlock" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            var mutex: std.Io.Mutex = .init;
-            var shared_counter: u32 = 0;
+    const io = rt.io();
 
-            // Lock and increment counter
-            try mutex.lock(io);
-            shared_counter += 1;
-            mutex.unlock(io);
+    var mutex: std.Io.Mutex = .init;
+    var shared_counter: u32 = 0;
 
-            try std.testing.expectEqual(@as(u32, 1), shared_counter);
+    // Lock and increment counter
+    try mutex.lock(io);
+    shared_counter += 1;
+    mutex.unlock(io);
 
-            // Test tryLock
-            try std.testing.expect(mutex.tryLock());
-            shared_counter += 1;
-            mutex.unlock(io);
+    try std.testing.expectEqual(@as(u32, 1), shared_counter);
 
-            try std.testing.expectEqual(@as(u32, 2), shared_counter);
-        }
-    };
+    // Test tryLock
+    try std.testing.expect(mutex.tryLock());
+    shared_counter += 1;
+    mutex.unlock(io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expectEqual(@as(u32, 2), shared_counter);
 }
 
 test "Io: Mutex concurrent access" {
@@ -1310,160 +1294,140 @@ test "Io: File close" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const file_path = "test_stdio_file_close.txt";
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+    const io = rt.io();
+    const file_path = "test_stdio_file_close.txt";
+    defer std.fs.cwd().deleteFile(file_path) catch {};
 
-            // Create file using std.fs
-            const std_file = try std.fs.cwd().createFile(file_path, .{});
-            const file: std.Io.File = .{ .handle = std_file.handle };
+    // Create file using std.fs
+    const std_file = try std.fs.cwd().createFile(file_path, .{});
+    const file: std.Io.File = .{ .handle = std_file.handle };
 
-            // Test that close works
-            file.close(io);
-        }
-    };
-
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Test that close works
+    file.close(io);
 }
 
 test "Io: DNS lookup localhost" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const hostname = try std.Io.net.HostName.init("localhost");
+    const io = rt.io();
+    const hostname = try std.Io.net.HostName.init("localhost");
 
-            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
-            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+    var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-            hostname.lookup(io, &lookup_queue, .{
-                .port = 80,
-                .canonical_name_buffer = &canonical_name_buffer,
-            });
+    hostname.lookup(io, &lookup_queue, .{
+        .port = 80,
+        .canonical_name_buffer = &canonical_name_buffer,
+    });
 
-            var saw_canonical_name = false;
-            var address_count: usize = 0;
+    var saw_canonical_name = false;
+    var address_count: usize = 0;
 
-            while (lookup_queue.getOne(io)) |result| {
-                switch (result) {
-                    .address => |_| {
-                        address_count += 1;
-                    },
-                    .canonical_name => |_| {
-                        saw_canonical_name = true;
-                    },
-                    .end => |end_result| {
-                        try end_result;
-                        break;
-                    },
-                }
-            } else |err| switch (err) {
-                error.Canceled => return err,
-            }
-
-            try std.testing.expect(saw_canonical_name);
-            try std.testing.expect(address_count > 0);
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |_| {
+                address_count += 1;
+            },
+            .canonical_name => |_| {
+                saw_canonical_name = true;
+            },
+            .end => |end_result| {
+                try end_result;
+                break;
+            },
         }
-    };
+    } else |err| switch (err) {
+        error.Canceled => return err,
+    }
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expect(saw_canonical_name);
+    try std.testing.expect(address_count > 0);
 }
 
 test "Io: DNS lookup numeric IP" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const hostname = try std.Io.net.HostName.init("127.0.0.1");
+    const io = rt.io();
+    const hostname = try std.Io.net.HostName.init("127.0.0.1");
 
-            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
-            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+    var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-            hostname.lookup(io, &lookup_queue, .{
-                .port = 8080,
-                .canonical_name_buffer = &canonical_name_buffer,
-            });
+    hostname.lookup(io, &lookup_queue, .{
+        .port = 8080,
+        .canonical_name_buffer = &canonical_name_buffer,
+    });
 
-            var saw_canonical_name = false;
-            var address_count: usize = 0;
-            var found_correct_port = false;
+    var saw_canonical_name = false;
+    var address_count: usize = 0;
+    var found_correct_port = false;
 
-            while (lookup_queue.getOne(io)) |result| {
-                switch (result) {
-                    .address => |addr| {
-                        address_count += 1;
-                        if (addr.ip4.port == 8080) {
-                            found_correct_port = true;
-                        }
-                    },
-                    .canonical_name => |_| {
-                        saw_canonical_name = true;
-                    },
-                    .end => |end_result| {
-                        try end_result;
-                        break;
-                    },
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| {
+                address_count += 1;
+                if (addr.ip4.port == 8080) {
+                    found_correct_port = true;
                 }
-            } else |err| switch (err) {
-                error.Canceled => return err,
-            }
-
-            try std.testing.expect(saw_canonical_name);
-            try std.testing.expectEqual(@as(usize, 1), address_count);
-            try std.testing.expect(found_correct_port);
+            },
+            .canonical_name => |_| {
+                saw_canonical_name = true;
+            },
+            .end => |end_result| {
+                try end_result;
+                break;
+            },
         }
-    };
+    } else |err| switch (err) {
+        error.Canceled => return err,
+    }
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expect(saw_canonical_name);
+    try std.testing.expectEqual(@as(usize, 1), address_count);
+    try std.testing.expect(found_correct_port);
 }
 
 test "Io: DNS lookup with family filter" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const hostname = try std.Io.net.HostName.init("localhost");
+    const io = rt.io();
+    const hostname = try std.Io.net.HostName.init("localhost");
 
-            var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-            var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
-            var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+    var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-            hostname.lookup(io, &lookup_queue, .{
-                .port = 80,
-                .canonical_name_buffer = &canonical_name_buffer,
-                .family = .ip4,
-            });
+    hostname.lookup(io, &lookup_queue, .{
+        .port = 80,
+        .canonical_name_buffer = &canonical_name_buffer,
+        .family = .ip4,
+    });
 
-            var address_count: usize = 0;
+    var address_count: usize = 0;
 
-            while (lookup_queue.getOne(io)) |result| {
-                switch (result) {
-                    .address => |addr| {
-                        address_count += 1;
-                        // Verify it's IPv4
-                        try std.testing.expect(addr == .ip4);
-                    },
-                    .canonical_name => {},
-                    .end => |end_result| {
-                        try end_result;
-                        break;
-                    },
-                }
-            } else |err| switch (err) {
-                error.Canceled => return err,
-            }
-
-            try std.testing.expect(address_count > 0);
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| {
+                address_count += 1;
+                // Verify it's IPv4
+                try std.testing.expect(addr == .ip4);
+            },
+            .canonical_name => {},
+            .end => |end_result| {
+                try end_result;
+                break;
+            },
         }
-    };
+    } else |err| switch (err) {
+        error.Canceled => return err,
+    }
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expect(address_count > 0);
 }
 
 test "Io: Group async/wait" {
