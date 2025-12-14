@@ -4,7 +4,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
-const Executor = @import("runtime.zig").Executor;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const AnyTask = @import("core/task.zig").AnyTask;
