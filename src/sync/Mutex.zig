@@ -171,25 +171,14 @@ test "Mutex basic lock/unlock" {
 test "Mutex tryLock" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
+    const rt = try Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
 
     var mutex = Mutex.init;
 
-    const TestFn = struct {
-        fn testTryLock(rt: *Runtime, mtx: *Mutex, results: *[3]bool) void {
-            results[0] = mtx.tryLock(); // Should succeed
-            results[1] = mtx.tryLock(); // Should fail (already locked)
-            mtx.unlock(rt);
-            results[2] = mtx.tryLock(); // Should succeed again
-            mtx.unlock(rt);
-        }
-    };
-
-    var results: [3]bool = undefined;
-    try runtime.runUntilComplete(TestFn.testTryLock, .{ runtime, &mutex, &results }, .{});
-
-    try testing.expect(results[0]); // First tryLock should succeed
-    try testing.expect(!results[1]); // Second tryLock should fail
-    try testing.expect(results[2]); // Third tryLock should succeed
+    try testing.expect(mutex.tryLock()); // Should succeed
+    try testing.expect(!mutex.tryLock()); // Should fail (already locked)
+    mutex.unlock(rt);
+    try testing.expect(mutex.tryLock()); // Should succeed again
+    mutex.unlock(rt);
 }

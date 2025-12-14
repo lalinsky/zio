@@ -303,26 +303,13 @@ test "ResetEvent wait/set signaling" {
 test "ResetEvent timedWait timeout" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
+    const rt = try Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
 
     var reset_event = ResetEvent.init;
-    var timed_out = false;
 
-    const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, timeout_flag: *bool) !void {
-            // Should timeout after 10ms
-            event.timedWait(rt, 10_000_000) catch |err| {
-                if (err == error.Timeout) {
-                    timeout_flag.* = true;
-                }
-            };
-        }
-    };
-
-    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &reset_event, &timed_out }, .{});
-
-    try testing.expect(timed_out);
+    // Should timeout after 10ms
+    try testing.expectError(error.Timeout, reset_event.timedWait(rt, 10_000_000));
     try testing.expect(!reset_event.isSet());
 }
 
@@ -368,25 +355,15 @@ test "ResetEvent multiple waiters broadcast" {
 test "ResetEvent wait on already set event" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
-    defer runtime.deinit();
+    const rt = try Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
 
     var reset_event = ResetEvent.init;
-    var wait_completed = false;
 
     // Set event before waiting
     reset_event.set();
 
-    const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, completed: *bool) !void {
-            try event.wait(rt); // Should return immediately
-            completed.* = true;
-        }
-    };
-
-    try runtime.runUntilComplete(TestFn.waiter, .{ runtime, &reset_event, &wait_completed }, .{});
-
-    try testing.expect(wait_completed);
+    try reset_event.wait(rt); // Should return immediately
     try testing.expect(reset_event.isSet());
 }
 
