@@ -512,28 +512,27 @@ pub const Executor = struct {
             self.scheduleTaskLocal(current_task, true); // is_yield = true
         }
 
-        if (is_main) {
-            // Main thread: run scheduler loop until main_task is ready
+        const current_coro = &current_task.coro;
+
+        // Try to switch directly to the next ready task (works for both main and spawned tasks)
+        if (self.getNextTask()) |next_wait_node| {
+            const next_task = AnyTask.fromWaitNode(next_wait_node);
+            self.current_coroutine = &next_task.coro;
+            current_coro.yieldTo(&next_task.coro);
+        } else if (!is_main) {
+            // Spawned task with no ready tasks: return to scheduler
+            current_coro.yield();
+        }
+
+        // Main: continue scheduling until ready
+        if (is_main and self.main_task.state.load(.acquire) != .ready) {
             self.runSchedulerLoop() catch |err| {
                 std.debug.panic("Event loop error during yield: {}", .{err});
             };
-        } else {
-            // Coroutine: context switch
-            const current_coro = self.current_coroutine.?;
+        }
 
-            // Try to switch directly to the next ready task (checks LIFO slot first)
-            if (self.getNextTask()) |next_wait_node| {
-                const next_task = AnyTask.fromWaitNode(next_wait_node);
-
-                self.current_coroutine = &next_task.coro;
-                current_coro.yieldTo(&next_task.coro);
-            } else {
-                // No ready tasks - return to scheduler
-                current_coro.yield();
-            }
-
-            // After resuming, the task may have migrated to a different executor.
-            // Re-derive the current executor from TLS instead of using the captured `self`.
+        // After resuming, the task may have migrated to a different executor.
+        if (!is_main) {
             const resumed_executor = Executor.current orelse unreachable;
             std.debug.assert(resumed_executor.current_coroutine == current_coro);
         }
