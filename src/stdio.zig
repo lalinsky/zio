@@ -1533,32 +1533,27 @@ test "Io: Dir createFile/openFile" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            const file_path = "test_stdio_dir_file.txt";
-            const cwd = std.Io.Dir.cwd();
+    const io = rt.io();
+    const file_path = "test_stdio_dir_file.txt";
+    const cwd = std.Io.Dir.cwd();
 
-            // Create a new file
-            const created_file = try cwd.createFile(io, file_path, .{});
-            defer std.fs.cwd().deleteFile(file_path) catch {};
+    // Create a new file
+    const created_file = try cwd.createFile(io, file_path, .{});
+    defer std.fs.cwd().deleteFile(file_path) catch {};
 
-            // Write some data
-            var write_buf = [_][]const u8{"hello world"};
-            _ = try created_file.writePositional(io, &write_buf, 0);
-            created_file.close(io);
+    // Write some data
+    var write_buf = [_][]const u8{"hello world"};
+    _ = try created_file.writePositional(io, &write_buf, 0);
+    created_file.close(io);
 
-            // Open the file for reading
-            const opened_file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
-            defer opened_file.close(io);
+    // Open the file for reading
+    const opened_file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
+    defer opened_file.close(io);
 
-            // Read the data back
-            var read_buf: [32]u8 = undefined;
-            var read_slices = [_][]u8{&read_buf};
-            const bytes_read = try opened_file.readPositional(io, &read_slices, 0);
+    // Read the data back
+    var read_buf: [32]u8 = undefined;
+    var read_slices = [_][]u8{&read_buf};
+    const bytes_read = try opened_file.readPositional(io, &read_slices, 0);
 
-            try std.testing.expectEqualStrings("hello world", read_buf[0..bytes_read]);
-        }
-    };
-
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    try std.testing.expectEqualStrings("hello world", read_buf[0..bytes_read]);
 }
