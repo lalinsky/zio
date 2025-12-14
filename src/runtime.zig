@@ -528,14 +528,9 @@ pub const Executor = struct {
     /// and also from run() which sets main_task to waiting until shutdown.
     fn runSchedulerLoop(self: *Executor) !void {
         std.debug.assert(Executor.current == self);
+        const is_main = self == &self.runtime.main_executor;
 
         while (true) {
-            // Drain remote ready queue (cross-thread tasks)
-            var drained = self.next_ready_queue_remote.popAll();
-            while (drained.pop()) |task| {
-                self.ready_queue.push(task);
-            }
-
             // Process ready coroutines
             while (self.getNextTask()) |wait_node| {
                 const task = AnyTask.fromWaitNode(wait_node);
@@ -564,19 +559,22 @@ pub const Executor = struct {
                         self.runtime.releaseAwaitable(current_awaitable, true);
                     }
                 }
+
+                // Early exit for main executor - woken by task completion (e.g., join)
+                if (is_main and self.main_task.state.load(.acquire) == .ready) {
+                    return;
+                }
             }
 
-            // Exit conditions differ based on executor type
-            if (self == &self.runtime.main_executor) {
-                // Main executor: exit when main_task is ready (woken by timer, I/O, or tasks empty)
-                if (self.main_task.state.load(.acquire) == .ready) {
-                    return;
-                }
-            } else {
-                // Non-main executor: exit only when loop is stopped (from deinit)
-                if (self.loop.stopped()) {
-                    return;
-                }
+            // Exit if loop is stopped (from deinit)
+            if (self.loop.stopped()) {
+                return;
+            }
+
+            // Drain remote ready queue (cross-thread tasks) after processing current queue
+            var drained = self.next_ready_queue_remote.popAll();
+            while (drained.pop()) |task| {
+                self.ready_queue.push(task);
             }
 
             // Move yielded coroutines back to ready queue
@@ -585,6 +583,11 @@ pub const Executor = struct {
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
             const has_work = self.ready_queue.head != null or self.lifo_slot != null;
             try self.loop.run(if (has_work) .no_wait else .once);
+
+            // Main executor: exit when main_task is ready (woken by I/O, timer, etc.)
+            if (is_main and self.main_task.state.load(.acquire) == .ready) {
+                return;
+            }
         }
     }
 
