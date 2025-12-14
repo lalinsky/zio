@@ -91,7 +91,7 @@ pub fn main() !void {
     var log_buffer: std.Io.Writer.Allocating = .init(allocator);
     defer log_buffer.deinit();
 
-    Printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
+    Printer.fmt("\r\x1b[0K"); // beginning of line and clear to end of line
 
     for (builtin.test_functions) |t| {
         if (isSetup(t)) {
@@ -192,7 +192,7 @@ pub fn main() !void {
             const ms = @as(f64, @floatFromInt(ns_taken)) / 1_000_000.0;
             Printer.status(status, "{s} ({d:.2}ms)\n", .{ friendly_name, ms });
         } else {
-            Printer.status(status, ".", .{});
+            Printer.status(status, ".");
         }
     }
 
@@ -214,9 +214,9 @@ pub fn main() !void {
     if (leak > 0) {
         Printer.status(.fail, "{d} test{s} leaked\n", .{ leak, if (leak != 1) "s" else "" });
     }
-    Printer.fmt("\n", .{});
+    Printer.fmt("\n");
     try slowest.display();
-    Printer.fmt("\n", .{});
+    Printer.fmt("\n");
     std.posix.exit(if (fail == 0) 0 else 1);
 }
 
@@ -227,9 +227,9 @@ const Printer = struct {
 
     fn status(s: Status, comptime format: []const u8, args: anytype) void {
         switch (s) {
-            .pass => std.debug.print("\x1b[32m", .{}),
-            .fail => std.debug.print("\x1b[31m", .{}),
-            .skip => std.debug.print("\x1b[33m", .{}),
+            .pass => std.debug.print("\x1b[32m"),
+            .fail => std.debug.print("\x1b[31m"),
+            .skip => std.debug.print("\x1b[33m"),
             else => {},
         }
         std.debug.print(format ++ "\x1b[0m", args);

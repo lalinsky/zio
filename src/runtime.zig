@@ -51,14 +51,6 @@ pub const ExecutorId = enum(usize) {
     }
 };
 
-/// Options for spawning a coroutine
-pub const SpawnOptions = struct {
-    /// Pin task to its home executor (prevents cross-thread migration).
-    /// Pinned tasks always run on their original executor, even when woken from other threads.
-    /// Useful for tasks with executor-specific state or when thread affinity is desired.
-    pinned: bool = false,
-};
-
 // Runtime configuration options
 pub const RuntimeOptions = struct {
     thread_pool: aio.ThreadPool.Options = .{},
@@ -120,7 +112,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example:
         /// ```zig
-        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// var handle = try rt.spawn(myTask);
         /// const result = handle.join(rt);
         /// ```
         pub fn join(self: *Self, rt: *Runtime) T {
@@ -182,7 +174,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example:
         /// ```zig
-        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// var handle = try rt.spawn(myTask);
         /// defer handle.cancel(rt);
         /// // Do some other work that could return early
         /// const result = handle.join(rt);
@@ -214,7 +206,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example:
         /// ```zig
-        /// var handle = try rt.spawn(backgroundTask, .{}, .{});
+        /// var handle = try rt.spawn(backgroundTask);
         /// handle.detach(rt); // Task runs independently
         /// ```
         pub fn detach(self: *Self, rt: *Runtime) void {
@@ -417,12 +409,10 @@ pub const Executor = struct {
         cleanupStackGrowth();
     }
 
-    pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
+    pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
 
-        const task = try Task(Result).create(self, func, args, .{
-            .pinned = options.pinned,
-        });
+        const task = try Task(Result).create(self, func, args);
         errdefer task.destroy(self);
 
         // Add to global awaitable registry
@@ -618,25 +608,6 @@ pub const Executor = struct {
         const current_coro = self.current_coroutine orelse unreachable;
         const current_task = AnyTask.fromCoroutine(current_coro);
         try current_task.checkCanceled(self.runtime);
-    }
-
-    /// Pin the current task to its home executor (prevents cross-thread migration).
-    /// While pinned, the task will always run on its original executor, even when
-    /// woken from other threads. Useful for tasks with executor-specific state.
-    /// Must be paired with endPin().
-    pub fn beginPin(self: *Executor) void {
-        const current_coro = self.current_coroutine orelse unreachable;
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        current_task.pin_count += 1;
-    }
-
-    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
-    /// Must be paired with beginPin().
-    pub fn endPin(self: *Executor) void {
-        const current_coro = self.current_coroutine orelse unreachable;
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        std.debug.assert(current_task.pin_count > 0);
-        current_task.pin_count -= 1;
     }
 
     pub fn getCurrentTask(self: *Executor) *AnyTask {
@@ -911,13 +882,13 @@ pub const Runtime = struct {
     }
 
     // High-level public API - delegates to appropriate Executor
-    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
+    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
         if (self.shutting_down.load(.acquire)) {
             return error.RuntimeShutdown;
         }
 
         const executor = getNextExecutor(self);
-        return executor.spawn(func, args, options);
+        return executor.spawn(func, args);
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
@@ -1012,28 +983,6 @@ pub const Runtime = struct {
     pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: anytype) !void {
         const current_task = self.getCurrentTask();
         try current_task.checkTimeout(self, timeout, err);
-    }
-
-    /// Pin the current task to its home executor (prevents cross-thread migration).
-    /// While pinned, the task will always run on its original executor, even when
-    /// woken from other threads. Useful for tasks with executor-specific state.
-    /// Must be paired with endPin().
-    /// No-op if not called from within a coroutine.
-    pub fn beginPin(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
-        executor.beginPin();
-    }
-
-    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
-    /// Must be paired with beginPin().
-    /// No-op if not called from within a coroutine.
-    pub fn endPin(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
-        executor.endPin();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
@@ -1179,7 +1128,7 @@ test "runtime: spawnBlocking smoke test" {
 test "runtime: JoinHandle.cast() error set conversion" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const MyError = error{ Foo, Bar };
@@ -1198,7 +1147,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
 
     // Test casting success case
     {
-        var handle = try runtime.spawn(taskSuccess, .{}, .{});
+        var handle = try runtime.spawn(taskSuccess);
         var casted = handle.cast(anyerror!i32);
         defer casted.cancel(runtime);
 
@@ -1208,7 +1157,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
 
     // Test casting error case
     {
-        var handle = try runtime.spawn(taskError, .{}, .{});
+        var handle = try runtime.spawn(taskError);
         var casted = handle.cast(anyerror!i32);
         defer casted.cancel(runtime);
 
@@ -1220,7 +1169,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
 test "Runtime: implicit run" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -1237,14 +1186,14 @@ test "Runtime: implicit run" {
         }
     };
 
-    var task = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var task = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try task.join(runtime);
 }
 
 test "Runtime: sleep from main" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     // Call sleep directly from main thread - no spawn needed
@@ -1259,7 +1208,7 @@ test "Runtime: sleep from main" {
 test "runtime: now() returns monotonic time" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const start = runtime.now();
@@ -1276,7 +1225,7 @@ test "runtime: now() returns monotonic time" {
 test "runtime: sleep is cancelable" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const sleepingTask = struct {
@@ -1290,7 +1239,7 @@ test "runtime: sleep is cancelable" {
 
     var timer = try std.time.Timer.start();
 
-    var handle = try runtime.spawn(sleepingTask, .{runtime}, .{});
+    var handle = try runtime.spawn(sleepingTask, .{runtime});
     defer handle.cancel(runtime);
 
     // Cancel the sleeping task
@@ -1312,7 +1261,7 @@ test "runtime: std.Io interface" {
 
     const testing = std.testing;
 
-    const rt = try Runtime.init(testing.allocator, .{});
+    const rt = try Runtime.init(testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();

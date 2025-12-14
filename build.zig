@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
             exe.linkLibC();
         }
 
-        const install_exe = b.addInstallArtifact(exe, .{});
+        const install_exe = b.addInstallArtifact(exe);
         examples_step.dependOn(&install_exe.step);
     }
 
@@ -108,7 +108,7 @@ pub fn build(b: *std.Build) void {
         });
         exe.root_module.addImport("zio", zio);
 
-        const install_exe = b.addInstallArtifact(exe, .{});
+        const install_exe = b.addInstallArtifact(exe);
         benchmarks_step.dependOn(&install_exe.step);
     }
 
@@ -124,5 +124,5 @@ pub fn build(b: *std.Build) void {
 
     // Build tests without running them (useful for cross-compilation)
     const build_tests_step = b.step("build-tests", "Build unit tests without running");
-    build_tests_step.dependOn(&b.addInstallArtifact(lib_unit_tests, .{}).step);
+    build_tests_step.dependOn(&b.addInstallArtifact(lib_unit_tests).step);
 }

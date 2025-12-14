@@ -588,7 +588,7 @@ fn netBindIpImpl(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, op
     _ = options; // std.Io BindOptions don't include reuse_address, use zio API directly for that
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
     const zio_addr = stdIoIpToZio(address.*);
-    const socket = zio_net.netBindIp(rt, zio_addr, .{}) catch |err| switch (err) {
+    const socket = zio_net.netBindIp(rt, zio_addr) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
@@ -824,7 +824,7 @@ pub fn toRuntime(io: std.Io) *Runtime {
 }
 
 test "Io: basic" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = fromRuntime(rt);
@@ -832,7 +832,7 @@ test "Io: basic" {
 }
 
 test "Io: async/await pattern" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -851,12 +851,12 @@ test "Io: async/await pattern" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: concurrent/await pattern" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -875,12 +875,12 @@ test "Io: concurrent/await pattern" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: now and sleep" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();
@@ -900,7 +900,7 @@ test "Io: now and sleep" {
 }
 
 test "Io: realtime clock" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();
@@ -919,7 +919,7 @@ test "Io: realtime clock" {
 }
 
 test "Io: select" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -933,7 +933,7 @@ test "Io: select" {
         }
 
         fn mainTask(io: std.Io) !void {
-            var fast = io.async(fastTask, .{});
+            var fast = io.async(fastTask);
             defer _ = fast.cancel(io);
 
             var slow = io.async(slowTask, .{io});
@@ -948,18 +948,18 @@ test "Io: select" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv4" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
         fn mainTask(io: std.Io) !void {
             const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
-            var server = try addr.listen(io, .{});
+            var server = try addr.listen(io);
             defer server.socket.close(io);
 
             var server_future = try io.concurrent(serverFn, .{ io, &server });
@@ -993,12 +993,12 @@ test "Io: TCP listen/accept/connect/read/write IPv4" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: TCP listen/accept/connect/read/write IPv6" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1009,7 +1009,7 @@ test "Io: TCP listen/accept/connect/read/write IPv6" {
                     .port = 0,
                 },
             };
-            var server = addr.listen(io, .{}) catch |err| {
+            var server = addr.listen(io) catch |err| {
                 if (err == error.AddressNotAvailable) return error.SkipZigTest;
                 return err;
             };
@@ -1046,12 +1046,12 @@ test "Io: TCP listen/accept/connect/read/write IPv6" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: UDP bind IPv4" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();
@@ -1065,7 +1065,7 @@ test "Io: UDP bind IPv4" {
 }
 
 test "Io: UDP bind IPv6" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();
@@ -1087,7 +1087,7 @@ test "Io: UDP bind IPv6" {
 }
 
 test "Io: Mutex lock/unlock" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();
@@ -1111,7 +1111,7 @@ test "Io: Mutex lock/unlock" {
 }
 
 test "Io: Mutex concurrent access" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1140,12 +1140,12 @@ test "Io: Mutex concurrent access" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: Condition wait/signal" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1187,12 +1187,12 @@ test "Io: Condition wait/signal" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: Condition broadcast" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1239,14 +1239,14 @@ test "Io: Condition broadcast" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: Unix domain socket listen/accept/connect/read/write" {
     if (!zio_net.has_unix_sockets) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1261,7 +1261,7 @@ test "Io: Unix domain socket listen/accept/connect/read/write" {
             const full_path = try std.fmt.bufPrint(&path_buf2, "{s}/test.sock", .{socket_path});
 
             const addr = try std.Io.net.UnixAddress.init(full_path);
-            var server = try addr.listen(io, .{});
+            var server = try addr.listen(io);
             defer server.deinit(io);
 
             var server_future = try io.concurrent(serverFn, .{ io, &server });
@@ -1295,12 +1295,12 @@ test "Io: Unix domain socket listen/accept/connect/read/write" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: File close" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();
@@ -1308,7 +1308,7 @@ test "Io: File close" {
     defer std.fs.cwd().deleteFile(file_path) catch {};
 
     // Create file using std.fs
-    const std_file = try std.fs.cwd().createFile(file_path, .{});
+    const std_file = try std.fs.cwd().createFile(file_path);
     const file: std.Io.File = .{ .handle = std_file.handle };
 
     // Test that close works
@@ -1440,7 +1440,7 @@ test "Io: DNS lookup with family filter" {
 }
 
 test "Io: Group async/wait" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1457,7 +1457,7 @@ test "Io: Group async/wait" {
             defer group.cancel(io);
 
             // Spawn one task into the group
-            group.async(io, increment, .{});
+            group.async(io, increment);
 
             // Wait for all to complete
             group.wait(io);
@@ -1467,12 +1467,12 @@ test "Io: Group async/wait" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: Group concurrent/wait" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1489,9 +1489,9 @@ test "Io: Group concurrent/wait" {
             defer group.cancel(io);
 
             // Spawn multiple tasks into the group using concurrent
-            try group.concurrent(io, increment, .{});
-            try group.concurrent(io, increment, .{});
-            try group.concurrent(io, increment, .{});
+            try group.concurrent(io, increment);
+            try group.concurrent(io, increment);
+            try group.concurrent(io, increment);
 
             // Wait for all to complete
             group.wait(io);
@@ -1501,12 +1501,12 @@ test "Io: Group concurrent/wait" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: Group cancel" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -1537,12 +1537,12 @@ test "Io: Group cancel" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()}, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{rt.io()});
     try handle.join(rt);
 }
 
 test "Io: Dir createFile/openFile" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const io = rt.io();
@@ -1550,7 +1550,7 @@ test "Io: Dir createFile/openFile" {
     const cwd = std.Io.Dir.cwd();
 
     // Create a new file
-    const created_file = try cwd.createFile(io, file_path, .{});
+    const created_file = try cwd.createFile(io, file_path);
     defer std.fs.cwd().deleteFile(file_path) catch {};
 
     // Write some data

@@ -14,7 +14,7 @@ var sigint = try zio.Signal.init(.interrupt);
 defer sigint.deinit();
 
 try sigint.wait(rt);
-std.log.info("Received SIGINT, initiating shutdown...", .{});
+std.log.info("Received SIGINT, initiating shutdown...");
 
 server.shutdown();
 ```
@@ -35,11 +35,11 @@ const result = try zio.select(rt, .{
 });
 switch (result) {
     .sigint => {
-        std.log.info("Received SIGINT, initiating graceful shutdown...", .{});
+        std.log.info("Received SIGINT, initiating graceful shutdown...");
         server.shutdown(.{ .graceful = true });
     },
     .sigterm => {
-        std.log.info("Received SIGTERM, initiating shutdown...", .{});
+        std.log.info("Received SIGTERM, initiating shutdown...");
         server.shutdown(.{ .graceful = false });
     },
 }
@@ -61,7 +61,7 @@ while (true) {
         return err;
     };
 
-    std.log.info("Received SIGINT, initiating shutdown...", .{});
+    std.log.info("Received SIGINT, initiating shutdown...");
     server.shutdown(.{ .graceful = true });
     break;
 }

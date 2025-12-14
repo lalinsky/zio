@@ -17,9 +17,7 @@ const Timeout = @import("timeout.zig").Timeout;
 const Group = @import("group.zig").Group;
 
 /// Options for creating a task
-pub const CreateOptions = struct {
-    pinned: bool = false,
-};
+pub const CreateOptions = struct {};
 
 pub const Closure = struct {
     start: Start,
@@ -155,9 +153,6 @@ pub const AnyTask = struct {
     // Number of active cancellation shields
     shield_count: u8 = 0,
 
-    // Number of times this task was pinned to the current executor
-    pin_count: u8 = 0,
-
     // Closure for the task
     closure: Closure,
 
@@ -198,9 +193,8 @@ pub const AnyTask = struct {
     }
 
     /// Check if this task can be migrated to a different executor.
-    /// Returns false if the task is pinned or canceled, true otherwise.
+    /// Returns false if the task is canceled, true otherwise.
     pub inline fn canMigrate(self: *const AnyTask) bool {
-        if (self.pin_count > 0) return false;
         if (self.awaitable.canceled_status.load(.acquire) != 0) return false;
         // TODO: Enable migration once we have work-stealing
         return false;
@@ -359,7 +353,6 @@ pub const AnyTask = struct {
                 .parent_context_ptr = &executor.main_task.coro.context,
             },
             .closure = alloc_result.closure,
-            .pin_count = if (options.pinned) 1 else 0,
         };
 
         // Acquire stack from pool and initialize context

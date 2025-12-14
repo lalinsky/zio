@@ -98,7 +98,7 @@ fn checkSelfWait(task: *AnyTask, future: anytype) void {
         if (std.meta.hasMethod(@TypeOf(future), "toAwaitable")) {
             const awaitable_ptr = future.toAwaitable();
             if (awaitable_ptr == &task.awaitable) {
-                std.debug.panic("cannot wait on self (would deadlock)", .{});
+                std.debug.panic("cannot wait on self (would deadlock)");
             }
         }
     }
@@ -252,8 +252,8 @@ pub const SelectWaiter = struct {
 ///
 /// Example:
 /// ```
-/// var h1 = try rt.spawn(task1, .{}, .{});
-/// var h2 = try rt.spawn(task2, .{}, .{});
+/// var h1 = try rt.spawn(task1);
+/// var h2 = try rt.spawn(task2);
 /// const result = rt.select(.{ .first = &h1, .second = &h2 });
 /// switch (result) {
 ///     .first => |val| ...,
@@ -510,7 +510,7 @@ pub fn waitUntilComplete(rt: *Runtime, future: anytype) FutureResult(@TypeOf(fut
 test "select: basic - first completes" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -525,9 +525,9 @@ test "select: basic - first completes" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var slow = try rt.spawn(slowTask, .{rt}, .{});
+            var slow = try rt.spawn(slowTask, .{rt});
             defer slow.cancel(rt);
-            var fast = try rt.spawn(fastTask, .{rt}, .{});
+            var fast = try rt.spawn(fastTask, .{rt});
             defer fast.cancel(rt);
 
             const result = try select(rt, .{ .fast = &fast, .slow = &slow });
@@ -540,14 +540,14 @@ test "select: basic - first completes" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
 test "select: already complete - fast path" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -561,14 +561,14 @@ test "select: already complete - fast path" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var immediate = try rt.spawn(immediateTask, .{}, .{});
+            var immediate = try rt.spawn(immediateTask);
             defer immediate.cancel(rt);
 
             // Give immediate task a chance to complete
             try rt.yield();
             try rt.yield();
 
-            var slow = try rt.spawn(slowTask, .{rt}, .{});
+            var slow = try rt.spawn(slowTask, .{rt});
             defer slow.cancel(rt);
 
             // immediate should already be complete, select should return immediately
@@ -580,14 +580,14 @@ test "select: already complete - fast path" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
 test "select: heterogeneous types" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -607,11 +607,11 @@ test "select: heterogeneous types" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var int_handle = try rt.spawn(intTask, .{rt}, .{});
+            var int_handle = try rt.spawn(intTask, .{rt});
             defer int_handle.cancel(rt);
-            var string_handle = try rt.spawn(stringTask, .{rt}, .{});
+            var string_handle = try rt.spawn(stringTask, .{rt});
             defer string_handle.cancel(rt);
-            var bool_handle = try rt.spawn(boolTask, .{rt}, .{});
+            var bool_handle = try rt.spawn(boolTask, .{rt});
             defer bool_handle.cancel(rt);
 
             const result = try select(rt, .{
@@ -637,14 +637,14 @@ test "select: heterogeneous types" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
 test "select: with cancellation" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -659,9 +659,9 @@ test "select: with cancellation" {
         }
 
         fn selectTask(rt: *Runtime) !i32 {
-            var h1 = try rt.spawn(slowTask1, .{rt}, .{});
+            var h1 = try rt.spawn(slowTask1, .{rt});
             defer h1.cancel(rt);
-            var h2 = try rt.spawn(slowTask2, .{rt}, .{});
+            var h2 = try rt.spawn(slowTask2, .{rt});
             defer h2.cancel(rt);
 
             const result = try select(rt, .{ .first = &h1, .second = &h2 });
@@ -672,7 +672,7 @@ test "select: with cancellation" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var select_handle = try rt.spawn(selectTask, .{rt}, .{});
+            var select_handle = try rt.spawn(selectTask, .{rt});
             defer select_handle.cancel(rt);
 
             // Give it a chance to start waiting
@@ -688,14 +688,14 @@ test "select: with cancellation" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
 test "select: with error unions - success case" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -713,9 +713,9 @@ test "select: with error unions - success case" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var parse_handle = try rt.spawn(parseTask, .{rt}, .{});
+            var parse_handle = try rt.spawn(parseTask, .{rt});
             defer parse_handle.cancel(rt);
-            var validate_handle = try rt.spawn(validateTask, .{rt}, .{});
+            var validate_handle = try rt.spawn(validateTask, .{rt});
             defer validate_handle.cancel(rt);
 
             const result = try select(rt, .{
@@ -747,14 +747,14 @@ test "select: with error unions - success case" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
 test "select: with error unions - error case" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -771,9 +771,9 @@ test "select: with error unions - error case" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var failing = try rt.spawn(failingTask, .{rt}, .{});
+            var failing = try rt.spawn(failingTask, .{rt});
             defer failing.cancel(rt);
-            var slow = try rt.spawn(slowTask, .{rt}, .{});
+            var slow = try rt.spawn(slowTask, .{rt});
             defer slow.cancel(rt);
 
             const result = try select(rt, .{ .failing = &failing, .slow = &slow });
@@ -796,14 +796,14 @@ test "select: with error unions - error case" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
 test "select: with mixed error types" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -826,11 +826,11 @@ test "select: with mixed error types" {
         }
 
         fn asyncTask(rt: *Runtime) !void {
-            var h1 = try rt.spawn(task1, .{rt}, .{});
+            var h1 = try rt.spawn(task1, .{rt});
             defer h1.cancel(rt);
-            var h2 = try rt.spawn(task2, .{rt}, .{});
+            var h2 = try rt.spawn(task2, .{rt});
             defer h2.cancel(rt);
-            var h3 = try rt.spawn(task3, .{rt}, .{});
+            var h3 = try rt.spawn(task3, .{rt});
             defer h3.cancel(rt);
 
             // select returns Cancelable!SelectUnion(...)
@@ -859,7 +859,7 @@ test "select: with mixed error types" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
@@ -867,7 +867,7 @@ test "wait: plain type" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -879,7 +879,7 @@ test "wait: plain type" {
                 fn run(f: *Future(i32)) !void {
                     f.set(42);
                 }
-            }.run, .{&future}, .{});
+            }.run, .{&future});
             defer task.cancel(rt);
 
             // Wait for the future
@@ -888,7 +888,7 @@ test "wait: plain type" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
@@ -896,7 +896,7 @@ test "wait: error union" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -910,7 +910,7 @@ test "wait: error union" {
                 fn run(f: *Future(MyError!i32)) !void {
                     f.set(123);
                 }
-            }.run, .{&future}, .{});
+            }.run, .{&future});
             defer task.cancel(rt);
 
             // Wait for the future
@@ -920,7 +920,7 @@ test "wait: error union" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
@@ -928,7 +928,7 @@ test "wait: error union with error" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -942,7 +942,7 @@ test "wait: error union with error" {
                 fn run(f: *Future(MyError!i32)) !void {
                     f.set(MyError.Foo);
                 }
-            }.run, .{&future}, .{});
+            }.run, .{&future});
             defer task.cancel(rt);
 
             // Wait for the future
@@ -951,7 +951,7 @@ test "wait: error union with error" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
@@ -959,7 +959,7 @@ test "wait: already complete (fast path)" {
     const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -973,14 +973,14 @@ test "wait: already complete (fast path)" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
 test "select: wait on JoinHandle from spawned task" {
     const testing = std.testing;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(testing.allocator);
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -991,10 +991,10 @@ test "select: wait on JoinHandle from spawned task" {
 
         fn asyncTask(rt: *Runtime) !void {
             // Spawn a task and get a JoinHandle
-            var handle1 = try rt.spawn(workerTask, .{ rt, 21 }, .{});
+            var handle1 = try rt.spawn(workerTask, .{ rt, 21 });
             defer handle1.cancel(rt);
 
-            var handle2 = try rt.spawn(workerTask, .{ rt, 100 }, .{});
+            var handle2 = try rt.spawn(workerTask, .{ rt, 100 });
             defer handle2.cancel(rt);
 
             // Wait on JoinHandles using select
@@ -1018,6 +1018,6 @@ test "select: wait on JoinHandle from spawned task" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }

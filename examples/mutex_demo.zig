@@ -28,7 +28,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var runtime = try zio.Runtime.init(gpa.allocator(), .{});
+    var runtime = try zio.Runtime.init(gpa.allocator());
     defer runtime.deinit();
 
     var shared_data = SharedData{
@@ -36,13 +36,13 @@ pub fn main() !void {
     };
 
     // Spawn multiple tasks that increment shared counter
-    var task0 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 0 }, .{});
+    var task0 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 0 });
     defer task0.cancel(runtime);
-    var task1 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 1 }, .{});
+    var task1 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 1 });
     defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 2 }, .{});
+    var task2 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 2 });
     defer task2.cancel(runtime);
-    var task3 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 3 }, .{});
+    var task3 = try runtime.spawn(incrementTask, .{ runtime, &shared_data, 3 });
     defer task3.cancel(runtime);
 
     try runtime.run();

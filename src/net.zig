@@ -646,7 +646,7 @@ pub const Stream = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.NetRecv.init(self.socket.handle, buffers, .{});
+        var op = aio.NetRecv.init(self.socket.handle, buffers);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -683,7 +683,7 @@ pub const Stream = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.NetSend.init(self.socket.handle, buffers, .{});
+        var op = aio.NetSend.init(self.socket.handle, buffers);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -810,7 +810,7 @@ fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var op = aio.NetOpen.init(@enumFromInt(family), .stream, .{});
+    var op = aio.NetOpen.init(@enumFromInt(family), .stream);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -824,7 +824,7 @@ fn createDatagramSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var op = aio.NetOpen.init(@enumFromInt(family), .dgram, .{});
+    var op = aio.NetOpen.init(@enumFromInt(family), .dgram);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -934,7 +934,7 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
     var storage: [16]aio.system.iovec = undefined;
     const read_bufs = aio.ReadBuf.fromSlices(bufs, &storage);
 
-    var op = aio.NetRecv.init(fd, read_bufs, .{});
+    var op = aio.NetRecv.init(fd, read_bufs);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -953,7 +953,7 @@ pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []co
     const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
 
     var storage: [16]aio.system.iovec_const = undefined;
-    var op = aio.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage), .{});
+    var op = aio.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage));
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -1187,13 +1187,13 @@ test "lookupHost: numeric IP" {
 }
 
 test "tcpConnectToAddress: basic" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator);
     defer runtime.deinit();
 
     const ServerTask = struct {
         fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try addr.listen(rt, .{});
+            const server = try addr.listen(rt);
             defer server.close(rt);
 
             try server_port.send(rt, server.socket.address.ip.getPort());
@@ -1230,10 +1230,10 @@ test "tcpConnectToAddress: basic" {
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch });
     defer server_task.cancel(runtime);
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
     defer client_task.cancel(runtime);
 
     try runtime.run();
@@ -1248,7 +1248,7 @@ test "tcpConnectToHost: basic" {
     const ServerTask = struct {
         fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try addr.listen(rt, .{});
+            const server = try addr.listen(rt);
             defer server.close(rt);
 
             std.debug.print("Server listening on port {}\n", .{server.socket.address.ip.getPort()});
@@ -1290,10 +1290,10 @@ test "tcpConnectToHost: basic" {
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch });
     defer server_task.cancel(runtime);
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
     defer client_task.cancel(runtime);
 
     try runtime.run();

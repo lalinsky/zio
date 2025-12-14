@@ -115,10 +115,10 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            var server_task = try rt.spawn(serverFn, .{ rt, server });
             defer server_task.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner }, .{});
+            var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner });
             defer client_task.cancel(rt);
 
             // TODO use TaskGroup
@@ -156,20 +156,20 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer });
     try handle.join(runtime);
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const Test = struct {
         pub fn mainFn(rt: *Runtime, server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
-            const socket = try server_addr_inner.bind(rt, .{});
+            const socket = try server_addr_inner.bind(rt);
             defer socket.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, socket }, .{});
+            var server_task = try rt.spawn(serverFn, .{ rt, socket });
             defer server_task.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, socket, client_addr_inner }, .{});
+            var client_task = try rt.spawn(clientFn, .{ rt, socket, client_addr_inner });
             defer client_task.cancel(rt);
 
             try server_task.join(rt);
@@ -187,7 +187,7 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
         }
 
         pub fn clientFn(rt: *Runtime, server_socket: Socket, client_addr_inner: @TypeOf(client_addr)) !void {
-            const client_socket = try client_addr_inner.bind(rt, .{});
+            const client_socket = try client_addr_inner.bind(rt);
             defer client_socket.close(rt);
 
             const test_data = "hello";
@@ -200,10 +200,10 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator);
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr });
     try handle.join(runtime);
 }
 
@@ -213,10 +213,10 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            var server_task = try rt.spawn(serverFn, .{ rt, server });
             defer server_task.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, server }, .{});
+            var client_task = try rt.spawn(clientFn, .{ rt, server });
             defer client_task.cancel(rt);
 
             // TODO use TaskGroup
@@ -247,7 +247,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options });
     try handle.join(runtime);
 }
 

@@ -24,7 +24,7 @@ fn handleClient(rt: *zio.Runtime, in_stream: zio.net.Stream) !void {
 fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
 
-    var server = try addr.listen(rt, .{});
+    var server = try addr.listen(rt);
     defer server.close(rt);
 
     ready.set();
@@ -34,7 +34,7 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
         var stream = try server.accept(rt);
         errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
+        var task = try rt.spawn(handleClient, .{ rt, stream });
         task.detach(rt);
     }
 
@@ -99,7 +99,7 @@ fn benchmarkTask(
     defer allocator.free(latencies);
 
     // Spawn server
-    var server = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done }, .{});
+    var server = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done });
     defer server.cancel(rt);
 
     // Wait for server to be ready
@@ -112,7 +112,7 @@ fn benchmarkTask(
     defer allocator.free(client_tasks);
 
     for (client_tasks, 0..) |*task, i| {
-        const handle = try rt.spawn(clientTask, .{ rt, &server_ready, latencies, i }, .{});
+        const handle = try rt.spawn(clientTask, .{ rt, &server_ready, latencies, i });
         task.* = handle.cast(anyerror!void);
     }
 
@@ -146,11 +146,11 @@ fn benchmarkTask(
     for (latencies) |lat| sum += lat;
     const avg = sum / latencies.len;
 
-    std.debug.print("Results:\n", .{});
+    std.debug.print("Results:\n");
     std.debug.print("  Total time: {d:.2} ms ({d:.3} s)\n", .{ elapsed_ms, elapsed_s });
     std.debug.print("  Messages/sec: {d:.0}\n", .{messages_per_sec});
     std.debug.print("  Throughput: {d:.2} MB/s (rx+tx)\n", .{throughput_mbps});
-    std.debug.print("\nLatency (round-trip):\n", .{});
+    std.debug.print("\nLatency (round-trip):\n");
     std.debug.print("  Average: {d:.1} µs\n", .{@as(f64, @floatFromInt(avg)) / 1000.0});
     std.debug.print("  p50: {d:.1} µs\n", .{@as(f64, @floatFromInt(p50)) / 1000.0});
     std.debug.print("  p95: {d:.1} µs\n", .{@as(f64, @floatFromInt(p95)) / 1000.0});
@@ -162,7 +162,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("Echo Server Benchmark\n", .{});
+    std.debug.print("Echo Server Benchmark\n");
     std.debug.print("  Clients: {}\n", .{NUM_CLIENTS});
     std.debug.print("  Messages per client: {}\n", .{MESSAGES_PER_CLIENT});
     std.debug.print("  Message size: {} bytes\n", .{MESSAGE_SIZE});
@@ -171,6 +171,6 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator, .{ .num_executors = null });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(benchmarkTask, .{ runtime, allocator }, .{});
+    var handle = try runtime.spawn(benchmarkTask, .{ runtime, allocator });
     try handle.join(runtime);
 }

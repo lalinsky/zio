@@ -77,7 +77,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 
 test "Timeout: smoke test" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     var timeout = Timeout.init;
@@ -87,7 +87,7 @@ test "Timeout: smoke test" {
 }
 
 test "Timeout: fires and returns error.Timeout" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     var timeout = Timeout.init;
@@ -109,7 +109,7 @@ test "Timeout: fires and returns error.Timeout" {
 }
 
 test "Timeout: nested timeouts - earliest fires first" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     var timeout1 = Timeout.init;
@@ -136,7 +136,7 @@ test "Timeout: nested timeouts - earliest fires first" {
 }
 
 test "Timeout: cleared before firing" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     var timeout = Timeout.init;
@@ -168,7 +168,7 @@ test "Timeout: user cancel has priority over timeout" {
         }
 
         fn main(rt: *Runtime) !void {
-            var handle = try rt.spawn(worker, .{rt}, .{});
+            var handle = try rt.spawn(worker, .{rt});
 
             // Let worker start and set timeout
             try rt.sleep(5);
@@ -186,15 +186,15 @@ test "Timeout: user cancel has priority over timeout" {
         }
     };
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
-    var handle = try rt.spawn(Test.main, .{rt}, .{});
+    var handle = try rt.spawn(Test.main, .{rt});
     try handle.join(rt);
 }
 
 test "Timeout: multiple timeouts with different deadlines" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     var timeout1 = Timeout.init;
@@ -227,7 +227,7 @@ test "Timeout: multiple timeouts with different deadlines" {
 }
 
 test "Timeout: set, clear, and re-set" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     var timeout = Timeout.init;

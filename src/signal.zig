@@ -377,16 +377,16 @@ pub const Signal = struct {
 test "Signal: basic signal handling" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var rt = try Runtime.init(std.testing.allocator, .{});
+    var rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
         signal_received: bool = false,
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            var h1 = try r.spawn(waitForSignal, .{ self, r });
             defer h1.cancel(r);
-            var h2 = try r.spawn(sendSignal, .{r}, .{});
+            var h2 = try r.spawn(sendSignal, .{r});
             defer h2.cancel(r);
 
             try h1.join(r);
@@ -408,7 +408,7 @@ test "Signal: basic signal handling" {
     };
 
     var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
     try std.testing.expect(ctx.signal_received);
@@ -417,20 +417,20 @@ test "Signal: basic signal handling" {
 test "Signal: multiple handlers for same signal" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var rt = try Runtime.init(std.testing.allocator, .{});
+    var rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
         count: std.atomic.Value(usize) = .init(0),
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            var h1 = try r.spawn(waitForSignal, .{ self, r });
             defer h1.cancel(r);
-            var h2 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            var h2 = try r.spawn(waitForSignal, .{ self, r });
             defer h2.cancel(r);
-            var h3 = try r.spawn(waitForSignal, .{ self, r }, .{});
+            var h3 = try r.spawn(waitForSignal, .{ self, r });
             defer h3.cancel(r);
-            var h4 = try r.spawn(sendSignal, .{r}, .{});
+            var h4 = try r.spawn(sendSignal, .{r});
             defer h4.cancel(r);
 
             try h1.join(r);
@@ -454,7 +454,7 @@ test "Signal: multiple handlers for same signal" {
     };
 
     var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
     try std.testing.expectEqual(@as(usize, 3), ctx.count.load(.monotonic));
@@ -463,7 +463,7 @@ test "Signal: multiple handlers for same signal" {
 test "Signal: timedWait timeout" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var rt = try Runtime.init(std.testing.allocator, .{});
+    var rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
@@ -484,7 +484,7 @@ test "Signal: timedWait timeout" {
     };
 
     var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
     try std.testing.expect(ctx.timed_out);
@@ -493,16 +493,16 @@ test "Signal: timedWait timeout" {
 test "Signal: timedWait receives signal before timeout" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var rt = try Runtime.init(std.testing.allocator, .{});
+    var rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const TestContext = struct {
         signal_received: bool = false,
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignalTimed, .{ self, r }, .{});
+            var h1 = try r.spawn(waitForSignalTimed, .{ self, r });
             defer h1.cancel(r);
-            var h2 = try r.spawn(sendSignal, .{r}, .{});
+            var h2 = try r.spawn(sendSignal, .{r});
             defer h2.cancel(r);
 
             try h1.join(r);
@@ -524,7 +524,7 @@ test "Signal: timedWait receives signal before timeout" {
     };
 
     var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
     try std.testing.expect(ctx.signal_received);
@@ -533,7 +533,7 @@ test "Signal: timedWait receives signal before timeout" {
 test "Signal: select on multiple signals" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var rt = try Runtime.init(std.testing.allocator, .{});
+    var rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const select = @import("select.zig").select;
@@ -542,9 +542,9 @@ test "Signal: select on multiple signals" {
         signal_received: std.atomic.Value(u8) = .init(0),
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignals, .{ self, r }, .{});
+            var h1 = try r.spawn(waitForSignals, .{ self, r });
             defer h1.cancel(r);
-            var h2 = try r.spawn(sendSignal, .{r}, .{});
+            var h2 = try r.spawn(sendSignal, .{r});
             defer h2.cancel(r);
 
             try h1.join(r);
@@ -571,7 +571,7 @@ test "Signal: select on multiple signals" {
     };
 
     var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
     try std.testing.expectEqual(@intFromEnum(SignalKind.user2), ctx.signal_received.load(.monotonic));
@@ -580,7 +580,7 @@ test "Signal: select on multiple signals" {
 test "Signal: select with signal already received (fast path)" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var rt = try Runtime.init(std.testing.allocator, .{});
+    var rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const select = @import("select.zig").select;
@@ -607,7 +607,7 @@ test "Signal: select with signal already received (fast path)" {
     };
 
     var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
     try std.testing.expect(ctx.signal_received);
@@ -616,7 +616,7 @@ test "Signal: select with signal already received (fast path)" {
 test "Signal: select with signal and task" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var rt = try Runtime.init(std.testing.allocator, .{});
+    var rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const select = @import("select.zig").select;
@@ -633,10 +633,10 @@ test "Signal: select with signal and task" {
             var sig = try Signal.init(.user1);
             defer sig.deinit();
 
-            var task = try r.spawn(slowTask, .{r}, .{});
+            var task = try r.spawn(slowTask, .{r});
             defer task.cancel(r);
 
-            var sender = try r.spawn(sendSignal, .{r}, .{});
+            var sender = try r.spawn(sendSignal, .{r});
             defer sender.cancel(r);
 
             // Signal should win (arrives much sooner)
@@ -659,7 +659,7 @@ test "Signal: select with signal and task" {
     };
 
     var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt }, .{});
+    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
     try std.testing.expectEqual(.signal, ctx.winner);

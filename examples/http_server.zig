@@ -58,24 +58,24 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
         if (!request.head.keep_alive) break;
     }
 
-    std.log.info("HTTP client disconnected", .{});
+    std.log.info("HTTP client disconnected");
 }
 
 fn serverTask(rt: *zio.Runtime) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
-    const server = try addr.listen(rt, .{});
+    const server = try addr.listen(rt);
     defer server.close(rt);
 
     std.log.info("HTTP server listening on {f}", .{server.socket.address});
     std.log.info("Visit http://{f} in your browser", .{server.socket.address});
-    std.log.info("Press Ctrl+C to stop the server", .{});
+    std.log.info("Press Ctrl+C to stop the server");
 
     while (true) {
         const stream = try server.accept(rt);
         errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
+        var task = try rt.spawn(handleClient, .{ rt, stream });
         task.detach(rt);
     }
 }
@@ -85,9 +85,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{});
+    var runtime = try zio.Runtime.init(allocator);
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(serverTask, .{runtime}, .{});
+    var handle = try runtime.spawn(serverTask, .{runtime});
     try handle.join(runtime);
 }

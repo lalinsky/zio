@@ -17,7 +17,7 @@ If you configure the runtime, you can also run tasks on multiple CPU threads, al
 Tasks are created using the [`spawn()`](/zio/apidocs/#zio.runtime.Runtime.spawn) method on the runtime. The basic syntax is:
 
 ```zig
-var task = try rt.spawn(taskFunction, .{ arg1, arg2 }, .{});
+var task = try rt.spawn(taskFunction, .{ arg1, arg2 });
 ```
 
 The `spawn()` method takes three parameters:
@@ -39,7 +39,7 @@ You should use [`join()`](/zio/apidocs/#zio.runtime.JoinHandle.join) to wait on 
 In the simplest case, you would do something like this:
 
 ```zig
-var task = try rt.spawn(myTask, .{}, .{});
+var task = try rt.spawn(myTask);
 task.join();
 ```
 
@@ -50,7 +50,7 @@ fn sum(a: i32, b: i32) i32 {
     return a + b;
 }
 
-const task = try rt.spawn(sum, .{ 1, 2 }, .{});
+const task = try rt.spawn(sum, .{ 1, 2 });
 const result = rt.join(rt);
 
 std.debug.assert(result == 3);
@@ -64,7 +64,7 @@ fn divide(a: i32, b: i32) !i32 {
     return a / b;
 }
 
-const task = try rt.spawn(divide, .{ 4, 2 }, .{});
+const task = try rt.spawn(divide, .{ 4, 2 });
 const result = try rt.join(rt); // using `try` here to catch the error
 
 std.debug.assert(result == 2);
@@ -99,7 +99,7 @@ fn myTask(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     }
 }
 
-var task = try rt.spawn(myTask, .{ rt, stream }, .{});
+var task = try rt.spawn(myTask, .{ rt, stream });
 
 // Later, cancel the task
 task.cancel(rt);
@@ -108,7 +108,7 @@ task.cancel(rt);
 You can safely call `cancel()` after successful `join()`, so this pattern becomes very common to clean up task resources:
 
 ```zig
-var task = try rt.spawn(myTask, .{ rt, stream }, .{});
+var task = try rt.spawn(myTask, .{ rt, stream });
 defer task.cancel(rt);
 
 // Do some other work that can fail
@@ -122,7 +122,7 @@ You can also start a task and let it run in the background. This is useful, for 
 to handle each connection in a separate task. You can do this using the [`detach()`](/zio/apidocs/#zio.runtime.JoinHandle.detach) method:
 
 ```zig
-var task = try rt.spawn(connectionHandler, .{ rt, stream }, .{});
+var task = try rt.spawn(connectionHandler, .{ rt, stream });
 task.detach(rt);
 ```
 

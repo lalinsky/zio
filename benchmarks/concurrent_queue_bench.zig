@@ -123,15 +123,15 @@ fn runBenchmark(comptime name: []const u8, allocator: std.mem.Allocator, comptim
     const ops_per_sec = @as(f64, @floatFromInt(num_operations)) / (@as(f64, @floatFromInt(avg)) / 1_000_000_000.0);
 
     std.debug.print("{s}:\n", .{name});
-    std.debug.print("  Avg: ", .{});
+    std.debug.print("  Avg: ");
     formatNs(avg);
     std.debug.print(" ({d:.0} ops/sec)\n", .{ops_per_sec});
-    std.debug.print("  Min: ", .{});
+    std.debug.print("  Min: ");
     formatNs(min);
-    std.debug.print("\n", .{});
-    std.debug.print("  Max: ", .{});
+    std.debug.print("\n");
+    std.debug.print("  Max: ");
     formatNs(max);
-    std.debug.print("\n\n", .{});
+    std.debug.print("\n\n");
 }
 
 fn runConcurrentBenchmark(comptime name: []const u8, allocator: std.mem.Allocator, comptime bench_fn: fn (std.mem.Allocator, usize, usize) anyerror!u64, num_threads: usize, ops_per_thread: usize, iterations: usize) !void {
@@ -151,15 +151,15 @@ fn runConcurrentBenchmark(comptime name: []const u8, allocator: std.mem.Allocato
     const ops_per_sec = @as(f64, @floatFromInt(total_ops)) / (@as(f64, @floatFromInt(avg)) / 1_000_000_000.0);
 
     std.debug.print("{s}:\n", .{name});
-    std.debug.print("  Avg: ", .{});
+    std.debug.print("  Avg: ");
     formatNs(avg);
     std.debug.print(" ({d:.0} ops/sec)\n", .{ops_per_sec});
-    std.debug.print("  Min: ", .{});
+    std.debug.print("  Min: ");
     formatNs(min);
-    std.debug.print("\n", .{});
-    std.debug.print("  Max: ", .{});
+    std.debug.print("\n");
+    std.debug.print("  Max: ");
     formatNs(max);
-    std.debug.print("\n\n", .{});
+    std.debug.print("\n\n");
 }
 
 pub fn main() !void {
@@ -167,13 +167,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const runtime = try Runtime.init(allocator, .{});
+    const runtime = try Runtime.init(allocator);
     defer runtime.deinit();
 
     const num_operations = 10_000;
     const iterations = 100;
 
-    std.debug.print("=== WaitQueue Benchmark ===\n\n", .{});
+    std.debug.print("=== WaitQueue Benchmark ===\n\n");
     std.debug.print("Queue size: {d} bytes\n", .{@sizeOf(WaitQueue(StandardNode))});
     std.debug.print("Node size:  {d} bytes\n\n", .{@sizeOf(StandardNode)});
 

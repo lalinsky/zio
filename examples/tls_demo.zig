@@ -5,18 +5,18 @@ const std = @import("std");
 const zio = @import("zio");
 
 fn runTlsTask(rt: *zio.Runtime) !void {
-    std.log.info("Starting TLS connection...", .{});
+    std.log.info("Starting TLS connection...");
 
     // Connect to httpbin.org (reliable HTTPS API)
     // TODO: Add DNS resolution support instead of hardcoded IP address
     const addr = try zio.net.IpAddress.parseIp4("52.2.107.230", 443); // httpbin.org
-    std.log.info("Attempting TCP connection to httpbin.org:443...", .{});
+    std.log.info("Attempting TCP connection to httpbin.org:443...");
 
     var stream = try addr.connect(rt);
     defer stream.close(rt);
 
-    std.log.info("TCP connected to httpbin.org:443 successfully!", .{});
-    std.log.info("Starting TLS handshake...", .{});
+    std.log.info("TCP connected to httpbin.org:443 successfully!");
+    std.log.info("Starting TLS handshake...");
 
     // Create buffers for TCP stream I/O
     var tcp_read_buffer: [32 * 1024]u8 = undefined;
@@ -40,12 +40,12 @@ fn runTlsTask(rt: *zio.Runtime) !void {
         return;
     };
 
-    std.log.info("TLS handshake completed successfully!", .{});
+    std.log.info("TLS handshake completed successfully!");
 
     // Send HTTPS request
     const request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: zio.tls-demo\r\nConnection: close\r\n\r\n";
 
-    std.log.info("Sending HTTPS request...", .{});
+    std.log.info("Sending HTTPS request...");
     try tls_client.writer.writeAll(request);
     // Need to flush both TLS layer (encrypts data to TCP buffer) and TCP layer (sends over network)
     try tls_client.writer.flush();
@@ -58,7 +58,7 @@ fn runTlsTask(rt: *zio.Runtime) !void {
     std.log.info("Received {} bytes over TLS", .{bytes_read});
 
     // Print first part of response
-    std.log.info("HTTPS Response:", .{});
+    std.log.info("HTTPS Response:");
     std.log.info("{s}", .{buffer[0..@min(500, bytes_read)]});
 }
 
@@ -67,10 +67,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{});
+    var runtime = try zio.Runtime.init(allocator);
     defer runtime.deinit();
 
-    var tls_task = try runtime.spawn(runTlsTask, .{runtime}, .{});
+    var tls_task = try runtime.spawn(runTlsTask, .{runtime});
     defer tls_task.cancel(runtime);
 
     try runtime.run();

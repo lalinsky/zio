@@ -6,7 +6,6 @@ const std = @import("std");
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
-pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
 
 // Re-export timeout functionality

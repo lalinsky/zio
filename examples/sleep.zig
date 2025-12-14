@@ -6,7 +6,7 @@ const zio = @import("zio");
 
 fn sleepTask(rt: *zio.Runtime) !void {
     for (0..10) |_| {
-        std.log.info("Sleeping...", .{});
+        std.log.info("Sleeping...");
         try rt.sleep(1000);
     }
 }
@@ -16,9 +16,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{});
+    var runtime = try zio.Runtime.init(allocator);
     defer runtime.deinit();
 
-    var task = try runtime.spawn(sleepTask, .{runtime}, .{});
+    var task = try runtime.spawn(sleepTask, .{runtime});
     try task.join(runtime);
 }

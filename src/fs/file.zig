@@ -322,12 +322,12 @@ pub const FileWriter = struct {
 test "File: basic read and write" {
     const fs = @import("../fs.zig");
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const dir = fs.cwd();
     const file_path = "test_file_basic.txt";
-    var zio_file = try dir.createFile(rt, file_path, .{});
+    var zio_file = try dir.createFile(rt, file_path);
 
     // Write test
     const write_data = "Hello, zio!";
@@ -351,7 +351,7 @@ test "File: basic read and write" {
 test "File: positional read and write" {
     const fs = @import("../fs.zig");
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const dir = fs.cwd();
@@ -381,12 +381,12 @@ test "File: positional read and write" {
 test "File: close operation" {
     const fs = @import("../fs.zig");
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const dir = fs.cwd();
     const file_path = "test_file_close.txt";
-    var zio_file = try dir.createFile(rt, file_path, .{});
+    var zio_file = try dir.createFile(rt, file_path);
 
     // Write some data
     const bytes_written = try zio_file.write(rt, "test data", 0);
@@ -401,7 +401,7 @@ test "File: close operation" {
 test "File: reader and writer interface" {
     const fs = @import("../fs.zig");
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator);
     defer rt.deinit();
 
     const dir = fs.cwd();
@@ -409,7 +409,7 @@ test "File: reader and writer interface" {
 
     // Write using writer interface
     {
-        var file = try dir.createFile(rt, file_path, .{});
+        var file = try dir.createFile(rt, file_path);
 
         var write_buffer: [256]u8 = undefined;
         var writer = file.writer(rt, &write_buffer);
@@ -424,7 +424,7 @@ test "File: reader and writer interface" {
 
     // Read using reader interface
     {
-        var file = try dir.openFile(rt, file_path, .{});
+        var file = try dir.openFile(rt, file_path);
 
         var read_buffer: [256]u8 = undefined;
         var reader = file.reader(rt, &read_buffer);

@@ -15,13 +15,13 @@ test "fs: openFile and createFile with different modes" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const rt = try Runtime.init(allocator, .{});
+    const rt = try Runtime.init(allocator);
     defer rt.deinit();
 
     const dir = cwd();
     const file_path = "test_fs_demo.txt";
 
-    var file = try dir.createFile(rt, file_path, .{});
+    var file = try dir.createFile(rt, file_path);
 
     const write_data = "Hello, zio fs!";
     _ = try file.write(rt, write_data, 0);

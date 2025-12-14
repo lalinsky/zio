@@ -6,7 +6,7 @@ const print = std.debug.print;
 const zio = @import("zio");
 
 fn clientTask(rt: *zio.Runtime) !void {
-    std.log.info("Connecting to 127.0.0.1:8080...", .{});
+    std.log.info("Connecting to 127.0.0.1:8080...");
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
     var stream = try addr.connect(rt);
     defer stream.close(rt);
@@ -43,7 +43,7 @@ pub fn main() !void {
     });
     defer runtime.deinit();
 
-    var task = try runtime.spawn(clientTask, .{runtime}, .{});
+    var task = try runtime.spawn(clientTask, .{runtime});
     defer task.cancel(runtime);
 
     try runtime.run();
