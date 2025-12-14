@@ -881,24 +881,20 @@ test "Io: now and sleep" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn mainTask(io: std.Io) !void {
-            // Get current time
-            const t1 = try std.Io.Clock.now(.awake, io);
+    const io = rt.io();
 
-            // Sleep for 10ms
-            try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    // Get current time
+    const t1 = try std.Io.Clock.now(.awake, io);
 
-            // Get time after sleep
-            const t2 = try std.Io.Clock.now(.awake, io);
+    // Sleep for 10ms
+    try io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
 
-            // Verify time moved forward
-            const elapsed = t1.durationTo(t2);
-            try std.testing.expect(elapsed.nanoseconds >= 10 * std.time.ns_per_ms);
-        }
-    };
+    // Get time after sleep
+    const t2 = try std.Io.Clock.now(.awake, io);
 
-    try rt.runUntilComplete(TestContext.mainTask, .{rt.io()}, .{});
+    // Verify time moved forward
+    const elapsed = t1.durationTo(t2);
+    try std.testing.expect(elapsed.nanoseconds >= 10 * std.time.ns_per_ms);
 }
 
 test "Io: realtime clock" {
