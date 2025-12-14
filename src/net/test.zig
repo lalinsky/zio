@@ -163,7 +163,7 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const Test = struct {
         pub fn mainFn(rt: *Runtime, server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
-            const socket = try server_addr_inner.bind(rt);
+            const socket = try server_addr_inner.bind(rt, .{});
             defer socket.close(rt);
 
             var server_task = try rt.spawn(serverFn, .{ rt, socket }, .{});
@@ -187,7 +187,7 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
         }
 
         pub fn clientFn(rt: *Runtime, server_socket: Socket, client_addr_inner: @TypeOf(client_addr)) !void {
-            const client_socket = try client_addr_inner.bind(rt);
+            const client_socket = try client_addr_inner.bind(rt, .{});
             defer client_socket.close(rt);
 
             const test_data = "hello";

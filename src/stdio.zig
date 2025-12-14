@@ -585,10 +585,10 @@ fn netAcceptImpl(userdata: ?*anyopaque, server: std.Io.net.Socket.Handle) std.Io
 }
 
 fn netBindIpImpl(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.BindOptions) std.Io.net.IpAddress.BindError!std.Io.net.Socket {
-    _ = options; // No options used in zio yet
+    _ = options; // std.Io BindOptions don't include reuse_address, use zio API directly for that
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
     const zio_addr = stdIoIpToZio(address.*);
-    const socket = zio_net.netBindIp(rt, zio_addr) catch |err| switch (err) {
+    const socket = zio_net.netBindIp(rt, zio_addr, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
