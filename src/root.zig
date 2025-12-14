@@ -3,6 +3,8 @@ pub const Closure = @import("coroutines.zig").Closure;
 
 pub const Context = @import("coroutines.zig").Context;
 pub const switchContext = @import("coroutines.zig").switchContext;
+pub const setupContext = @import("coroutines.zig").setupContext;
+pub const EntryPointFn = @import("coroutines.zig").EntryPointFn;
 
 pub const StackInfo = @import("stack.zig").StackInfo;
 pub const stackAlloc = @import("stack.zig").stackAlloc;
