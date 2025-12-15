@@ -133,6 +133,22 @@ pub const File = struct {
         _ = op.getResult() catch {};
     }
 
+    pub const StatError = aio.system.fs.FileStatError || Cancelable;
+
+    pub fn stat(self: File, rt: *Runtime) StatError!aio.system.fs.FileStatInfo {
+        const task = rt.getCurrentTask();
+        const executor = task.getExecutor();
+
+        var op = aio.FileStat.init(self.fd, null);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
+    }
+
     pub fn reader(self: File, rt: *Runtime, buffer: []u8) FileReader {
         return FileReader.init(self, rt, buffer);
     }
