@@ -1659,25 +1659,28 @@ test "Io: File stat" {
     file.close(io);
 }
 
-test "Io: Dir stat" {
+test "Io: Dir stat (via statPath)" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const io = rt.io();
     const cwd = std.Io.Dir.cwd();
 
-    // Get current directory stats using statPath with "."
-    // Note: Cannot use cwd.stat() directly because cwd() returns a special handle
-    // (AT_FDCWD on POSIX, PEB handle on Windows) that doesn't support fstat
-    const stat = try cwd.statPath(io, ".", .{});
+    // Create a temporary directory using std.fs (std.Io doesn't have dirMake yet)
+    const dir_path = "test_stdio_dir_stat_tmp";
+    try std.fs.cwd().makeDir(dir_path);
+    defer std.fs.cwd().deleteDir(dir_path) catch {};
+
+    // Stat the directory via statPath
+    const dir_stat = try cwd.statPath(io, dir_path, .{});
 
     // Verify it's a directory
-    try std.testing.expectEqual(std.Io.File.Kind.directory, stat.kind);
+    try std.testing.expectEqual(std.Io.File.Kind.directory, dir_stat.kind);
 
     // Check that timestamps are reasonable
-    try std.testing.expect(stat.mtime.nanoseconds > 0);
-    try std.testing.expect(stat.atime.nanoseconds > 0);
-    try std.testing.expect(stat.ctime.nanoseconds > 0);
+    try std.testing.expect(dir_stat.mtime.nanoseconds > 0);
+    try std.testing.expect(dir_stat.atime.nanoseconds > 0);
+    try std.testing.expect(dir_stat.ctime.nanoseconds > 0);
 }
 
 test "Io: Dir statPath" {
