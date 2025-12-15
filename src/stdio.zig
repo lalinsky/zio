@@ -1666,8 +1666,10 @@ test "Io: Dir stat" {
     const io = rt.io();
     const cwd = std.Io.Dir.cwd();
 
-    // Get directory stats
-    const stat = try cwd.stat(io);
+    // Get current directory stats using statPath with "."
+    // Note: Cannot use cwd.stat() directly because cwd() returns a special handle
+    // (AT_FDCWD on POSIX, PEB handle on Windows) that doesn't support fstat
+    const stat = try cwd.statPath(io, ".", .{});
 
     // Verify it's a directory
     try std.testing.expectEqual(std.Io.File.Kind.directory, stat.kind);
