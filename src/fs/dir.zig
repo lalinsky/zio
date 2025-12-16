@@ -2,6 +2,7 @@ const std = @import("std");
 const aio = @import("aio");
 const Runtime = @import("../runtime.zig").Runtime;
 const File = @import("file.zig").File;
+const Cancelable = @import("../common.zig").Cancelable;
 const waitForIo = @import("../io.zig").waitForIo;
 const genericCallback = @import("../io.zig").genericCallback;
 
@@ -69,5 +70,35 @@ pub const Dir = struct {
         try waitForIo(rt, &op.c);
 
         try op.getResult();
+    }
+
+    pub const StatError = aio.system.fs.FileStatError || Cancelable;
+
+    pub fn stat(self: Dir, rt: *Runtime) StatError!aio.system.fs.FileStatInfo {
+        const task = rt.getCurrentTask();
+        const executor = task.getExecutor();
+
+        var op = aio.FileStat.init(self.fd, null);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
+    }
+
+    pub fn statPath(self: Dir, rt: *Runtime, path: []const u8) StatError!aio.system.fs.FileStatInfo {
+        const task = rt.getCurrentTask();
+        const executor = task.getExecutor();
+
+        var op = aio.FileStat.init(self.fd, path);
+        op.c.userdata = task;
+        op.c.callback = genericCallback;
+
+        executor.loop.add(&op.c);
+        try waitForIo(rt, &op.c);
+
+        return try op.getResult();
     }
 };
