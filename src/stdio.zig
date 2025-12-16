@@ -298,17 +298,41 @@ fn dirMakeOpenPathImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const
 }
 
 fn dirStatImpl(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-    _ = userdata;
-    _ = dir;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_dir = zio_dir_io.Dir{ .fd = dir.handle };
+
+    const aio_stat = zio_dir.stat(rt) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.AccessDenied => return error.AccessDenied,
+        error.SystemResources => return error.SystemResources,
+        else => return error.Unexpected,
+    };
+
+    return aioFileStatToStdIo(aio_stat);
 }
 
 fn dirStatPathImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatPathOptions) std.Io.Dir.StatPathError!std.Io.File.Stat {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = options;
-    @panic("TODO");
+    // StatPathOptions only has follow_symlinks, which is the default behavior for fstatat
+    // We don't support not following symlinks yet
+    if (!options.follow_symlinks) {
+        return error.Unexpected;
+    }
+
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_dir = zio_dir_io.Dir{ .fd = dir.handle };
+
+    const aio_stat = zio_dir.statPath(rt, sub_path) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.AccessDenied => return error.AccessDenied,
+        error.SymLinkLoop => return error.SymLinkLoop,
+        error.FileNotFound => return error.FileNotFound,
+        error.NameTooLong => return error.NameTooLong,
+        error.NotDir => return error.NotDir,
+        error.SystemResources => return error.SystemResources,
+        else => return error.Unexpected,
+    };
+
+    return aioFileStatToStdIo(aio_stat);
 }
 
 fn dirAccessImpl(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
@@ -422,10 +446,44 @@ fn dirCloseImpl(userdata: ?*anyopaque, dir: std.Io.Dir) void {
     @panic("TODO");
 }
 
+fn aioFileStatToStdIo(aio_stat: aio.system.fs.FileStatInfo) std.Io.File.Stat {
+    const kind: std.Io.File.Kind = switch (aio_stat.kind) {
+        .block_device => .block_device,
+        .character_device => .character_device,
+        .directory => .directory,
+        .named_pipe => .named_pipe,
+        .sym_link => .sym_link,
+        .file => .file,
+        .unix_domain_socket => .unix_domain_socket,
+        .whiteout => .whiteout,
+        .door => .door,
+        .event_port => .event_port,
+        .unknown => .unknown,
+    };
+
+    return .{
+        .inode = aio_stat.inode,
+        .size = aio_stat.size,
+        .mode = aio_stat.mode,
+        .kind = kind,
+        .atime = .{ .nanoseconds = aio_stat.atime },
+        .mtime = .{ .nanoseconds = aio_stat.mtime },
+        .ctime = .{ .nanoseconds = aio_stat.ctime },
+    };
+}
+
 fn fileStatImpl(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-    _ = userdata;
-    _ = file;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_file = zio_file_io.File.fromFd(file.handle);
+
+    const aio_stat = zio_file.stat(rt) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.AccessDenied => return error.AccessDenied,
+        error.SystemResources => return error.SystemResources,
+        else => return error.Unexpected,
+    };
+
+    return aioFileStatToStdIo(aio_stat);
 }
 
 fn fileCloseImpl(userdata: ?*anyopaque, file: std.Io.File) void {
@@ -1568,4 +1626,89 @@ test "Io: Dir createFile/openFile" {
     const bytes_read = try opened_file.readPositional(io, &read_slices, 0);
 
     try std.testing.expectEqualStrings("hello world", read_buf[0..bytes_read]);
+}
+
+test "Io: File stat" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const file_path = "test_stdio_file_stat.txt";
+    const cwd = std.Io.Dir.cwd();
+
+    // Create a file with known content
+    const file = try cwd.createFile(io, file_path, .{});
+    defer std.fs.cwd().deleteFile(file_path) catch {};
+
+    const test_data = "Hello, file stat!";
+    var write_buf = [_][]const u8{test_data};
+    _ = try file.writePositional(io, &write_buf, 0);
+
+    // Get file stats
+    const stat = try file.stat(io);
+
+    // Verify the stats
+    try std.testing.expectEqual(@as(u64, test_data.len), stat.size);
+    try std.testing.expectEqual(std.Io.File.Kind.file, stat.kind);
+
+    // Check that timestamps are reasonable (not zero, not in the far future)
+    try std.testing.expect(stat.mtime.nanoseconds > 0);
+    try std.testing.expect(stat.atime.nanoseconds > 0);
+    try std.testing.expect(stat.ctime.nanoseconds > 0);
+
+    file.close(io);
+}
+
+test "Io: Dir stat (via statPath)" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = std.Io.Dir.cwd();
+
+    // Create a temporary directory using std.fs (std.Io doesn't have dirMake yet)
+    const dir_path = "test_stdio_dir_stat_tmp";
+    try std.fs.cwd().makeDir(dir_path);
+    defer std.fs.cwd().deleteDir(dir_path) catch {};
+
+    // Stat the directory via statPath
+    const dir_stat = try cwd.statPath(io, dir_path, .{});
+
+    // Verify it's a directory
+    try std.testing.expectEqual(std.Io.File.Kind.directory, dir_stat.kind);
+
+    // Check that timestamps are reasonable
+    try std.testing.expect(dir_stat.mtime.nanoseconds > 0);
+    try std.testing.expect(dir_stat.atime.nanoseconds > 0);
+    try std.testing.expect(dir_stat.ctime.nanoseconds > 0);
+}
+
+test "Io: Dir statPath" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const file_path = "test_stdio_dir_stat_path.txt";
+    const cwd = std.Io.Dir.cwd();
+
+    // Create a file with known content
+    const file = try cwd.createFile(io, file_path, .{});
+    defer std.fs.cwd().deleteFile(file_path) catch {};
+
+    const test_data = "Hello, stat path!";
+    var write_buf = [_][]const u8{test_data};
+    _ = try file.writePositional(io, &write_buf, 0);
+    file.close(io);
+
+    // Get file stats via path
+    const stat = try cwd.statPath(io, file_path, .{});
+
+    // Verify the stats
+    try std.testing.expectEqual(@as(u64, test_data.len), stat.size);
+    try std.testing.expectEqual(std.Io.File.Kind.file, stat.kind);
+
+    // Check that timestamps are reasonable
+    try std.testing.expect(stat.mtime.nanoseconds > 0);
+    try std.testing.expect(stat.atime.nanoseconds > 0);
+    try std.testing.expect(stat.ctime.nanoseconds > 0);
 }
