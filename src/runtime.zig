@@ -555,6 +555,14 @@ pub const Executor = struct {
                         // Mark awaitable as complete and wake all waiters
                         current_awaitable.markComplete();
 
+                        // For group tasks, remove from group list and release group's reference
+                        // Only release if we successfully removed it (groupCancel might have popped it first)
+                        if (current_awaitable.group_node.group) |group| {
+                            if (group.getTaskList().remove(&current_awaitable.group_node)) {
+                                self.runtime.releaseAwaitable(current_awaitable, false);
+                            }
+                        }
+
                         // Release runtime's reference and check for shutdown
                         self.runtime.releaseAwaitable(current_awaitable, true);
                     }
