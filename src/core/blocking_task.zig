@@ -93,6 +93,15 @@ fn completionCallback(
     // Even if canceled, we still mark as complete so waiters wake up
     any_blocking_task.awaitable.markComplete();
 
+    // For group tasks, remove from group list and release group's reference
+    // Only release if we successfully removed it (groupCancel might have popped it first)
+    if (any_blocking_task.awaitable.group_node.group) |group| {
+        if (group.getTaskList().remove(&any_blocking_task.awaitable.group_node)) {
+            const runtime = any_blocking_task.runtime;
+            runtime.releaseAwaitable(&any_blocking_task.awaitable, false);
+        }
+    }
+
     // Release the blocking task's reference and check for shutdown
     const runtime = any_blocking_task.runtime;
     runtime.releaseAwaitable(&any_blocking_task.awaitable, true);
