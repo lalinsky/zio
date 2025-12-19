@@ -38,6 +38,8 @@ const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
+const DirOpen = @import("../completion.zig").DirOpen;
+const DirClose = @import("../completion.zig").DirClose;
 
 pub const NetHandle = net.fd_t;
 
@@ -54,6 +56,8 @@ pub const capabilities: BackendCapabilities = .{
     .file_delete = true,
     .file_size = true,
     .file_stat = true,
+    .dir_open = true,
+    .dir_close = true,
 };
 
 pub const SharedState = struct {};
@@ -97,6 +101,10 @@ pub const FileSizeData = struct {
 
 pub const FileStatData = struct {
     statx: linux.Statx = std.mem.zeroes(linux.Statx),
+    path: [:0]const u8 = "",
+};
+
+pub const DirOpenData = struct {
     path: [:0]const u8 = "",
 };
 
@@ -506,6 +514,48 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 sqe.user_data = @intFromPtr(c);
             }
         },
+
+        .dir_open => {
+            const data = c.cast(DirOpen);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for dir_open", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            var flags = linux.O{
+                .ACCMODE = .RDONLY,
+                .DIRECTORY = true,
+                .CLOEXEC = true,
+                .NOFOLLOW = !data.flags.follow_symlinks,
+            };
+            // On Linux, O_PATH can be used to open a directory descriptor without read permission
+            // but only if we don't plan to iterate it
+            if (!data.flags.iterate) {
+                flags.PATH = true;
+            }
+            sqe.prep_openat(data.dir, path, flags, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+
+        .dir_close => {
+            const data = c.cast(DirClose);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for dir_close", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_close(data.handle);
+            sqe.user_data = @intFromPtr(c);
+        },
     }
 }
 
@@ -812,6 +862,24 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileStatError(@enumFromInt(-res)));
             } else {
                 c.setResult(.file_stat, statxToFileStat(data.internal.statx));
+            }
+        },
+
+        .dir_open => {
+            const data = c.cast(DirOpen);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.dir_open, res);
+            }
+        },
+
+        .dir_close => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.dir_close, {});
             }
         },
     }

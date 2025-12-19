@@ -19,6 +19,8 @@ pub const BackendCapabilities = struct {
     file_delete: bool = false,
     file_size: bool = false,
     file_stat: bool = false,
+    dir_open: bool = false,
+    dir_close: bool = false,
 
     pub fn supportsNonBlockingFileIo(comptime self: BackendCapabilities) bool {
         return self.file_read or self.file_write;
@@ -52,6 +54,8 @@ pub const Op = enum {
     file_delete,
     file_size,
     file_stat,
+    dir_open,
+    dir_close,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -82,6 +86,8 @@ pub const Op = enum {
             .file_delete => FileDelete,
             .file_size => FileSize,
             .file_stat => FileStat,
+            .dir_open => DirOpen,
+            .dir_close => DirClose,
         };
     }
 
@@ -114,6 +120,8 @@ pub const Op = enum {
             FileDelete => .file_delete,
             FileSize => .file_size,
             FileStat => .file_stat,
+            DirOpen => .dir_open,
+            DirClose => .dir_close,
             else => @compileError("unknown completion type"),
         };
     }
@@ -866,6 +874,56 @@ pub const FileStat = struct {
 
     pub fn getResult(self: *const FileStat) Error!fs.FileStatInfo {
         return self.c.getResult(.file_stat);
+    }
+};
+
+pub const DirOpen = struct {
+    c: Completion,
+    result_private_do_not_touch: fs.fd_t = undefined,
+    internal: switch (Backend.capabilities.dir_open) {
+        true => if (@hasDecl(Backend, "DirOpenData")) Backend.DirOpenData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    flags: fs.DirOpenFlags,
+
+    pub const Error = fs.FileOpenError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, flags: fs.DirOpenFlags) DirOpen {
+        return .{
+            .c = .init(.dir_open),
+            .dir = dir,
+            .path = path,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const DirOpen) Error!fs.fd_t {
+        return self.c.getResult(.dir_open);
+    }
+};
+
+pub const DirClose = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_close) {
+        true => if (@hasDecl(Backend, "DirCloseData")) Backend.DirCloseData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+
+    pub const Error = Cancelable;
+
+    pub fn init(handle: fs.fd_t) DirClose {
+        return .{
+            .c = .init(.dir_close),
+            .handle = handle,
+        };
+    }
+
+    pub fn getResult(self: *const DirClose) Error!void {
+        return self.c.getResult(.dir_close);
     }
 };
 

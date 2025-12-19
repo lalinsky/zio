@@ -40,6 +40,8 @@ pub const FileRename = completion.FileRename;
 pub const FileDelete = completion.FileDelete;
 pub const FileSize = completion.FileSize;
 pub const FileStat = completion.FileStat;
+pub const DirOpen = completion.DirOpen;
+pub const DirClose = completion.DirClose;
 
 /// Low level system APIs
 pub const system = @import("system.zig");

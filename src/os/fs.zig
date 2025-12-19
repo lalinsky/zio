@@ -54,6 +54,13 @@ pub const FileOpenFlags = struct {
     nonblocking: bool = false,
 };
 
+pub const DirOpenFlags = struct {
+    /// Whether to follow symlinks when opening the directory
+    follow_symlinks: bool = true,
+    /// Whether the directory will be iterated (affects O_PATH optimization on Linux)
+    iterate: bool = false,
+};
+
 pub const FileCreateFlags = struct {
     read: bool = false,
     truncate: bool = false,
@@ -247,6 +254,73 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         },
         .CLOEXEC = true,
     };
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    while (true) {
+        const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToFileOpenError(err),
+        }
+    }
+}
+
+/// Open a directory using openat() syscall
+pub fn opendirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) FileOpenError!fd_t {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        // Convert path to UTF-16 with proper prefixing and directory handling
+        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.BadPathName,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            else => error.Unexpected,
+        };
+
+        const access_mask: w.DWORD = w.GENERIC_READ;
+
+        // FILE_FLAG_BACKUP_SEMANTICS is required to open directory handles
+        const file_flags: w.DWORD = w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS;
+
+        const handle = w2.CreateFileW(
+            path_w.span().ptr,
+            access_mask,
+            w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
+            null,
+            w.OPEN_EXISTING,
+            file_flags,
+            null,
+        );
+
+        if (handle == w.INVALID_HANDLE_VALUE) {
+            return switch (w2.GetLastError()) {
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .PATH_NOT_FOUND => error.FileNotFound,
+                .ACCESS_DENIED => error.AccessDenied,
+                else => |err| return unexpectedError(err),
+            };
+        }
+
+        return handle;
+    }
+
+    var open_flags: posix.system.O = .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .CLOEXEC = true,
+        .NOFOLLOW = !flags.follow_symlinks,
+    };
+
+    // On Linux, O_PATH can be used to open a directory descriptor without read permission
+    // but only if we don't plan to iterate it
+    if (@hasField(posix.system.O, "PATH") and !flags.iterate) {
+        open_flags.PATH = true;
+    }
 
     const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
     defer allocator.free(path_z);

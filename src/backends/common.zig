@@ -17,6 +17,8 @@ const FileRename = @import("../completion.zig").FileRename;
 const FileDelete = @import("../completion.zig").FileDelete;
 const FileSize = @import("../completion.zig").FileSize;
 const FileStat = @import("../completion.zig").FileStat;
+const DirOpen = @import("../completion.zig").DirOpen;
+const DirClose = @import("../completion.zig").DirClose;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 
@@ -285,4 +287,38 @@ pub fn fileStatWork(work: *Work) void {
     const internal: *@FieldType(FileStat, "internal") = @fieldParentPtr("work", work);
     const file_stat: *FileStat = @fieldParentPtr("internal", internal);
     handleFileStat(&file_stat.c, file_stat.internal.allocator);
+}
+
+/// Helper to handle directory open operation
+pub fn handleDirOpen(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirOpen);
+    if (fs.opendirat(allocator, data.dir, data.path, data.flags)) |fd| {
+        c.setResult(.dir_open, fd);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirOpen - performs blocking openat() syscall
+pub fn dirOpenWork(work: *Work) void {
+    const internal: *@FieldType(DirOpen, "internal") = @fieldParentPtr("work", work);
+    const dir_open: *DirOpen = @fieldParentPtr("internal", internal);
+    handleDirOpen(&dir_open.c, dir_open.internal.allocator);
+}
+
+/// Helper to handle directory close operation
+pub fn handleDirClose(c: *Completion) void {
+    const data = c.cast(DirClose);
+    if (fs.close(data.handle)) |_| {
+        c.setResult(.dir_close, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirClose - performs blocking close() syscall
+pub fn dirCloseWork(work: *Work) void {
+    const internal: *@FieldType(DirClose, "internal") = @fieldParentPtr("work", work);
+    const dir_close: *DirClose = @fieldParentPtr("internal", internal);
+    handleDirClose(&dir_close.c);
 }

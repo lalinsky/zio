@@ -18,6 +18,9 @@ const FileSync = @import("completion.zig").FileSync;
 const FileRename = @import("completion.zig").FileRename;
 const FileDelete = @import("completion.zig").FileDelete;
 const FileSize = @import("completion.zig").FileSize;
+const FileStat = @import("completion.zig").FileStat;
+const DirOpen = @import("completion.zig").DirOpen;
+const DirClose = @import("completion.zig").DirClose;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const time = @import("os/time.zig");
 const net = @import("os/net.zig");
@@ -478,7 +481,7 @@ pub const Loop = struct {
                 // Regular backend operation
                 // Route file operations to thread pool for backends without native support
                 switch (completion.op) {
-                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat => |op| {
+                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat, .dir_open, .dir_close => |op| {
                         if (!@field(Backend.capabilities, @tagName(op))) {
                             self.submitFileOpToThreadPool(completion);
                             return;
@@ -581,7 +584,7 @@ pub const Loop = struct {
         self.state.active += 1;
 
         switch (completion.op) {
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat, .dir_open, .dir_close => |op| {
                 if (@field(Backend.capabilities, @tagName(op))) {
                     unreachable;
                 }
@@ -597,6 +600,8 @@ pub const Loop = struct {
                     .file_delete => common.fileDeleteWork,
                     .file_size => common.fileSizeWork,
                     .file_stat => common.fileStatWork,
+                    .dir_open => common.dirOpenWork,
+                    .dir_close => common.dirCloseWork,
                     else => unreachable,
                 };
 
