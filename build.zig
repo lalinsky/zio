@@ -33,6 +33,15 @@ pub fn build(b: *std.Build) void {
     zio.addImport("aio", aio.module("aio"));
     zio.addImport("coro", coro.module("coro"));
 
+    // Only use stdx backport for Zig < 0.16
+    if (@import("builtin").zig_version.order(.{ .major = 0, .minor = 16, .patch = 0 }) == .lt) {
+        const stdx_dep = b.dependency("stdx", .{
+            .target = target,
+            .optimize = optimize,
+        });
+        zio.addImport("stdx", stdx_dep.module("stdx"));
+    }
+
     const zio_lib = b.addLibrary(.{
         .name = "zio",
         .root_module = zio,
@@ -53,6 +62,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]struct { name: []const u8, file: []const u8 }{
         .{ .name = "sleep", .file = "examples/sleep.zig" },
         .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
+        .{ .name = "tcp-echo-server-stdio", .file = "examples/tcp_echo_server_stdio.zig" },
         .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
         .{ .name = "http-server", .file = "examples/http_server.zig" },
         .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },
