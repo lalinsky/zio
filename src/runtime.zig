@@ -31,6 +31,7 @@ const Timeout = @import("core/timeout.zig").Timeout;
 
 const select = @import("select.zig");
 const stdio = @import("stdio.zig");
+const Io = @import("zio.zig").Io;
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -1134,17 +1135,11 @@ pub const Runtime = struct {
         self.thread_pool.stop();
     }
 
-    pub fn io(self: *Runtime) std.Io {
-        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            @panic("std.Io requires Zig 0.16 or later");
-        }
+    pub fn io(self: *Runtime) Io {
         return stdio.fromRuntime(self);
     }
 
-    pub fn fromIo(io_: std.Io) *Runtime {
-        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            @panic("std.Io requires Zig 0.16 or later");
-        }
+    pub fn fromIo(io_: Io) *Runtime {
         return stdio.toRuntime(io_);
     }
 };
@@ -1314,10 +1309,6 @@ test "runtime: sleep is cancelable" {
 }
 
 test "runtime: std.Io interface" {
-    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-        return error.SkipZigTest;
-    }
-
     const testing = std.testing;
 
     const rt = try Runtime.init(testing.allocator, .{});

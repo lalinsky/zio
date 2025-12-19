@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Re-export runtime functionality
 const runtime = @import("runtime.zig");
@@ -52,6 +53,8 @@ pub const WaitResult = @import("select.zig").WaitResult;
 
 // Re-export low-level utilities
 pub const util = @import("utils.zig");
+
+pub const Io = @import("stdio.zig").Io;
 
 test {
     std.testing.refAllDecls(@This());
