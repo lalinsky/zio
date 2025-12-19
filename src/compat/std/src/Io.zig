@@ -1,7 +1,7 @@
 const builtin = @import("builtin");
 const is_windows = builtin.os.tag == .windows;
 
-const std = @import("std.zig");
+const std = @import("std");
 const windows = std.os.windows;
 const posix = std.posix;
 const math = std.math;
@@ -9,80 +9,11 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 
-pub const Limit = enum(usize) {
-    nothing = 0,
-    unlimited = std.math.maxInt(usize),
-    _,
+pub const Limit = std.Io.Limit;
+pub const Reader = std.Io.Reader;
+pub const Writer = std.Io.Writer;
 
-    /// `std.math.maxInt(usize)` is interpreted to mean `.unlimited`.
-    pub fn limited(n: usize) Limit {
-        return @enumFromInt(n);
-    }
-
-    /// Any value grater than `std.math.maxInt(usize)` is interpreted to mean
-    /// `.unlimited`.
-    pub fn limited64(n: u64) Limit {
-        return @enumFromInt(@min(n, std.math.maxInt(usize)));
-    }
-
-    pub fn countVec(data: []const []const u8) Limit {
-        var total: usize = 0;
-        for (data) |d| total += d.len;
-        return .limited(total);
-    }
-
-    pub fn min(a: Limit, b: Limit) Limit {
-        return @enumFromInt(@min(@intFromEnum(a), @intFromEnum(b)));
-    }
-
-    pub fn minInt(l: Limit, n: usize) usize {
-        return @min(n, @intFromEnum(l));
-    }
-
-    pub fn minInt64(l: Limit, n: u64) usize {
-        return @min(n, @intFromEnum(l));
-    }
-
-    pub fn slice(l: Limit, s: []u8) []u8 {
-        return s[0..l.minInt(s.len)];
-    }
-
-    pub fn sliceConst(l: Limit, s: []const u8) []const u8 {
-        return s[0..l.minInt(s.len)];
-    }
-
-    pub fn toInt(l: Limit) ?usize {
-        return switch (l) {
-            else => @intFromEnum(l),
-            .unlimited => null,
-        };
-    }
-
-    /// Reduces a slice to account for the limit, leaving room for one extra
-    /// byte above the limit, allowing for the use case of differentiating
-    /// between end-of-stream and reaching the limit.
-    pub fn slice1(l: Limit, non_empty_buffer: []u8) []u8 {
-        assert(non_empty_buffer.len >= 1);
-        return non_empty_buffer[0..@min(@intFromEnum(l) +| 1, non_empty_buffer.len)];
-    }
-
-    pub fn nonzero(l: Limit) bool {
-        return @intFromEnum(l) > 0;
-    }
-
-    /// Return a new limit reduced by `amount` or return `null` indicating
-    /// limit would be exceeded.
-    pub fn subtract(l: Limit, amount: usize) ?Limit {
-        if (l == .unlimited) return .unlimited;
-        if (amount > @intFromEnum(l)) return null;
-        return @enumFromInt(@intFromEnum(l) - amount);
-    }
-};
-
-pub const Reader = @import("Io/Reader.zig");
-pub const Writer = @import("Io/Writer.zig");
-
-pub const tty = @import("Io/tty.zig");
+pub const tty = std.Io.tty;
 
 pub fn poll(
     gpa: Allocator,
@@ -528,7 +459,23 @@ pub fn Poller(comptime StreamEnum: type) type {
 /// Given an enum, returns a struct with fields of that enum, each field
 /// representing an I/O stream for polling.
 pub fn PollFiles(comptime StreamEnum: type) type {
-    return @Struct(.auto, null, std.meta.fieldNames(StreamEnum), &@splat(std.fs.File), &@splat(.{}));
+    const field_names = std.meta.fieldNames(StreamEnum);
+    var fields: [field_names.len]std.builtin.Type.StructField = undefined;
+    for (&fields, field_names) |*field, name| {
+        field.* = .{
+            .name = name,
+            .type = std.fs.File,
+            .default_value_ptr = null,
+            .is_comptime = false,
+            .alignment = @alignOf(std.fs.File),
+        };
+    }
+    return @Type(.{ .@"struct" = .{
+        .layout = .auto,
+        .fields = &fields,
+        .decls = &.{},
+        .is_tuple = false,
+    } });
 }
 
 test {
@@ -536,25 +483,10 @@ test {
     _ = Reader;
     _ = Writer;
     _ = tty;
-    _ = Evented;
-    _ = Threaded;
-    _ = @import("Io/test.zig");
 }
 
 const Io = @This();
 
-pub const Evented = switch (builtin.os.tag) {
-    .linux => switch (builtin.cpu.arch) {
-        .x86_64, .aarch64 => @import("Io/IoUring.zig"),
-        else => void, // context-switching code not implemented yet
-    },
-    .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => switch (builtin.cpu.arch) {
-        .x86_64, .aarch64 => @import("Io/Kqueue.zig"),
-        else => void, // context-switching code not implemented yet
-    },
-    else => void,
-};
-pub const Threaded = @import("Io/Threaded.zig");
 pub const net = @import("Io/net.zig");
 
 userdata: ?*anyopaque,
@@ -909,7 +841,7 @@ pub const Timestamp = struct {
         return t.nanoseconds;
     }
 
-    pub fn formatNumber(t: Timestamp, w: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
+    pub fn formatNumber(t: Timestamp, w: *Writer, n: std.fmt.Number) Writer.Error!void {
         return w.printInt(t.nanoseconds, n.mode.base() orelse 10, n.case, .{
             .precision = n.precision,
             .width = n.width,
@@ -1202,7 +1134,7 @@ pub const Mutex = struct {
         return prev_state.isUnlocked();
     }
 
-    pub fn lock(mutex: *Mutex, io: std.Io) Cancelable!void {
+    pub fn lock(mutex: *Mutex, io: Io) Cancelable!void {
         const prev_state: State = @enumFromInt(@atomicRmw(
             usize,
             @as(*usize, @ptrCast(&mutex.state)),
@@ -1218,7 +1150,7 @@ pub const Mutex = struct {
     }
 
     /// Same as `lock` but cannot be canceled.
-    pub fn lockUncancelable(mutex: *Mutex, io: std.Io) void {
+    pub fn lockUncancelable(mutex: *Mutex, io: Io) void {
         const prev_state: State = @enumFromInt(@atomicRmw(
             usize,
             @as(*usize, @ptrCast(&mutex.state)),
@@ -1233,7 +1165,7 @@ pub const Mutex = struct {
         return io.vtable.mutexLockUncancelable(io.userdata, prev_state, mutex);
     }
 
-    pub fn unlock(mutex: *Mutex, io: std.Io) void {
+    pub fn unlock(mutex: *Mutex, io: Io) void {
         const prev_state = @cmpxchgWeak(State, &mutex.state, .locked_once, .unlocked, .release, .acquire) orelse {
             @branchHint(.likely);
             return;
@@ -1644,14 +1576,22 @@ pub fn sleep(io: Io, duration: Duration, clock: Clock) SleepError!void {
 /// fields, each field type the future's result.
 pub fn SelectUnion(S: type) type {
     const struct_fields = @typeInfo(S).@"struct".fields;
-    var names: [struct_fields.len][]const u8 = undefined;
-    var types: [struct_fields.len]type = undefined;
-    for (struct_fields, &names, &types) |struct_field, *union_field_name, *UnionFieldType| {
+    var fields: [struct_fields.len]std.builtin.Type.UnionField = undefined;
+    for (&fields, struct_fields) |*union_field, struct_field| {
         const FieldFuture = @typeInfo(struct_field.type).pointer.child;
-        union_field_name.* = struct_field.name;
-        UnionFieldType.* = @FieldType(FieldFuture, "result");
+        const Result = @FieldType(FieldFuture, "result");
+        union_field.* = .{
+            .name = struct_field.name,
+            .type = Result,
+            .alignment = @alignOf(Result),
+        };
     }
-    return @Union(.auto, std.meta.FieldEnum(S), &names, &types, &@splat(.{}));
+    return @Type(.{ .@"union" = .{
+        .layout = .auto,
+        .tag_type = std.meta.FieldEnum(S),
+        .fields = &fields,
+        .decls = &.{},
+    } });
 }
 
 /// `s` is a struct with every field a `*Future(T)`, where `T` can be any type,

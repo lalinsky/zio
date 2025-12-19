@@ -4,8 +4,8 @@ const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 const is_windows = native_os == .windows;
 
-const std = @import("../std.zig");
-const Io = std.Io;
+const std = @import("std");
+const Io = @import("../Io.zig");
 const assert = std.debug.assert;
 
 handle: Handle,

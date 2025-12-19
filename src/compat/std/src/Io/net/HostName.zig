@@ -7,8 +7,8 @@ const HostName = @This();
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 
-const std = @import("../../std.zig");
-const Io = std.Io;
+const std = @import("std");
+const Io = @import("../../Io.zig");
 const IpAddress = Io.net.IpAddress;
 const Ip6Address = Io.net.Ip6Address;
 const assert = std.debug.assert;

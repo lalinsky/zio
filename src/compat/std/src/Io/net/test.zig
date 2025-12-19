@@ -1,8 +1,8 @@
 const builtin = @import("builtin");
 
 const std = @import("std");
-const Io = std.Io;
-const net = std.Io.net;
+const Io = @import("../../Io.zig");
+const net = Io.net;
 const mem = std.mem;
 const testing = std.testing;
 

@@ -3,8 +3,8 @@ const Dir = @This();
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 
-const std = @import("../std.zig");
-const Io = std.Io;
+const std = @import("std");
+const Io = @import("../Io.zig");
 const File = Io.File;
 
 handle: Handle,
