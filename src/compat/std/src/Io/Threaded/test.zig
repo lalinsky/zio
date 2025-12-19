@@ -6,11 +6,6 @@ const testing = std.testing;
 const assert = std.debug.assert;
 
 test "concurrent vs main prevents deadlock via oversubscription" {
-    if (true) {
-        // https://codeberg.org/ziglang/zig/issues/30141
-        return error.SkipZigTest;
-    }
-
     var threaded: Io.Threaded = .init(std.testing.allocator);
     defer threaded.deinit();
     const io = threaded.io();
@@ -39,11 +34,6 @@ fn get(io: Io, queue: *Io.Queue(u8)) void {
 }
 
 test "concurrent vs concurrent prevents deadlock via oversubscription" {
-    if (true) {
-        // https://codeberg.org/ziglang/zig/issues/30141
-        return error.SkipZigTest;
-    }
-
     var threaded: Io.Threaded = .init(std.testing.allocator);
     defer threaded.deinit();
     const io = threaded.io();

@@ -1252,7 +1252,7 @@ pub const TakeEnumError = Error || error{InvalidEnumTag};
 pub fn takeEnum(r: *Reader, comptime Enum: type, endian: std.builtin.Endian) TakeEnumError!Enum {
     const Tag = @typeInfo(Enum).@"enum".tag_type;
     const int = try r.takeInt(Tag, endian);
-    return std.enums.fromInt(Enum, int) orelse return error.InvalidEnumTag;
+    return std.meta.intToEnum(Enum, int);
 }
 
 /// Reads an integer with the same size as the given nonexhaustive enum's tag type.

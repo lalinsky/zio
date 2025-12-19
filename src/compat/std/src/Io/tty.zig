@@ -5,6 +5,11 @@ const process = std.process;
 const windows = std.os.windows;
 const native_os = builtin.os.tag;
 
+/// Deprecated in favor of `Config.detect`.
+pub fn detectConfig(file: File) Config {
+    return .detect(file);
+}
+
 pub const Color = enum {
     black,
     red,

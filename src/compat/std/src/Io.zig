@@ -620,6 +620,11 @@ pub const VTable = struct {
         result: []u8,
         result_alignment: std.mem.Alignment,
     ) void,
+    /// Returns whether the current thread of execution is known to have
+    /// been requested to cancel.
+    ///
+    /// Thread-safe.
+    cancelRequested: *const fn (?*anyopaque) bool,
 
     /// When this function returns, implementation guarantees that `start` has
     /// either already been called, or a unit of concurrency has been assigned
@@ -890,7 +895,7 @@ pub const Timestamp = struct {
     }
 
     pub fn withClock(t: Timestamp, clock: Clock) Clock.Timestamp {
-        return .{ .raw = t, .clock = clock };
+        return .{ .nanoseconds = t.nanoseconds, .clock = clock };
     }
 
     pub fn fromNanoseconds(x: i96) Timestamp {
