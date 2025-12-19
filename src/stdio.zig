@@ -5,7 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const aio = @import("aio");
 
-pub const Io = if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) @import("stdx").Io else std.Io;
+pub const Io = std.Io;
 
 const Runtime = @import("runtime.zig").Runtime;
 const getNextExecutor = @import("runtime.zig").getNextExecutor;

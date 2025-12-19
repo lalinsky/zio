@@ -18,8 +18,5 @@
             .url = "git+https://github.com/lalinsky/coro.zig?ref=zig-0.16#4bb1a60186952636e6d3e409d62d9e8cf50b1560",
             .hash = "coro-0.4.0-PlYYwDlNAQDajwoM6gvvT__merg34jKq5m6oHEuZib-2",
         },
-        .stdx = .{
-            .path = "src/compat/std",
-        },
     },
 }

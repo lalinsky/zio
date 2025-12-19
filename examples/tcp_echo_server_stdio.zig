@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const builtin = @import("builtin");
 const zio = @import("zio");
 
-const Io = if (builtin.zig_version.order(.{ .major = 0, .minor = 16, .patch = 0 }) == .lt) zio.Io else std.Io;
+const Io = std.Io;
 
 fn handleClient(io: Io, stream: Io.net.Stream) void {
     defer stream.close(io);
