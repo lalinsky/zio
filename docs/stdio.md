@@ -4,10 +4,13 @@ In the upcoming Zig 0.16 release, there is going to be a new `std.Io` interface 
 You can read more about in [this article](https://kristoff.it/blog/zig-new-async-io/). Zio provides an implementation of the interface, so you will be able to use
 our coroutine runtime with any code using that interface.
 
-> Because Zig 0.16 is not released yet, we have a backported copy of the interface for Zig 0.15 and will be referring to it as `zio.Io`.
+You initialize the Zio runtime the usual way, you use `rt.io()` to get the `std.Io` interface and that's it. Once you have the `io` instance,
+you can follow any guide you find online or in Zig documentation and it should work, just running I/O operations asynchronously in the background.
+
+> Because Zig 0.16 is not released yet, we have a backported copy of the interface for Zig 0.15 and will be referring to it as `zio.Io` in the code.
 > When migrating to Zig 0.16, simply replace `zio.Io` with `std.Io`, everything else stays the same.
 
-Simple sleep example:
+Simplest possible example:
 
 ```zig
 const std = @import("std");
@@ -33,7 +36,7 @@ If you want something more complex, here is a TCP echo server:
 const std = @import("std");
 const zio = @import("zio");
 
-const Io = zio.Io;
+const Io = zio.Io;  // TODO: use std.Io in Zig 0.16
 
 fn handleClient(io: Io, stream: Io.net.Stream) void {
     defer stream.close(io);
