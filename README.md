@@ -133,4 +133,4 @@ There are many projects implementing stackful coroutines for Zig, unfortunately 
 
 ### How is this different from the future `std.Io` interface in Zig?
 
-In the `zig-0.16` branch, I actually have an implementation of the `std.Io` interface, so you can use this library for any I/O code in Zig 0.16. It's essentially just another frontend API for the same runtime.
+This library provides an implementation of the `std.Io` interface, see the [documentation](https://lalinsky.github.io/zio/stdio/).
