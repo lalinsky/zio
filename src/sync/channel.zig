@@ -7,6 +7,14 @@ const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../core/WaitNode.zig");
 const select = @import("../select.zig").select;
 
+/// Specifies how a channel should be closed.
+pub const CloseMode = enum {
+    /// Close gracefully - allows receivers to drain buffered values before receiving error.ChannelClosed
+    graceful,
+    /// Close immediately - clears all buffered items so receivers get error.ChannelClosed right away
+    immediate,
+};
+
 /// A bounded FIFO channel for communication between async tasks.
 ///
 /// Channels provide a way to send values between tasks with backpressure. A channel
@@ -275,14 +283,15 @@ pub fn Channel(comptime T: type) type {
         /// Receive operations can still drain any buffered values before returning
         /// `error.ChannelClosed`.
         ///
-        /// If `immediate` is true, clears all buffered items immediately. This causes
-        /// receivers to get `error.ChannelClosed` right away instead of draining.
-        pub fn close(self: *Self, immediate: bool) void {
+        /// Use `CloseMode.graceful` to allow receivers to drain buffered values.
+        /// Use `CloseMode.immediate` to clear all buffered items immediately,
+        /// causing receivers to get `error.ChannelClosed` right away.
+        pub fn close(self: *Self, mode: CloseMode) void {
             self.mutex.lock();
 
             self.closed = true;
 
-            if (immediate) {
+            if (mode == .immediate) {
                 // Clear the buffer
                 self.head = 0;
                 self.tail = 0;
@@ -837,7 +846,7 @@ test "Channel: close graceful" {
         fn producer(rt: *Runtime, ch: *Channel(u32)) !void {
             try ch.send(rt, 1);
             try ch.send(rt, 2);
-            ch.close(false); // Graceful close - items remain
+            ch.close(.graceful); // Graceful close - items remain
         }
 
         fn consumer(rt: *Runtime, ch: *Channel(u32), results: *[3]?u32) !void {
@@ -875,7 +884,7 @@ test "Channel: close immediate" {
             try ch.send(rt, 1);
             try ch.send(rt, 2);
             try ch.send(rt, 3);
-            ch.close(true); // Immediate close - clears all items
+            ch.close(.immediate); // Immediate close - clears all items
         }
 
         fn consumer(rt: *Runtime, ch: *Channel(u32), result: *?u32) !void {
@@ -906,7 +915,7 @@ test "Channel: send on closed channel" {
 
     const TestFn = struct {
         fn testClosed(rt: *Runtime, ch: *Channel(u32)) !void {
-            ch.close(false);
+            ch.close(.graceful);
 
             const put_err = ch.send(rt, 1);
             try testing.expectError(error.ChannelClosed, put_err);
@@ -1034,7 +1043,7 @@ test "Channel: asyncReceive with select - closed channel" {
 
     const TestFn = struct {
         fn test_closed(rt: *Runtime, ch: *Channel(u32)) !void {
-            ch.close(false);
+            ch.close(.graceful);
 
             var recv = ch.asyncReceive();
             const result = try select(rt, .{ .recv = &recv });
@@ -1128,7 +1137,7 @@ test "Channel: asyncSend with select - closed channel" {
 
     const TestFn = struct {
         fn test_closed(rt: *Runtime, ch: *Channel(u32)) !void {
-            ch.close(false);
+            ch.close(.graceful);
 
             var send = ch.asyncSend(42);
             const result = try select(rt, .{ .send = &send });
