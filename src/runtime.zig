@@ -24,6 +24,7 @@ const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 
 const AnyTask = @import("core/task.zig").AnyTask;
 const Task = @import("core/task.zig").Task;
+const TaskPool = @import("core/task.zig").TaskPool;
 const ResumeMode = @import("core/task.zig").ResumeMode;
 const resumeTask = @import("core/task.zig").resumeTask;
 const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
@@ -845,6 +846,7 @@ pub const Executor = struct {
 pub const Runtime = struct {
     thread_pool: aio.ThreadPool,
     stack_pool: StackPool,
+    task_pool: TaskPool,
     allocator: Allocator,
     options: RuntimeOptions,
 
@@ -867,6 +869,7 @@ pub const Runtime = struct {
             .thread_pool = undefined,
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
+            .task_pool = .init(allocator),
         };
 
         try self.thread_pool.init(allocator, options.thread_pool);
@@ -916,6 +919,9 @@ pub const Runtime = struct {
 
         // Clean up stack pool
         self.stack_pool.deinit();
+
+        // Clean up task pool
+        self.task_pool.deinit();
 
         // Free the Runtime allocation
         allocator.destroy(self);
