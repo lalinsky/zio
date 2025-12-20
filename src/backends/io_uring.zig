@@ -40,6 +40,9 @@ const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
 const DirOpen = @import("../completion.zig").DirOpen;
 const DirClose = @import("../completion.zig").DirClose;
+const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
+const FileStreamRead = @import("../completion.zig").FileStreamRead;
+const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
 
 pub const NetHandle = net.fd_t;
 
@@ -556,6 +559,43 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
+        .file_stream_poll => {
+            const data = c.cast(FileStreamPoll);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_stream_poll", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            const poll_mask: u32 = switch (data.event) {
+                .read => linux.POLL.IN,
+                .write => linux.POLL.OUT,
+            };
+            sqe.prep_poll_add(data.handle, poll_mask);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_stream_read => {
+            const data = c.cast(FileStreamRead);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_stream_read", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_readv(data.handle, data.buffer.iovecs, 0);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_stream_write => {
+            const data = c.cast(FileStreamWrite);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_stream_write", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_writev(data.handle, data.buffer.iovecs, 0);
+            sqe.user_data = @intFromPtr(c);
+        },
     }
 }
 
@@ -880,6 +920,27 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
             } else {
                 c.setResult(.dir_close, {});
+            }
+        },
+        .file_stream_poll => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_stream_poll, {});
+            }
+        },
+        .file_stream_read => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_stream_read, @intCast(res));
+            }
+        },
+        .file_stream_write => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_stream_write, @intCast(res));
             }
         },
     }

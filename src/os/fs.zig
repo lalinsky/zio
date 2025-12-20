@@ -515,6 +515,86 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
     }
 }
 
+/// Read from file descriptor using readv() - for pipes and stream-like fds
+pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        var total_read: usize = 0;
+        for (buffers) |buffer| {
+            var bytes_read: w.DWORD = undefined;
+
+            const success = w2.ReadFile(
+                fd,
+                buffer.buf,
+                @intCast(buffer.len),
+                &bytes_read,
+                null,
+            );
+
+            if (success == w.FALSE) {
+                const err = w2.GetLastError();
+                switch (err) {
+                    .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
+                    else => return errnoToFileReadError(err),
+                }
+            }
+
+            total_read += bytes_read;
+            if (bytes_read < buffer.len) break;
+        }
+
+        return total_read;
+    }
+
+    while (true) {
+        const rc = posix.system.readv(fd, buffers.ptr, @intCast(buffers.len));
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToFileReadError(err),
+        }
+    }
+}
+
+/// Write to file descriptor using writev() - for pipes and stream-like fds
+pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
+    if (builtin.os.tag == .windows) {
+        const w = std.os.windows;
+
+        var total_written: usize = 0;
+        for (buffers) |buffer| {
+            var bytes_written: w.DWORD = undefined;
+
+            const success = w2.WriteFile(
+                fd,
+                buffer.buf,
+                @intCast(buffer.len),
+                &bytes_written,
+                null,
+            );
+
+            if (success == w.FALSE) {
+                return errnoToFileWriteError(w2.GetLastError());
+            }
+
+            total_written += bytes_written;
+            if (bytes_written < buffer.len) break;
+        }
+
+        return total_written;
+    }
+
+    while (true) {
+        const rc = posix.system.writev(fd, buffers.ptr, @intCast(buffers.len));
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToFileWriteError(err),
+        }
+    }
+}
+
 /// Sync file data to disk
 pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
     if (builtin.os.tag == .windows) {

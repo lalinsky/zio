@@ -25,6 +25,10 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
+const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
+const FileStreamRead = @import("../completion.zig").FileStreamRead;
+const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
+const fs = @import("../os/fs.zig");
 
 pub const NetHandle = net.fd_t;
 
@@ -134,6 +138,15 @@ fn getFilter(completion: *Completion) i16 {
                 .send => std.c.EVFILT.WRITE,
             };
         },
+        .file_stream_read => std.c.EVFILT.READ,
+        .file_stream_write => std.c.EVFILT.WRITE,
+        .file_stream_poll => blk: {
+            const poll_data = completion.cast(FileStreamPoll);
+            break :blk switch (poll_data.event) {
+                .read => std.c.EVFILT.READ,
+                .write => std.c.EVFILT.WRITE,
+            };
+        },
         else => unreachable,
     };
 }
@@ -197,6 +210,9 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_recvfrom => completion.cast(NetRecvFrom).handle,
         .net_sendto => completion.cast(NetSendTo).handle,
         .net_poll => completion.cast(NetPoll).handle,
+        .file_stream_poll => completion.cast(FileStreamPoll).handle,
+        .file_stream_read => completion.cast(FileStreamRead).handle,
+        .file_stream_write => completion.cast(FileStreamWrite).handle,
         else => unreachable,
     };
 }
@@ -275,6 +291,18 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_poll => {
             const data = c.cast(NetPoll);
+            self.queueRegister(state, data.handle, c);
+        },
+        .file_stream_poll => {
+            const data = c.cast(FileStreamPoll);
+            self.queueRegister(state, data.handle, c);
+        },
+        .file_stream_read => {
+            const data = c.cast(FileStreamRead);
+            self.queueRegister(state, data.handle, c);
+        },
+        .file_stream_write => {
+            const data = c.cast(FileStreamWrite);
             self.queueRegister(state, data.handle, c);
         },
 
@@ -492,6 +520,49 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setError(err);
             } else {
                 comp.setResult(.net_poll, {});
+            }
+            return .completed;
+        },
+        .file_stream_read => {
+            const data = comp.cast(FileStreamRead);
+            if (handleKqueueError(event, fs.errnoToFileReadError)) |err| {
+                comp.setError(err);
+                return .completed;
+            }
+            if (fs.readv(data.handle, data.buffer.iovecs)) |n| {
+                comp.setResult(.file_stream_read, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    comp.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .file_stream_write => {
+            const data = comp.cast(FileStreamWrite);
+            if (handleKqueueError(event, fs.errnoToFileWriteError)) |err| {
+                comp.setError(err);
+                return .completed;
+            }
+            if (fs.writev(data.handle, data.buffer.iovecs)) |n| {
+                comp.setResult(.file_stream_write, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    comp.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .file_stream_poll => {
+            // For poll operations, EOF means the fd is "ready" (will return EOF on next read).
+            if (handleKqueueError(event, fs.errnoToFileReadError)) |err| {
+                comp.setError(err);
+            } else {
+                comp.setResult(.file_stream_poll, {});
             }
             return .completed;
         },

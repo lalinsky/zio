@@ -1,12 +1,20 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Loop = @import("loop.zig").Loop;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
 const NetClose = @import("completion.zig").NetClose;
 const NetOpen = @import("completion.zig").NetOpen;
 const NetBind = @import("completion.zig").NetBind;
+const FileStreamPoll = @import("completion.zig").FileStreamPoll;
+const FileStreamRead = @import("completion.zig").FileStreamRead;
+const FileStreamWrite = @import("completion.zig").FileStreamWrite;
+const ReadBuf = @import("buf.zig").ReadBuf;
+const WriteBuf = @import("buf.zig").WriteBuf;
 const net = @import("os/net.zig");
 const time = @import("os/time.zig");
+const posix = @import("os/posix.zig");
+const fs = @import("os/fs.zig");
 
 test {
     _ = @import("test/thread_pool.zig");
@@ -233,4 +241,66 @@ test "Loop: wakeFromAnywhere - cross-thread" {
     try std.testing.expectEqual(.dead, async_handle.c.state);
 
     thread.join();
+}
+
+test "FileStream: write and read" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    // Create a pipe
+    const pipefd = try posix.pipe(.{ .nonblocking = true, .cloexec = true });
+    defer _ = fs.close(pipefd[0]) catch {};
+    defer _ = fs.close(pipefd[1]) catch {};
+
+    // Write data to the pipe
+    const write_data = "Hello, pipe!";
+    var write_iovecs: [1]fs.iovec_const = undefined;
+    const write_buf = WriteBuf.fromSlice(write_data, &write_iovecs);
+    var stream_write: FileStreamWrite = .init(pipefd[1], write_buf);
+    loop.add(&stream_write.c);
+    try loop.run(.until_done);
+    const written = try stream_write.getResult();
+    try std.testing.expectEqual(write_data.len, written);
+
+    // Read data from the pipe
+    var read_data: [128]u8 = undefined;
+    var read_iovecs: [1]fs.iovec = undefined;
+    const read_buf = ReadBuf.fromSlice(&read_data, &read_iovecs);
+    var stream_read: FileStreamRead = .init(pipefd[0], read_buf);
+    loop.add(&stream_read.c);
+    try loop.run(.until_done);
+    const read_len = try stream_read.getResult();
+    try std.testing.expectEqual(write_data.len, read_len);
+    try std.testing.expectEqualStrings(write_data, read_data[0..read_len]);
+}
+
+test "FileStream: poll for readability" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    // Create a pipe
+    const pipefd = try posix.pipe(.{ .nonblocking = true, .cloexec = true });
+    defer _ = fs.close(pipefd[0]) catch {};
+    defer _ = fs.close(pipefd[1]) catch {};
+
+    // Write data so the read end becomes readable
+    const write_data = "poll test";
+    _ = posix.system.write(pipefd[1], write_data.ptr, write_data.len);
+
+    // Poll for readability
+    var stream_poll: FileStreamPoll = .init(pipefd[0], .read);
+    loop.add(&stream_poll.c);
+    try loop.run(.until_done);
+    try stream_poll.getResult();
+
+    // Verify we can read the data
+    var read_data: [128]u8 = undefined;
+    const read_len = posix.system.read(pipefd[0], &read_data, read_data.len);
+    try std.testing.expectEqual(write_data.len, @as(usize, @intCast(read_len)));
 }

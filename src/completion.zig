@@ -56,6 +56,9 @@ pub const Op = enum {
     file_stat,
     dir_open,
     dir_close,
+    file_stream_poll,
+    file_stream_read,
+    file_stream_write,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -88,6 +91,9 @@ pub const Op = enum {
             .file_stat => FileStat,
             .dir_open => DirOpen,
             .dir_close => DirClose,
+            .file_stream_poll => FileStreamPoll,
+            .file_stream_read => FileStreamRead,
+            .file_stream_write => FileStreamWrite,
         };
     }
 
@@ -122,6 +128,9 @@ pub const Op = enum {
             FileStat => .file_stat,
             DirOpen => .dir_open,
             DirClose => .dir_close,
+            FileStreamPoll => .file_stream_poll,
+            FileStreamRead => .file_stream_read,
+            FileStreamWrite => .file_stream_write,
             else => @compileError("unknown completion type"),
         };
     }
@@ -679,7 +688,7 @@ pub const FileClose = struct {
     } = .{},
     handle: fs.fd_t,
 
-    pub const Error = Cancelable;
+    pub const Error = fs.FileCloseError || Cancelable;
 
     pub fn init(handle: fs.fd_t) FileClose {
         return .{
@@ -951,5 +960,74 @@ pub const NetPoll = struct {
 
     pub fn getResult(self: *const NetPoll) Error!void {
         return self.c.getResult(.net_poll);
+    }
+};
+
+pub const FileStreamPoll = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    handle: fs.fd_t,
+    event: Event,
+
+    pub const Error = fs.FileReadError || Cancelable;
+
+    /// Event to monitor for
+    pub const Event = enum {
+        read,
+        write,
+    };
+
+    pub fn init(handle: fs.fd_t, event: Event) FileStreamPoll {
+        return .{
+            .c = .init(.file_stream_poll),
+            .handle = handle,
+            .event = event,
+        };
+    }
+
+    pub fn getResult(self: *const FileStreamPoll) Error!void {
+        return self.c.getResult(.file_stream_poll);
+    }
+};
+
+pub const FileStreamRead = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    handle: fs.fd_t,
+    buffer: ReadBuf,
+
+    pub const Error = fs.FileReadError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, buffer: ReadBuf) FileStreamRead {
+        return .{
+            .c = .init(.file_stream_read),
+            .handle = handle,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const FileStreamRead) Error!usize {
+        return self.c.getResult(.file_stream_read);
+    }
+};
+
+pub const FileStreamWrite = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    handle: fs.fd_t,
+    buffer: WriteBuf,
+
+    pub const Error = fs.FileWriteError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, buffer: WriteBuf) FileStreamWrite {
+        return .{
+            .c = .init(.file_stream_write),
+            .handle = handle,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const FileStreamWrite) Error!usize {
+        return self.c.getResult(.file_stream_write);
     }
 };

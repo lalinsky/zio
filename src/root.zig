@@ -42,6 +42,9 @@ pub const FileSize = completion.FileSize;
 pub const FileStat = completion.FileStat;
 pub const DirOpen = completion.DirOpen;
 pub const DirClose = completion.DirClose;
+pub const FileStreamPoll = completion.FileStreamPoll;
+pub const FileStreamRead = completion.FileStreamRead;
+pub const FileStreamWrite = completion.FileStreamWrite;
 
 /// Low level system APIs
 pub const system = @import("system.zig");

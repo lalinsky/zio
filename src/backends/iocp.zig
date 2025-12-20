@@ -29,6 +29,9 @@ const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
 const FileRename = @import("../completion.zig").FileRename;
 const FileDelete = @import("../completion.zig").FileDelete;
+const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
+const FileStreamRead = @import("../completion.zig").FileStreamRead;
+const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
 
 // WAIT_IO_COMPLETION is returned when an alertable wait is interrupted by an APC
 const WAIT_IO_COMPLETION: windows.Win32Error = @enumFromInt(0xC0);
@@ -452,6 +455,28 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_open,
         .dir_close,
         => unreachable, // These are handled by thread pool (capabilities = false)
+
+        .file_stream_poll => {
+            // Windows IOCP doesn't support poll-style waiting on file handles
+            c.setError(error.Unexpected);
+            state.markCompleted(c);
+        },
+
+        .file_stream_read => {
+            const data = c.cast(FileStreamRead);
+            self.submitFileStreamRead(state, data) catch |err| {
+                c.setError(err);
+                state.markCompleted(c);
+            };
+        },
+
+        .file_stream_write => {
+            const data = c.cast(FileStreamWrite);
+            self.submitFileStreamWrite(state, data) catch |err| {
+                c.setError(err);
+                state.markCompleted(c);
+            };
+        },
 
         .file_read => {
             const data = c.cast(FileRead);
@@ -901,6 +926,74 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
     // Operation will complete via IOCP (either immediate or async)
 }
 
+fn submitFileStreamRead(self: *Self, state: *LoopState, data: *FileStreamRead) !void {
+    _ = self;
+
+    // Initialize OVERLAPPED with zero offset (streams don't have offsets)
+    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+
+    // ReadFile only supports a single buffer, so we read into the first iovec
+    // TODO: Handle multiple iovecs with multiple ReadFile calls
+    const buffer = data.buffer.iovecs[0];
+    var bytes_read: windows.DWORD = 0;
+
+    const result = w.ReadFile(
+        data.handle,
+        buffer.buf,
+        @intCast(buffer.len),
+        &bytes_read,
+        &data.c.internal.overlapped,
+    );
+
+    // When ReadFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
+    // the completion will be posted to the IOCP port.
+    if (result == 0) {
+        const err = w.GetLastError();
+        if (err != .IO_PENDING) {
+            // Real error - complete immediately with error
+            log.err("ReadFile (stream) failed: {}", .{err});
+            data.c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
+            state.markCompleted(&data.c);
+            return;
+        }
+    }
+    // Operation will complete via IOCP (either immediate or async)
+}
+
+fn submitFileStreamWrite(self: *Self, state: *LoopState, data: *FileStreamWrite) !void {
+    _ = self;
+
+    // Initialize OVERLAPPED with zero offset (streams don't have offsets)
+    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+
+    // WriteFile only supports a single buffer, so we write from the first iovec
+    // TODO: Handle multiple iovecs with multiple WriteFile calls
+    const buffer = data.buffer.iovecs[0];
+    var bytes_written: windows.DWORD = 0;
+
+    const result = w.WriteFile(
+        data.handle,
+        buffer.buf,
+        @intCast(buffer.len),
+        &bytes_written,
+        &data.c.internal.overlapped,
+    );
+
+    // When WriteFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
+    // the completion will be posted to the IOCP port.
+    if (result == 0) {
+        const err = w.GetLastError();
+        if (err != .IO_PENDING) {
+            // Real error - complete immediately with error
+            log.err("WriteFile (stream) failed: {}", .{err});
+            data.c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
+            state.markCompleted(&data.c);
+            return;
+        }
+    }
+    // Operation will complete via IOCP (either immediate or async)
+}
+
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
@@ -943,12 +1036,16 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .file_read,
                 .file_write,
                 .file_sync,
+                .file_stream_read,
+                .file_stream_write,
                 => blk: {
                     // Get file handle from the completion
                     const h = switch (target.op) {
                         .file_read => target.cast(FileRead).handle,
                         .file_write => target.cast(FileWrite).handle,
                         .file_sync => target.cast(FileSync).handle,
+                        .file_stream_read => target.cast(FileStreamRead).handle,
+                        .file_stream_write => target.cast(FileStreamWrite).handle,
                         else => unreachable,
                     };
                     break :blk h;
@@ -1286,6 +1383,53 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             } else {
                 c.setResult(.file_write, @intCast(bytes_transferred));
+            }
+
+            state.markCompleted(c);
+        },
+
+        .file_stream_read => {
+            const data = c.cast(FileStreamRead);
+            var bytes_transferred: windows.DWORD = 0;
+
+            const result = w.GetOverlappedResult(
+                data.handle,
+                &data.c.internal.overlapped,
+                &bytes_transferred,
+                windows.FALSE,
+            );
+
+            if (result == 0) {
+                const err = w.GetLastError();
+                // HANDLE_EOF is not an error - it means we successfully read 0 bytes (EOF)
+                if (err == .HANDLE_EOF) {
+                    c.setResult(.file_stream_read, 0);
+                } else {
+                    c.setError(fs.errnoToFileReadError(err));
+                }
+            } else {
+                c.setResult(.file_stream_read, @intCast(bytes_transferred));
+            }
+
+            state.markCompleted(c);
+        },
+
+        .file_stream_write => {
+            const data = c.cast(FileStreamWrite);
+            var bytes_transferred: windows.DWORD = 0;
+
+            const result = w.GetOverlappedResult(
+                data.handle,
+                &data.c.internal.overlapped,
+                &bytes_transferred,
+                windows.FALSE,
+            );
+
+            if (result == 0) {
+                const err = w.GetLastError();
+                c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
+            } else {
+                c.setResult(.file_stream_write, @intCast(bytes_transferred));
             }
 
             state.markCompleted(c);
