@@ -38,14 +38,14 @@ pub const AnyBlockingTask = struct {
         // Allocate task with closure
         const alloc_result = try Closure.alloc(
             AnyBlockingTask,
-            runtime.allocator,
+            runtime,
             result_len,
             result_alignment,
             context.len,
             context_alignment,
             start,
         );
-        errdefer alloc_result.closure.free(AnyBlockingTask, runtime.allocator, alloc_result.task);
+        errdefer alloc_result.closure.free(AnyBlockingTask, runtime, alloc_result.task);
 
         const self = alloc_result.task;
         self.* = .{
@@ -165,7 +165,7 @@ pub fn BlockingTask(comptime T: type) type {
 
         pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
             const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
-            any_blocking_task.closure.free(AnyBlockingTask, rt.allocator, any_blocking_task);
+            any_blocking_task.closure.free(AnyBlockingTask, rt, any_blocking_task);
         }
 
         pub fn create(

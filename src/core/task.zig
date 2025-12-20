@@ -105,7 +105,7 @@ pub const Closure = struct {
 
     pub fn alloc(
         comptime TaskType: type,
-        allocator: std.mem.Allocator,
+        rt: *Runtime,
         result_len: usize,
         result_alignment: std.mem.Alignment,
         context_len: usize,
@@ -126,8 +126,8 @@ pub const Closure = struct {
         const context_padding = context_alignment.forward(allocation_size) - allocation_size;
         allocation_size += context_padding + context_len;
 
-        // Allocate task
-        const allocation = try allocator.alignedAlloc(u8, .fromByteUnits(task_alignment), allocation_size);
+        // Allocate task from pool or fallback allocator
+        const allocation = try rt.task_pool.alloc(rt, allocation_size);
 
         return .{
             .closure = .{
@@ -141,9 +141,9 @@ pub const Closure = struct {
         };
     }
 
-    pub fn free(self: *const Closure, comptime TaskType: type, allocator: std.mem.Allocator, task: *TaskType) void {
+    pub fn free(self: *const Closure, comptime TaskType: type, rt: *Runtime, task: *TaskType) void {
         const allocation = self.getAllocationSlice(TaskType, task);
-        allocator.free(allocation);
+        rt.task_pool.free(rt, allocation);
     }
 };
 
@@ -316,7 +316,7 @@ pub const AnyTask = struct {
             rt.stack_pool.release(self.coro.context.stack_info);
         }
 
-        self.closure.free(AnyTask, rt.allocator, self);
+        self.closure.free(AnyTask, rt, self);
     }
 
     pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
@@ -336,14 +336,14 @@ pub const AnyTask = struct {
         // Allocate task with closure
         const alloc_result = try Closure.alloc(
             AnyTask,
-            executor.allocator,
+            executor.runtime,
             result_len,
             result_alignment,
             context.len,
             context_alignment,
             start,
         );
-        errdefer alloc_result.closure.free(AnyTask, executor.allocator, alloc_result.task);
+        errdefer alloc_result.closure.free(AnyTask, executor.runtime, alloc_result.task);
 
         const self = alloc_result.task;
         self.* = .{
@@ -470,3 +470,42 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
     const executor = Executor.fromCoroutine(&task.coro);
     executor.scheduleTask(task, mode);
 }
+
+pub const TaskPool = struct {
+    pub const pool_item_size = std.mem.alignForward(usize, @sizeOf(AnyTask) + 128, 128);
+
+    pool: std.heap.MemoryPoolAligned([pool_item_size]u8, .fromByteUnits(Closure.task_alignment)),
+    mutex: std.Thread.Mutex = .{},
+
+    pub fn init(allocator: std.mem.Allocator) TaskPool {
+        return .{
+            .pool = .init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *TaskPool) void {
+        self.pool.deinit();
+    }
+
+    pub fn alloc(self: *TaskPool, rt: *Runtime, size: usize) ![]align(Closure.task_alignment) u8 {
+        if (size <= pool_item_size) {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            const ptr = try self.pool.create();
+            return ptr;
+        } else {
+            return try rt.allocator.alignedAlloc(u8, .fromByteUnits(Closure.task_alignment), size);
+        }
+    }
+
+    pub fn free(self: *TaskPool, rt: *Runtime, slice: []align(Closure.task_alignment) u8) void {
+        if (slice.len <= pool_item_size) {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.pool.destroy(@ptrCast(slice.ptr));
+        } else {
+            rt.allocator.free(slice);
+        }
+    }
+};
+

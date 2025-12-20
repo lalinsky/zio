@@ -111,7 +111,7 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
         .{ .regular = start },
         CreateOptions{},
     ) catch return error.ConcurrencyUnavailable;
-    errdefer task.closure.free(AnyTask, executor.allocator, task);
+    errdefer task.closure.free(AnyTask, executor.runtime, task);
 
     // Add to global awaitable registry
     rt.tasks.add(&task.awaitable);
@@ -193,7 +193,7 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const
         .{ .group = @ptrCast(start) },
         CreateOptions{},
     ) catch return error.ConcurrencyUnavailable;
-    errdefer task.closure.free(AnyTask, executor.allocator, task);
+    errdefer task.closure.free(AnyTask, executor.runtime, task);
 
     // Add to global awaitable registry
     rt.tasks.add(&task.awaitable);

@@ -136,7 +136,7 @@ pub const Group = struct {
             .{ .group = &Wrapper.start },
             .{},
         );
-        errdefer task.closure.free(AnyTask, rt.allocator, task);
+        errdefer task.closure.free(AnyTask, rt, task);
 
         // Associate the task with the group
         task.awaitable.group_node.group = self;
