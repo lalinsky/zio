@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 // Re-export all synchronization primitives
 pub const Mutex = @import("sync/Mutex.zig");

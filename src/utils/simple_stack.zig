@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 //! Generic simple singly-linked stack (LIFO) for single-threaded use.
 //!
