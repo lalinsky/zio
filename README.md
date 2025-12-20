@@ -76,7 +76,13 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     }
 }
 
-fn serverTask(rt: *zio.Runtime) !void {
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    const rt = try zio.Runtime.init(gpa.allocator(), .{});
+    defer rt.deinit();
+
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
     const server = try addr.listen(rt, .{});
@@ -91,17 +97,6 @@ fn serverTask(rt: *zio.Runtime) !void {
         var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
         task.detach(rt);
     }
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    const rt = try zio.Runtime.init(gpa.allocator(), .{});
-    defer rt.deinit();
-
-    var handle = try rt.spawn(serverTask, .{rt}, .{});
-    try handle.join(rt);
 }
 ```
 
