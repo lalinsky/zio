@@ -686,7 +686,9 @@ pub const Executor = struct {
         if (self.runtime.tasks.isEmpty()) {
             return;
         }
-        self.main_task.state.store(.waiting, .release);
+        // Use .new state to indicate we're waiting for all tasks to complete
+        // This distinguishes from .waiting state used by I/O operations
+        self.main_task.state.store(.new, .release);
         try self.runSchedulerLoop();
     }
 
@@ -1090,9 +1092,13 @@ pub const Runtime = struct {
             awaitable.destroy_fn(self, awaitable);
         }
         // Wake main executor when all tasks complete (for run() to exit)
+        // Only wake if main_task is in .new state (waiting in run() mode)
+        // Use CAS to atomically check and transition to .ready
         if (done and self.tasks.isEmpty()) {
-            self.main_executor.main_task.state.store(.ready, .release);
-            self.main_executor.loop.wake();
+            if (self.main_executor.main_task.state.cmpxchgStrong(.new, .ready, .release, .acquire) == null) {
+                // CAS succeeded - main_task was in .new state, now transitioned to .ready
+                self.main_executor.loop.wake();
+            }
         }
     }
 
