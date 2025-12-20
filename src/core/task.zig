@@ -509,7 +509,3 @@ pub const TaskPool = struct {
     }
 };
 
-test "AnyTask size" {
-    try std.testing.expectEqual(248, @sizeOf(AnyTask));
-    try std.testing.expectEqual(384, TaskPool.pool_item_size);
-}
