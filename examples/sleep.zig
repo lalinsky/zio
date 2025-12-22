@@ -16,9 +16,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{});
-    defer runtime.deinit();
+    var rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
 
-    var task = try runtime.spawn(sleepTask, .{runtime}, .{});
-    try task.join(runtime);
+    var task = try rt.spawn(sleepTask, .{rt}, .{});
+    try task.join(rt);
 }

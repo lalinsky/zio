@@ -45,8 +45,8 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var runtime = try zio.Runtime.init(gpa.allocator(), .{});
-    defer runtime.deinit();
+    var rt = try zio.Runtime.init(gpa.allocator(), .{});
+    defer rt.deinit();
 
     // Create shutdown flag
     var shutdown = std.atomic.Value(bool).init(false);
@@ -54,15 +54,15 @@ pub fn main() !void {
     std.log.info("Starting demo (press Ctrl+C to stop gracefully)...", .{});
 
     // Spawn server task
-    var server_task = try runtime.spawn(serverTask, .{ runtime, &shutdown }, .{});
-    defer server_task.cancel(runtime);
+    var server_task = try rt.spawn(serverTask, .{ rt, &shutdown }, .{});
+    defer server_task.cancel(rt);
 
     // Spawn signal handler task
-    var signal_task = try runtime.spawn(signalHandler, .{ runtime, &shutdown }, .{});
-    defer signal_task.cancel(runtime);
+    var signal_task = try rt.spawn(signalHandler, .{ rt, &shutdown }, .{});
+    defer signal_task.cancel(rt);
 
     // Run until all tasks complete
-    try runtime.run();
+    try rt.run();
 
     std.log.info("Demo completed.", .{});
 }
