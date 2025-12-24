@@ -993,7 +993,7 @@ pub fn streamDelimiterLimit(
             error.ReadFailed => return error.ReadFailed,
             error.EndOfStream => return @intFromEnum(limit) - remaining,
         });
-        if (std.mem.indexOfScalar(u8, available, delimiter)) |delimiter_index| {
+        if (std.mem.findScalar(u8, available, delimiter)) |delimiter_index| {
             try w.writeAll(available[0..delimiter_index]);
             r.toss(delimiter_index);
             remaining -= delimiter_index;
@@ -1064,7 +1064,7 @@ pub fn discardDelimiterLimit(r: *Reader, delimiter: u8, limit: Limit) DiscardDel
             error.ReadFailed => return error.ReadFailed,
             error.EndOfStream => return @intFromEnum(limit) - remaining,
         });
-        if (std.mem.indexOfScalar(u8, available, delimiter)) |delimiter_index| {
+        if (std.mem.findScalar(u8, available, delimiter)) |delimiter_index| {
             r.toss(delimiter_index);
             remaining -= delimiter_index;
             return @intFromEnum(limit) - remaining;
@@ -1252,7 +1252,7 @@ pub const TakeEnumError = Error || error{InvalidEnumTag};
 pub fn takeEnum(r: *Reader, comptime Enum: type, endian: std.builtin.Endian) TakeEnumError!Enum {
     const Tag = @typeInfo(Enum).@"enum".tag_type;
     const int = try r.takeInt(Tag, endian);
-    return std.meta.intToEnum(Enum, int);
+    return std.enums.fromInt(Enum, int) orelse return error.InvalidEnumTag;
 }
 
 /// Reads an integer with the same size as the given nonexhaustive enum's tag type.
