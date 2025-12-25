@@ -67,13 +67,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{});
-    defer runtime.deinit();
+    var rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
 
-    var tls_task = try runtime.spawn(runTlsTask, .{runtime}, .{});
-    defer tls_task.cancel(runtime);
+    var tls_task = try rt.spawn(runTlsTask, .{rt}, .{});
+    defer tls_task.cancel(rt);
 
-    try runtime.run();
+    try rt.run();
 
-    try tls_task.join(runtime);
+    try tls_task.join(rt);
 }

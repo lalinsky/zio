@@ -45,8 +45,8 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var runtime = try zio.Runtime.init(gpa.allocator(), .{});
-    defer runtime.deinit();
+    var rt = try zio.Runtime.init(gpa.allocator(), .{});
+    defer rt.deinit();
 
     var buffer: [8]i32 = undefined;
     var channel = zio.Channel(i32).init(&buffer);
@@ -58,18 +58,18 @@ pub fn main() !void {
     var consumer_count: usize = 0;
 
     defer {
-        for (producers[0..producer_count]) |*task| task.cancel(runtime);
-        for (consumers[0..consumer_count]) |*task| task.cancel(runtime);
+        for (producers[0..producer_count]) |*task| task.cancel(rt);
+        for (consumers[0..consumer_count]) |*task| task.cancel(rt);
     }
 
     for (0..2) |i| {
-        producers[i] = try runtime.spawn(producer, .{ runtime, &channel, @as(u32, @intCast(i)) }, .{});
+        producers[i] = try rt.spawn(producer, .{ rt, &channel, @as(u32, @intCast(i)) }, .{});
         producer_count += 1;
-        consumers[i] = try runtime.spawn(consumer, .{ runtime, &channel, @as(u32, @intCast(i)) }, .{});
+        consumers[i] = try rt.spawn(consumer, .{ rt, &channel, @as(u32, @intCast(i)) }, .{});
         consumer_count += 1;
     }
 
-    try runtime.run();
+    try rt.run();
 
     std.log.info("All tasks completed.", .{});
 }

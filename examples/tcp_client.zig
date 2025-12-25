@@ -38,13 +38,13 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Thread pool is always enabled for DNS resolution
-    var runtime = try zio.Runtime.init(allocator, .{
+    var rt = try zio.Runtime.init(allocator, .{
         .thread_pool = .{},
     });
-    defer runtime.deinit();
+    defer rt.deinit();
 
-    var task = try runtime.spawn(clientTask, .{runtime}, .{});
-    defer task.cancel(runtime);
+    var task = try rt.spawn(clientTask, .{rt}, .{});
+    defer task.cancel(rt);
 
-    try runtime.run();
+    try rt.run();
 }
