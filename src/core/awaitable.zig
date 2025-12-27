@@ -95,6 +95,29 @@ pub const Awaitable = struct {
         self.wait_node.wake();
     }
 
+    /// Re-arm cancellation after it was acknowledged.
+    /// This increments pending_errors so the next cancellation point returns error.Canceled.
+    /// Asserts that user_canceled is already set.
+    pub fn recancel(self: *Awaitable) void {
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+
+            // Must have been canceled already
+            std.debug.assert(status.user_canceled);
+
+            // Increment pending_errors
+            status.pending_errors += 1;
+
+            const new: u32 = @bitCast(status);
+            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                current = prev;
+                continue;
+            }
+            break;
+        }
+    }
+
     /// Registers a wait node to be notified when the awaitable completes.
     /// This is part of the Future protocol for select().
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
