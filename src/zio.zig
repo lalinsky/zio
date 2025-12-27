@@ -40,6 +40,7 @@ pub const Semaphore = @import("sync.zig").Semaphore;
 pub const Barrier = @import("sync.zig").Barrier;
 pub const Channel = @import("sync.zig").Channel;
 pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
+pub const Futex = @import("sync/Futex.zig");
 
 // Re-export signal handling
 pub const Signal = @import("signal.zig").Signal;

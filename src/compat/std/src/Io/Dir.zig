@@ -322,7 +322,7 @@ pub fn makePathStatus(dir: Dir, io: Io, sub_path: []const u8) MakePathError!Make
     var status: MakePathStatus = .existed;
     var component = it.last() orelse return error.BadPathName;
     while (true) {
-        if (makeDir(dir, io, component.path)) |_| {
+        if (makeDir(dir, io, component.path)) {
             status = .created;
         } else |err| switch (err) {
             error.PathAlreadyExists => {

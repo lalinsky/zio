@@ -20,38 +20,8 @@ const select = @import("select.zig");
 const zio_net = @import("net.zig");
 const zio_file_io = @import("fs/file.zig");
 const zio_dir_io = @import("fs/dir.zig");
-const zio_mutex = @import("sync/Mutex.zig");
-const zio_condition = @import("sync/Condition.zig");
+const Futex = @import("sync/Futex.zig");
 const CompactWaitQueue = @import("utils/wait_queue.zig").CompactWaitQueue;
-const WaitNode = @import("core/WaitNode.zig");
-
-// Verify binary compatibility between Io.Mutex and zio.Mutex
-comptime {
-    if (@sizeOf(Io.Mutex) != @sizeOf(zio_mutex)) {
-        @compileError("Io.Mutex and zio.Mutex must have the same size");
-    }
-    if (@alignOf(Io.Mutex) != @alignOf(zio_mutex)) {
-        @compileError("Io.Mutex and zio.Mutex must have the same alignment");
-    }
-    // Verify sentinel values match between Io.Mutex and CompactWaitQueue
-    const State = CompactWaitQueue(WaitNode).State;
-    if (@intFromEnum(Io.Mutex.State.locked_once) != @intFromEnum(State.sentinel0)) {
-        @compileError("Io.Mutex.State.locked_once must match CompactWaitQueue.State.sentinel0");
-    }
-    if (@intFromEnum(Io.Mutex.State.unlocked) != @intFromEnum(State.sentinel1)) {
-        @compileError("Io.Mutex.State.unlocked must match CompactWaitQueue.State.sentinel1");
-    }
-}
-
-// Verify binary compatibility between Io.Condition and zio.Condition
-comptime {
-    if (@sizeOf(Io.Condition) != @sizeOf(zio_condition)) {
-        @compileError("Io.Condition and zio.Condition must have the same size");
-    }
-    if (@alignOf(Io.Condition) != @alignOf(zio_condition)) {
-        @compileError("Io.Condition and zio.Condition must have the same alignment");
-    }
-}
 
 // Verify binary compatibility between Io.Group and zio.Group
 comptime {
@@ -216,18 +186,20 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const
     executor.scheduleTask(task, .maybe_remote);
 }
 
-fn groupWaitImpl(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) void {
+fn groupWaitImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) void {
+    _ = initial_token;
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
     const zio_grp: *Group = @ptrCast(group);
-    var list = CompactWaitQueue(GroupNode).fromPtr(token);
-    zio_group.groupWait(rt, zio_grp, &list) catch {};
+    // Io.Group.wait returns void, so we eat any Canceled error here.
+    // The cancellation is still propagated to all group tasks internally.
+    zio_group.groupWait(rt, zio_grp) catch {};
 }
 
-fn groupCancelImpl(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) void {
+fn groupCancelImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) void {
+    _ = initial_token;
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    _ = group;
-    var list = CompactWaitQueue(GroupNode).fromPtr(token);
-    zio_group.groupCancel(rt, &list);
+    const zio_grp: *Group = @ptrCast(group);
+    zio_group.groupCancel(rt, zio_grp);
 }
 
 fn selectImpl(userdata: ?*anyopaque, futures: []const *Io.AnyFuture) Io.Cancelable!usize {
@@ -236,48 +208,61 @@ fn selectImpl(userdata: ?*anyopaque, futures: []const *Io.AnyFuture) Io.Cancelab
     return select.selectAwaitables(rt, awaitables);
 }
 
-fn mutexLockImpl(userdata: ?*anyopaque, prev_state: Io.Mutex.State, mutex: *Io.Mutex) Io.Cancelable!void {
-    _ = prev_state;
+fn recancelImpl(userdata: ?*anyopaque) void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_mtx: *zio_mutex = @ptrCast(mutex);
-    try zio_mtx.lock(rt);
+    const task = rt.getCurrentTask();
+    task.awaitable.recancel();
 }
 
-fn mutexLockUncancelableImpl(userdata: ?*anyopaque, prev_state: Io.Mutex.State, mutex: *Io.Mutex) void {
-    _ = prev_state;
+fn swapCancelProtectionImpl(userdata: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_mtx: *zio_mutex = @ptrCast(mutex);
-    zio_mtx.lockUncancelable(rt);
-}
-
-fn mutexUnlockImpl(userdata: ?*anyopaque, prev_state: Io.Mutex.State, mutex: *Io.Mutex) void {
-    _ = prev_state;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_mtx: *zio_mutex = @ptrCast(mutex);
-    zio_mtx.unlock(rt);
-}
-
-fn conditionWaitImpl(userdata: ?*anyopaque, cond: *Io.Condition, mutex: *Io.Mutex) Io.Cancelable!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_cond: *zio_condition = @ptrCast(cond);
-    const zio_mtx: *zio_mutex = @ptrCast(mutex);
-    try zio_cond.wait(rt, zio_mtx);
-}
-
-fn conditionWaitUncancelableImpl(userdata: ?*anyopaque, cond: *Io.Condition, mutex: *Io.Mutex) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_cond: *zio_condition = @ptrCast(cond);
-    const zio_mtx: *zio_mutex = @ptrCast(mutex);
-    zio_cond.waitUncancelable(rt, zio_mtx);
-}
-
-fn conditionWakeImpl(userdata: ?*anyopaque, cond: *Io.Condition, wake: Io.Condition.Wake) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_cond: *zio_condition = @ptrCast(cond);
-    switch (wake) {
-        .one => zio_cond.signal(rt),
-        .all => zio_cond.broadcast(rt),
+    switch (new) {
+        .blocked => {
+            rt.beginShield();
+            return .unblocked;
+        },
+        .unblocked => {
+            rt.endShield();
+            return .blocked;
+        },
     }
+}
+
+fn checkCancelImpl(userdata: ?*anyopaque) Io.Cancelable!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    try rt.checkCanceled();
+}
+
+fn futexWaitImpl(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Convert Io.Timeout to nanoseconds using the built-in conversion
+    const timeout_ns: u64 = if (timeout.toDurationFromNow(rt.io()) catch return error.Canceled) |duration| blk: {
+        const ns = duration.raw.nanoseconds;
+        if (ns <= 0) break :blk 1; // Already expired, use minimum timeout
+        break :blk @intCast(ns);
+    } else 0; // .none -> 0 means wait forever in our Futex API
+
+    Futex.timedWait(rt, ptr, expected, timeout_ns) catch |err| switch (err) {
+        error.Timeout => return error.Canceled, // Io treats timeout as cancellation
+        error.Canceled => return error.Canceled,
+    };
+}
+
+fn futexWaitUncancelableImpl(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    rt.beginShield();
+    defer rt.endShield();
+
+    Futex.wait(rt, ptr, expected) catch |err| switch (err) {
+        error.Canceled => unreachable, // Shielded, should not happen
+    };
+}
+
+fn futexWakeImpl(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    Futex.wake(rt, ptr, max_waiters);
 }
 
 fn dirMakeImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, mode: Io.Dir.Mode) Io.Dir.MakeError!void {
@@ -777,21 +762,20 @@ fn netInterfaceNameImpl(userdata: ?*anyopaque, interface: Io.net.Interface) Io.n
     @panic("TODO");
 }
 
-fn netLookupImpl(userdata: ?*anyopaque, hostname: Io.net.HostName, queue: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) void {
+fn netLookupImpl(userdata: ?*anyopaque, hostname: Io.net.HostName, queue: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
     const io = fromRuntime(rt);
+    defer queue.close(io);
 
     // Call the zio DNS lookup (uses thread pool internally)
     var iter = zio_net.lookupHost(rt, hostname.bytes, options.port) catch |err| {
-        const mapped_err: Io.net.HostName.LookupError = switch (err) {
+        return switch (err) {
             error.UnknownHostName => error.UnknownHostName,
             error.NameServerFailure => error.NameServerFailure,
             error.HostLacksNetworkAddresses => error.UnknownHostName,
             error.TemporaryNameServerFailure => error.NameServerFailure,
             else => error.NameServerFailure,
         };
-        queue.putOneUncancelable(io, .{ .end = mapped_err });
-        return;
     };
     defer iter.deinit();
 
@@ -800,7 +784,9 @@ fn netLookupImpl(userdata: ?*anyopaque, hostname: Io.net.HostName, queue: *Io.Qu
     const canonical_name = Io.net.HostName{
         .bytes = options.canonical_name_buffer[0..hostname.bytes.len],
     };
-    queue.putOneUncancelable(io, .{ .canonical_name = canonical_name });
+    queue.putOneUncancelable(io, .{ .canonical_name = canonical_name }) catch |err| switch (err) {
+        error.Closed => unreachable, // We close the queue, not the caller
+    };
 
     // Iterate through resolved addresses
     while (iter.next()) |zio_addr| {
@@ -816,11 +802,10 @@ fn netLookupImpl(userdata: ?*anyopaque, hostname: Io.net.HostName, queue: *Io.Qu
 
         // Convert zio IpAddress to Io.net.IpAddress
         const std_addr = zioIpToStdIo(zio_addr);
-        queue.putOneUncancelable(io, .{ .address = std_addr });
+        queue.putOneUncancelable(io, .{ .address = std_addr }) catch |err| switch (err) {
+            error.Closed => unreachable, // We close the queue, not the caller
+        };
     }
-
-    // Push end marker
-    queue.putOneUncancelable(io, .{ .end = {} });
 }
 
 pub const vtable = Io.VTable{
@@ -832,13 +817,13 @@ pub const vtable = Io.VTable{
     .groupConcurrent = groupConcurrentImpl,
     .groupWait = groupWaitImpl,
     .groupCancel = groupCancelImpl,
+    .recancel = recancelImpl,
+    .swapCancelProtection = swapCancelProtectionImpl,
+    .checkCancel = checkCancelImpl,
     .select = selectImpl,
-    .mutexLock = mutexLockImpl,
-    .mutexLockUncancelable = mutexLockUncancelableImpl,
-    .mutexUnlock = mutexUnlockImpl,
-    .conditionWait = conditionWaitImpl,
-    .conditionWaitUncancelable = conditionWaitUncancelableImpl,
-    .conditionWake = conditionWakeImpl,
+    .futexWait = futexWaitImpl,
+    .futexWaitUncancelable = futexWaitUncancelableImpl,
+    .futexWake = futexWakeImpl,
     .dirMake = dirMakeImpl,
     .dirMakePath = dirMakePathImpl,
     .dirMakeOpenPath = dirMakeOpenPathImpl,
@@ -1215,7 +1200,7 @@ test "Io: Condition wait/signal" {
     const TestContext = struct {
         fn mainTask(io: Io) !void {
             var mutex: Io.Mutex = .init;
-            var condition: Io.Condition = .{};
+            var condition = Io.Condition.init;
             var ready = false;
 
             var waiter_future = try io.concurrent(waiterTask, .{ io, &mutex, &condition, &ready });
@@ -1262,7 +1247,7 @@ test "Io: Condition broadcast" {
     const TestContext = struct {
         fn mainTask(io: Io) !void {
             var mutex: Io.Mutex = .init;
-            var condition: Io.Condition = .{};
+            var condition = Io.Condition.init;
             var ready = false;
             var count = std.atomic.Value(u32).init(0);
 
@@ -1390,7 +1375,7 @@ test "Io: DNS lookup localhost" {
     var lookup_buffer: [32]Io.net.HostName.LookupResult = undefined;
     var lookup_queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-    hostname.lookup(io, &lookup_queue, .{
+    try hostname.lookup(io, &lookup_queue, .{
         .port = 80,
         .canonical_name_buffer = &canonical_name_buffer,
     });
@@ -1406,13 +1391,10 @@ test "Io: DNS lookup localhost" {
             .canonical_name => |_| {
                 saw_canonical_name = true;
             },
-            .end => |end_result| {
-                try end_result;
-                break;
-            },
         }
     } else |err| switch (err) {
         error.Canceled => return err,
+        error.Closed => {}, // Queue closed, done reading
     }
 
     try std.testing.expect(saw_canonical_name);
@@ -1430,7 +1412,7 @@ test "Io: DNS lookup numeric IP" {
     var lookup_buffer: [32]Io.net.HostName.LookupResult = undefined;
     var lookup_queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-    hostname.lookup(io, &lookup_queue, .{
+    try hostname.lookup(io, &lookup_queue, .{
         .port = 8080,
         .canonical_name_buffer = &canonical_name_buffer,
     });
@@ -1450,13 +1432,10 @@ test "Io: DNS lookup numeric IP" {
             .canonical_name => |_| {
                 saw_canonical_name = true;
             },
-            .end => |end_result| {
-                try end_result;
-                break;
-            },
         }
     } else |err| switch (err) {
         error.Canceled => return err,
+        error.Closed => {}, // Queue closed, done reading
     }
 
     try std.testing.expect(saw_canonical_name);
@@ -1475,7 +1454,7 @@ test "Io: DNS lookup with family filter" {
     var lookup_buffer: [32]Io.net.HostName.LookupResult = undefined;
     var lookup_queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&lookup_buffer);
 
-    hostname.lookup(io, &lookup_queue, .{
+    try hostname.lookup(io, &lookup_queue, .{
         .port = 80,
         .canonical_name_buffer = &canonical_name_buffer,
         .family = .ip4,
@@ -1491,13 +1470,10 @@ test "Io: DNS lookup with family filter" {
                 try std.testing.expect(addr == .ip4);
             },
             .canonical_name => {},
-            .end => |end_result| {
-                try end_result;
-                break;
-            },
         }
     } else |err| switch (err) {
         error.Canceled => return err,
+        error.Closed => {}, // Queue closed, done reading
     }
 
     try std.testing.expect(address_count > 0);
@@ -1717,4 +1693,60 @@ test "Io: Dir statPath" {
     try std.testing.expect(stat.mtime.nanoseconds > 0);
     try std.testing.expect(stat.atime.nanoseconds > 0);
     try std.testing.expect(stat.ctime.nanoseconds > 0);
+}
+
+test "Io: Event wait/set" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+
+    const TestContext = struct {
+        var event: Io.Event = .unset;
+        var waiter_completed: bool = false;
+
+        fn waiterTask(i: Io) !void {
+            try event.wait(i);
+            waiter_completed = true;
+        }
+
+        fn setterTask(i: Io) !void {
+            // Small delay to ensure waiter is waiting
+            try i.sleep(.{ .nanoseconds = 1_000_000 }, .awake);
+            event.set(i);
+        }
+    };
+
+    TestContext.event = .unset;
+    TestContext.waiter_completed = false;
+
+    var waiter = try io.concurrent(TestContext.waiterTask, .{io});
+    defer waiter.cancel(io) catch {};
+
+    var setter = try io.concurrent(TestContext.setterTask, .{io});
+    defer setter.cancel(io) catch {};
+
+    // Wait for both tasks
+    _ = try waiter.await(io);
+    _ = try setter.await(io);
+
+    try std.testing.expect(TestContext.waiter_completed);
+    try std.testing.expect(TestContext.event.isSet());
+}
+
+test "Io: Event set before wait" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+
+    var event: Io.Event = .unset;
+
+    // Set before wait - should return immediately
+    event.set(io);
+    try std.testing.expect(event.isSet());
+
+    // Wait should return immediately since already set
+    try event.wait(io);
+    try std.testing.expect(event.isSet());
 }

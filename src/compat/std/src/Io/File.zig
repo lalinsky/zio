@@ -419,7 +419,7 @@ pub const Reader = struct {
             },
             .streaming, .streaming_reading => {
                 const seek_err = r.seek_err orelse e: {
-                    if (io.vtable.fileSeekBy(io.userdata, r.file, offset)) |_| {
+                    if (io.vtable.fileSeekBy(io.userdata, r.file, offset)) {
                         setLogicalPos(r, @intCast(@as(i64, @intCast(logicalPos(r))) + offset));
                         return;
                     } else |err| {

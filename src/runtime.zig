@@ -33,6 +33,7 @@ const Timeout = @import("core/timeout.zig").Timeout;
 const select = @import("select.zig");
 const stdio = @import("stdio.zig");
 const Io = @import("zio.zig").Io;
+const Futex = @import("sync/Futex.zig");
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -859,6 +860,8 @@ pub const Runtime = struct {
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     shutdown_mutex: std.Thread.Mutex = .{}, // Protects task list iteration during shutdown
 
+    futex_table: Futex.Table, // Global futex wait table
+
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
@@ -870,6 +873,7 @@ pub const Runtime = struct {
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
             .task_pool = .init(allocator),
+            .futex_table = Futex.Table.init(allocator),
         };
 
         try self.thread_pool.init(allocator, options.thread_pool);
@@ -922,6 +926,9 @@ pub const Runtime = struct {
 
         // Clean up task pool
         self.task_pool.deinit();
+
+        // Clean up futex table
+        self.futex_table.deinit();
 
         // Free the Runtime allocation
         allocator.destroy(self);

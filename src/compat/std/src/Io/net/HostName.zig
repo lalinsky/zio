@@ -82,19 +82,22 @@ pub const LookupError = error{
 pub const LookupResult = union(enum) {
     address: IpAddress,
     canonical_name: HostName,
-    end: LookupError!void,
 };
 
-/// Adds any number of `IpAddress` into resolved, exactly one canonical_name,
-/// and then always finishes by adding one `LookupResult.end` entry.
+/// Adds any number of `LookupResult.address` into `resolved`, and exactly one
+/// `LookupResult.canonical_name`.
 ///
 /// Guaranteed not to block if provided queue has capacity at least 16.
+///
+/// Closes `resolved` before return, even on error.
+///
+/// Asserts `resolved` is not closed until this call returns.
 pub fn lookup(
     host_name: HostName,
     io: Io,
     resolved: *Io.Queue(LookupResult),
     options: LookupOptions,
-) void {
+) LookupError!void {
     return io.vtable.netLookup(io.userdata, host_name, resolved, options);
 }
 
@@ -211,23 +214,25 @@ pub fn connect(
     port: u16,
     options: IpAddress.ConnectOptions,
 ) ConnectError!Stream {
-    var connect_many_buffer: [32]ConnectManyResult = undefined;
-    var connect_many_queue: Io.Queue(ConnectManyResult) = .init(&connect_many_buffer);
+    var connect_many_buffer: [32]IpAddress.ConnectError!Stream = undefined;
+    var connect_many_queue: Io.Queue(IpAddress.ConnectError!Stream) = .init(&connect_many_buffer);
 
     var connect_many = io.async(connectMany, .{ host_name, io, port, &connect_many_queue, options });
-    var saw_end = false;
     defer {
-        connect_many.cancel(io);
-        if (!saw_end) while (true) switch (connect_many_queue.getOneUncancelable(io)) {
-            .connection => |loser| if (loser) |s| s.close(io) else |_| continue,
-            .end => break,
-        };
+        connect_many.cancel(io) catch {};
+        while (connect_many_queue.getOneUncancelable(io)) |loser| {
+            if (loser) |s| s.close(io) else |_| {}
+        } else |err| switch (err) {
+            error.Closed => {},
+        }
     }
 
-    var aggregate_error: ConnectError = error.UnknownHostName;
+    var ip_connect_error: ?IpAddress.ConnectError = null;
 
-    while (connect_many_queue.getOne(io)) |result| switch (result) {
-        .connection => |connection| if (connection) |stream| return stream else |err| switch (err) {
+    while (connect_many_queue.getOne(io)) |result| {
+        if (result) |stream| {
+            return stream;
+        } else |err| switch (err) {
             error.SystemResources,
             error.OptionUnsupported,
             error.ProcessFdQuotaExceeded,
@@ -237,66 +242,80 @@ pub fn connect(
 
             error.WouldBlock => return error.Unexpected,
 
-            else => |e| aggregate_error = e,
-        },
-        .end => |end| {
-            saw_end = true;
-            try end;
-            return aggregate_error;
-        },
+            else => |e| ip_connect_error = e,
+        }
     } else |err| switch (err) {
         error.Canceled => |e| return e,
+        error.Closed => {
+            // There was no successful connection attempt. If there was a lookup error, return that.
+            try connect_many.await(io);
+            // Otherwise, return the error from a failed IP connection attempt.
+            return ip_connect_error orelse
+                return error.UnknownHostName;
+        },
     }
 }
 
-pub const ConnectManyResult = union(enum) {
-    connection: IpAddress.ConnectError!Stream,
-    end: ConnectError!void,
-};
-
 /// Asynchronously establishes a connection to all IP addresses associated with
 /// a host name, adding them to a results queue upon completion.
+///
+/// Closes `results` before return, even on error.
+///
+/// Asserts `results` is not closed until this call returns.
 pub fn connectMany(
     host_name: HostName,
     io: Io,
     port: u16,
-    results: *Io.Queue(ConnectManyResult),
+    results: *Io.Queue(IpAddress.ConnectError!Stream),
     options: IpAddress.ConnectOptions,
-) void {
+) LookupError!void {
+    defer results.close(io);
+
     var canonical_name_buffer: [max_len]u8 = undefined;
     var lookup_buffer: [32]HostName.LookupResult = undefined;
     var lookup_queue: Io.Queue(LookupResult) = .init(&lookup_buffer);
-    var group: Io.Group = .init;
-    defer group.cancel(io);
-
-    group.async(io, lookup, .{ host_name, io, &lookup_queue, .{
+    var lookup_future = io.async(lookup, .{ host_name, io, &lookup_queue, .{
         .port = port,
         .canonical_name_buffer = &canonical_name_buffer,
     } });
+    defer lookup_future.cancel(io) catch {};
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
 
     while (lookup_queue.getOne(io)) |dns_result| switch (dns_result) {
         .address => |address| group.async(io, enqueueConnection, .{ address, io, results, options }),
         .canonical_name => continue,
-        .end => |lookup_result| {
-            group.wait(io);
-            results.putOneUncancelable(io, .{ .end = lookup_result });
-            return;
-        },
     } else |err| switch (err) {
-        error.Canceled => |e| {
-            group.cancel(io);
-            results.putOneUncancelable(io, .{ .end = e });
+        error.Canceled => |e| return e,
+        error.Closed => {
+            group.wait(io);
+            return lookup_future.await(io);
         },
     }
 }
-
 fn enqueueConnection(
     address: IpAddress,
     io: Io,
-    queue: *Io.Queue(ConnectManyResult),
+    queue: *Io.Queue(IpAddress.ConnectError!Stream),
     options: IpAddress.ConnectOptions,
 ) void {
-    queue.putOneUncancelable(io, .{ .connection = address.connect(io, options) });
+    enqueueConnectionFallible(address, io, queue, options) catch |err| switch (err) {
+        error.Canceled => {},
+    };
+}
+fn enqueueConnectionFallible(
+    address: IpAddress,
+    io: Io,
+    queue: *Io.Queue(IpAddress.ConnectError!Stream),
+    options: IpAddress.ConnectOptions,
+) Io.Cancelable!void {
+    const result = address.connect(io, options);
+    errdefer if (result) |s| s.close(io) else |_| {};
+    queue.putOne(io, result) catch |err| switch (err) {
+        error.Closed => unreachable, // `queue` must not be closed
+        error.Canceled => |e| return e,
+    };
 }
 
 pub const ResolvConf = struct {

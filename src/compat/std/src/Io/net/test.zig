@@ -129,7 +129,7 @@ test "resolve DNS" {
         var results_buffer: [32]net.HostName.LookupResult = undefined;
         var results: Io.Queue(net.HostName.LookupResult) = .init(&results_buffer);
 
-        net.HostName.lookup(try .init("localhost"), io, &results, .{
+        try net.HostName.lookup(try .init("localhost"), io, &results, .{
             .port = 80,
             .canonical_name_buffer = &canonical_name_buffer,
         });
@@ -142,11 +142,10 @@ test "resolve DNS" {
                     addresses_found += 1;
             },
             .canonical_name => |canonical_name| try testing.expectEqualStrings("localhost", canonical_name.bytes),
-            .end => |end| {
-                try end;
-                break;
-            },
-        } else |err| return err;
+        } else |err| switch (err) {
+            error.Closed => {},
+            error.Canceled => |e| return e,
+        }
 
         try testing.expect(addresses_found != 0);
     }
@@ -161,20 +160,19 @@ test "resolve DNS" {
         net.HostName.lookup(try .init("example.com"), io, &results, .{
             .port = 80,
             .canonical_name_buffer = &canonical_name_buffer,
-        });
+        }) catch |err| switch (err) {
+            error.UnknownHostName => return error.SkipZigTest,
+            error.NameServerFailure => return error.SkipZigTest,
+            else => |e| return e,
+        };
 
         while (results.getOne(io)) |result| switch (result) {
             .address => {},
             .canonical_name => {},
-            .end => |end| {
-                end catch |err| switch (err) {
-                    error.UnknownHostName => return error.SkipZigTest,
-                    error.NameServerFailure => return error.SkipZigTest,
-                    else => return err,
-                };
-                break;
-            },
-        } else |err| return err;
+        } else |err| switch (err) {
+            error.Closed => {},
+            error.Canceled => |e| return e,
+        }
     }
 }
 
