@@ -582,17 +582,17 @@ pub const VTable = struct {
     groupWait: *const fn (?*anyopaque, *Group, token: *anyopaque) void,
     groupCancel: *const fn (?*anyopaque, *Group, token: *anyopaque) void,
 
+    recancel: *const fn (?*anyopaque) void,
+    swapCancelProtection: *const fn (?*anyopaque, new: CancelProtection) CancelProtection,
+    checkCancel: *const fn (?*anyopaque) Cancelable!void,
+
     /// Blocks until one of the futures from the list has a result ready, such
     /// that awaiting it will not block. Returns that index.
     select: *const fn (?*anyopaque, futures: []const *AnyFuture) Cancelable!usize,
 
-    mutexLock: *const fn (?*anyopaque, prev_state: Mutex.State, mutex: *Mutex) Cancelable!void,
-    mutexLockUncancelable: *const fn (?*anyopaque, prev_state: Mutex.State, mutex: *Mutex) void,
-    mutexUnlock: *const fn (?*anyopaque, prev_state: Mutex.State, mutex: *Mutex) void,
-
-    conditionWait: *const fn (?*anyopaque, cond: *Condition, mutex: *Mutex) Cancelable!void,
-    conditionWaitUncancelable: *const fn (?*anyopaque, cond: *Condition, mutex: *Mutex) void,
-    conditionWake: *const fn (?*anyopaque, cond: *Condition, wake: Condition.Wake) void,
+    futexWait: *const fn (?*anyopaque, ptr: *const u32, expected: u32, Timeout) Cancelable!void,
+    futexWaitUncancelable: *const fn (?*anyopaque, ptr: *const u32, expected: u32) void,
+    futexWake: *const fn (?*anyopaque, ptr: *const u32, max_waiters: u32) void,
 
     dirMake: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.Mode) Dir.MakeError!void,
     dirMakePath: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.Mode) Dir.MakeError!void,
@@ -633,7 +633,7 @@ pub const VTable = struct {
     netClose: *const fn (?*anyopaque, handle: net.Socket.Handle) void,
     netInterfaceNameResolve: *const fn (?*anyopaque, *const net.Interface.Name) net.Interface.Name.ResolveError!net.Interface,
     netInterfaceName: *const fn (?*anyopaque, net.Interface) net.Interface.NameError!net.Interface.Name,
-    netLookup: *const fn (?*anyopaque, net.HostName, *Queue(net.HostName.LookupResult), net.HostName.LookupOptions) void,
+    netLookup: *const fn (?*anyopaque, net.HostName, *Queue(net.HostName.LookupResult), net.HostName.LookupOptions) net.HostName.LookupError!void,
 };
 
 pub const Cancelable = error{
@@ -841,7 +841,7 @@ pub const Timestamp = struct {
         return t.nanoseconds;
     }
 
-    pub fn formatNumber(t: Timestamp, w: *Writer, n: std.fmt.Number) Writer.Error!void {
+    pub fn formatNumber(t: Timestamp, w: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
         return w.printInt(t.nanoseconds, n.mode.base() orelse 10, n.case, .{
             .precision = n.precision,
             .width = n.width,
@@ -918,7 +918,14 @@ pub fn Future(Result: type) type {
         any_future: ?*AnyFuture,
         result: Result,
 
-        /// Equivalent to `await` but places a cancellation request.
+        /// Equivalent to `await` but places a cancellation request. This causes the task to receive
+        /// `error.Canceled` from its next "cancelation point" (if any). A cancelation point is a
+        /// call to a function in `Io` which can return `error.Canceled`.
+        ///
+        /// After cancelation of a task is requested, only the next cancelation point in that task
+        /// will return `error.Canceled`: future points will not re-signal the cancelation. As such,
+        /// it is usually a bug to ignore `error.Canceled`. However, to defer handling cancelation
+        /// requests, see also `recancel` and `CancelProtection`.
         ///
         /// Idempotent. Not threadsafe.
         pub fn cancel(f: *@This(), io: Io) Result {
@@ -941,9 +948,14 @@ pub fn Future(Result: type) type {
 pub const Group = struct {
     state: usize,
     context: ?*anyopaque,
-    token: ?*anyopaque,
+    /// This value indicates whether or not a group has pending tasks. `null`
+    /// means there are no pending tasks, and no resources associated with the
+    /// group, so `await` and `cancel` return immediately without calling the
+    /// implementation. This means that `token` must be accessed atomically to
+    /// avoid racing with the check in `await` and `cancel`.
+    token: std.atomic.Value(?*anyopaque),
 
-    pub const init: Group = .{ .state = 0, .context = null, .token = null };
+    pub const init: Group = .{ .state = 0, .context = null, .token = .init(null) };
 
     /// Calls `function` with `args` asynchronously. The resource spawned is
     /// owned by the group.
@@ -1006,22 +1018,87 @@ pub const Group = struct {
     /// cancellation requests propagate to all members of the group.
     ///
     /// Idempotent. Not threadsafe.
+    ///
+    /// It is safe to call this function concurrently with `Group.async` or
+    /// `Group.concurrent`, provided that the group does not complete until
+    /// the call to `Group.async` or `Group.concurrent` returns.
     pub fn wait(g: *Group, io: Io) void {
-        const token = g.token orelse return;
-        g.token = null;
+        const token = g.token.load(.acquire) orelse return;
         io.vtable.groupWait(io.userdata, g, token);
+        assert(g.token.raw == null);
     }
 
     /// Equivalent to `wait` but immediately requests cancellation on all
     /// members of the group.
     ///
+    /// For a description of cancelation and cancelation points, see `Future.cancel`.
+    ///
     /// Idempotent. Not threadsafe.
+    ///
+    /// It is safe to call this function concurrently with `Group.async` or
+    /// `Group.concurrent`, provided that the group does not complete until
+    /// the call to `Group.async` or `Group.concurrent` returns.
     pub fn cancel(g: *Group, io: Io) void {
-        const token = g.token orelse return;
-        g.token = null;
+        const token = g.token.load(.acquire) orelse return;
         io.vtable.groupCancel(io.userdata, g, token);
+        assert(g.token.raw == null);
     }
 };
+
+/// Asserts that `error.Canceled` was returned from a prior cancelation point, and "re-arms" the
+/// cancelation request, so that `error.Canceled` will be returned again from the next cancelation
+/// point.
+///
+/// For a description of cancelation and cancelation points, see `Future.cancel`.
+pub fn recancel(io: Io) void {
+    io.vtable.recancel(io.userdata);
+}
+
+/// In rare cases, it is desirable to completely block cancelation notification, so that a region
+/// of code can run uninterrupted before `error.Canceled` is potentially observed. Therefore, every
+/// task has a "cancel protection" state which indicates whether or not `Io` functions can introduce
+/// cancelation points.
+///
+/// To modify a task's cancel protection state, see `swapCancelProtection`.
+///
+/// For a description of cancelation and cancelation points, see `Future.cancel`.
+pub const CancelProtection = enum {
+    /// Any call to an `Io` function with `error.Canceled` in its error set is a cancelation point.
+    ///
+    /// This is the default state, which all tasks are created in.
+    unblocked,
+    /// No `Io` function introduces a cancelation point (`error.Canceled` will never be returned).
+    blocked,
+};
+/// Updates the current task's cancel protection state (see `CancelProtection`).
+///
+/// The typical usage for this function is to protect a block of code from cancelation:
+/// ```
+/// const old_cancel_protect = io.swapCancelProtection(.blocked);
+/// defer _ = io.swapCancelProtection(old_cancel_protect);
+/// doSomeWork() catch |err| switch (err) {
+///     error.Canceled => unreachable,
+/// };
+/// ```
+///
+/// For a description of cancelation and cancelation points, see `Future.cancel`.
+pub fn swapCancelProtection(io: Io, new: CancelProtection) CancelProtection {
+    return io.vtable.swapCancelProtection(io.userdata, new);
+}
+
+/// This function acts as a pure cancelation point (subject to protection; see `CancelProtection`)
+/// and does nothing else. In other words, it returns `error.Canceled` if there is an outstanding
+/// non-blocked cancelation request, but otherwise is a no-op.
+///
+/// It is rarely necessary to call this function. The primary use case is in long-running CPU-bound
+/// tasks which may need to respond to cancelation before completing. Short tasks, or those which
+/// perform other `Io` operations (and hence have other cancelation points), will typically already
+/// respond quickly to cancelation requests.
+///
+/// For a description of cancelation and cancelation points, see `Future.cancel`.
+pub fn checkCancel(io: Io) Cancelable!void {
+    return io.vtable.checkCancel(io.userdata);
+}
 
 pub fn Select(comptime U: type) type {
     return struct {
@@ -1076,7 +1153,9 @@ pub fn Select(comptime U: type) type {
                     const args_casted: *const Args = @ptrCast(@alignCast(context));
                     const unerased_select: *S = @fieldParentPtr("group", group);
                     const elem = @unionInit(U, @tagName(field), @call(.auto, function, args_casted.*));
-                    unerased_select.queue.putOneUncancelable(unerased_select.io, elem);
+                    unerased_select.queue.putOneUncancelable(unerased_select.io, elem) catch |err| switch (err) {
+                        error.Closed => unreachable,
+                    };
                 }
             };
             _ = @atomicRmw(usize, &s.outstanding, .Add, 1, .monotonic);
@@ -1090,11 +1169,16 @@ pub fn Select(comptime U: type) type {
         /// Not threadsafe.
         pub fn wait(s: *S) Cancelable!U {
             s.outstanding -= 1;
-            return s.queue.getOne(s.io);
+            return s.queue.getOne(s.io) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Closed => unreachable,
+            };
         }
 
         /// Equivalent to `wait` but requests cancellation on all remaining
         /// tasks owned by the select.
+        ///
+        /// For a description of cancelation and cancelation points, see `Future.cancel`.
         ///
         /// It is illegal to call `wait` after this.
         ///
@@ -1106,104 +1190,340 @@ pub fn Select(comptime U: type) type {
     };
 }
 
+/// Atomically checks if the value at `ptr` equals `expected`, and if so, blocks until either:
+///
+/// * a matching (same `ptr` argument) `futexWake` call occurs, or
+/// * a spurious ("random") wakeup occurs.
+///
+/// Typically, `futexWake` should be called immediately after updating the value at `ptr.*`, to
+/// unblock tasks using `futexWait` to wait for the value to change from what it previously was.
+///
+/// The caller is responsible for identifying spurious wakeups if necessary, typically by checking
+/// the value at `ptr.*`.
+///
+/// Asserts that `T` is 4 bytes in length and has a well-defined layout with no padding bits.
+pub fn futexWait(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, expected: T) Cancelable!void {
+    return futexWaitTimeout(io, T, ptr, expected, .none);
+}
+/// Same as `futexWait`, except also unblocks if `timeout` expires. As with `futexWait`, spurious
+/// wakeups are possible. It remains the caller's responsibility to differentiate between these
+/// three possible wake-up reasons if necessary.
+pub fn futexWaitTimeout(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, expected: T, timeout: Timeout) Cancelable!void {
+    comptime assert(@sizeOf(T) == 4);
+    const expected_raw: *align(1) const u32 = @ptrCast(&expected);
+    return io.vtable.futexWait(io.userdata, @ptrCast(ptr), expected_raw.*, timeout);
+}
+/// Same as `futexWait`, except does not introduce a cancelation point.
+///
+/// For a description of cancelation and cancelation points, see `Future.cancel`.
+pub fn futexWaitUncancelable(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, expected: T) void {
+    comptime assert(@sizeOf(T) == @sizeOf(u32));
+    const expected_raw: *align(1) const u32 = @ptrCast(&expected);
+    io.vtable.futexWaitUncancelable(io.userdata, @ptrCast(ptr), expected_raw.*);
+}
+/// Unblocks pending futex waits on `ptr`, up to a limit of `max_waiters` calls.
+pub fn futexWake(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, max_waiters: u32) void {
+    comptime assert(@sizeOf(T) == @sizeOf(u32));
+    if (max_waiters == 0) return;
+    return io.vtable.futexWake(io.userdata, @ptrCast(ptr), max_waiters);
+}
+
 pub const Mutex = struct {
-    state: State,
+    state: std.atomic.Value(State),
 
-    pub const State = enum(usize) {
-        locked_once = 0b00,
-        unlocked = 0b01,
-        contended = 0b10,
-        /// contended
-        _,
+    pub const init: Mutex = .{ .state = .init(.unlocked) };
 
-        pub fn isUnlocked(state: State) bool {
-            return @intFromEnum(state) & @intFromEnum(State.unlocked) == @intFromEnum(State.unlocked);
-        }
+    const State = enum(u32) {
+        unlocked,
+        locked_once,
+        contended,
     };
 
-    pub const init: Mutex = .{ .state = .unlocked };
-
-    pub fn tryLock(mutex: *Mutex) bool {
-        const prev_state: State = @enumFromInt(@atomicRmw(
-            usize,
-            @as(*usize, @ptrCast(&mutex.state)),
-            .And,
-            ~@intFromEnum(State.unlocked),
+    pub fn tryLock(m: *Mutex) bool {
+        switch (m.state.cmpxchgWeak(
+            .unlocked,
+            .locked_once,
             .acquire,
-        ));
-        return prev_state.isUnlocked();
-    }
-
-    pub fn lock(mutex: *Mutex, io: Io) Cancelable!void {
-        const prev_state: State = @enumFromInt(@atomicRmw(
-            usize,
-            @as(*usize, @ptrCast(&mutex.state)),
-            .And,
-            ~@intFromEnum(State.unlocked),
-            .acquire,
-        ));
-        if (prev_state.isUnlocked()) {
-            @branchHint(.likely);
-            return;
+            .monotonic,
+        ) orelse return true) {
+            .unlocked => unreachable,
+            .locked_once, .contended => return false,
         }
-        return io.vtable.mutexLock(io.userdata, prev_state, mutex);
     }
 
-    /// Same as `lock` but cannot be canceled.
-    pub fn lockUncancelable(mutex: *Mutex, io: Io) void {
-        const prev_state: State = @enumFromInt(@atomicRmw(
-            usize,
-            @as(*usize, @ptrCast(&mutex.state)),
-            .And,
-            ~@intFromEnum(State.unlocked),
+    pub fn lock(m: *Mutex, io: Io) Cancelable!void {
+        const initial_state = m.state.cmpxchgWeak(
+            .unlocked,
+            .locked_once,
             .acquire,
-        ));
-        if (prev_state.isUnlocked()) {
-            @branchHint(.likely);
-            return;
-        }
-        return io.vtable.mutexLockUncancelable(io.userdata, prev_state, mutex);
-    }
-
-    pub fn unlock(mutex: *Mutex, io: Io) void {
-        const prev_state = @cmpxchgWeak(State, &mutex.state, .locked_once, .unlocked, .release, .acquire) orelse {
+            .monotonic,
+        ) orelse {
             @branchHint(.likely);
             return;
         };
-        assert(prev_state != .unlocked); // mutex not locked
-        return io.vtable.mutexUnlock(io.userdata, prev_state, mutex);
+        if (initial_state == .contended) {
+            try io.futexWait(State, &m.state.raw, .contended);
+        }
+        while (m.state.swap(.contended, .acquire) != .unlocked) {
+            try io.futexWait(State, &m.state.raw, .contended);
+        }
+    }
+
+    /// Same as `lock`, except does not introduce a cancelation point.
+    ///
+    /// For a description of cancelation and cancelation points, see `Future.cancel`.
+    pub fn lockUncancelable(m: *Mutex, io: Io) void {
+        const initial_state = m.state.cmpxchgWeak(
+            .unlocked,
+            .locked_once,
+            .acquire,
+            .monotonic,
+        ) orelse {
+            @branchHint(.likely);
+            return;
+        };
+        if (initial_state == .contended) {
+            io.futexWaitUncancelable(State, &m.state.raw, .contended);
+        }
+        while (m.state.swap(.contended, .acquire) != .unlocked) {
+            io.futexWaitUncancelable(State, &m.state.raw, .contended);
+        }
+    }
+
+    pub fn unlock(m: *Mutex, io: Io) void {
+        switch (m.state.swap(.unlocked, .release)) {
+            .unlocked => unreachable,
+            .locked_once => {},
+            .contended => {
+                @branchHint(.unlikely);
+                io.futexWake(State, &m.state.raw, 1);
+            },
+        }
     }
 };
 
 pub const Condition = struct {
-    state: u64 = 0,
+    state: std.atomic.Value(State),
+    /// Incremented whenever the condition is signaled
+    epoch: std.atomic.Value(u32),
+
+    const State = packed struct(u32) {
+        waiters: u16,
+        signals: u16,
+    };
+
+    pub const init: Condition = .{
+        .state = .init(.{ .waiters = 0, .signals = 0 }),
+        .epoch = .init(0),
+    };
 
     pub fn wait(cond: *Condition, io: Io, mutex: *Mutex) Cancelable!void {
-        return io.vtable.conditionWait(io.userdata, cond, mutex);
+        try waitInner(cond, io, mutex, false);
     }
 
+    /// Same as `wait`, except does not introduce a cancelation point.
+    ///
+    /// For a description of cancelation and cancelation points, see `Future.cancel`.
     pub fn waitUncancelable(cond: *Condition, io: Io, mutex: *Mutex) void {
-        return io.vtable.conditionWaitUncancelable(io.userdata, cond, mutex);
+        waitInner(cond, io, mutex, true) catch |err| switch (err) {
+            error.Canceled => unreachable,
+        };
+    }
+
+    fn waitInner(cond: *Condition, io: Io, mutex: *Mutex, uncancelable: bool) Cancelable!void {
+        var epoch = cond.epoch.load(.acquire); // `.acquire` to ensure ordered before state load
+
+        {
+            const prev_state = cond.state.fetchAdd(.{ .waiters = 1, .signals = 0 }, .monotonic);
+            assert(prev_state.waiters < math.maxInt(u16)); // overflow caused by too many waiters
+        }
+
+        mutex.unlock(io);
+        defer mutex.lockUncancelable(io);
+
+        while (true) {
+            const result = if (uncancelable)
+                io.futexWaitUncancelable(u32, &cond.epoch.raw, epoch)
+            else
+                io.futexWait(u32, &cond.epoch.raw, epoch);
+
+            epoch = cond.epoch.load(.acquire); // `.acquire` to ensure ordered before `state` laod
+
+            // Even on error, try to consume a pending signal first. Otherwise a race might
+            // cause a signal to get stuck in the state with no corresponding waiter.
+            {
+                var prev_state = cond.state.load(.monotonic);
+                while (prev_state.signals > 0) {
+                    prev_state = cond.state.cmpxchgWeak(prev_state, .{
+                        .waiters = prev_state.waiters - 1,
+                        .signals = prev_state.signals - 1,
+                    }, .acquire, .monotonic) orelse {
+                        // We successfully consumed a signal.
+                        return;
+                    };
+                }
+            }
+
+            // There are no more signals available; this was a spurious wakeup or an error. If it
+            // was an error, we will remove ourselves as a waiter and return that error. Otherwise,
+            // we'll loop back to the futex wait.
+            result catch |err| {
+                const prev_state = cond.state.fetchSub(.{ .waiters = 1, .signals = 0 }, .monotonic);
+                assert(prev_state.waiters > 0); // underflow caused by illegal state
+                return err;
+            };
+        }
     }
 
     pub fn signal(cond: *Condition, io: Io) void {
-        io.vtable.conditionWake(io.userdata, cond, .one);
+        var prev_state = cond.state.load(.monotonic);
+        while (prev_state.waiters > prev_state.signals) {
+            @branchHint(.unlikely);
+            prev_state = cond.state.cmpxchgWeak(prev_state, .{
+                .waiters = prev_state.waiters,
+                .signals = prev_state.signals + 1,
+            }, .release, .monotonic) orelse {
+                // Update the epoch to tell the waiting threads that there are new signals for them.
+                // Note that a waiting thread could miss a take if *exactly* (1<<32)-1 wakes happen
+                // between it observing the epoch and sleeping on it, but this is extraordinarily
+                // unlikely due to the precise number of calls required.
+                _ = cond.epoch.fetchAdd(1, .release); // `.release` to ensure ordered after `state` update
+                io.futexWake(u32, &cond.epoch.raw, 1);
+                return;
+            };
+        }
     }
 
     pub fn broadcast(cond: *Condition, io: Io) void {
-        io.vtable.conditionWake(io.userdata, cond, .all);
+        var prev_state = cond.state.load(.monotonic);
+        while (prev_state.waiters > prev_state.signals) {
+            @branchHint(.unlikely);
+            prev_state = cond.state.cmpxchgWeak(prev_state, .{
+                .waiters = prev_state.waiters,
+                .signals = prev_state.waiters,
+            }, .release, .monotonic) orelse {
+                // Update the epoch to tell the waiting threads that there are new signals for them.
+                // Note that a waiting thread could miss a take if *exactly* (1<<32)-1 wakes happen
+                // between it observing the epoch and sleeping on it, but this is extraordinarily
+                // unlikely due to the precise number of calls required.
+                _ = cond.epoch.fetchAdd(1, .release); // `.release` to ensure ordered after `state` update
+                io.futexWake(u32, &cond.epoch.raw, prev_state.waiters - prev_state.signals);
+                return;
+            };
+        }
+    }
+};
+
+/// Logical boolean flag which can be set and unset and supports a "wait until set" operation.
+pub const Event = enum(u32) {
+    unset,
+    waiting,
+    is_set,
+
+    /// Returns whether the logical boolean is `true`.
+    pub fn isSet(event: *const Event) bool {
+        return switch (@atomicLoad(Event, event, .acquire)) {
+            .unset, .waiting => false,
+            .is_set => true,
+        };
     }
 
-    pub const Wake = enum {
-        /// Wake up only one thread.
-        one,
-        /// Wake up all threads.
-        all,
-    };
+    /// Blocks until the logical boolean is `true`.
+    pub fn wait(event: *Event, io: Io) Io.Cancelable!void {
+        if (@cmpxchgStrong(Event, event, .unset, .waiting, .acquire, .acquire)) |prev| switch (prev) {
+            .unset => unreachable,
+            .waiting => {},
+            .is_set => return,
+        };
+        errdefer {
+            // Ideally we would restore the event back to `.unset` instead of `.waiting`, but there
+            // might be other threads waiting on the event. In theory we could track the *number* of
+            // waiting threads in the unused bits of the `Event`, but that has its own problem: the
+            // waiters would wake up when a *new waiter* was added. So it's easiest to just leave
+            // the state at `.waiting`---at worst it causes one redundant call to `futexWake`.
+        }
+        while (true) {
+            try io.futexWait(Event, event, .waiting);
+            switch (@atomicLoad(Event, event, .acquire)) {
+                .unset => unreachable, // `reset` called before pending `wait` returned
+                .waiting => continue,
+                .is_set => return,
+            }
+        }
+    }
+
+    /// Same as `wait`, except does not introduce a cancelation point.
+    ///
+    /// For a description of cancelation and cancelation points, see `Future.cancel`.
+    pub fn waitUncancelable(event: *Event, io: Io) void {
+        if (@cmpxchgStrong(Event, event, .unset, .waiting, .acquire, .acquire)) |prev| switch (prev) {
+            .unset => unreachable,
+            .waiting => {},
+            .is_set => return,
+        };
+        while (true) {
+            io.futexWaitUncancelable(Event, event, .waiting);
+            switch (@atomicLoad(Event, event, .acquire)) {
+                .unset => unreachable, // `reset` called before pending `wait` returned
+                .waiting => continue,
+                .is_set => return,
+            }
+        }
+    }
+
+    /// Blocks the calling thread until either the logical boolean is set, the timeout expires, or a
+    /// spurious wakeup occurs. If the timeout expires or a spurious wakeup occurs, `error.Timeout`
+    /// is returned.
+    pub fn waitTimeout(event: *Event, io: Io, timeout: Timeout) (error{Timeout} || Cancelable)!void {
+        if (@cmpxchgStrong(Event, event, .unset, .waiting, .acquire, .acquire)) |prev| switch (prev) {
+            .unset => unreachable,
+            .waiting => assert(!builtin.single_threaded), // invalid state
+            .is_set => return,
+        };
+        errdefer {
+            // Ideally we would restore the event back to `.unset` instead of `.waiting`, but there
+            // might be other threads waiting on the event. In theory we could track the *number* of
+            // waiting threads in the unused bits of the `Event`, but that has its own problem: the
+            // waiters would wake up when a *new waiter* was added. So it's easiest to just leave
+            // the state at `.waiting`---at worst it causes one redundant call to `futexWake`.
+        }
+        io.futexWaitTimeout(Event, event, .waiting, timeout);
+        switch (@atomicLoad(Event, event, .acquire)) {
+            .unset => unreachable, // `reset` called before pending `wait` returned
+            .waiting => return error.Timeout,
+            .is_set => return,
+        }
+    }
+
+    /// Sets the logical boolean to true, and hence unblocks any pending calls to `wait`. The
+    /// logical boolean remains true until `reset` is called, so future calls to `set` have no
+    /// semantic effect.
+    ///
+    /// Any memory accesses prior to a `set` call are "released", so that if this `set` call causes
+    /// `isSet` to return `true` or a wait to finish, those tasks will be able to observe those
+    /// memory accesses.
+    pub fn set(e: *Event, io: Io) void {
+        switch (@atomicRmw(Event, e, .Xchg, .is_set, .release)) {
+            .unset, .is_set => {},
+            .waiting => io.futexWake(Event, e, std.math.maxInt(u32)),
+        }
+    }
+
+    /// Sets the logical boolean to false.
+    ///
+    /// Assumes that there is no pending call to `wait` or `waitUncancelable`.
+    ///
+    /// However, concurrent calls to `isSet`, `set`, and `reset` are allowed.
+    pub fn reset(e: *Event) void {
+        @atomicStore(Event, e, .unset, .monotonic);
+    }
 };
+
+pub const QueueClosedError = error{Closed};
 
 pub const TypeErasedQueue = struct {
     mutex: Mutex,
+    closed: bool,
 
     /// Ring buffer. This data is logically *after* queued getters.
     buffer: []u8,
@@ -1215,12 +1535,14 @@ pub const TypeErasedQueue = struct {
 
     const Put = struct {
         remaining: []const u8,
+        needed: usize,
         condition: Condition,
         node: std.DoublyLinkedList.Node,
     };
 
     const Get = struct {
         remaining: []u8,
+        needed: usize,
         condition: Condition,
         node: std.DoublyLinkedList.Node,
     };
@@ -1228,6 +1550,7 @@ pub const TypeErasedQueue = struct {
     pub fn init(buffer: []u8) TypeErasedQueue {
         return .{
             .mutex = .init,
+            .closed = false,
             .buffer = buffer,
             .start = 0,
             .len = 0,
@@ -1236,7 +1559,27 @@ pub const TypeErasedQueue = struct {
         };
     }
 
-    pub fn put(q: *TypeErasedQueue, io: Io, elements: []const u8, min: usize) Cancelable!usize {
+    pub fn close(q: *TypeErasedQueue, io: Io) void {
+        q.mutex.lockUncancelable(io);
+        defer q.mutex.unlock(io);
+        q.closed = true;
+        {
+            var it = q.getters.first;
+            while (it) |node| : (it = node.next) {
+                const getter: *Get = @alignCast(@fieldParentPtr("node", node));
+                getter.condition.signal(io);
+            }
+        }
+        {
+            var it = q.putters.first;
+            while (it) |node| : (it = node.next) {
+                const putter: *Put = @alignCast(@fieldParentPtr("node", node));
+                putter.condition.signal(io);
+            }
+        }
+    }
+
+    pub fn put(q: *TypeErasedQueue, io: Io, elements: []const u8, min: usize) (QueueClosedError || Cancelable)!usize {
         assert(elements.len >= min);
         if (elements.len == 0) return 0;
         try q.mutex.lock(io);
@@ -1244,14 +1587,17 @@ pub const TypeErasedQueue = struct {
         return q.putLocked(io, elements, min, false);
     }
 
-    /// Same as `put` but cannot be canceled.
-    pub fn putUncancelable(q: *TypeErasedQueue, io: Io, elements: []const u8, min: usize) usize {
+    /// Same as `put`, except does not introduce a cancelation point.
+    ///
+    /// For a description of cancelation and cancelation points, see `Future.cancel`.
+    pub fn putUncancelable(q: *TypeErasedQueue, io: Io, elements: []const u8, min: usize) QueueClosedError!usize {
         assert(elements.len >= min);
         if (elements.len == 0) return 0;
         q.mutex.lockUncancelable(io);
         defer q.mutex.unlock(io);
         return q.putLocked(io, elements, min, true) catch |err| switch (err) {
             error.Canceled => unreachable,
+            error.Closed => |e| return e,
         };
     }
 
@@ -1265,49 +1611,79 @@ pub const TypeErasedQueue = struct {
         return if (slice.len > 0) slice else null;
     }
 
-    fn putLocked(q: *TypeErasedQueue, io: Io, elements: []const u8, min: usize, uncancelable: bool) Cancelable!usize {
+    fn putLocked(q: *TypeErasedQueue, io: Io, elements: []const u8, target: usize, uncancelable: bool) (QueueClosedError || Cancelable)!usize {
+        // A closed queue cannot be added to, even if there is space in the buffer.
+        if (q.closed) return error.Closed;
+
         // Getters have first priority on the data, and only when the getters
         // queue is empty do we start populating the buffer.
 
-        var remaining = elements;
+        // The number of elements we add immediately, before possibly blocking.
+        var n: usize = 0;
+
         while (q.getters.popFirst()) |getter_node| {
             const getter: *Get = @alignCast(@fieldParentPtr("node", getter_node));
-            const copy_len = @min(getter.remaining.len, remaining.len);
+            const copy_len = @min(getter.remaining.len, elements.len - n);
             assert(copy_len > 0);
-            @memcpy(getter.remaining[0..copy_len], remaining[0..copy_len]);
-            remaining = remaining[copy_len..];
+            @memcpy(getter.remaining[0..copy_len], elements[n..][0..copy_len]);
             getter.remaining = getter.remaining[copy_len..];
-            if (getter.remaining.len == 0) {
+            getter.needed -|= copy_len;
+            n += copy_len;
+            if (getter.needed == 0) {
                 getter.condition.signal(io);
-                if (remaining.len > 0) continue;
-            } else q.getters.prepend(getter_node);
-            assert(remaining.len == 0);
-            return elements.len;
+            } else {
+                assert(n == elements.len); // we didn't have enough elements for the getter
+                q.getters.prepend(getter_node);
+            }
+            if (n == elements.len) return elements.len;
         }
 
         while (q.puttableSlice()) |slice| {
-            const copy_len = @min(slice.len, remaining.len);
+            const copy_len = @min(slice.len, elements.len - n);
             assert(copy_len > 0);
-            @memcpy(slice[0..copy_len], remaining[0..copy_len]);
+            @memcpy(slice[0..copy_len], elements[n..][0..copy_len]);
             q.len += copy_len;
-            remaining = remaining[copy_len..];
-            if (remaining.len == 0) return elements.len;
+            n += copy_len;
+            if (n == elements.len) return elements.len;
         }
 
-        const total_filled = elements.len - remaining.len;
-        if (total_filled >= min) return total_filled;
+        // Don't block if we hit the target.
+        if (n >= target) return n;
 
-        var pending: Put = .{ .remaining = remaining, .condition = .{}, .node = .{} };
+        var pending: Put = .{
+            .remaining = elements[n..],
+            .needed = target - n,
+            .condition = .init,
+            .node = .{},
+        };
         q.putters.append(&pending.node);
-        defer if (pending.remaining.len > 0) q.putters.remove(&pending.node);
-        while (pending.remaining.len > 0) if (uncancelable)
-            pending.condition.waitUncancelable(io, &q.mutex)
-        else
-            try pending.condition.wait(io, &q.mutex);
-        return elements.len;
+        defer if (pending.needed > 0) q.putters.remove(&pending.node);
+
+        while (pending.needed > 0 and !q.closed) {
+            if (uncancelable) {
+                pending.condition.waitUncancelable(io, &q.mutex);
+                continue;
+            }
+            pending.condition.wait(io, &q.mutex) catch |err| switch (err) {
+                error.Canceled => if (pending.remaining.len == elements.len) {
+                    // Canceled while waiting, and appended no elements.
+                    return error.Canceled;
+                } else {
+                    // Canceled while waiting, but appended some elements, so report those first.
+                    io.recancel();
+                    return elements.len - pending.remaining.len;
+                },
+            };
+        }
+        if (pending.remaining.len == elements.len) {
+            // The queue was closed while we were waiting. We appended no elements.
+            assert(q.closed);
+            return error.Closed;
+        }
+        return elements.len - pending.remaining.len;
     }
 
-    pub fn get(q: *@This(), io: Io, buffer: []u8, min: usize) Cancelable!usize {
+    pub fn get(q: *TypeErasedQueue, io: Io, buffer: []u8, min: usize) (QueueClosedError || Cancelable)!usize {
         assert(buffer.len >= min);
         if (buffer.len == 0) return 0;
         try q.mutex.lock(io);
@@ -1315,13 +1691,17 @@ pub const TypeErasedQueue = struct {
         return q.getLocked(io, buffer, min, false);
     }
 
-    pub fn getUncancelable(q: *@This(), io: Io, buffer: []u8, min: usize) usize {
+    /// Same as `get`, except does not introduce a cancelation point.
+    ///
+    /// For a description of cancelation and cancelation points, see `Future.cancel`.
+    pub fn getUncancelable(q: *TypeErasedQueue, io: Io, buffer: []u8, min: usize) QueueClosedError!usize {
         assert(buffer.len >= min);
         if (buffer.len == 0) return 0;
         q.mutex.lockUncancelable(io);
         defer q.mutex.unlock(io);
         return q.getLocked(io, buffer, min, true) catch |err| switch (err) {
             error.Canceled => unreachable,
+            error.Closed => |e| return e,
         };
     }
 
@@ -1331,21 +1711,23 @@ pub const TypeErasedQueue = struct {
         return if (slice.len > 0) slice else null;
     }
 
-    fn getLocked(q: *@This(), io: Io, buffer: []u8, min: usize, uncancelable: bool) Cancelable!usize {
+    fn getLocked(q: *TypeErasedQueue, io: Io, buffer: []u8, target: usize, uncancelable: bool) (QueueClosedError || Cancelable)!usize {
         // The ring buffer gets first priority, then data should come from any
         // queued putters, then finally the ring buffer should be filled with
         // data from putters so they can be resumed.
 
-        var remaining = buffer;
+        // The number of elements we received immediately, before possibly blocking.
+        var n: usize = 0;
+
         while (q.gettableSlice()) |slice| {
-            const copy_len = @min(slice.len, remaining.len);
+            const copy_len = @min(slice.len, buffer.len - n);
             assert(copy_len > 0);
-            @memcpy(remaining[0..copy_len], slice[0..copy_len]);
+            @memcpy(buffer[n..][0..copy_len], slice[0..copy_len]);
             q.start += copy_len;
             if (q.buffer.len - q.start == 0) q.start = 0;
             q.len -= copy_len;
-            remaining = remaining[copy_len..];
-            if (remaining.len == 0) {
+            n += copy_len;
+            if (n == buffer.len) {
                 q.fillRingBufferFromPutters(io);
                 return buffer.len;
             }
@@ -1354,33 +1736,64 @@ pub const TypeErasedQueue = struct {
         // Copy directly from putters into buffer.
         while (q.putters.popFirst()) |putter_node| {
             const putter: *Put = @alignCast(@fieldParentPtr("node", putter_node));
-            const copy_len = @min(putter.remaining.len, remaining.len);
+            const copy_len = @min(putter.remaining.len, buffer.len - n);
             assert(copy_len > 0);
-            @memcpy(remaining[0..copy_len], putter.remaining[0..copy_len]);
+            @memcpy(buffer[n..][0..copy_len], putter.remaining[0..copy_len]);
             putter.remaining = putter.remaining[copy_len..];
-            remaining = remaining[copy_len..];
-            if (putter.remaining.len == 0) {
+            putter.needed -|= copy_len;
+            n += copy_len;
+            if (putter.needed == 0) {
                 putter.condition.signal(io);
-                if (remaining.len > 0) continue;
-            } else q.putters.prepend(putter_node);
-            assert(remaining.len == 0);
-            q.fillRingBufferFromPutters(io);
-            return buffer.len;
+            } else {
+                assert(n == buffer.len); // we didn't have enough space for the putter
+                q.putters.prepend(putter_node);
+            }
+            if (n == buffer.len) {
+                q.fillRingBufferFromPutters(io);
+                return buffer.len;
+            }
         }
 
-        // Both ring buffer and putters queue is empty.
-        const total_filled = buffer.len - remaining.len;
-        if (total_filled >= min) return total_filled;
+        // No need to call `fillRingBufferFromPutters` from this point onwards,
+        // because we emptied the ring buffer *and* the putter queue!
 
-        var pending: Get = .{ .remaining = remaining, .condition = .{}, .node = .{} };
+        // Don't block if we hit the target or if the queue is closed. Return how
+        // many elements we could get immediately, unless the queue was closed and
+        // empty, in which case report `error.Closed`.
+        if (n == 0 and q.closed) return error.Closed;
+        if (n >= target or q.closed) return n;
+
+        var pending: Get = .{
+            .remaining = buffer[n..],
+            .needed = target - n,
+            .condition = .init,
+            .node = .{},
+        };
         q.getters.append(&pending.node);
-        defer if (pending.remaining.len > 0) q.getters.remove(&pending.node);
-        while (pending.remaining.len > 0) if (uncancelable)
-            pending.condition.waitUncancelable(io, &q.mutex)
-        else
-            try pending.condition.wait(io, &q.mutex);
-        q.fillRingBufferFromPutters(io);
-        return buffer.len;
+        defer if (pending.needed > 0) q.getters.remove(&pending.node);
+
+        while (pending.needed > 0 and !q.closed) {
+            if (uncancelable) {
+                pending.condition.waitUncancelable(io, &q.mutex);
+                continue;
+            }
+            pending.condition.wait(io, &q.mutex) catch |err| switch (err) {
+                error.Canceled => if (pending.remaining.len == buffer.len) {
+                    // Canceled while waiting, and received no elements.
+                    return error.Canceled;
+                } else {
+                    // Canceled while waiting, but received some elements, so report those first.
+                    io.recancel();
+                    return buffer.len - pending.remaining.len;
+                },
+            };
+        }
+        if (pending.remaining.len == buffer.len) {
+            // The queue was closed while we were waiting. We received no elements.
+            assert(q.closed);
+            return error.Closed;
+        }
+        return buffer.len - pending.remaining.len;
     }
 
     /// Called when there is nonzero space available in the ring buffer and
@@ -1396,7 +1809,8 @@ pub const TypeErasedQueue = struct {
                 @memcpy(slice[0..copy_len], putter.remaining[0..copy_len]);
                 q.len += copy_len;
                 putter.remaining = putter.remaining[copy_len..];
-                if (putter.remaining.len == 0) {
+                putter.needed -|= copy_len;
+                if (putter.needed == 0) {
                     putter.condition.signal(io);
                     break;
                 }
@@ -1419,59 +1833,112 @@ pub fn Queue(Elem: type) type {
             return .{ .type_erased = .init(@ptrCast(buffer)) };
         }
 
-        /// Appends elements to the end of the queue. The function returns when
-        /// at least `min` elements have been added to the buffer or sent
-        /// directly to a consumer.
+        pub fn close(q: *@This(), io: Io) void {
+            q.type_erased.close(io);
+        }
+
+        /// Appends elements to the end of the queue, potentially blocking if
+        /// there is insufficient capacity. Returns when any one of the
+        /// following conditions is satisfied:
         ///
-        /// Returns how many elements have been added to the queue.
+        /// * At least `target` elements have been added to the queue
+        /// * The queue is closed
+        /// * The current task is canceled
         ///
-        /// Asserts that `elements.len >= min`.
-        pub fn put(q: *@This(), io: Io, elements: []const Elem, min: usize) Cancelable!usize {
-            return @divExact(try q.type_erased.put(io, @ptrCast(elements), min * @sizeOf(Elem)), @sizeOf(Elem));
+        /// Returns how many of `elements` have been added to the queue, if any.
+        /// If an error is returned, no elements have been added.
+        ///
+        /// If the queue is closed or the task is canceled, but some items were
+        /// already added before the closure or cancelation, then `put` may
+        /// return a number lower than `target`, in which case future calls are
+        /// guaranteed to return `error.Canceled` or `error.Closed`.
+        ///
+        /// A return value of 0 is only possible if `target` is 0, in which case
+        /// the call is guaranteed to queue as many of `elements` as is possible
+        /// *without* blocking.
+        ///
+        /// Asserts that `elements.len >= target`.
+        pub fn put(q: *@This(), io: Io, elements: []const Elem, target: usize) (QueueClosedError || Cancelable)!usize {
+            return @divExact(try q.type_erased.put(io, @ptrCast(elements), target * @sizeOf(Elem)), @sizeOf(Elem));
         }
 
         /// Same as `put` but blocks until all elements have been added to the queue.
-        pub fn putAll(q: *@This(), io: Io, elements: []const Elem) Cancelable!void {
-            assert(try q.put(io, elements, elements.len) == elements.len);
+        ///
+        /// If the queue is closed or canceled, `error.Closed` or `error.Canceled`
+        /// is returned, and it is unspecified how many, if any, of `elements` were
+        /// added to the queue prior to cancelation or closure.
+        pub fn putAll(q: *@This(), io: Io, elements: []const Elem) (QueueClosedError || Cancelable)!void {
+            const n = try q.put(io, elements, elements.len);
+            if (n != elements.len) {
+                _ = try q.put(io, elements[n..], elements.len - n);
+                unreachable; // partial `put` implies queue was closed or we were canceled
+            }
         }
 
-        /// Same as `put` but cannot be interrupted.
-        pub fn putUncancelable(q: *@This(), io: Io, elements: []const Elem, min: usize) usize {
-            return @divExact(q.type_erased.putUncancelable(io, @ptrCast(elements), min * @sizeOf(Elem)), @sizeOf(Elem));
+        /// Same as `put`, except does not introduce a cancelation point.
+        ///
+        /// For a description of cancelation and cancelation points, see `Future.cancel`.
+        pub fn putUncancelable(q: *@This(), io: Io, elements: []const Elem, min: usize) QueueClosedError!usize {
+            return @divExact(try q.type_erased.putUncancelable(io, @ptrCast(elements), min * @sizeOf(Elem)), @sizeOf(Elem));
         }
 
-        pub fn putOne(q: *@This(), io: Io, item: Elem) Cancelable!void {
+        /// Appends `item` to the end of the queue, blocking if the queue is full.
+        pub fn putOne(q: *@This(), io: Io, item: Elem) (QueueClosedError || Cancelable)!void {
             assert(try q.put(io, &.{item}, 1) == 1);
         }
 
-        pub fn putOneUncancelable(q: *@This(), io: Io, item: Elem) void {
-            assert(q.putUncancelable(io, &.{item}, 1) == 1);
-        }
-
-        /// Receives elements from the beginning of the queue. The function
-        /// returns when at least `min` elements have been populated inside
-        /// `buffer`.
+        /// Same as `putOne`, except does not introduce a cancelation point.
         ///
-        /// Returns how many elements of `buffer` have been populated.
+        /// For a description of cancelation and cancelation points, see `Future.cancel`.
+        pub fn putOneUncancelable(q: *@This(), io: Io, item: Elem) QueueClosedError!void {
+            assert(try q.putUncancelable(io, &.{item}, 1) == 1);
+        }
+
+        /// Receives elements from the beginning of the queue, potentially blocking
+        /// if there are insufficient elements currently in the queue. Returns when
+        /// any one of the following conditions is satisfied:
         ///
-        /// Asserts that `buffer.len >= min`.
-        pub fn get(q: *@This(), io: Io, buffer: []Elem, min: usize) Cancelable!usize {
-            return @divExact(try q.type_erased.get(io, @ptrCast(buffer), min * @sizeOf(Elem)), @sizeOf(Elem));
+        /// * At least `target` elements have been received from the queue
+        /// * The queue is closed and contains no buffered elements
+        /// * The current task is canceled
+        ///
+        /// Returns how many elements of `buffer` have been populated, if any.
+        /// If an error is returned, no elements have been populated.
+        ///
+        /// If the queue is closed or the task is canceled, but some items were
+        /// already received before the closure or cancelation, then `get` may
+        /// return a number lower than `target`, in which case future calls are
+        /// guaranteed to return `error.Canceled` or `error.Closed`.
+        ///
+        /// A return value of 0 is only possible if `target` is 0, in which case
+        /// the call is guaranteed to fill as much of `buffer` as is possible
+        /// *without* blocking.
+        ///
+        /// Asserts that `buffer.len >= target`.
+        pub fn get(q: *@This(), io: Io, buffer: []Elem, target: usize) (QueueClosedError || Cancelable)!usize {
+            return @divExact(try q.type_erased.get(io, @ptrCast(buffer), target * @sizeOf(Elem)), @sizeOf(Elem));
         }
 
-        pub fn getUncancelable(q: *@This(), io: Io, buffer: []Elem, min: usize) usize {
-            return @divExact(q.type_erased.getUncancelable(io, @ptrCast(buffer), min * @sizeOf(Elem)), @sizeOf(Elem));
+        /// Same as `get`, except does not introduce a cancelation point.
+        ///
+        /// For a description of cancelation and cancelation points, see `Future.cancel`.
+        pub fn getUncancelable(q: *@This(), io: Io, buffer: []Elem, min: usize) QueueClosedError!usize {
+            return @divExact(try q.type_erased.getUncancelable(io, @ptrCast(buffer), min * @sizeOf(Elem)), @sizeOf(Elem));
         }
 
-        pub fn getOne(q: *@This(), io: Io) Cancelable!Elem {
+        /// Receives one element from the beginning of the queue, blocking if the queue is empty.
+        pub fn getOne(q: *@This(), io: Io) (QueueClosedError || Cancelable)!Elem {
             var buf: [1]Elem = undefined;
             assert(try q.get(io, &buf, 1) == 1);
             return buf[0];
         }
 
-        pub fn getOneUncancelable(q: *@This(), io: Io) Elem {
+        /// Same as `getOne`, except does not introduce a cancelation point.
+        ///
+        /// For a description of cancelation and cancelation points, see `Future.cancel`.
+        pub fn getOneUncancelable(q: *@This(), io: Io) QueueClosedError!Elem {
             var buf: [1]Elem = undefined;
-            assert(q.getUncancelable(io, &buf, 1) == 1);
+            assert(try q.getUncancelable(io, &buf, 1) == 1);
             return buf[0];
         }
 
@@ -1557,10 +2024,6 @@ pub fn concurrent(
         TypeErased.start,
     );
     return future;
-}
-
-pub fn cancelRequested(io: Io) bool {
-    return io.vtable.cancelRequested(io.userdata);
 }
 
 pub const SleepError = error{UnsupportedClock} || UnexpectedError || Cancelable;
