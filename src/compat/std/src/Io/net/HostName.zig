@@ -343,7 +343,7 @@ pub const ResolvConf = struct {
             .attempts = 2,
         };
 
-        const file = Io.File.openAbsolute(io, "/etc/resolv.conf", .{}) catch |err| switch (err) {
+        const file = Io.Dir.openFileAbsolute(io, "/etc/resolv.conf", .{}) catch |err| switch (err) {
             error.FileNotFound,
             error.NotDir,
             error.AccessDenied,

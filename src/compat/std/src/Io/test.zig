@@ -3,16 +3,17 @@ const native_endian = builtin.cpu.arch.endian();
 
 const std = @import("std");
 const Io = std.Io;
+const DefaultPrng = std.Random.DefaultPrng;
+const mem = std.mem;
+const fs = std.fs;
+const File = std.Io.File;
+const assert = std.debug.assert;
+
 const testing = std.testing;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
-const DefaultPrng = std.Random.DefaultPrng;
-const mem = std.mem;
-const fs = std.fs;
-const File = std.fs.File;
-const assert = std.debug.assert;
-
+const expectEqualStrings = std.testing.expectEqualStrings;
 const tmpDir = std.testing.tmpDir;
 
 test "write a file, read it, then delete it" {
@@ -27,10 +28,10 @@ test "write a file, read it, then delete it" {
     random.bytes(data[0..]);
     const tmp_file_name = "temp_test_file.txt";
     {
-        var file = try tmp.dir.createFile(tmp_file_name, .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(io, tmp_file_name, .{});
+        defer file.close(io);
 
-        var file_writer = file.writer(&.{});
+        var file_writer = file.writer(io, &.{});
         const st = &file_writer.interface;
         try st.print("begin", .{});
         try st.writeAll(&data);
@@ -40,14 +41,14 @@ test "write a file, read it, then delete it" {
 
     {
         // Make sure the exclusive flag is honored.
-        try expectError(File.OpenError.PathAlreadyExists, tmp.dir.createFile(tmp_file_name, .{ .exclusive = true }));
+        try expectError(File.OpenError.PathAlreadyExists, tmp.dir.createFile(io, tmp_file_name, .{ .exclusive = true }));
     }
 
     {
-        var file = try tmp.dir.openFile(tmp_file_name, .{});
-        defer file.close();
+        var file = try tmp.dir.openFile(io, tmp_file_name, .{});
+        defer file.close(io);
 
-        const file_size = try file.getEndPos();
+        const file_size = try file.length(io);
         const expected_file_size: u64 = "begin".len + data.len + "end".len;
         try expectEqual(expected_file_size, file_size);
 
@@ -60,72 +61,127 @@ test "write a file, read it, then delete it" {
         try expect(mem.eql(u8, contents["begin".len .. contents.len - "end".len], &data));
         try expect(mem.eql(u8, contents[contents.len - "end".len ..], "end"));
     }
-    try tmp.dir.deleteFile(tmp_file_name);
+    try tmp.dir.deleteFile(io, tmp_file_name);
 }
 
-test "File seek ops" {
+test "File.Writer.seekTo" {
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const io = testing.io;
+
+    var data: [8192]u8 = undefined;
+    @memset(&data, 0x55);
+
+    const tmp_file_name = "temp_test_file.txt";
+    var file = try tmp.dir.createFile(io, tmp_file_name, .{ .read = true });
+    defer file.close(io);
+
+    var fw = file.writerStreaming(io, &.{});
+
+    try fw.interface.writeAll(&data);
+    try expect(fw.logicalPos() == try file.length(io));
+    try fw.seekTo(1234);
+    try expect(fw.logicalPos() == 1234);
+}
+
+test "File.setLength" {
+    const io = testing.io;
+
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
 
     const tmp_file_name = "temp_test_file.txt";
-    var file = try tmp.dir.createFile(tmp_file_name, .{});
-    defer file.close();
+    var file = try tmp.dir.createFile(io, tmp_file_name, .{ .read = true });
+    defer file.close(io);
 
-    try file.writeAll(&([_]u8{0x55} ** 8192));
-
-    // Seek to the end
-    try file.seekFromEnd(0);
-    try expect((try file.getPos()) == try file.getEndPos());
-    // Negative delta
-    try file.seekBy(-4096);
-    try expect((try file.getPos()) == 4096);
-    // Positive delta
-    try file.seekBy(10);
-    try expect((try file.getPos()) == 4106);
-    // Absolute position
-    try file.seekTo(1234);
-    try expect((try file.getPos()) == 1234);
-}
-
-test "setEndPos" {
-    var tmp = tmpDir(.{});
-    defer tmp.cleanup();
-
-    const tmp_file_name = "temp_test_file.txt";
-    var file = try tmp.dir.createFile(tmp_file_name, .{});
-    defer file.close();
+    var fw = file.writerStreaming(io, &.{});
 
     // Verify that the file size changes and the file offset is not moved
-    try expect((try file.getEndPos()) == 0);
-    try expect((try file.getPos()) == 0);
-    try file.setEndPos(8192);
-    try expect((try file.getEndPos()) == 8192);
-    try expect((try file.getPos()) == 0);
-    try file.seekTo(100);
-    try file.setEndPos(4096);
-    try expect((try file.getEndPos()) == 4096);
-    try expect((try file.getPos()) == 100);
-    try file.setEndPos(0);
-    try expect((try file.getEndPos()) == 0);
-    try expect((try file.getPos()) == 100);
+    try expect((try file.length(io)) == 0);
+    try expect(fw.logicalPos() == 0);
+    try file.setLength(io, 8192);
+    try expect((try file.length(io)) == 8192);
+    try expect(fw.logicalPos() == 0);
+    try fw.seekTo(100);
+    try file.setLength(io, 4096);
+    try expect((try file.length(io)) == 4096);
+    try expect(fw.logicalPos() == 100);
+    try file.setLength(io, 0);
+    try expect((try file.length(io)) == 0);
+    try expect(fw.logicalPos() == 100);
 }
 
-test "updateTimes" {
+test "legacy setLength" {
+    // https://github.com/ziglang/zig/issues/20747 (open fd does not have write permission)
+    if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.cpu.arch.isMIPS64() and (builtin.abi == .gnuabin32 or builtin.abi == .muslabin32)) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/23806
+
+    const io = testing.io;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file_name = "afile.txt";
+    try tmp.dir.writeFile(io, .{ .sub_path = file_name, .data = "ninebytes" });
+    const f = try tmp.dir.openFile(io, file_name, .{ .mode = .read_write });
+    defer f.close(io);
+
+    const initial_size = try f.length(io);
+    var buffer: [32]u8 = undefined;
+    var reader = f.reader(io, &.{});
+
+    {
+        try f.setLength(io, initial_size);
+        try expectEqual(initial_size, try f.length(io));
+        try reader.seekTo(0);
+        try expectEqual(initial_size, try reader.interface.readSliceShort(&buffer));
+        try expectEqualStrings("ninebytes", buffer[0..@intCast(initial_size)]);
+    }
+
+    {
+        const larger = initial_size + 4;
+        try f.setLength(io, larger);
+        try expectEqual(larger, try f.length(io));
+        try reader.seekTo(0);
+        try expectEqual(larger, try reader.interface.readSliceShort(&buffer));
+        try expectEqualStrings("ninebytes\x00\x00\x00\x00", buffer[0..@intCast(larger)]);
+    }
+
+    {
+        const smaller = initial_size - 5;
+        try f.setLength(io, smaller);
+        try expectEqual(smaller, try f.length(io));
+        try reader.seekTo(0);
+        try expectEqual(smaller, try reader.interface.readSliceShort(&buffer));
+        try expectEqualStrings("nine", buffer[0..@intCast(smaller)]);
+    }
+
+    try f.setLength(io, 0);
+    try expectEqual(0, try f.length(io));
+    try reader.seekTo(0);
+    try expectEqual(0, try reader.interface.readSliceShort(&buffer));
+}
+
+test "setTimestamps" {
+    const io = testing.io;
+
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
 
     const tmp_file_name = "just_a_temporary_file.txt";
-    var file = try tmp.dir.createFile(tmp_file_name, .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(io, tmp_file_name, .{ .read = true });
+    defer file.close(io);
 
-    const stat_old = try file.stat();
+    const stat_old = try file.stat(io);
+
     // Set atime and mtime to 5s before
-    try file.updateTimes(
-        stat_old.atime.subDuration(.fromSeconds(5)),
-        stat_old.mtime.subDuration(.fromSeconds(5)),
-    );
-    const stat_new = try file.stat();
-    try expect(stat_new.atime.nanoseconds < stat_old.atime.nanoseconds);
+    try file.setTimestamps(io, .{
+        .access_timestamp = if (stat_old.atime) |atime| .{ .new = atime.subDuration(.fromSeconds(5)) } else .unchanged,
+        .modify_timestamp = .{ .new = stat_old.mtime.subDuration(.fromSeconds(5)) },
+    });
+    const stat_new = try file.stat(io);
+    if (stat_old.atime) |old_atime| try expect(stat_new.atime.?.nanoseconds < old_atime.nanoseconds);
     try expect(stat_new.mtime.nanoseconds < stat_old.mtime.nanoseconds);
 }
 

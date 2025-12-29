@@ -869,11 +869,11 @@ pub fn io(k: *Kqueue) Io {
             .conditionWaitUncancelable = conditionWaitUncancelable,
             .conditionWake = conditionWake,
 
-            .dirMake = dirMake,
-            .dirMakePath = dirMakePath,
-            .dirMakeOpenPath = dirMakeOpenPath,
+            .dirCreateDir = dirCreateDir,
+            .dirCreateDirPath = dirCreateDirPath,
+            .dirCreateDirPathOpen = dirCreateDirPathOpen,
             .dirStat = dirStat,
-            .dirStatPath = dirStatPath,
+            .dirStatFile = dirStatFile,
 
             .fileStat = fileStat,
             .dirAccess = dirAccess,
@@ -888,7 +888,7 @@ pub fn io(k: *Kqueue) Io {
             .fileReadPositional = fileReadPositional,
             .fileSeekBy = fileSeekBy,
             .fileSeekTo = fileSeekTo,
-            .openSelfExe = openSelfExe,
+            .openExecutable = openExecutable,
 
             .now = now,
             .sleep = sleep,
@@ -900,6 +900,7 @@ pub fn io(k: *Kqueue) Io {
             .netConnectIp = netConnectIp,
             .netConnectUnix = netConnectUnix,
             .netClose = netClose,
+            .netShutdown = netShutdown,
             .netRead = netRead,
             .netWrite = netWrite,
             .netSend = netSend,
@@ -1114,7 +1115,7 @@ fn conditionWake(userdata: ?*anyopaque, cond: *Io.Condition, wake: Io.Condition.
     k.yield(waiting_fiber, .reschedule);
 }
 
-fn dirMake(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, mode: Dir.Mode) Dir.MakeError!void {
+fn dirCreateDir(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, mode: Dir.Mode) Dir.CreateDirError!void {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
     _ = dir;
@@ -1122,7 +1123,7 @@ fn dirMake(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, mode: Dir.Mode
     _ = mode;
     @panic("TODO");
 }
-fn dirMakePath(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, mode: Dir.Mode) Dir.MakeError!void {
+fn dirCreateDirPath(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, mode: Dir.Mode) Dir.CreateDirError!void {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
     _ = dir;
@@ -1130,7 +1131,7 @@ fn dirMakePath(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, mode: Dir.
     _ = mode;
     @panic("TODO");
 }
-fn dirMakeOpenPath(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, options: Dir.OpenOptions) Dir.MakeOpenPathError!Dir {
+fn dirCreateDirPathOpen(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, options: Dir.OpenOptions) Dir.CreateDirPathOpenError!Dir {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
     _ = dir;
@@ -1144,7 +1145,7 @@ fn dirStat(userdata: ?*anyopaque, dir: Dir) Dir.StatError!Dir.Stat {
     _ = dir;
     @panic("TODO");
 }
-fn dirStatPath(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, options: Dir.StatPathOptions) Dir.StatPathError!File.Stat {
+fn dirStatFile(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, options: Dir.StatPathOptions) Dir.StatFileError!File.Stat {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
     _ = dir;
@@ -1246,7 +1247,7 @@ fn fileSeekTo(userdata: ?*anyopaque, file: File, absolute_offset: u64) File.Seek
     _ = absolute_offset;
     @panic("TODO");
 }
-fn openSelfExe(userdata: ?*anyopaque, file: File.OpenFlags) File.OpenSelfExeError!File {
+fn openExecutable(userdata: ?*anyopaque, file: File.OpenFlags) File.OpenExecutableError!File {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
     _ = file;
@@ -1549,12 +1550,22 @@ fn netWrite(userdata: ?*anyopaque, dest: net.Socket.Handle, header: []const u8, 
     _ = splat;
     @panic("TODO");
 }
+
 fn netClose(userdata: ?*anyopaque, handle: net.Socket.Handle) void {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
     _ = handle;
     @panic("TODO");
 }
+
+fn netShutdown(userdata: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void {
+    const k: *Kqueue = @ptrCast(@alignCast(userdata));
+    _ = k;
+    _ = handle;
+    _ = how;
+    @panic("TODO");
+}
+
 fn netInterfaceNameResolve(
     userdata: ?*anyopaque,
     name: *const net.Interface.Name,
@@ -1564,12 +1575,14 @@ fn netInterfaceNameResolve(
     _ = name;
     @panic("TODO");
 }
+
 fn netInterfaceName(userdata: ?*anyopaque, interface: net.Interface) net.Interface.NameError!net.Interface.Name {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
     _ = interface;
     @panic("TODO");
 }
+
 fn netLookup(
     userdata: ?*anyopaque,
     host_name: net.HostName,
