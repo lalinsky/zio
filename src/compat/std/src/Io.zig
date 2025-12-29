@@ -13,8 +13,6 @@ pub const Limit = std.Io.Limit;
 pub const Reader = std.Io.Reader;
 pub const Writer = std.Io.Writer;
 
-pub const tty = std.Io.tty;
-
 pub fn poll(
     gpa: Allocator,
     comptime StreamEnum: type,
@@ -482,7 +480,6 @@ test {
     _ = net;
     _ = Reader;
     _ = Writer;
-    _ = tty;
 }
 
 const Io = @This();
@@ -594,27 +591,64 @@ pub const VTable = struct {
     futexWaitUncancelable: *const fn (?*anyopaque, ptr: *const u32, expected: u32) void,
     futexWake: *const fn (?*anyopaque, ptr: *const u32, max_waiters: u32) void,
 
-    dirMake: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.Mode) Dir.MakeError!void,
-    dirMakePath: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.Mode) Dir.MakeError!void,
-    dirMakeOpenPath: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.OpenOptions) Dir.MakeOpenPathError!Dir,
+    dirCreateDir: *const fn (?*anyopaque, Dir, []const u8, Dir.Permissions) Dir.CreateDirError!void,
+    dirCreateDirPath: *const fn (?*anyopaque, Dir, []const u8, Dir.Permissions) Dir.CreateDirPathError!Dir.CreatePathStatus,
+    dirCreateDirPathOpen: *const fn (?*anyopaque, Dir, []const u8, Dir.Permissions, Dir.OpenOptions) Dir.CreateDirPathOpenError!Dir,
+    dirOpenDir: *const fn (?*anyopaque, Dir, []const u8, Dir.OpenOptions) Dir.OpenError!Dir,
     dirStat: *const fn (?*anyopaque, Dir) Dir.StatError!Dir.Stat,
-    dirStatPath: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.StatPathOptions) Dir.StatPathError!File.Stat,
-    dirAccess: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.AccessOptions) Dir.AccessError!void,
-    dirCreateFile: *const fn (?*anyopaque, Dir, sub_path: []const u8, File.CreateFlags) File.OpenError!File,
-    dirOpenFile: *const fn (?*anyopaque, Dir, sub_path: []const u8, File.OpenFlags) File.OpenError!File,
-    dirOpenDir: *const fn (?*anyopaque, Dir, sub_path: []const u8, Dir.OpenOptions) Dir.OpenError!Dir,
-    dirClose: *const fn (?*anyopaque, Dir) void,
+    dirStatFile: *const fn (?*anyopaque, Dir, []const u8, Dir.StatFileOptions) Dir.StatFileError!File.Stat,
+    dirAccess: *const fn (?*anyopaque, Dir, []const u8, Dir.AccessOptions) Dir.AccessError!void,
+    dirCreateFile: *const fn (?*anyopaque, Dir, []const u8, File.CreateFlags) File.OpenError!File,
+    dirOpenFile: *const fn (?*anyopaque, Dir, []const u8, File.OpenFlags) File.OpenError!File,
+    dirClose: *const fn (?*anyopaque, []const Dir) void,
+    dirRead: *const fn (?*anyopaque, *Dir.Reader, []Dir.Entry) Dir.Reader.Error!usize,
+    dirRealPath: *const fn (?*anyopaque, Dir, out_buffer: []u8) Dir.RealPathError!usize,
+    dirRealPathFile: *const fn (?*anyopaque, Dir, path_name: []const u8, out_buffer: []u8) Dir.RealPathFileError!usize,
+    dirDeleteFile: *const fn (?*anyopaque, Dir, []const u8) Dir.DeleteFileError!void,
+    dirDeleteDir: *const fn (?*anyopaque, Dir, []const u8) Dir.DeleteDirError!void,
+    dirRename: *const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8) Dir.RenameError!void,
+    dirSymLink: *const fn (?*anyopaque, Dir, target_path: []const u8, sym_link_path: []const u8, Dir.SymLinkFlags) Dir.SymLinkError!void,
+    dirReadLink: *const fn (?*anyopaque, Dir, sub_path: []const u8, buffer: []u8) Dir.ReadLinkError!usize,
+    dirSetOwner: *const fn (?*anyopaque, Dir, ?File.Uid, ?File.Gid) Dir.SetOwnerError!void,
+    dirSetFileOwner: *const fn (?*anyopaque, Dir, []const u8, ?File.Uid, ?File.Gid, Dir.SetFileOwnerOptions) Dir.SetFileOwnerError!void,
+    dirSetPermissions: *const fn (?*anyopaque, Dir, Dir.Permissions) Dir.SetPermissionsError!void,
+    dirSetFilePermissions: *const fn (?*anyopaque, Dir, []const u8, File.Permissions, Dir.SetFilePermissionsOptions) Dir.SetFilePermissionsError!void,
+    dirSetTimestamps: *const fn (?*anyopaque, Dir, []const u8, Dir.SetTimestampsOptions) Dir.SetTimestampsError!void,
+    dirHardLink: *const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8, Dir.HardLinkOptions) Dir.HardLinkError!void,
+
     fileStat: *const fn (?*anyopaque, File) File.StatError!File.Stat,
-    fileClose: *const fn (?*anyopaque, File) void,
-    fileWriteStreaming: *const fn (?*anyopaque, File, buffer: [][]const u8) File.WriteStreamingError!usize,
-    fileWritePositional: *const fn (?*anyopaque, File, buffer: [][]const u8, offset: u64) File.WritePositionalError!usize,
+    fileLength: *const fn (?*anyopaque, File) File.LengthError!u64,
+    fileClose: *const fn (?*anyopaque, []const File) void,
+    fileWriteStreaming: *const fn (?*anyopaque, File, header: []const u8, data: []const []const u8, splat: usize) File.Writer.Error!usize,
+    fileWritePositional: *const fn (?*anyopaque, File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) File.WritePositionalError!usize,
+    fileWriteFileStreaming: *const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit) File.Writer.WriteFileError!usize,
+    fileWriteFilePositional: *const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit, offset: u64) File.WriteFilePositionalError!usize,
     /// Returns 0 on end of stream.
-    fileReadStreaming: *const fn (?*anyopaque, File, data: [][]u8) File.Reader.Error!usize,
+    fileReadStreaming: *const fn (?*anyopaque, File, data: []const []u8) File.Reader.Error!usize,
     /// Returns 0 on end of stream.
-    fileReadPositional: *const fn (?*anyopaque, File, data: [][]u8, offset: u64) File.ReadPositionalError!usize,
+    fileReadPositional: *const fn (?*anyopaque, File, data: []const []u8, offset: u64) File.ReadPositionalError!usize,
     fileSeekBy: *const fn (?*anyopaque, File, relative_offset: i64) File.SeekError!void,
     fileSeekTo: *const fn (?*anyopaque, File, absolute_offset: u64) File.SeekError!void,
-    openSelfExe: *const fn (?*anyopaque, File.OpenFlags) File.OpenSelfExeError!File,
+    fileSync: *const fn (?*anyopaque, File) File.SyncError!void,
+    fileIsTty: *const fn (?*anyopaque, File) Cancelable!bool,
+    fileEnableAnsiEscapeCodes: *const fn (?*anyopaque, File) File.EnableAnsiEscapeCodesError!void,
+    fileSupportsAnsiEscapeCodes: *const fn (?*anyopaque, File) Cancelable!bool,
+    fileSetLength: *const fn (?*anyopaque, File, u64) File.SetLengthError!void,
+    fileSetOwner: *const fn (?*anyopaque, File, ?File.Uid, ?File.Gid) File.SetOwnerError!void,
+    fileSetPermissions: *const fn (?*anyopaque, File, File.Permissions) File.SetPermissionsError!void,
+    fileSetTimestamps: *const fn (?*anyopaque, File, File.SetTimestampsOptions) File.SetTimestampsError!void,
+    fileLock: *const fn (?*anyopaque, File, File.Lock) File.LockError!void,
+    fileTryLock: *const fn (?*anyopaque, File, File.Lock) File.LockError!bool,
+    fileUnlock: *const fn (?*anyopaque, File) void,
+    fileDowngradeLock: *const fn (?*anyopaque, File) File.DowngradeLockError!void,
+    fileRealPath: *const fn (?*anyopaque, File, out_buffer: []u8) File.RealPathError!usize,
+
+    processExecutableOpen: *const fn (?*anyopaque, File.OpenFlags) std.process.OpenExecutableError!File,
+    processExecutablePath: *const fn (?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize,
+    lockStderr: *const fn (?*anyopaque, buffer: []u8, ?Terminal.Mode) Cancelable!LockedStderr,
+    tryLockStderr: *const fn (?*anyopaque, buffer: []u8, ?Terminal.Mode) Cancelable!?LockedStderr,
+    unlockStderr: *const fn (?*anyopaque) void,
+    processSetCurrentDir: *const fn (?*anyopaque, Dir) std.process.SetCurrentDirError!void,
 
     now: *const fn (?*anyopaque, Clock) Clock.Error!Timestamp,
     sleep: *const fn (?*anyopaque, Timeout) SleepError!void,
@@ -630,7 +664,9 @@ pub const VTable = struct {
     /// Returns 0 on end of stream.
     netRead: *const fn (?*anyopaque, src: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize,
     netWrite: *const fn (?*anyopaque, dest: net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) net.Stream.Writer.Error!usize,
-    netClose: *const fn (?*anyopaque, handle: net.Socket.Handle) void,
+    netWriteFile: *const fn (?*anyopaque, net.Socket.Handle, header: []const u8, *Io.File.Reader, Io.Limit) net.Stream.Writer.WriteFileError!usize,
+    netClose: *const fn (?*anyopaque, handle: []const net.Socket.Handle) void,
+    netShutdown: *const fn (?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void,
     netInterfaceNameResolve: *const fn (?*anyopaque, *const net.Interface.Name) net.Interface.Name.ResolveError!net.Interface,
     netInterfaceName: *const fn (?*anyopaque, net.Interface) net.Interface.NameError!net.Interface.Name,
     netLookup: *const fn (?*anyopaque, net.HostName, *Queue(net.HostName.LookupResult), net.HostName.LookupOptions) net.HostName.LookupError!void,
@@ -655,6 +691,7 @@ pub const UnexpectedError = error{
 
 pub const Dir = @import("Io/Dir.zig");
 pub const File = @import("Io/File.zig");
+pub const Terminal = @import("Io/Terminal.zig");
 
 pub const Clock = enum {
     /// A settable system-wide clock that measures real (i.e. wall-clock)
@@ -1209,17 +1246,21 @@ pub fn futexWait(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, e
 /// wakeups are possible. It remains the caller's responsibility to differentiate between these
 /// three possible wake-up reasons if necessary.
 pub fn futexWaitTimeout(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, expected: T, timeout: Timeout) Cancelable!void {
-    comptime assert(@sizeOf(T) == 4);
-    const expected_raw: *align(1) const u32 = @ptrCast(&expected);
-    return io.vtable.futexWait(io.userdata, @ptrCast(ptr), expected_raw.*, timeout);
+    const expected_int: u32 = switch (@typeInfo(T)) {
+        .@"enum" => @bitCast(@intFromEnum(expected)),
+        else => @bitCast(expected),
+    };
+    return io.vtable.futexWait(io.userdata, @ptrCast(ptr), expected_int, timeout);
 }
 /// Same as `futexWait`, except does not introduce a cancelation point.
 ///
 /// For a description of cancelation and cancelation points, see `Future.cancel`.
 pub fn futexWaitUncancelable(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, expected: T) void {
-    comptime assert(@sizeOf(T) == @sizeOf(u32));
-    const expected_raw: *align(1) const u32 = @ptrCast(&expected);
-    io.vtable.futexWaitUncancelable(io.userdata, @ptrCast(ptr), expected_raw.*);
+    const expected_int: u32 = switch (@typeInfo(T)) {
+        .@"enum" => @bitCast(@intFromEnum(expected)),
+        else => @bitCast(expected),
+    };
+    io.vtable.futexWaitUncancelable(io.userdata, @ptrCast(ptr), expected_int);
 }
 /// Unblocks pending futex waits on `ptr`, up to a limit of `max_waiters` calls.
 pub fn futexWake(io: Io, comptime T: type, ptr: *align(@alignOf(u32)) const T, max_waiters: u32) void {
@@ -1471,10 +1512,12 @@ pub const Event = enum(u32) {
         }
     }
 
+    pub const WaitTimeoutError = error{Timeout} || Cancelable;
+
     /// Blocks the calling thread until either the logical boolean is set, the timeout expires, or a
     /// spurious wakeup occurs. If the timeout expires or a spurious wakeup occurs, `error.Timeout`
     /// is returned.
-    pub fn waitTimeout(event: *Event, io: Io, timeout: Timeout) (error{Timeout} || Cancelable)!void {
+    pub fn waitTimeout(event: *Event, io: Io, timeout: Timeout) WaitTimeoutError!void {
         if (@cmpxchgStrong(Event, event, .unset, .waiting, .acquire, .acquire)) |prev| switch (prev) {
             .unset => unreachable,
             .waiting => assert(!builtin.single_threaded), // invalid state
@@ -1487,7 +1530,7 @@ pub const Event = enum(u32) {
             // waiters would wake up when a *new waiter* was added. So it's easiest to just leave
             // the state at `.waiting`---at worst it causes one redundant call to `futexWake`.
         }
-        io.futexWaitTimeout(Event, event, .waiting, timeout);
+        try io.futexWaitTimeout(Event, event, .waiting, timeout);
         switch (@atomicLoad(Event, event, .acquire)) {
             .unset => unreachable, // `reset` called before pending `wait` returned
             .waiting => return error.Timeout,
@@ -2075,4 +2118,36 @@ pub fn select(io: Io, s: anytype) Cancelable!SelectUnion(@TypeOf(s)) {
         },
         else => unreachable,
     }
+}
+
+pub const LockedStderr = struct {
+    file_writer: *File.Writer,
+    terminal_mode: Terminal.Mode,
+
+    pub fn terminal(ls: LockedStderr) Terminal {
+        return .{
+            .writer = &ls.file_writer.interface,
+            .mode = ls.terminal_mode,
+        };
+    }
+};
+
+/// For doing application-level writes to the standard error stream.
+/// Coordinates also with debug-level writes that are ignorant of Io interface
+/// and implementations. When this returns, `std.process.stderr_thread_mutex`
+/// will be locked.
+///
+/// See also:
+/// * `tryLockStderr`
+pub fn lockStderr(io: Io, buffer: []u8, terminal_mode: ?Terminal.Mode) Cancelable!LockedStderr {
+    return io.vtable.lockStderr(io.userdata, buffer, terminal_mode);
+}
+
+/// Same as `lockStderr` but non-blocking.
+pub fn tryLockStderr(io: Io, buffer: []u8, terminal_mode: ?Terminal.Mode) Cancelable!?LockedStderr {
+    return io.vtable.tryLockStderr(io.userdata, buffer, terminal_mode);
+}
+
+pub fn unlockStderr(io: Io) void {
+    return io.vtable.unlockStderr(io.userdata);
 }

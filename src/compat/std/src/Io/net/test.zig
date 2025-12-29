@@ -232,8 +232,10 @@ test "listen on an in use port" {
 fn testClientToHost(allocator: mem.Allocator, name: []const u8, port: u16) anyerror!void {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
+    const io = testing.io;
+
     const connection = try net.tcpConnectToHost(allocator, name, port);
-    defer connection.close();
+    defer connection.close(io);
 
     var buf: [100]u8 = undefined;
     const len = try connection.read(&buf);
@@ -244,8 +246,10 @@ fn testClientToHost(allocator: mem.Allocator, name: []const u8, port: u16) anyer
 fn testClient(addr: net.IpAddress) anyerror!void {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
+    const io = testing.io;
+
     const socket_file = try net.tcpConnectToAddress(addr);
-    defer socket_file.close();
+    defer socket_file.close(io);
 
     var buf: [100]u8 = undefined;
     const len = try socket_file.read(&buf);
@@ -267,6 +271,7 @@ test "listen on a unix socket, send bytes, receive bytes" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!net.has_unix_sockets) return error.SkipZigTest;
     if (builtin.os.tag == .windows) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25983
+    if (builtin.cpu.arch == .mipsel) return error.SkipZigTest; // TODO
 
     const io = testing.io;
 
@@ -274,7 +279,7 @@ test "listen on a unix socket, send bytes, receive bytes" {
     defer testing.allocator.free(socket_path);
 
     const socket_addr = try net.UnixAddress.init(socket_path);
-    defer std.fs.cwd().deleteFile(socket_path) catch {};
+    defer Io.Dir.cwd().deleteFile(io, socket_path) catch {};
 
     var server = try socket_addr.listen(io, .{});
     defer server.socket.close(io);
@@ -330,7 +335,7 @@ test "non-blocking tcp server" {
     try testing.expectError(error.WouldBlock, accept_err);
 
     const socket_file = try net.tcpConnectToAddress(server.socket.address);
-    defer socket_file.close();
+    defer socket_file.close(io);
 
     var stream = try server.accept(io);
     defer stream.close(io);
@@ -341,6 +346,8 @@ test "non-blocking tcp server" {
     const len = try socket_file.read(&buf);
     const msg = buf[0..len];
     try testing.expect(mem.eql(u8, msg, "hello from server\n"));
+
+    try stream.shutdown(io, .both);
 }
 
 test "decompress compressed DNS name" {

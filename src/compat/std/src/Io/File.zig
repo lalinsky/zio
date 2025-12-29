@@ -7,12 +7,19 @@ const is_windows = native_os == .windows;
 const std = @import("std");
 const Io = @import("../Io.zig");
 const assert = std.debug.assert;
+const Dir = @import("Dir.zig");
 
 handle: Handle,
 
+pub const Reader = @import("File/Reader.zig");
+pub const Writer = @import("File/Writer.zig");
+pub const Atomic = @import("File/Atomic.zig");
+
 pub const Handle = std.posix.fd_t;
-pub const Mode = std.posix.mode_t;
 pub const INode = std.posix.ino_t;
+pub const NLink = std.posix.nlink_t;
+pub const Uid = std.posix.uid_t;
+pub const Gid = std.posix.gid_t;
 
 pub const Kind = enum {
     block_device,
@@ -41,12 +48,17 @@ pub const Stat = struct {
     /// The FileIndex on Windows is similar. It is a number for a file that
     /// is unique to each filesystem.
     inode: INode,
+    nlink: NLink,
     size: u64,
-    /// This is available on POSIX systems and is always 0 otherwise.
-    mode: Mode,
+    permissions: Permissions,
     kind: Kind,
     /// Last access time in nanoseconds, relative to UTC 1970-01-01.
-    atime: Io.Timestamp,
+    ///
+    /// Filesystems generally find this value problematic to keep updated since
+    /// it turns read-only file system accesses into file system mutations.
+    /// Some systems report stale values, and some systems explicitly refuse to
+    /// report this value. The latter case is handled by `null`.
+    atime: ?Io.Timestamp,
     /// Last modification time in nanoseconds, relative to UTC 1970-01-01.
     mtime: Io.Timestamp,
     /// Last status/metadata change time in nanoseconds, relative to UTC 1970-01-01.
@@ -95,6 +107,26 @@ pub const Lock = enum {
 pub const OpenFlags = struct {
     mode: OpenMode = .read_only,
 
+    /// Determines the behavior when opening a path that refers to a directory.
+    ///
+    /// If set to true, directories may be opened, but `error.IsDir` is still
+    /// possible in certain scenarios, e.g. attempting to open a directory with
+    /// write permissions.
+    ///
+    /// If set to false, `error.IsDir` will always be returned when opening a directory.
+    ///
+    /// When set to false:
+    /// * On Windows, the behavior is implemented without any extra syscalls.
+    /// * On other operating systems, the behavior is implemented with an additional
+    ///   `fstat` syscall.
+    allow_directory: bool = true,
+    /// Indicates intent for only some operations to be performed on this
+    /// opened file:
+    /// * `close`
+    /// * `stat`
+    /// On Linux and FreeBSD, this corresponds to `std.posix.O.PATH`.
+    path_only: bool = false,
+
     /// Open the file with an advisory lock to coordinate with other processes
     /// accessing it at the same time. An exclusive lock will prevent other
     /// processes from acquiring a lock. A shared lock will prevent other
@@ -141,7 +173,51 @@ pub const OpenFlags = struct {
     }
 };
 
-pub const CreateFlags = std.fs.File.CreateFlags;
+pub const CreateFlags = struct {
+    /// Whether the file will be created with read access.
+    read: bool = false,
+
+    /// If the file already exists, and is a regular file, and the access
+    /// mode allows writing, it will be truncated to length 0.
+    truncate: bool = true,
+
+    /// Ensures that this open call creates the file, otherwise causes
+    /// `error.PathAlreadyExists` to be returned.
+    exclusive: bool = false,
+
+    /// Open the file with an advisory lock to coordinate with other processes
+    /// accessing it at the same time. An exclusive lock will prevent other
+    /// processes from acquiring a lock. A shared lock will prevent other
+    /// processes from acquiring a exclusive lock, but does not prevent
+    /// other process from getting their own shared locks.
+    ///
+    /// The lock is advisory, except on Linux in very specific circumstances[1].
+    /// This means that a process that does not respect the locking API can still get access
+    /// to the file, despite the lock.
+    ///
+    /// On these operating systems, the lock is acquired atomically with
+    /// opening the file:
+    /// * Darwin
+    /// * DragonFlyBSD
+    /// * FreeBSD
+    /// * Haiku
+    /// * NetBSD
+    /// * OpenBSD
+    /// On these operating systems, the lock is acquired via a separate syscall
+    /// after opening the file:
+    /// * Linux
+    /// * Windows
+    ///
+    /// [1]: https://www.kernel.org/doc/Documentation/filesystems/mandatory-locking.txt
+    lock: Lock = .none,
+
+    /// Sets whether or not to wait until the file is locked to return. If set to true,
+    /// `error.WouldBlock` will be returned. Otherwise, the file will wait until the file
+    /// is available to proceed.
+    lock_nonblocking: bool = false,
+
+    permissions: Permissions = .default_file,
+};
 
 pub const OpenError = error{
     SharingViolation,
@@ -149,7 +225,6 @@ pub const OpenError = error{
     NoDevice,
     /// On Windows, `\\server` or `\\server\share` was not found.
     NetworkNotFound,
-    ProcessNotFound,
     /// On Windows, antivirus software is enabled by default. It can be
     /// disabled, but Windows Update sometimes ignores the user's preference
     /// and re-enables it. When enabled, antivirus software on Windows
@@ -178,7 +253,9 @@ pub const OpenError = error{
     /// The file is too large to be opened. This error is unreachable
     /// for 64-bit targets, as well as when opening directories.
     FileTooBig,
-    /// The path refers to directory but the `DIRECTORY` flag was not provided.
+    /// Either:
+    /// * The path refers to a directory and write permissions were requested.
+    /// * The path refers to a directory and `allow_directory` was set to false.
     IsDir,
     /// A new path cannot be created because the device has no room for the new file.
     /// This error is only reachable when the `CREAT` flag is provided.
@@ -189,7 +266,7 @@ pub const OpenError = error{
     /// The path already exists and the `CREAT` and `EXCL` flags were provided.
     PathAlreadyExists,
     DeviceBusy,
-    FileLocksNotSupported,
+    FileLocksUnsupported,
     /// One of these three things:
     /// * pathname  refers to an executable image which is currently being
     ///   executed and write access was requested.
@@ -204,51 +281,277 @@ pub const OpenError = error{
 } || Io.Dir.PathNameError || Io.Cancelable || Io.UnexpectedError;
 
 pub fn close(file: File, io: Io) void {
-    return io.vtable.fileClose(io.userdata, file);
+    return io.vtable.fileClose(io.userdata, (&file)[0..1]);
 }
 
-pub const OpenSelfExeError = OpenError || std.fs.SelfExePathError || std.posix.FlockError;
+pub fn closeMany(io: Io, files: []const File) void {
+    return io.vtable.fileClose(io.userdata, files);
+}
 
-pub fn openSelfExe(io: Io, flags: OpenFlags) OpenSelfExeError!File {
-    return io.vtable.openSelfExe(io.userdata, flags);
+pub const SyncError = error{
+    InputOutput,
+    NoSpaceLeft,
+    DiskQuota,
+    AccessDenied,
+} || Io.Cancelable || Io.UnexpectedError;
+
+/// Blocks until all pending file contents and metadata modifications for the
+/// file have been synchronized with the underlying filesystem.
+///
+/// This does not ensure that metadata for the directory containing the file
+/// has also reached disk.
+pub fn sync(file: File, io: Io) SyncError!void {
+    return io.vtable.fileSync(io.userdata, file);
+}
+
+/// Test whether the file refers to a terminal (similar to libc "isatty").
+///
+/// See also:
+/// * `enableAnsiEscapeCodes`
+/// * `supportsAnsiEscapeCodes`.
+pub fn isTty(file: File, io: Io) Io.Cancelable!bool {
+    return io.vtable.fileIsTty(io.userdata, file);
+}
+
+pub const EnableAnsiEscapeCodesError = error{
+    NotTerminalDevice,
+} || Io.Cancelable || Io.UnexpectedError;
+
+pub fn enableAnsiEscapeCodes(file: File, io: Io) EnableAnsiEscapeCodesError!void {
+    return io.vtable.fileEnableAnsiEscapeCodes(io.userdata, file);
+}
+
+/// Test whether ANSI escape codes will be treated as such without
+/// attempting to enable support for ANSI escape codes.
+pub fn supportsAnsiEscapeCodes(file: File, io: Io) Io.Cancelable!bool {
+    return io.vtable.fileSupportsAnsiEscapeCodes(io.userdata, file);
+}
+
+pub const SetLengthError = error{
+    FileTooBig,
+    InputOutput,
+    FileBusy,
+    AccessDenied,
+    PermissionDenied,
+    NonResizable,
+} || Io.Cancelable || Io.UnexpectedError;
+
+/// Truncates or expands the file, populating any new data with zeroes.
+///
+/// The file offset after this call is left unchanged.
+pub fn setLength(file: File, io: Io, new_length: u64) SetLengthError!void {
+    return io.vtable.fileSetLength(io.userdata, file, new_length);
+}
+
+pub const LengthError = StatError;
+
+/// Retrieve the ending byte index of the file.
+///
+/// Sometimes cheaper than `stat` if only the length is needed.
+pub fn length(file: File, io: Io) LengthError!u64 {
+    return io.vtable.fileLength(io.userdata, file);
+}
+
+pub const SetPermissionsError = error{
+    AccessDenied,
+    PermissionDenied,
+    InputOutput,
+    SymLinkLoop,
+    FileNotFound,
+    SystemResources,
+    ReadOnlyFileSystem,
+} || Io.Cancelable || Io.UnexpectedError;
+
+/// Also known as "chmod".
+///
+/// The process must have the correct privileges in order to do this
+/// successfully, or must have the effective user ID matching the owner of the
+/// file.
+pub fn setPermissions(file: File, io: Io, new_permissions: Permissions) SetPermissionsError!void {
+    return io.vtable.fileSetPermissions(io.userdata, file, new_permissions);
+}
+
+pub const SetOwnerError = error{
+    AccessDenied,
+    PermissionDenied,
+    InputOutput,
+    SymLinkLoop,
+    FileNotFound,
+    SystemResources,
+    ReadOnlyFileSystem,
+} || Io.Cancelable || Io.UnexpectedError;
+
+/// Also known as "chown".
+///
+/// The process must have the correct privileges in order to do this
+/// successfully. The group may be changed by the owner of the file to any
+/// group of which the owner is a member. If the owner or group is specified as
+/// `null`, the ID is not changed.
+pub fn setOwner(file: File, io: Io, owner: ?Uid, group: ?Gid) SetOwnerError!void {
+    return io.vtable.fileSetOwner(io.userdata, file, owner, group);
+}
+
+/// Cross-platform representation of permissions on a file.
+///
+/// On POSIX systems this corresponds to "mode" and on Windows this corresponds to "attributes".
+pub const Permissions = std.Options.FilePermissions orelse if (is_windows) enum(std.os.windows.DWORD) {
+    default_file = 0,
+    _,
+
+    pub const default_dir: @This() = .default_file;
+    pub const executable_file: @This() = .default_file;
+    pub const has_executable_bit = false;
+
+    const windows = std.os.windows;
+
+    pub fn toAttributes(self: @This()) windows.FILE.ATTRIBUTE {
+        return @bitCast(@intFromEnum(self));
+    }
+
+    pub fn readOnly(self: @This()) bool {
+        const attributes = toAttributes(self);
+        return attributes & windows.FILE_ATTRIBUTE_READONLY != 0;
+    }
+
+    pub fn setReadOnly(self: @This(), read_only: bool) @This() {
+        const attributes = toAttributes(self);
+        return @enumFromInt(if (read_only)
+            attributes | windows.FILE_ATTRIBUTE_READONLY
+        else
+            attributes & ~@as(windows.DWORD, windows.FILE_ATTRIBUTE_READONLY));
+    }
+} else if (std.posix.mode_t != u0) enum(std.posix.mode_t) {
+    /// This is the default mode given to POSIX operating systems for creating
+    /// files. `0o666` is "-rw-rw-rw-" which is counter-intuitive at first,
+    /// since most people would expect "-rw-r--r--", for example, when using
+    /// the `touch` command, which would correspond to `0o644`. However, POSIX
+    /// libc implementations use `0o666` inside `fopen` and then rely on the
+    /// process-scoped "umask" setting to adjust this number for file creation.
+    default_file = 0o666,
+    default_dir = 0o755,
+    executable_file = 0o777,
+    _,
+
+    pub const has_executable_bit = native_os != .wasi;
+
+    pub fn toMode(self: @This()) std.posix.mode_t {
+        return @intFromEnum(self);
+    }
+
+    pub fn fromMode(mode: std.posix.mode_t) @This() {
+        return @enumFromInt(mode);
+    }
+
+    /// Returns `true` if and only if no class has write permissions.
+    pub fn readOnly(self: @This()) bool {
+        const mode = toMode(self);
+        return mode & 0o222 == 0;
+    }
+
+    /// Enables write permission for all classes.
+    pub fn setReadOnly(self: @This(), read_only: bool) @This() {
+        const mode = toMode(self);
+        const o222 = @as(std.posix.mode_t, 0o222);
+        return @enumFromInt(if (read_only) mode & ~o222 else mode | o222);
+    }
+} else enum(u0) {
+    default_file = 0,
+    pub const default_dir: @This() = .default_file;
+    pub const executable_file: @This() = .default_file;
+    pub const has_executable_bit = false;
+};
+
+pub const SetTimestampsError = error{
+    /// times is NULL, or both nsec values are UTIME_NOW, and either:
+    /// *  the effective user ID of the caller does not match the  owner
+    ///    of  the  file,  the  caller does not have write access to the
+    ///    file, and the caller is not privileged (Linux: does not  have
+    ///    either  the  CAP_FOWNER  or the CAP_DAC_OVERRIDE capability);
+    ///    or,
+    /// *  the file is marked immutable (see chattr(1)).
+    AccessDenied,
+    /// The caller attempted to change one or both timestamps to a value
+    /// other than the current time, or to change one of the  timestamps
+    /// to the current time while leaving the other timestamp unchanged,
+    /// (i.e., times is not NULL, neither nsec  field  is  UTIME_NOW,
+    /// and neither nsec field is UTIME_OMIT) and either:
+    /// *  the  caller's  effective  user ID does not match the owner of
+    ///    file, and the caller is not privileged (Linux: does not  have
+    ///    the CAP_FOWNER capability); or,
+    /// *  the file is marked append-only or immutable (see chattr(1)).
+    PermissionDenied,
+    ReadOnlyFileSystem,
+} || Io.Cancelable || Io.UnexpectedError;
+
+pub const SetTimestampsOptions = struct {
+    access_timestamp: SetTimestamp = .unchanged,
+    modify_timestamp: SetTimestamp = .unchanged,
+};
+
+pub const SetTimestamp = union(enum) {
+    /// Leave the existing timestamp unmodified.
+    unchanged,
+    /// Set to current time using `Io.Clock.real`.
+    now,
+    /// Set to provided timestamp using `Io.Clock.real`.
+    new: Io.Timestamp,
+
+    /// Convenience for interacting with `Stat`, in which `null` indicates `unchanged`.
+    pub fn init(optional: ?Io.Timestamp) SetTimestamp {
+        return if (optional) |t| .{ .new = t } else .unchanged;
+    }
+};
+
+/// The granularity that ultimately is stored depends on the combination of
+/// operating system and file system. When a value as provided that exceeds
+/// this range, the value is clamped to the maximum.
+pub fn setTimestamps(file: File, io: Io, options: SetTimestampsOptions) SetTimestampsError!void {
+    return io.vtable.fileSetTimestamps(io.userdata, file, options);
+}
+
+/// Sets the accessed and modification timestamps of `file` to the current wall
+/// clock time.
+///
+/// The granularity that ultimately is stored depends on the combination of
+/// operating system and file system.
+pub fn setTimestampsNow(file: File, io: Io) SetTimestampsError!void {
+    return io.vtable.fileSetTimestamps(io.userdata, file, .{
+        .access_timestamp = .now,
+        .modify_timestamp = .now,
+    });
+}
+
+/// Returns 0 on stream end or if `buffer` has no space available for data.
+///
+/// See also:
+/// * `reader`
+pub fn readStreaming(file: File, io: Io, buffer: []const []u8) Reader.Error!usize {
+    return io.vtable.fileReadStreaming(io.userdata, file, buffer);
 }
 
 pub const ReadPositionalError = Reader.Error || error{Unseekable};
 
-pub fn readPositional(file: File, io: Io, buffer: [][]u8, offset: u64) ReadPositionalError!usize {
+/// Returns 0 on stream end or if `buffer` has no space available for data.
+///
+/// See also:
+/// * `reader`
+pub fn readPositional(file: File, io: Io, buffer: []const []u8, offset: u64) ReadPositionalError!usize {
     return io.vtable.fileReadPositional(io.userdata, file, buffer, offset);
 }
 
-pub const WriteStreamingError = error{} || Io.UnexpectedError || Io.Cancelable;
+pub const WritePositionalError = Writer.Error || error{Unseekable};
 
-pub fn writeStreaming(file: File, io: Io, buffer: [][]const u8) WriteStreamingError!usize {
-    return file.fileWriteStreaming(io, buffer);
+/// See also:
+/// * `writer`
+pub fn writePositional(file: File, io: Io, buffer: []const []const u8, offset: u64) WritePositionalError!usize {
+    return io.vtable.fileWritePositional(io.userdata, file, &.{}, buffer, 1, offset);
 }
 
-pub const WritePositionalError = WriteStreamingError || error{Unseekable};
-
-pub fn writePositional(file: File, io: Io, buffer: [][]const u8, offset: u64) WritePositionalError!usize {
-    return io.vtable.fileWritePositional(io.userdata, file, buffer, offset);
-}
-
-pub fn openAbsolute(io: Io, absolute_path: []const u8, flags: OpenFlags) OpenError!File {
-    assert(std.fs.path.isAbsolute(absolute_path));
-    return Io.Dir.cwd().openFile(io, absolute_path, flags);
-}
-
-/// Defaults to positional reading; falls back to streaming.
-///
-/// Positional is more threadsafe, since the global seek position is not
-/// affected.
-pub fn reader(file: File, io: Io, buffer: []u8) Reader {
-    return .init(file, io, buffer);
-}
-
-/// Positional is more threadsafe, since the global seek position is not
-/// affected, but when such syscalls are not available, preemptively
-/// initializing in streaming mode skips a failed syscall.
-pub fn readerStreaming(file: File, io: Io, buffer: []u8) Reader {
-    return .initStreaming(file, io, buffer);
+/// Equivalent to creating a positional writer, writing `bytes`, and then flushing.
+pub fn writePositionalAll(file: File, io: Io, bytes: []const u8, offset: u64) WritePositionalError!void {
+    var index: usize = 0;
+    while (index < bytes.len)
+        index += try io.vtable.fileWritePositional(io.userdata, file, &.{}, &.{bytes[index..]}, 1, offset + index);
 }
 
 pub const SeekError = error{
@@ -257,398 +560,156 @@ pub const SeekError = error{
     AccessDenied,
 } || Io.Cancelable || Io.UnexpectedError;
 
-/// Memoizes key information about a file handle such as:
-/// * The size from calling stat, or the error that occurred therein.
-/// * The current seek position.
-/// * The error that occurred when trying to seek.
-/// * Whether reading should be done positionally or streaming.
-/// * Whether reading should be done via fd-to-fd syscalls (e.g. `sendfile`)
-///   versus plain variants (e.g. `read`).
+pub const WriteFilePositionalError = Writer.WriteFileError || error{Unseekable};
+
+/// Defaults to positional reading; falls back to streaming.
 ///
-/// Fulfills the `Io.Reader` interface.
-pub const Reader = struct {
-    io: Io,
-    file: File,
-    err: ?Error = null,
-    mode: Reader.Mode = .positional,
-    /// Tracks the true seek position in the file. To obtain the logical
-    /// position, use `logicalPos`.
-    pos: u64 = 0,
-    size: ?u64 = null,
-    size_err: ?SizeError = null,
-    seek_err: ?Reader.SeekError = null,
-    interface: Io.Reader,
+/// Positional is more threadsafe, since the global seek position is not
+/// affected.
+///
+/// See also:
+/// * `readerStreaming`
+pub fn reader(file: File, io: Io, buffer: []u8) Reader {
+    return .init(file, io, buffer);
+}
 
-    pub const Error = error{
-        InputOutput,
-        SystemResources,
-        IsDir,
-        BrokenPipe,
-        ConnectionResetByPeer,
-        Timeout,
-        /// In WASI, EBADF is mapped to this error because it is returned when
-        /// trying to read a directory file descriptor as if it were a file.
-        NotOpenForReading,
-        SocketUnconnected,
-        /// This error occurs when no global event loop is configured,
-        /// and reading from the file descriptor would block.
-        WouldBlock,
-        /// In WASI, this error occurs when the file descriptor does
-        /// not hold the required rights to read from it.
-        AccessDenied,
-        /// This error occurs in Linux if the process to be read from
-        /// no longer exists.
-        ProcessNotFound,
-        /// Unable to read file due to lock.
-        LockViolation,
-    } || Io.Cancelable || Io.UnexpectedError;
-
-    pub const SizeError = std.os.windows.GetFileSizeError || StatError || error{
-        /// Occurs if, for example, the file handle is a network socket and therefore does not have a size.
-        Streaming,
-    };
-
-    pub const SeekError = File.SeekError || error{
-        /// Seeking fell back to reading, and reached the end before the requested seek position.
-        /// `pos` remains at the end of the file.
-        EndOfStream,
-        /// Seeking fell back to reading, which failed.
-        ReadFailed,
-    };
-
-    pub const Mode = enum {
-        streaming,
-        positional,
-        /// Avoid syscalls other than `read` and `readv`.
-        streaming_reading,
-        /// Avoid syscalls other than `pread` and `preadv`.
-        positional_reading,
-        /// Indicates reading cannot continue because of a seek failure.
-        failure,
-
-        pub fn toStreaming(m: @This()) @This() {
-            return switch (m) {
-                .positional, .streaming => .streaming,
-                .positional_reading, .streaming_reading => .streaming_reading,
-                .failure => .failure,
-            };
-        }
-
-        pub fn toReading(m: @This()) @This() {
-            return switch (m) {
-                .positional, .positional_reading => .positional_reading,
-                .streaming, .streaming_reading => .streaming_reading,
-                .failure => .failure,
-            };
-        }
-    };
-
-    pub fn initInterface(buffer: []u8) Io.Reader {
-        return .{
-            .vtable = &.{
-                .stream = Reader.stream,
-                .discard = Reader.discard,
-                .readVec = Reader.readVec,
-            },
-            .buffer = buffer,
-            .seek = 0,
-            .end = 0,
-        };
+/// Equivalent to creating a positional reader and reading multiple times to fill `buffer`.
+///
+/// Returns number of bytes read into `buffer`. If less than `buffer.len`, end of file occurred.
+///
+/// See also:
+/// * `reader`
+pub fn readPositionalAll(file: File, io: Io, buffer: []u8, offset: u64) ReadPositionalError!usize {
+    var index: usize = 0;
+    while (index != buffer.len) {
+        const amt = try file.readPositional(io, &.{buffer[index..]}, offset + index);
+        if (amt == 0) break;
+        index += amt;
     }
+    return index;
+}
 
-    pub fn init(file: File, io: Io, buffer: []u8) Reader {
-        return .{
-            .io = io,
-            .file = file,
-            .interface = initInterface(buffer),
-        };
+/// Positional is more threadsafe, since the global seek position is not
+/// affected, but when such syscalls are not available, preemptively
+/// initializing in streaming mode skips a failed syscall.
+///
+/// See also:
+/// * `reader`
+pub fn readerStreaming(file: File, io: Io, buffer: []u8) Reader {
+    return .initStreaming(file, io, buffer);
+}
+
+/// Defaults to positional reading; falls back to streaming.
+///
+/// Positional is more threadsafe, since the global seek position is not
+/// affected.
+pub fn writer(file: File, io: Io, buffer: []u8) Writer {
+    return .init(file, io, buffer);
+}
+
+/// Positional is more threadsafe, since the global seek position is not
+/// affected, but when such syscalls are not available, preemptively
+/// initializing in streaming mode will skip a failed syscall.
+pub fn writerStreaming(file: File, io: Io, buffer: []u8) Writer {
+    return .initStreaming(file, io, buffer);
+}
+
+/// Equivalent to creating a streaming writer, writing `bytes`, and then flushing.
+pub fn writeStreamingAll(file: File, io: Io, bytes: []const u8) Writer.Error!void {
+    var index: usize = 0;
+    while (index < bytes.len) {
+        index += try io.vtable.fileWriteStreaming(io.userdata, file, &.{}, &.{bytes[index..]}, 1);
     }
+}
 
-    /// Takes a legacy `std.fs.File` to help with upgrading.
-    pub fn initAdapted(file: std.fs.File, io: Io, buffer: []u8) Reader {
-        return .init(.{ .handle = file.handle }, io, buffer);
-    }
+pub const LockError = error{
+    SystemResources,
+    FileLocksUnsupported,
+} || Io.Cancelable || Io.UnexpectedError;
 
-    pub fn initSize(file: File, io: Io, buffer: []u8, size: ?u64) Reader {
-        return .{
-            .io = io,
-            .file = file,
-            .interface = initInterface(buffer),
-            .size = size,
-        };
-    }
+/// Blocks when an incompatible lock is held by another process. A process may
+/// hold only one type of lock (shared or exclusive) on a file. When a process
+/// terminates in any way, the lock is released.
+///
+/// Assumes the file is unlocked.
+pub fn lock(file: File, io: Io, l: Lock) LockError!void {
+    return io.vtable.fileLock(io.userdata, file, l);
+}
 
-    /// Positional is more threadsafe, since the global seek position is not
-    /// affected, but when such syscalls are not available, preemptively
-    /// initializing in streaming mode skips a failed syscall.
-    pub fn initStreaming(file: File, io: Io, buffer: []u8) Reader {
-        return .{
-            .io = io,
-            .file = file,
-            .interface = Reader.initInterface(buffer),
-            .mode = .streaming,
-            .seek_err = error.Unseekable,
-            .size_err = error.Streaming,
-        };
-    }
+/// Assumes the file is locked.
+pub fn unlock(file: File, io: Io) void {
+    return io.vtable.fileUnlock(io.userdata, file);
+}
 
-    pub fn getSize(r: *Reader) SizeError!u64 {
-        return r.size orelse {
-            if (r.size_err) |err| return err;
-            if (stat(r.file, r.io)) |st| {
-                if (st.kind == .file) {
-                    r.size = st.size;
-                    return st.size;
-                } else {
-                    r.mode = r.mode.toStreaming();
-                    r.size_err = error.Streaming;
-                    return error.Streaming;
-                }
-            } else |err| {
-                r.size_err = err;
-                return err;
-            }
-        };
-    }
+/// Attempts to obtain a lock, returning `true` if the lock is obtained, and
+/// `false` if there was an existing incompatible lock held. A process may hold
+/// only one type of lock (shared or exclusive) on a file. When a process
+/// terminates in any way, the lock is released.
+///
+/// Assumes the file is unlocked.
+pub fn tryLock(file: File, io: Io, l: Lock) LockError!bool {
+    return io.vtable.fileTryLock(io.userdata, file, l);
+}
 
-    pub fn seekBy(r: *Reader, offset: i64) Reader.SeekError!void {
-        const io = r.io;
-        switch (r.mode) {
-            .positional, .positional_reading => {
-                setLogicalPos(r, @intCast(@as(i64, @intCast(logicalPos(r))) + offset));
-            },
-            .streaming, .streaming_reading => {
-                const seek_err = r.seek_err orelse e: {
-                    if (io.vtable.fileSeekBy(io.userdata, r.file, offset)) {
-                        setLogicalPos(r, @intCast(@as(i64, @intCast(logicalPos(r))) + offset));
-                        return;
-                    } else |err| {
-                        r.seek_err = err;
-                        break :e err;
-                    }
-                };
-                var remaining = std.math.cast(u64, offset) orelse return seek_err;
-                while (remaining > 0) {
-                    remaining -= discard(&r.interface, .limited64(remaining)) catch |err| {
-                        r.seek_err = err;
-                        return err;
-                    };
-                }
-                r.interface.tossBuffered();
-            },
-            .failure => return r.seek_err.?,
-        }
-    }
+pub const DowngradeLockError = Io.Cancelable || Io.UnexpectedError;
 
-    /// Repositions logical read offset relative to the beginning of the file.
-    pub fn seekTo(r: *Reader, offset: u64) Reader.SeekError!void {
-        const io = r.io;
-        switch (r.mode) {
-            .positional, .positional_reading => {
-                setLogicalPos(r, offset);
-            },
-            .streaming, .streaming_reading => {
-                const logical_pos = logicalPos(r);
-                if (offset >= logical_pos) return Reader.seekBy(r, @intCast(offset - logical_pos));
-                if (r.seek_err) |err| return err;
-                io.vtable.fileSeekTo(io.userdata, r.file, offset) catch |err| {
-                    r.seek_err = err;
-                    return err;
-                };
-                setLogicalPos(r, offset);
-            },
-            .failure => return r.seek_err.?,
-        }
-    }
+/// Assumes the file is already locked in exclusive mode.
+/// Atomically modifies the lock to be in shared mode, without releasing it.
+pub fn downgradeLock(file: File, io: Io) LockError!void {
+    return io.vtable.fileDowngradeLock(io.userdata, file);
+}
 
-    pub fn logicalPos(r: *const Reader) u64 {
-        return r.pos - r.interface.bufferedLen();
-    }
+pub const RealPathError = error{
+    /// This operating system, file system, or `Io` implementation does not
+    /// support realpath operations.
+    OperationUnsupported,
+    /// The full file system path could not fit into the provided buffer, or
+    /// due to its length could not be obtained via realpath functions no
+    /// matter the buffer size provided.
+    NameTooLong,
+    FileNotFound,
+    AccessDenied,
+    PermissionDenied,
+    NotDir,
+    SymLinkLoop,
+    InputOutput,
+    FileTooBig,
+    IsDir,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    NoDevice,
+    SystemResources,
+    NoSpaceLeft,
+    FileSystem,
+    DeviceBusy,
+    SharingViolation,
+    PipeBusy,
+    /// On Windows, `\\server` or `\\server\share` was not found.
+    NetworkNotFound,
+    PathAlreadyExists,
+    /// On Windows, antivirus software is enabled by default. It can be
+    /// disabled, but Windows Update sometimes ignores the user's preference
+    /// and re-enables it. When enabled, antivirus software on Windows
+    /// intercepts file system operations and makes them significantly slower
+    /// in addition to possibly failing with this error code.
+    AntivirusInterference,
+    /// On Windows, the volume does not contain a recognized file system. File
+    /// system drivers might not be loaded, or the volume may be corrupt.
+    UnrecognizedVolume,
+} || Io.Cancelable || Io.UnexpectedError;
 
-    fn setLogicalPos(r: *Reader, offset: u64) void {
-        const logical_pos = r.logicalPos();
-        if (offset < logical_pos or offset >= r.pos) {
-            r.interface.tossBuffered();
-            r.pos = offset;
-        } else r.interface.toss(@intCast(offset - logical_pos));
-    }
+/// Obtains the canonicalized absolute path name corresponding to an open file
+/// handle.
+///
+/// This function has limited platform support, and using it can lead to
+/// unnecessary failures and race conditions. It is generally advisable to
+/// avoid this function entirely.
+pub fn realPath(file: File, io: Io, out_buffer: []u8) RealPathError!usize {
+    return io.vtable.fileRealPath(io.userdata, file, out_buffer);
+}
 
-    /// Number of slices to store on the stack, when trying to send as many byte
-    /// vectors through the underlying read calls as possible.
-    const max_buffers_len = 16;
-
-    fn stream(io_reader: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
-        return streamMode(r, w, limit, r.mode);
-    }
-
-    pub fn streamMode(r: *Reader, w: *Io.Writer, limit: Io.Limit, mode: Reader.Mode) Io.Reader.StreamError!usize {
-        switch (mode) {
-            .positional, .streaming => return w.sendFile(r, limit) catch |write_err| switch (write_err) {
-                error.Unimplemented => {
-                    r.mode = r.mode.toReading();
-                    return 0;
-                },
-                else => |e| return e,
-            },
-            .positional_reading => {
-                const dest = limit.slice(try w.writableSliceGreedy(1));
-                var data: [1][]u8 = .{dest};
-                const n = try readVecPositional(r, &data);
-                w.advance(n);
-                return n;
-            },
-            .streaming_reading => {
-                const dest = limit.slice(try w.writableSliceGreedy(1));
-                var data: [1][]u8 = .{dest};
-                const n = try readVecStreaming(r, &data);
-                w.advance(n);
-                return n;
-            },
-            .failure => return error.ReadFailed,
-        }
-    }
-
-    fn readVec(io_reader: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
-        const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
-        switch (r.mode) {
-            .positional, .positional_reading => return readVecPositional(r, data),
-            .streaming, .streaming_reading => return readVecStreaming(r, data),
-            .failure => return error.ReadFailed,
-        }
-    }
-
-    fn readVecPositional(r: *Reader, data: [][]u8) Io.Reader.Error!usize {
-        const io = r.io;
-        var iovecs_buffer: [max_buffers_len][]u8 = undefined;
-        const dest_n, const data_size = try r.interface.writableVector(&iovecs_buffer, data);
-        const dest = iovecs_buffer[0..dest_n];
-        assert(dest[0].len > 0);
-        const n = io.vtable.fileReadPositional(io.userdata, r.file, dest, r.pos) catch |err| switch (err) {
-            error.Unseekable => {
-                r.mode = r.mode.toStreaming();
-                const pos = r.pos;
-                if (pos != 0) {
-                    r.pos = 0;
-                    r.seekBy(@intCast(pos)) catch {
-                        r.mode = .failure;
-                        return error.ReadFailed;
-                    };
-                }
-                return 0;
-            },
-            else => |e| {
-                r.err = e;
-                return error.ReadFailed;
-            },
-        };
-        if (n == 0) {
-            r.size = r.pos;
-            return error.EndOfStream;
-        }
-        r.pos += n;
-        if (n > data_size) {
-            r.interface.end += n - data_size;
-            return data_size;
-        }
-        return n;
-    }
-
-    fn readVecStreaming(r: *Reader, data: [][]u8) Io.Reader.Error!usize {
-        const io = r.io;
-        var iovecs_buffer: [max_buffers_len][]u8 = undefined;
-        const dest_n, const data_size = try r.interface.writableVector(&iovecs_buffer, data);
-        const dest = iovecs_buffer[0..dest_n];
-        assert(dest[0].len > 0);
-        const n = io.vtable.fileReadStreaming(io.userdata, r.file, dest) catch |err| {
-            r.err = err;
-            return error.ReadFailed;
-        };
-        if (n == 0) {
-            r.size = r.pos;
-            return error.EndOfStream;
-        }
-        r.pos += n;
-        if (n > data_size) {
-            r.interface.end += n - data_size;
-            return data_size;
-        }
-        return n;
-    }
-
-    fn discard(io_reader: *Io.Reader, limit: Io.Limit) Io.Reader.Error!usize {
-        const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
-        const io = r.io;
-        const file = r.file;
-        switch (r.mode) {
-            .positional, .positional_reading => {
-                const size = r.getSize() catch {
-                    r.mode = r.mode.toStreaming();
-                    return 0;
-                };
-                const logical_pos = logicalPos(r);
-                const delta = @min(@intFromEnum(limit), size - logical_pos);
-                setLogicalPos(r, logical_pos + delta);
-                return delta;
-            },
-            .streaming, .streaming_reading => {
-                // Unfortunately we can't seek forward without knowing the
-                // size because the seek syscalls provided to us will not
-                // return the true end position if a seek would exceed the
-                // end.
-                fallback: {
-                    if (r.size_err == null and r.seek_err == null) break :fallback;
-
-                    const buffered_len = r.interface.bufferedLen();
-                    var remaining = @intFromEnum(limit);
-                    if (remaining <= buffered_len) {
-                        r.interface.seek += remaining;
-                        return remaining;
-                    }
-                    remaining -= buffered_len;
-                    r.interface.seek = 0;
-                    r.interface.end = 0;
-
-                    var trash_buffer: [128]u8 = undefined;
-                    var data: [1][]u8 = .{trash_buffer[0..@min(trash_buffer.len, remaining)]};
-                    var iovecs_buffer: [max_buffers_len][]u8 = undefined;
-                    const dest_n, const data_size = try r.interface.writableVector(&iovecs_buffer, &data);
-                    const dest = iovecs_buffer[0..dest_n];
-                    assert(dest[0].len > 0);
-                    const n = io.vtable.fileReadStreaming(io.userdata, file, dest) catch |err| {
-                        r.err = err;
-                        return error.ReadFailed;
-                    };
-                    if (n == 0) {
-                        r.size = r.pos;
-                        return error.EndOfStream;
-                    }
-                    r.pos += n;
-                    if (n > data_size) {
-                        r.interface.end += n - data_size;
-                        remaining -= data_size;
-                    } else {
-                        remaining -= n;
-                    }
-                    return @intFromEnum(limit) - remaining;
-                }
-                const size = r.getSize() catch return 0;
-                const n = @min(size - r.pos, std.math.maxInt(i64), @intFromEnum(limit));
-                io.vtable.fileSeekBy(io.userdata, file, n) catch |err| {
-                    r.seek_err = err;
-                    return 0;
-                };
-                r.pos += n;
-                return n;
-            },
-            .failure => return error.ReadFailed,
-        }
-    }
-
-    /// Returns whether the stream is at the logical end.
-    pub fn atEnd(r: *Reader) bool {
-        // Even if stat fails, size is set when end is encountered.
-        const size = r.size orelse return false;
-        return size - logicalPos(r) == 0;
-    }
-};
+test {
+    _ = Reader;
+    _ = Writer;
+    _ = Atomic;
+}
