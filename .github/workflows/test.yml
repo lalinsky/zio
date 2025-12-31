@@ -27,6 +27,11 @@ jobs:
             qemu_binary: qemu-riscv64-static
 
           - os: ubuntu-latest
+            target: loongarch64-linux
+            run: qemu
+            qemu_binary: qemu-loongarch64-static
+
+          - os: ubuntu-latest
             target: x86_64-freebsd
             run: vm
             vm_type: freebsd

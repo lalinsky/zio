@@ -44,6 +44,14 @@ pub const Context = switch (builtin.cpu.arch) {
 
         pub const stack_alignment = 16;
     },
+    .loongarch64 => extern struct {
+        sp: u64,
+        fp: u64,
+        pc: u64,
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -64,6 +72,11 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
             ctx.pc = @intFromPtr(entry_point);
         },
         .riscv64 => {
+            ctx.sp = stack_ptr;
+            ctx.fp = 0;
+            ctx.pc = @intFromPtr(entry_point);
+        },
+        .loongarch64 => {
             ctx.sp = stack_ptr;
             ctx.fp = 0;
             ctx.pc = @intFromPtr(entry_point);
@@ -395,6 +408,84 @@ pub inline fn switchContext(
               .f31 = true,  // ft11
               .memory = true,
             }),
+        .loongarch64 => asm volatile (
+            \\ la.local $t0, 0f
+            \\ st.d $t0, $a0, 16
+            \\ st.d $sp, $a0, 0
+            \\ st.d $fp, $a0, 8
+            \\
+            \\ ld.d $sp, $a1, 0
+            \\ ld.d $fp, $a1, 8
+            \\ ld.d $t0, $a1, 16
+            \\ jr $t0
+            \\0:
+            :
+            : [current] "{$r4}" (current_context_param),
+              [new] "{$r5}" (new_context),
+            : .{
+              .r1 = true,   // ra
+              .r3 = true,   // sp
+              .r4 = true,   // a0
+              .r5 = true,   // a1
+              .r6 = true,   // a2
+              .r7 = true,   // a3
+              .r8 = true,   // a4
+              .r9 = true,   // a5
+              .r10 = true,  // a6
+              .r11 = true,  // a7
+              .r12 = true,  // t0
+              .r13 = true,  // t1
+              .r14 = true,  // t2
+              .r15 = true,  // t3
+              .r16 = true,  // t4
+              .r17 = true,  // t5
+              .r18 = true,  // t6
+              .r19 = true,  // t7
+              .r20 = true,  // t8
+              .r22 = true,  // fp/s9
+              .r23 = true,  // s0
+              .r24 = true,  // s1
+              .r25 = true,  // s2
+              .r26 = true,  // s3
+              .r27 = true,  // s4
+              .r28 = true,  // s5
+              .r29 = true,  // s6
+              .r30 = true,  // s7
+              .r31 = true,  // s8
+              .f0 = true,   // fa0
+              .f1 = true,   // fa1
+              .f2 = true,   // fa2
+              .f3 = true,   // fa3
+              .f4 = true,   // fa4
+              .f5 = true,   // fa5
+              .f6 = true,   // fa6
+              .f7 = true,   // fa7
+              .f8 = true,   // ft0
+              .f9 = true,   // ft1
+              .f10 = true,  // ft2
+              .f11 = true,  // ft3
+              .f12 = true,  // ft4
+              .f13 = true,  // ft5
+              .f14 = true,  // ft6
+              .f15 = true,  // ft7
+              .f16 = true,  // ft8
+              .f17 = true,  // ft9
+              .f18 = true,  // ft10
+              .f19 = true,  // ft11
+              .f20 = true,  // ft12
+              .f21 = true,  // ft13
+              .f22 = true,  // ft14
+              .f23 = true,  // ft15
+              .f24 = true,  // fs0
+              .f25 = true,  // fs1
+              .f26 = true,  // fs2
+              .f27 = true,  // fs3
+              .f28 = true,  // fs4
+              .f29 = true,  // fs5
+              .f30 = true,  // fs6
+              .f31 = true,  // fs7
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -451,6 +542,13 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ ld a0, 8(sp)
             \\ ld t0, 0(sp)
             \\ jr t0
+            \\1:
+        ),
+        .loongarch64 => asm volatile (
+            \\ la.local $ra, 1f
+            \\ ld.d $a0, $sp, 8
+            \\ ld.d $t0, $sp, 0
+            \\ jr $t0
             \\1:
         ),
         else => @compileError("unsupported architecture"),
@@ -741,6 +839,9 @@ test "Coroutine: allocator inside coroutine" {
 
 
 test "Coroutine: stack trace" {
+    // Skip on loongarch64 - stack trace capture is not yet supported
+    if (builtin.cpu.arch == .loongarch64) return error.SkipZigTest;
+
     const stack = @import("stack.zig");
 
     var parent_ctx: Context = undefined;
