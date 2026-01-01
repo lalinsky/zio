@@ -52,6 +52,158 @@ comptime {
     }
 }
 
+// ============================================================================
+// Impl implementations for new VTable functions (not yet implemented)
+// ============================================================================
+
+fn dirReadImpl(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+    @panic("VTable function not implemented: dirRead");
+}
+
+fn dirRealPathImpl(_: ?*anyopaque, _: Io.Dir, _: []u8) Io.Dir.RealPathError!usize {
+    @panic("VTable function not implemented: dirRealPath");
+}
+
+fn dirRealPathFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.RealPathFileError!usize {
+    @panic("VTable function not implemented: dirRealPathFile");
+}
+
+fn dirDeleteFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8) Io.Dir.DeleteFileError!void {
+    @panic("VTable function not implemented: dirDeleteFile");
+}
+
+fn dirDeleteDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8) Io.Dir.DeleteDirError!void {
+    @panic("VTable function not implemented: dirDeleteDir");
+}
+
+fn dirRenameImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8) Io.Dir.RenameError!void {
+    @panic("VTable function not implemented: dirRename");
+}
+
+fn dirSymLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []const u8, _: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
+    @panic("VTable function not implemented: dirSymLink");
+}
+
+fn dirReadLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.ReadLinkError!usize {
+    @panic("VTable function not implemented: dirReadLink");
+}
+
+fn dirSetOwnerImpl(_: ?*anyopaque, _: Io.Dir, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
+    @panic("VTable function not implemented: dirSetOwner");
+}
+
+fn dirSetFileOwnerImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: ?Io.File.Uid, _: ?Io.File.Gid, _: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
+    @panic("VTable function not implemented: dirSetFileOwner");
+}
+
+fn dirSetPermissionsImpl(_: ?*anyopaque, _: Io.Dir, _: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
+    @panic("VTable function not implemented: dirSetPermissions");
+}
+
+fn dirSetFilePermissionsImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.File.Permissions, _: Io.Dir.SetFilePermissionsOptions) Io.Dir.SetFilePermissionsError!void {
+    @panic("VTable function not implemented: dirSetFilePermissions");
+}
+
+fn dirSetTimestampsImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.SetTimestampsOptions) Io.Dir.SetTimestampsError!void {
+    @panic("VTable function not implemented: dirSetTimestamps");
+}
+
+fn dirHardLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8, _: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
+    @panic("VTable function not implemented: dirHardLink");
+}
+
+fn fileLengthImpl(_: ?*anyopaque, _: Io.File) Io.File.LengthError!u64 {
+    @panic("VTable function not implemented: fileLength");
+}
+
+fn fileWriteFileStreamingImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.File.Writer.WriteFileError!usize {
+    @panic("VTable function not implemented: fileWriteFileStreaming");
+}
+
+fn fileWriteFilePositionalImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io.File.Reader, _: Io.Limit, _: u64) Io.File.WriteFilePositionalError!usize {
+    @panic("VTable function not implemented: fileWriteFilePositional");
+}
+
+fn fileSyncImpl(_: ?*anyopaque, _: Io.File) Io.File.SyncError!void {
+    @panic("VTable function not implemented: fileSync");
+}
+
+fn fileIsTtyImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!bool {
+    @panic("VTable function not implemented: fileIsTty");
+}
+
+fn fileEnableAnsiEscapeCodesImpl(_: ?*anyopaque, _: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
+    @panic("VTable function not implemented: fileEnableAnsiEscapeCodes");
+}
+
+fn fileSupportsAnsiEscapeCodesImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!bool {
+    @panic("VTable function not implemented: fileSupportsAnsiEscapeCodes");
+}
+
+fn fileSetLengthImpl(_: ?*anyopaque, _: Io.File, _: u64) Io.File.SetLengthError!void {
+    @panic("VTable function not implemented: fileSetLength");
+}
+
+fn fileSetOwnerImpl(_: ?*anyopaque, _: Io.File, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.File.SetOwnerError!void {
+    @panic("VTable function not implemented: fileSetOwner");
+}
+
+fn fileSetPermissionsImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Permissions) Io.File.SetPermissionsError!void {
+    @panic("VTable function not implemented: fileSetPermissions");
+}
+
+fn fileSetTimestampsImpl(_: ?*anyopaque, _: Io.File, _: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
+    @panic("VTable function not implemented: fileSetTimestamps");
+}
+
+fn fileLockImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Lock) Io.File.LockError!void {
+    @panic("VTable function not implemented: fileLock");
+}
+
+fn fileTryLockImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Lock) Io.File.LockError!bool {
+    @panic("VTable function not implemented: fileTryLock");
+}
+
+fn fileUnlockImpl(_: ?*anyopaque, _: Io.File) void {
+    @panic("VTable function not implemented: fileUnlock");
+}
+
+fn fileDowngradeLockImpl(_: ?*anyopaque, _: Io.File) Io.File.DowngradeLockError!void {
+    @panic("VTable function not implemented: fileDowngradeLock");
+}
+
+fn fileRealPathImpl(_: ?*anyopaque, _: Io.File, _: []u8) Io.File.RealPathError!usize {
+    @panic("VTable function not implemented: fileRealPath");
+}
+
+fn processExecutablePathImpl(_: ?*anyopaque, _: []u8) Io.ExecutablePathError!usize {
+    @panic("VTable function not implemented: processExecutablePath");
+}
+
+fn lockStderrImpl(_: ?*anyopaque, _: []u8, _: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
+    @panic("VTable function not implemented: lockStderr");
+}
+
+fn tryLockStderrImpl(_: ?*anyopaque, _: []u8, _: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
+    @panic("VTable function not implemented: tryLockStderr");
+}
+
+fn unlockStderrImpl(_: ?*anyopaque) void {
+    @panic("VTable function not implemented: unlockStderr");
+}
+
+fn processSetCurrentDirImpl(_: ?*anyopaque, _: Io.Dir) Io.SetCurrentDirError!void {
+    @panic("VTable function not implemented: processSetCurrentDir");
+}
+
+fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.net.Stream.Writer.WriteFileError!usize {
+    @panic("VTable function not implemented: netWriteFile");
+}
+
+fn netShutdownImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.ShutdownHow) Io.net.ShutdownError!void {
+    @panic("VTable function not implemented: netShutdown");
+}
+
 fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*Io.AnyFuture {
     return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
         // If we can't schedule asynchronously, execute synchronously
@@ -265,26 +417,27 @@ fn futexWakeImpl(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void 
     Futex.wake(rt, ptr, max_waiters);
 }
 
-fn dirMakeImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, mode: Io.Dir.Mode) Io.Dir.MakeError!void {
+fn dirMakeImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
     _ = userdata;
     _ = dir;
     _ = sub_path;
-    _ = mode;
+    _ = permissions;
     @panic("TODO");
 }
 
-fn dirMakePathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, mode: Io.Dir.Mode) Io.Dir.MakeError!void {
+fn dirMakePathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
     _ = userdata;
     _ = dir;
     _ = sub_path;
-    _ = mode;
+    _ = permissions;
     @panic("TODO");
 }
 
-fn dirMakeOpenPathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.MakeOpenPathError!Io.Dir {
+fn dirMakeOpenPathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions, options: Io.Dir.OpenOptions) Io.Dir.CreateDirPathOpenError!Io.Dir {
     _ = userdata;
     _ = dir;
     _ = sub_path;
+    _ = permissions;
     _ = options;
     @panic("TODO");
 }
@@ -303,7 +456,7 @@ fn dirStatImpl(userdata: ?*anyopaque, dir: Io.Dir) Io.Dir.StatError!Io.Dir.Stat 
     return aioFileStatToStdIo(aio_stat);
 }
 
-fn dirStatPathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.StatPathOptions) Io.Dir.StatPathError!Io.File.Stat {
+fn dirStatPathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
     // StatPathOptions only has follow_symlinks, which is the default behavior for fstatat
     // We don't support not following symlinks yet
     if (!options.follow_symlinks) {
@@ -346,7 +499,6 @@ fn dirCreateFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, f
         .read = flags.read,
         .truncate = flags.truncate,
         .exclusive = flags.exclusive,
-        .mode = flags.mode,
     };
 
     const file = zio_dir.createFile(rt, sub_path, aio_flags) catch |err| switch (err) {
@@ -366,11 +518,11 @@ fn dirCreateFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, f
         error.NotDir => return error.NotDir,
         error.PathAlreadyExists => return error.PathAlreadyExists,
         error.DeviceBusy => return error.DeviceBusy,
-        error.FileLocksNotSupported => return error.FileLocksNotSupported,
+        error.FileLocksNotSupported => return error.FileLocksUnsupported,
         error.BadPathName => return error.BadPathName,
         error.InvalidUtf8 => return error.Unexpected,
         error.NetworkNotFound => return error.NetworkNotFound,
-        error.ProcessNotFound => return error.ProcessNotFound,
+        error.ProcessNotFound => return error.Unexpected,
         error.FileBusy => return error.FileBusy,
         else => return error.Unexpected,
     };
@@ -412,11 +564,11 @@ fn dirOpenFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, fla
         error.NotDir => return error.NotDir,
         error.PathAlreadyExists => return error.PathAlreadyExists,
         error.DeviceBusy => return error.DeviceBusy,
-        error.FileLocksNotSupported => return error.FileLocksNotSupported,
+        error.FileLocksNotSupported => return error.FileLocksUnsupported,
         error.BadPathName => return error.BadPathName,
         error.InvalidUtf8 => return error.Unexpected,
         error.NetworkNotFound => return error.NetworkNotFound,
-        error.ProcessNotFound => return error.ProcessNotFound,
+        error.ProcessNotFound => return error.Unexpected,
         error.FileBusy => return error.FileBusy,
         else => return error.Unexpected,
     };
@@ -432,10 +584,10 @@ fn dirOpenDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, opti
     @panic("TODO");
 }
 
-fn dirCloseImpl(userdata: ?*anyopaque, dir: Io.Dir) void {
+fn dirCloseImpl(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
     _ = userdata;
-    _ = dir;
-    @panic("TODO");
+    _ = dirs;
+    @panic("TODO: dirClose");
 }
 
 fn aioFileStatToStdIo(aio_stat: aio.system.fs.FileStatInfo) Io.File.Stat {
@@ -455,8 +607,9 @@ fn aioFileStatToStdIo(aio_stat: aio.system.fs.FileStatInfo) Io.File.Stat {
 
     return .{
         .inode = aio_stat.inode,
+        .nlink = 1, // TODO: aio doesn't provide nlink
         .size = aio_stat.size,
-        .mode = aio_stat.mode,
+        .permissions = @enumFromInt(aio_stat.mode),
         .kind = kind,
         .atime = .{ .nanoseconds = aio_stat.atime },
         .mtime = .{ .nanoseconds = aio_stat.mtime },
@@ -478,45 +631,51 @@ fn fileStatImpl(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.
     return aioFileStatToStdIo(aio_stat);
 }
 
-fn fileCloseImpl(userdata: ?*anyopaque, file: Io.File) void {
+fn fileCloseImpl(userdata: ?*anyopaque, files: []const Io.File) void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var zio_file = zio_file_io.File.fromFd(file.handle);
-    zio_file.close(rt);
+    for (files) |file| {
+        var zio_file = zio_file_io.File.fromFd(file.handle);
+        zio_file.close(rt);
+    }
 }
 
-fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: Io.File, buffer: [][]const u8) Io.File.WriteStreamingError!usize {
+fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize) Io.File.Writer.Error!usize {
     _ = userdata;
     _ = file;
-    _ = buffer;
+    _ = header;
+    _ = data;
+    _ = splat;
     // Cannot track position with bare file handle - Io.File is just a handle
-    return error.Unexpected;
+    @panic("TODO: fileWriteStreaming");
 }
 
-fn fileWritePositionalImpl(userdata: ?*anyopaque, file: Io.File, buffer: [][]const u8, offset: u64) Io.File.WritePositionalError!usize {
+fn fileWritePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
+    _ = header;
+    _ = splat;
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
-    if (buffer.len == 0) return 0;
+    if (data.len == 0) return 0;
 
-    return zio_file_io.fileWritePositional(rt, file.handle, buffer, offset) catch |err| switch (err) {
+    return zio_file_io.fileWritePositional(rt, file.handle, data, offset) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
 }
 
-fn fileReadStreamingImpl(userdata: ?*anyopaque, file: Io.File, data: [][]u8) Io.File.Reader.Error!usize {
+fn fileReadStreamingImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u8) Io.File.Reader.Error!usize {
     _ = userdata;
     _ = file;
     _ = data;
     // Cannot track position with bare file handle - Io.File is just a handle
-    return error.Unexpected;
+    @panic("TODO: fileReadStreaming");
 }
 
-fn fileReadPositionalImpl(userdata: ?*anyopaque, file: Io.File, data: [][]u8, offset: u64) Io.File.ReadPositionalError!usize {
+fn fileReadPositionalImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
     if (data.len == 0) return 0;
 
-    return zio_file_io.fileReadPositional(rt, file.handle, data, offset) catch |err| switch (err) {
+    return zio_file_io.fileReadPositional(rt, file.handle, @constCast(data), offset) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
@@ -538,10 +697,10 @@ fn fileSeekToImpl(userdata: ?*anyopaque, file: Io.File, absolute_offset: u64) Io
     return error.Unseekable;
 }
 
-fn openSelfExeImpl(userdata: ?*anyopaque, flags: Io.File.OpenFlags) Io.File.OpenSelfExeError!Io.File {
+fn openSelfExeImpl(userdata: ?*anyopaque, flags: Io.File.OpenFlags) Io.OpenExecutableError!Io.File {
     _ = userdata;
     _ = flags;
-    @panic("TODO");
+    @panic("TODO: processExecutableOpen");
 }
 
 fn nowImpl(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.Error!Io.Timestamp {
@@ -745,9 +904,11 @@ fn netWriteImpl(userdata: ?*anyopaque, dest: Io.net.Socket.Handle, header: []con
     };
 }
 
-fn netCloseImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle) void {
+fn netCloseImpl(userdata: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    zio_net.netClose(rt, handle);
+    for (handles) |handle| {
+        zio_net.netClose(rt, handle);
+    }
 }
 
 fn netInterfaceNameResolveImpl(userdata: ?*anyopaque, name: *const Io.net.Interface.Name) Io.net.Interface.Name.ResolveError!Io.net.Interface {
@@ -824,25 +985,62 @@ pub const vtable = Io.VTable{
     .futexWait = futexWaitImpl,
     .futexWaitUncancelable = futexWaitUncancelableImpl,
     .futexWake = futexWakeImpl,
-    .dirMake = dirMakeImpl,
-    .dirMakePath = dirMakePathImpl,
-    .dirMakeOpenPath = dirMakeOpenPathImpl,
+    // Renamed: dirMake -> dirCreateDir
+    .dirCreateDir = dirMakeImpl,
+    .dirCreateDirPath = dirMakePathImpl,
+    .dirCreateDirPathOpen = dirMakeOpenPathImpl,
+    .dirOpenDir = dirOpenDirImpl,
     .dirStat = dirStatImpl,
-    .dirStatPath = dirStatPathImpl,
+    .dirStatFile = dirStatPathImpl,
     .dirAccess = dirAccessImpl,
     .dirCreateFile = dirCreateFileImpl,
     .dirOpenFile = dirOpenFileImpl,
-    .dirOpenDir = dirOpenDirImpl,
     .dirClose = dirCloseImpl,
+    .dirRead = dirReadImpl,
+    .dirRealPath = dirRealPathImpl,
+    .dirRealPathFile = dirRealPathFileImpl,
+    .dirDeleteFile = dirDeleteFileImpl,
+    .dirDeleteDir = dirDeleteDirImpl,
+    .dirRename = dirRenameImpl,
+    .dirSymLink = dirSymLinkImpl,
+    .dirReadLink = dirReadLinkImpl,
+    .dirSetOwner = dirSetOwnerImpl,
+    .dirSetFileOwner = dirSetFileOwnerImpl,
+    .dirSetPermissions = dirSetPermissionsImpl,
+    .dirSetFilePermissions = dirSetFilePermissionsImpl,
+    .dirSetTimestamps = dirSetTimestampsImpl,
+    .dirHardLink = dirHardLinkImpl,
     .fileStat = fileStatImpl,
+    .fileLength = fileLengthImpl,
     .fileClose = fileCloseImpl,
     .fileWriteStreaming = fileWriteStreamingImpl,
     .fileWritePositional = fileWritePositionalImpl,
+    .fileWriteFileStreaming = fileWriteFileStreamingImpl,
+    .fileWriteFilePositional = fileWriteFilePositionalImpl,
     .fileReadStreaming = fileReadStreamingImpl,
     .fileReadPositional = fileReadPositionalImpl,
     .fileSeekBy = fileSeekByImpl,
     .fileSeekTo = fileSeekToImpl,
-    .openSelfExe = openSelfExeImpl,
+    .fileSync = fileSyncImpl,
+    .fileIsTty = fileIsTtyImpl,
+    .fileEnableAnsiEscapeCodes = fileEnableAnsiEscapeCodesImpl,
+    .fileSupportsAnsiEscapeCodes = fileSupportsAnsiEscapeCodesImpl,
+    .fileSetLength = fileSetLengthImpl,
+    .fileSetOwner = fileSetOwnerImpl,
+    .fileSetPermissions = fileSetPermissionsImpl,
+    .fileSetTimestamps = fileSetTimestampsImpl,
+    .fileLock = fileLockImpl,
+    .fileTryLock = fileTryLockImpl,
+    .fileUnlock = fileUnlockImpl,
+    .fileDowngradeLock = fileDowngradeLockImpl,
+    .fileRealPath = fileRealPathImpl,
+    // Renamed: openSelfExe -> processExecutableOpen
+    .processExecutableOpen = openSelfExeImpl,
+    .processExecutablePath = processExecutablePathImpl,
+    .lockStderr = lockStderrImpl,
+    .tryLockStderr = tryLockStderrImpl,
+    .unlockStderr = unlockStderrImpl,
+    .processSetCurrentDir = processSetCurrentDirImpl,
     .now = nowImpl,
     .sleep = sleepImpl,
     .netListenIp = netListenIpImpl,
@@ -855,7 +1053,9 @@ pub const vtable = Io.VTable{
     .netReceive = netReceiveImpl,
     .netRead = netReadImpl,
     .netWrite = netWriteImpl,
+    .netWriteFile = netWriteFileImpl,
     .netClose = netCloseImpl,
+    .netShutdown = netShutdownImpl,
     .netInterfaceNameResolve = netInterfaceNameResolveImpl,
     .netInterfaceName = netInterfaceNameImpl,
     .netLookup = netLookupImpl,
@@ -1635,13 +1835,13 @@ test "Io: File stat" {
 
     // Check that timestamps are reasonable (not zero, not in the far future)
     try std.testing.expect(stat.mtime.nanoseconds > 0);
-    try std.testing.expect(stat.atime.nanoseconds > 0);
+    if (stat.atime) |atime| try std.testing.expect(atime.nanoseconds > 0);
     try std.testing.expect(stat.ctime.nanoseconds > 0);
 
     file.close(io);
 }
 
-test "Io: Dir stat (via statPath)" {
+test "Io: Dir stat (via statFile)" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1653,37 +1853,37 @@ test "Io: Dir stat (via statPath)" {
     try std.fs.cwd().makeDir(dir_path);
     defer std.fs.cwd().deleteDir(dir_path) catch {};
 
-    // Stat the directory via statPath
-    const dir_stat = try cwd.statPath(io, dir_path, .{});
+    // Stat the directory via statFile
+    const dir_stat = try cwd.statFile(io, dir_path, .{});
 
     // Verify it's a directory
     try std.testing.expectEqual(Io.File.Kind.directory, dir_stat.kind);
 
     // Check that timestamps are reasonable
     try std.testing.expect(dir_stat.mtime.nanoseconds > 0);
-    try std.testing.expect(dir_stat.atime.nanoseconds > 0);
+    if (dir_stat.atime) |atime| try std.testing.expect(atime.nanoseconds > 0);
     try std.testing.expect(dir_stat.ctime.nanoseconds > 0);
 }
 
-test "Io: Dir statPath" {
+test "Io: Dir statFile" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const io = rt.io();
-    const file_path = "test_stdio_dir_stat_path.txt";
+    const file_path = "test_stdio_dir_stat_file.txt";
     const cwd = Io.Dir.cwd();
 
     // Create a file with known content
     const file = try cwd.createFile(io, file_path, .{});
     defer std.fs.cwd().deleteFile(file_path) catch {};
 
-    const test_data = "Hello, stat path!";
+    const test_data = "Hello, stat file!";
     var write_buf = [_][]const u8{test_data};
     _ = try file.writePositional(io, &write_buf, 0);
     file.close(io);
 
     // Get file stats via path
-    const stat = try cwd.statPath(io, file_path, .{});
+    const stat = try cwd.statFile(io, file_path, .{});
 
     // Verify the stats
     try std.testing.expectEqual(@as(u64, test_data.len), stat.size);
@@ -1691,7 +1891,7 @@ test "Io: Dir statPath" {
 
     // Check that timestamps are reasonable
     try std.testing.expect(stat.mtime.nanoseconds > 0);
-    try std.testing.expect(stat.atime.nanoseconds > 0);
+    if (stat.atime) |atime| try std.testing.expect(atime.nanoseconds > 0);
     try std.testing.expect(stat.ctime.nanoseconds > 0);
 }
 

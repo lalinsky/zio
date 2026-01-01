@@ -1315,7 +1315,6 @@ pub const Stream = struct {
                 .interface = .{
                     .vtable = &.{
                         .drain = drain,
-                        .sendFile = sendFile,
                     },
                     .buffer = buffer,
                 },
@@ -1332,13 +1331,6 @@ pub const Stream = struct {
                 return error.WriteFailed;
             };
             return io_w.consume(n);
-        }
-
-        fn sendFile(io_w: *Io.Writer, file_reader: *Io.File.Reader, limit: Io.Limit) Io.Writer.FileError!usize {
-            _ = io_w;
-            _ = file_reader;
-            _ = limit;
-            return error.Unimplemented; // TODO
         }
     };
 

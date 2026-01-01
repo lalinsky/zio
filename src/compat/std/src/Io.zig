@@ -486,6 +486,42 @@ const Io = @This();
 
 pub const net = @import("Io/net.zig");
 
+// Error types not present in Zig 0.15, defined locally for compatibility
+pub const ExecutablePathBaseError = error{
+    FileNotFound,
+    AccessDenied,
+    OperationUnsupported,
+    FileSystem,
+    SymLinkLoop,
+    NotDir,
+    NameTooLong,
+    InvalidWtf8,
+    BadPathName,
+    NoDevice,
+    ReadOnlyFileSystem,
+    NoSpaceLeft,
+    FileBusy,
+    InputOutput,
+    DeviceBusy,
+    InvalidArgument,
+    UnrecognizedVolume,
+    PermissionDenied,
+} || Cancelable || UnexpectedError;
+
+pub const ExecutablePathError = ExecutablePathBaseError || error{NameTooLong};
+pub const OpenExecutableError = File.OpenError || ExecutablePathError || File.LockError;
+pub const SetCurrentDirError = error{
+    AccessDenied,
+    BadPathName,
+    FileNotFound,
+    FileSystem,
+    NameTooLong,
+    NoDevice,
+    NotDir,
+    OperationUnsupported,
+    UnrecognizedVolume,
+} || Cancelable || UnexpectedError;
+
 userdata: ?*anyopaque,
 vtable: *const VTable,
 
@@ -643,12 +679,12 @@ pub const VTable = struct {
     fileDowngradeLock: *const fn (?*anyopaque, File) File.DowngradeLockError!void,
     fileRealPath: *const fn (?*anyopaque, File, out_buffer: []u8) File.RealPathError!usize,
 
-    processExecutableOpen: *const fn (?*anyopaque, File.OpenFlags) std.process.OpenExecutableError!File,
-    processExecutablePath: *const fn (?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize,
+    processExecutableOpen: *const fn (?*anyopaque, File.OpenFlags) OpenExecutableError!File,
+    processExecutablePath: *const fn (?*anyopaque, buffer: []u8) ExecutablePathError!usize,
     lockStderr: *const fn (?*anyopaque, buffer: []u8, ?Terminal.Mode) Cancelable!LockedStderr,
     tryLockStderr: *const fn (?*anyopaque, buffer: []u8, ?Terminal.Mode) Cancelable!?LockedStderr,
     unlockStderr: *const fn (?*anyopaque) void,
-    processSetCurrentDir: *const fn (?*anyopaque, Dir) std.process.SetCurrentDirError!void,
+    processSetCurrentDir: *const fn (?*anyopaque, Dir) SetCurrentDirError!void,
 
     now: *const fn (?*anyopaque, Clock) Clock.Error!Timestamp,
     sleep: *const fn (?*anyopaque, Timeout) SleepError!void,

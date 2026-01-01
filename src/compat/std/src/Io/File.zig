@@ -394,7 +394,7 @@ pub fn setOwner(file: File, io: Io, owner: ?Uid, group: ?Gid) SetOwnerError!void
 /// Cross-platform representation of permissions on a file.
 ///
 /// On POSIX systems this corresponds to "mode" and on Windows this corresponds to "attributes".
-pub const Permissions = std.Options.FilePermissions orelse if (is_windows) enum(std.os.windows.DWORD) {
+pub const Permissions = if (is_windows) enum(std.os.windows.DWORD) {
     default_file = 0,
     _,
 
