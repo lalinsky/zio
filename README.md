@@ -17,7 +17,8 @@ You can see this as an alternative to the Go runtime, the Tokio project for Rust
 
 ## Features
 
-- Supports Linux (x86_64, aarch64, riscv64), Windows (x86_64, aarch64), macOS (x86_64, aarch64), should also work on BSDs, but not tested
+- Supported operating systems: Linux, Windows, macOS, FreeBSD, NetBSD, should also work on other BSDs, but not tested
+- Supports architectures: x86_64, aarch64, riscv64, loongarch64
 - Single-threaded or multi-threaded runtime with one I/O event loop per executor thread
 - Spawning coroutines, one small allocation per spawn, stack memory is reused
 - Spawning blocking tasks in an auxiliary thread pool
