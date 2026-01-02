@@ -45,6 +45,10 @@ jobs:
             target: native
             run: native
 
+          - os: macos-15-intel
+            target: native
+            run: native
+            
           - os: windows-latest
             target: native
             run: native
