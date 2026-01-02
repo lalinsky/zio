@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .root_module = mod,
         .test_runner = .{
-            .path = b.path("src/test/runner.zig"),
+            .path = b.path("test_runner.zig"),
             .mode = .simple,
         },
     });
