@@ -607,7 +607,7 @@ fn aioFileStatToStdIo(aio_stat: aio.system.fs.FileStatInfo) Io.File.Stat {
 
     return .{
         .inode = aio_stat.inode,
-        .nlink = 1, // TODO: aio doesn't provide nlink
+        .nlink = if (Io.File.NLink == void) {} else 1, // TODO: aio doesn't provide nlink
         .size = aio_stat.size,
         .permissions = @enumFromInt(aio_stat.mode),
         .kind = kind,
