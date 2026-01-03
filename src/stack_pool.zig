@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 
@@ -263,7 +264,11 @@ test "StackPool age-based expiration" {
     try testing.expectEqual(1, pool.pool_size);
 
     // Wait for it to expire
-    std.Thread.sleep(150_000_000); // 150ms
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+        std.Thread.sleep(150 * std.time.ns_per_ms);
+    } else {
+        try testing.io.sleep(.fromMilliseconds(150), .awake);
+    }
 
     // Next acquire should allocate a new stack (old one expired)
     const stack2 = try pool.acquire();
