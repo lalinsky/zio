@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]struct { name: []const u8, file: []const u8 }{
         .{ .name = "sleep", .file = "examples/sleep.zig" },
         .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
+        .{ .name = "tcp-echo-server-plain", .file = "examples/tcp_echo_server_plain.zig" },
         .{ .name = "tcp-echo-server-stdio", .file = "examples/tcp_echo_server_stdio.zig" },
         .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
         .{ .name = "http-server", .file = "examples/http_server.zig" },
@@ -69,7 +70,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig" },
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
         .{ .name = "signal-demo", .file = "examples/signal_demo.zig" },
-        //.{ .name = "udp-echo", .file = "examples/udp_echo.zig" },
+        .{ .name = "udp-echo-server", .file = "examples/udp_echo_server.zig" },
     };
 
     // Benchmarks configuration

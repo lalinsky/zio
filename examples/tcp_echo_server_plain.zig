@@ -15,22 +15,14 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
 
     std.log.info("Client connected from {f}", .{stream.socket.address});
 
-    var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(rt, &read_buffer);
-
-    var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(rt, &write_buffer);
+    var buffer: [1024]u8 = undefined;
 
     while (true) {
-        // Use new Reader delimiter method to read lines
-        const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
+        const n = try stream.read(rt, &buffer);
+        if (n == 0) break;
 
-        std.log.info("Received: {s}", .{line});
-        try writer.interface.writeAll(line);
-        try writer.interface.flush();
+        std.log.info("Received: {s}", .{buffer[0..n]});
+        try stream.writeAll(rt, buffer[0..n]);
     }
 
     std.log.info("Client disconnected", .{});
