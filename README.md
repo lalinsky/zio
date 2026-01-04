@@ -7,7 +7,7 @@
 
 The project consists of a few high-level components:
 - Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
-- Asynchronous I/O layer that makes it look like operations are blocking for easier state management, but using event-driven OS APIs under the hood.
+- Asynchronous I/O layer that makes it look like operations are blocking for easy state management, but using event-driven OS APIs under the hood.
 - Synchronization primitives that cooperate with this runtime.
 - Integration with standard library interfaces, like [`std.Io`], [`std.Io.Reader`] and [`std.Io.Writer`].
 
