@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: MIT
+
 pub const Coroutine = @import("coroutines.zig").Coroutine;
 pub const Closure = @import("coroutines.zig").Closure;
 

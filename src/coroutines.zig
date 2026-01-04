@@ -1,6 +1,7 @@
-// zig fmt: off
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
+
+// zig fmt: off
 
 const std = @import("std");
 const print = std.debug.print;
