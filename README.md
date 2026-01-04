@@ -7,11 +7,16 @@
 
 The project consists of a few high-level components:
 - Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
-- Asynchronous I/O layer that makes it look like operations are blocking, but uses event-driven I/O APIs under the hood.
+- Asynchronous I/O layer that makes it look like operations are blocking for easier state management, but using event-driven OS APIs under the hood.
 - Synchronization primitives that cooperate with this runtime.
-- Integration with standard library interfaces, like [`std.Io`](https://ziglang.org/documentation/master/std/#std.Io), [`std.Io.Reader`](https://ziglang.org/documentation/master/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/master/std/#std.Io.Writer).
+- Integration with standard library interfaces, like [`std.Io`], [`std.Io.Reader`] and [`std.Io.Writer`].
 
-It's similar to [goroutines](https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency) in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
+It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
+
+[`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io
+[`std.Io.Reader`]: https://ziglang.org/documentation/master/std/#std.Io.Reader
+[`std.Io.Writer`]: https://ziglang.org/documentation/master/std/#std.Io.Writer
+[goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
 
 ## Features
 
@@ -115,3 +120,9 @@ To make CI testing easier, I've extracted platform-specific code to separate pac
 
 * [aio.zig](https://github.com/lalinsky/aio.zig) - callback-based asynchronous file/network library for Linux, Windows, macOS and most BSDs
 * [coro.zig](https://github.com/lalinsky/coro.zig) - stackful coroutine library for x86_64, aarch64 and riscv64 architectures
+
+## License
+
+This project is licensed under the [MIT license].
+
+[MIT license]: https://github.com/tokio-rs/tokio/blob/master/LICENSE
