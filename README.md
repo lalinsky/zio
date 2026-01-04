@@ -115,13 +115,3 @@ To make CI testing easier, I've extracted platform-specific code to separate pac
 
 * [aio.zig](https://github.com/lalinsky/aio.zig) - callback-based asynchronous file/network library for Linux, Windows, macOS and most BSDs
 * [coro.zig](https://github.com/lalinsky/coro.zig) - stackful coroutine library for x86_64, aarch64 and riscv64 architectures
-
-## FAQ
-
-### How is this different from other Zig async I/O projects?
-
-There are many projects implementing stackful coroutines for Zig, unfortunately they are all missing something. The closest one to complete is [Tardy](https://github.com/tardy-org/tardy). Unfortunately, I didn't know about it when I started this project. However, even Tardy is missing many things that I wanted, like spawning non-cooperative tasks in a separate thread pool and being able to wait on their results from coroutines, more advanced synchronization primitives and Windows support. I wanted to start from an existing cross-platform event loop, originally [libuv](https://libuv.org/), later switched to [libxev](https://github.com/mitchellh/libxev), and just add coroutine runtime on top of that.
-
-### How is this different from the future `std.Io` interface in Zig?
-
-This library provides an implementation of the `std.Io` interface, see the [documentation](https://lalinsky.github.io/zio/stdio/).
