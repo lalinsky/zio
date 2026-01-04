@@ -163,14 +163,14 @@ fn groupWaitImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopa
     const zio_grp = Group.fromStd(group);
     // Io.Group.wait returns void, so we eat any Canceled error here.
     // The cancellation is still propagated to all group tasks internally.
-    zio_group.groupWait(rt, zio_grp) catch {};
+    zio_grp.wait(rt) catch {};
 }
 
 fn groupCancelImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) void {
     _ = initial_token;
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
     const zio_grp = Group.fromStd(group);
-    zio_group.groupCancel(rt, zio_grp);
+    zio_grp.cancel(rt);
 }
 
 fn selectImpl(userdata: ?*anyopaque, futures: []const *Io.AnyFuture) Io.Cancelable!usize {

@@ -14,7 +14,6 @@ const Awaitable = @import("awaitable.zig").Awaitable;
 const AnyTask = @import("task.zig").AnyTask;
 const CreateOptions = @import("task.zig").CreateOptions;
 const ResetEvent = @import("../sync/ResetEvent.zig");
-const select = @import("../select.zig");
 
 const Io = @import("../stdio.zig").Io;
 
@@ -154,18 +153,32 @@ pub const Group = struct {
     }
 
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
-        if (group.inner.token.load(.acquire) == null) return;
-        groupWait(rt, group) catch |err| {
-            std.debug.assert(group.inner.token.raw == null);
-            return err;
-        };
-        std.debug.assert(group.inner.token.raw == null);
+        errdefer group.cancel(rt);
+        try group.waitForRemainingTasks(rt, group.getTaskList());
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
-        if (group.inner.token.load(.acquire) == null) return;
-        groupCancel(rt, group);
-        std.debug.assert(group.inner.token.raw == null);
+        rt.beginShield();
+        defer rt.endShield();
+
+        // Request cancellation for all tasks in the list
+        const list = group.getTaskList();
+        var local_list: SimpleWaitQueue(GroupNode) = .empty;
+        while (list.pop()) |node| {
+            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
+            awaitable.cancel();
+            local_list.push(node);
+        }
+
+        group.waitForRemainingTasks(rt, &local_list) catch unreachable;
+    }
+
+    fn waitForRemainingTasks(group: *Group, rt: *Runtime, tasks: anytype) Cancelable!void {
+        try group.getEvent().wait(rt);
+        while (tasks.pop()) |node| {
+            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
+            rt.releaseAwaitable(awaitable, false);
+        }
     }
 };
 
@@ -180,57 +193,6 @@ pub const GroupNode = struct {
 };
 
 const Cancelable = @import("../common.zig").Cancelable;
-
-/// Wait for all tasks in the group list to complete.
-/// On cancellation, remaining tasks are canceled in shield mode.
-/// Returns error.Canceled if the wait was canceled.
-pub fn groupWait(rt: *Runtime, group: *Group) Cancelable!void {
-    // Wait for the event to be set (counter reached 0)
-    group.getEvent().wait(rt) catch |err| {
-        // On cancellation, cancel all remaining tasks in shield mode
-        rt.beginShield();
-        groupCancel(rt, group);
-        rt.endShield();
-        return err;
-    };
-
-    // All tasks completed - release all awaitables
-    const list = group.getTaskList();
-    while (list.pop()) |node| {
-        const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-        rt.releaseAwaitable(awaitable, false);
-    }
-}
-
-/// Cancel all tasks in the group list and wait for them to complete.
-pub fn groupCancel(rt: *Runtime, group: *Group) void {
-    const list = group.getTaskList();
-    while (true) {
-        // Pop all nodes into a local list, canceling as we go
-        var local_list: SimpleWaitQueue(GroupNode) = .empty;
-        while (list.pop()) |node| {
-            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-            if (awaitable.done.load(.acquire)) {
-                // Already done, just release
-                rt.releaseAwaitable(awaitable, false);
-            } else {
-                // Request cancellation and queue for waiting
-                awaitable.cancel();
-                local_list.push(node);
-            }
-        }
-
-        // If nothing needs waiting, we're done
-        if (local_list.isEmpty()) break;
-
-        // Wait for completion and release
-        while (local_list.pop()) |node| {
-            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-            select.waitUntilComplete(rt, awaitable);
-            rt.releaseAwaitable(awaitable, false);
-        }
-    }
-}
 
 fn testFn(arg: usize) usize {
     return arg + 1;
