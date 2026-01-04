@@ -9,22 +9,18 @@ The project consists of a few high-level components:
 - Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
 - Asynchronous I/O layer that makes it look like operations are blocking, but uses event-driven I/O APIs under the hood.
 - Synchronization primitives that cooperate with this runtime.
-- Integration with standard library interfaces, like `std.Io.Reader` and `std.Io.Writer`.
+- Integration with standard library interfaces, like `std.Io`, `std.Io.Reader` and `std.Io.Writer`.
 
 ## Features
 
-- Supported operating systems: Linux, Windows, macOS, FreeBSD, NetBSD, should also work on other BSDs, but not tested
-- Supports architectures: x86_64, aarch64, riscv64, loongarch64
-- Single-threaded or multi-threaded runtime with one I/O event loop per executor thread
-- Spawning coroutines, one small allocation per spawn, stack memory is reused
-- Spawning blocking tasks in an auxiliary thread pool
-- Fully asynchronous network I/O, supports TCP/UDP sockets, Unix sockets, DNS resolution currently via thread pool
-- Asynchronous file I/O, Linux and Windows are truly asynchronous, other platforms are simulated using a thread pool
-- Cancellation support for all I/O operations on Linux and Windows, on other platforms we just stop polling, but can't cancel an active operation
-- Full `std.Io.Reader` and `std.Io.Writer` support for files and streaming sockets (TCP, Unix)
-- Synchronization primitives matching `std.Thread` API (`Mutex`, `Condition`, `Semaphore`, `ResetEvent`, `Notify`, `Barrier`)
-- `Channel(T)` and `BroadcastChannel(T)` for producer-consumer patterns across coroutines
-- Signal handling
+- Support Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and other systems (`poll`).
+- Stackful coroutines for `x86_64`, `aarch64`, `riscv64` and `loongarch64` architectures.
+- Growable stacks for the coroutines implemented by auto-extending virtual memory reservations.
+- Multi-threaded coroutine scheduler.
+- Fully asynchronous network I/O.
+- Asynchronous file I/O on Linux and Windows, simulated using auxiliary thread pool on other systems.
+- Cancelation support for all operations.
+- Synchronization primitives, including more advanced ones, like channels.
 
 ## Installation
 
