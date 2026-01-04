@@ -23,35 +23,6 @@ const zio_dir_io = @import("fs/dir.zig");
 const Futex = @import("sync/Futex.zig");
 const CompactWaitQueue = @import("utils/wait_queue.zig").CompactWaitQueue;
 
-// Verify binary compatibility between Io.Group and zio.Group
-comptime {
-    if (@sizeOf(Io.Group) != @sizeOf(Group)) {
-        @compileError("Io.Group and zio.Group must have the same size");
-    }
-    if (@alignOf(Io.Group) != @alignOf(Group)) {
-        @compileError("Io.Group and zio.Group must have the same alignment");
-    }
-    // Verify field offsets and sizes match
-    if (@offsetOf(Io.Group, "state") != @offsetOf(Group, "state")) {
-        @compileError("Io.Group.state offset must match zio.Group.state");
-    }
-    if (@offsetOf(Io.Group, "context") != @offsetOf(Group, "context")) {
-        @compileError("Io.Group.context offset must match zio.Group.context");
-    }
-    if (@offsetOf(Io.Group, "token") != @offsetOf(Group, "token")) {
-        @compileError("Io.Group.token offset must match zio.Group.token");
-    }
-    if (@sizeOf(@TypeOf(@as(Io.Group, undefined).state)) != @sizeOf(@TypeOf(@as(Group, undefined).state))) {
-        @compileError("Io.Group.state size must match zio.Group.state");
-    }
-    if (@sizeOf(@TypeOf(@as(Io.Group, undefined).context)) != @sizeOf(@TypeOf(@as(Group, undefined).context))) {
-        @compileError("Io.Group.context size must match zio.Group.context");
-    }
-    if (@sizeOf(@TypeOf(@as(Io.Group, undefined).token)) != @sizeOf(@TypeOf(@as(Group, undefined).token))) {
-        @compileError("Io.Group.token size must match zio.Group.token");
-    }
-}
-
 fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*Io.AnyFuture {
     return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
         // If we can't schedule asynchronously, execute synchronously
@@ -170,7 +141,7 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const
     errdefer _ = rt.tasks.remove(&task.awaitable);
 
     // Set group_node.group for startFn to access
-    const zio_grp: *Group = @ptrCast(group);
+    const zio_grp = Group.fromStd(group);
     task.awaitable.group_node.group = zio_grp;
 
     // Increment counter before spawning
@@ -189,7 +160,7 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const
 fn groupWaitImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) void {
     _ = initial_token;
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_grp: *Group = @ptrCast(group);
+    const zio_grp = Group.fromStd(group);
     // Io.Group.wait returns void, so we eat any Canceled error here.
     // The cancellation is still propagated to all group tasks internally.
     zio_group.groupWait(rt, zio_grp) catch {};
@@ -198,7 +169,7 @@ fn groupWaitImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopa
 fn groupCancelImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) void {
     _ = initial_token;
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const zio_grp: *Group = @ptrCast(group);
+    const zio_grp = Group.fromStd(group);
     zio_group.groupCancel(rt, zio_grp);
 }
 

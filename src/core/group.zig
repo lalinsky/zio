@@ -16,12 +16,16 @@ const CreateOptions = @import("task.zig").CreateOptions;
 const ResetEvent = @import("../sync/ResetEvent.zig");
 const select = @import("../select.zig");
 
-pub const Group = struct {
-    state: usize,
-    context: ?*anyopaque,
-    token: std.atomic.Value(?*anyopaque),
+const Io = @import("../stdio.zig").Io;
 
-    pub const init: Group = .{ .state = 0, .context = null, .token = .init(null) };
+pub const Group = struct {
+    inner: Io.Group,
+
+    pub const init: Group = .{ .inner = .init };
+
+    pub fn fromStd(io_group: *Io.Group) *Group {
+        return @fieldParentPtr("inner", io_group);
+    }
 
     // State encoding:
     // - Bits 0-60: pending task counter
@@ -35,7 +39,7 @@ pub const Group = struct {
 
     /// Get the state as an atomic.
     fn getState(self: *Group) *std.atomic.Value(usize) {
-        return @ptrCast(&self.state);
+        return @ptrCast(&self.inner.state);
     }
 
     /// Increment the pending task counter.
@@ -92,12 +96,12 @@ pub const Group = struct {
 
     /// Get the event for coroutines waiting on the group.
     pub fn getEvent(self: *Group) *ResetEvent {
-        return @ptrCast(&self.context);
+        return @ptrCast(&self.inner.context);
     }
 
     /// Get the list of spawned tasks (for cancellation).
     pub fn getTaskList(self: *Group) *CompactWaitQueue(GroupNode) {
-        return @ptrCast(&self.token.raw);
+        return @ptrCast(&self.inner.token.raw);
     }
 
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
@@ -150,18 +154,18 @@ pub const Group = struct {
     }
 
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
-        if (group.token.load(.acquire) == null) return;
+        if (group.inner.token.load(.acquire) == null) return;
         groupWait(rt, group) catch |err| {
-            std.debug.assert(group.token.raw == null);
+            std.debug.assert(group.inner.token.raw == null);
             return err;
         };
-        std.debug.assert(group.token.raw == null);
+        std.debug.assert(group.inner.token.raw == null);
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
-        if (group.token.load(.acquire) == null) return;
+        if (group.inner.token.load(.acquire) == null) return;
         groupCancel(rt, group);
-        std.debug.assert(group.token.raw == null);
+        std.debug.assert(group.inner.token.raw == null);
     }
 };
 
