@@ -1302,6 +1302,341 @@ test "tcpConnectToHost: basic" {
     try client_task.join(runtime);
 }
 
-test {
-    _ = @import("net/test.zig");
+test "IpAddress: initIp4" {
+    const addr = IpAddress.initIp4(.{0} ** 4, 8080);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr.any.family);
+}
+
+test "IpAddress: initIp6" {
+    const addr = IpAddress.initIp6(.{0} ** 16, 8080, 0, 0);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr.any.family);
+}
+
+test "IpAddress: parseIp4" {
+    const addr = try IpAddress.parseIp4("127.0.0.1", 8080);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr.any.family);
+    try std.testing.expectEqual(8080, addr.getPort());
+
+    var buf: [32]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&buf, "{f}", .{addr});
+    try std.testing.expectEqualStrings("127.0.0.1:8080", formatted);
+}
+
+test "IpAddress: parseIp6" {
+    const addr = try IpAddress.parseIp6("::1", 8080);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr.any.family);
+    try std.testing.expectEqual(8080, addr.getPort());
+
+    var buf: [64]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&buf, "{f}", .{addr});
+    try std.testing.expectEqualStrings("[::1]:8080", formatted);
+}
+
+test "IpAddress: parseIp" {
+    const addr1 = try IpAddress.parseIp("127.0.0.1", 8080);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(8080, addr1.getPort());
+
+    const addr2 = try IpAddress.parseIp("::1", 8080);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(8080, addr2.getPort());
+}
+
+test "IpAddress: parseIpAndPort" {
+    const addr1 = try IpAddress.parseIpAndPort("127.0.0.1:8080");
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(8080, addr1.getPort());
+
+    var buf1: [32]u8 = undefined;
+    const formatted1 = try std.fmt.bufPrint(&buf1, "{f}", .{addr1});
+    try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
+
+    const addr2 = try IpAddress.parseIpAndPort("[::1]:8080");
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(8080, addr2.getPort());
+
+    var buf2: [64]u8 = undefined;
+    const formatted2 = try std.fmt.bufPrint(&buf2, "{f}", .{addr2});
+    try std.testing.expectEqualStrings("[::1]:8080", formatted2);
+}
+
+test "Address: parseIp" {
+    const addr1 = try Address.parseIp("127.0.0.1", 8080);
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(8080, addr1.ip.getPort());
+
+    const addr2 = try Address.parseIp("::1", 8080);
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(8080, addr2.ip.getPort());
+}
+
+test "Address: parseIpAndHost" {
+    const addr1 = try Address.parseIpAndHost("127.0.0.1:8080");
+    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(8080, addr1.ip.getPort());
+
+    var buf1: [32]u8 = undefined;
+    const formatted1 = try std.fmt.bufPrint(&buf1, "{f}", .{addr1});
+    try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
+
+    const addr2 = try Address.parseIpAndHost("[::1]:8080");
+    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(8080, addr2.ip.getPort());
+
+    var buf2: [64]u8 = undefined;
+    const formatted2 = try std.fmt.bufPrint(&buf2, "{f}", .{addr2});
+    try std.testing.expectEqualStrings("[::1]:8080", formatted2);
+}
+
+test "UnixAddress: init" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const addr = try UnixAddress.init(path);
+    try std.testing.expectEqual(aio.system.net.AF.UNIX, addr.any.family);
+}
+
+pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
+    const Test = struct {
+        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
+            const server = try addr_inner.listen(rt, options_inner);
+            defer server.close(rt);
+
+            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            defer server_task.cancel(rt);
+
+            var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner }, .{});
+            defer client_task.cancel(rt);
+
+            // TODO use TaskGroup
+
+            try server_task.join(rt);
+            try client_task.join(rt);
+        }
+
+        pub fn serverFn(rt: *Runtime, server: Server) !void {
+            const client = try server.accept(rt);
+            defer client.close(rt);
+
+            var buf: [32]u8 = undefined;
+            var reader = client.reader(rt, &buf);
+
+            const line = try reader.interface.takeDelimiterExclusive('\n');
+            try std.testing.expectEqualStrings("hello", line);
+
+            client.shutdown(rt, .both) catch {};
+        }
+
+        pub fn clientFn(rt: *Runtime, server: Server, write_buffer_inner: []u8) !void {
+            const client = try server.socket.address.connect(rt);
+            defer client.close(rt);
+
+            var writer = client.writer(rt, write_buffer_inner);
+
+            try writer.interface.writeAll("hello\n");
+            try writer.interface.flush();
+
+            client.shutdown(rt, .both) catch {};
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
+    try handle.join(runtime);
+}
+
+pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
+    const Test = struct {
+        pub fn mainFn(rt: *Runtime, server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
+            const socket = try server_addr_inner.bind(rt, .{});
+            defer socket.close(rt);
+
+            var server_task = try rt.spawn(serverFn, .{ rt, socket }, .{});
+            defer server_task.cancel(rt);
+
+            var client_task = try rt.spawn(clientFn, .{ rt, socket, client_addr_inner }, .{});
+            defer client_task.cancel(rt);
+
+            try server_task.join(rt);
+            try client_task.join(rt);
+        }
+
+        pub fn serverFn(rt: *Runtime, socket: Socket) !void {
+            var buf: [1024]u8 = undefined;
+            const result = try socket.receiveFrom(rt, &buf);
+
+            try std.testing.expectEqualStrings("hello", buf[0..result.len]);
+
+            const bytes_sent = try socket.sendTo(rt, result.from, buf[0..result.len]);
+            try std.testing.expectEqual(result.len, bytes_sent);
+        }
+
+        pub fn clientFn(rt: *Runtime, server_socket: Socket, client_addr_inner: @TypeOf(client_addr)) !void {
+            const client_socket = try client_addr_inner.bind(rt, .{});
+            defer client_socket.close(rt);
+
+            const test_data = "hello";
+            const bytes_sent = try client_socket.sendTo(rt, server_socket.address, test_data);
+            try std.testing.expectEqual(test_data.len, bytes_sent);
+
+            var buf: [1024]u8 = undefined;
+            const result = try client_socket.receiveFrom(rt, &buf);
+            try std.testing.expectEqualStrings(test_data, buf[0..result.len]);
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr }, .{});
+    try handle.join(runtime);
+}
+
+pub fn checkShutdown(addr: anytype, options: anytype) !void {
+    const Test = struct {
+        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
+            const server = try addr_inner.listen(rt, options_inner);
+            defer server.close(rt);
+
+            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            defer server_task.cancel(rt);
+
+            var client_task = try rt.spawn(clientFn, .{ rt, server }, .{});
+            defer client_task.cancel(rt);
+
+            // TODO use TaskGroup
+
+            try server_task.join(rt);
+            try client_task.join(rt);
+        }
+
+        pub fn serverFn(rt: *Runtime, server: Server) !void {
+            const client = try server.accept(rt);
+            defer client.close(rt);
+            client.shutdown(rt, .send) catch {};
+        }
+
+        pub fn clientFn(rt: *Runtime, server: Server) !void {
+            const client = try server.socket.address.connect(rt);
+            defer client.close(rt);
+
+            var buf: [32]u8 = undefined;
+            var reader = client.reader(rt, &buf);
+
+            try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+
+            client.shutdown(rt, .both) catch {};
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options }, .{});
+    try handle.join(runtime);
+}
+
+test "UnixAddress: listen/accept/connect/read/write" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    var write_buffer: [32]u8 = undefined;
+    const addr = try UnixAddress.init(path);
+    try checkListen(addr, UnixAddress.ListenOptions{}, &write_buffer);
+}
+
+test "IpAddress: listen/accept/connect/read/write IPv4" {
+    var write_buffer: [32]u8 = undefined;
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    try checkListen(addr, IpAddress.ListenOptions{}, &write_buffer);
+}
+
+test "IpAddress: listen/accept/connect/read/write IPv6" {
+    var write_buffer: [32]u8 = undefined;
+    const addr = try IpAddress.parseIp6("::1", 0);
+    checkListen(addr, IpAddress.ListenOptions{}, &write_buffer) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
+}
+
+test "UnixAddress: listen/accept/connect/read/write unbuffered" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const addr = try UnixAddress.init(path);
+    try checkListen(addr, UnixAddress.ListenOptions{}, &.{});
+}
+
+test "IpAddress: listen/accept/connect/read/write unbuffered IPv4" {
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    try checkListen(addr, IpAddress.ListenOptions{}, &.{});
+}
+
+test "IpAddress: listen/accept/connect/read/write unbuffered IPv6" {
+    const addr = try IpAddress.parseIp6("::1", 0);
+    checkListen(addr, IpAddress.ListenOptions{}, &.{}) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
+}
+
+test "IpAddress: bind/sendTo/receiveFrom IPv4" {
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    try checkBind(addr, addr);
+}
+
+test "IpAddress: bind/sendTo/receiveFrom IPv6" {
+    const addr = try IpAddress.parseIp6("::1", 0);
+    checkBind(addr, addr) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
+}
+
+test "UnixAddress: bind/sendTo/receiveFrom" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    // Windows doesn't support UDP Unix sockets
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const server_path = "zio-test-udp-server.sock";
+    defer std.fs.cwd().deleteFile(server_path) catch {};
+
+    const client_path = "zio-test-udp-client.sock";
+    defer std.fs.cwd().deleteFile(client_path) catch {};
+
+    const server_addr = try UnixAddress.init(server_path);
+    const client_addr = try UnixAddress.init(client_path);
+    try checkBind(server_addr, client_addr);
+}
+
+test "UnixAddress: listen/accept/connect/read/EOF" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    const path = "zio-test-socket.sock";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const addr = try UnixAddress.init(path);
+    try checkShutdown(addr, UnixAddress.ListenOptions{});
+}
+
+test "IpAddress: listen/accept/connect/read/EOF IPv4" {
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    try checkShutdown(addr, IpAddress.ListenOptions{});
+}
+
+test "IpAddress: listen/accept/connect/read/EOF IPv6" {
+    const addr = try IpAddress.parseIp6("::1", 0);
+    checkShutdown(addr, IpAddress.ListenOptions{}) catch |err| {
+        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        return err;
+    };
 }
