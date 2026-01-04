@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../core/WaitNode.zig");
+const WaitNode = @import("../runtime/WaitNode.zig");
 const meta = @import("../meta.zig");
 const select = @import("../select.zig");
 

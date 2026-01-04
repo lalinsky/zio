@@ -4,7 +4,7 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
-const WaitNode = @import("../core/WaitNode.zig");
+const WaitNode = @import("../runtime/WaitNode.zig");
 const select = @import("../select.zig").select;
 
 /// Specifies how a channel should be closed.

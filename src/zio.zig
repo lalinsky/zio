@@ -9,9 +9,9 @@ pub const Runtime = runtime.Runtime;
 pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
 
-pub const Timeout = @import("core/timeout.zig").Timeout;
+pub const Timeout = @import("runtime/timeout.zig").Timeout;
 
-pub const Group = @import("core/group.zig").Group;
+pub const Group = @import("runtime/group.zig").Group;
 
 const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;

@@ -22,13 +22,13 @@ const cleanupStackGrowth = @import("coro").cleanupStackGrowth;
 
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 
-const AnyTask = @import("core/task.zig").AnyTask;
-const Task = @import("core/task.zig").Task;
-const TaskPool = @import("core/task.zig").TaskPool;
-const ResumeMode = @import("core/task.zig").ResumeMode;
-const resumeTask = @import("core/task.zig").resumeTask;
-const BlockingTask = @import("core/blocking_task.zig").BlockingTask;
-const Timeout = @import("core/timeout.zig").Timeout;
+const AnyTask = @import("runtime/task.zig").AnyTask;
+const Task = @import("runtime/task.zig").Task;
+const TaskPool = @import("runtime/task.zig").TaskPool;
+const ResumeMode = @import("runtime/task.zig").ResumeMode;
+const resumeTask = @import("runtime/task.zig").resumeTask;
+const BlockingTask = @import("runtime/blocking_task.zig").BlockingTask;
+const Timeout = @import("runtime/timeout.zig").Timeout;
 
 const select = @import("select.zig");
 const stdio = @import("stdio.zig");
@@ -93,7 +93,7 @@ fn noopTimerCancelCallback(
     _ = c;
 }
 
-const awaitable_module = @import("core/awaitable.zig");
+const awaitable_module = @import("runtime/awaitable.zig");
 const Awaitable = awaitable_module.Awaitable;
 const AwaitableKind = awaitable_module.AwaitableKind;
 const AwaitableList = awaitable_module.AwaitableList;
@@ -268,7 +268,7 @@ pub fn JoinHandle(comptime T: type) type {
 }
 
 // Generic data structures (private)
-const WaitNode = @import("core/WaitNode.zig");
+const WaitNode = @import("runtime/WaitNode.zig");
 const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;

@@ -31,9 +31,9 @@ const Allocator = std.mem.Allocator;
 
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
-const AnyTask = @import("../core/task.zig").AnyTask;
-const WaitNode = @import("../core/WaitNode.zig");
-const Timeout = @import("../core/timeout.zig").Timeout;
+const AnyTask = @import("../runtime/task.zig").AnyTask;
+const WaitNode = @import("../runtime/WaitNode.zig");
+const Timeout = @import("../runtime/timeout.zig").Timeout;
 const Cancelable = @import("../common.zig").Cancelable;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 

@@ -6,12 +6,12 @@ const std = @import("std");
 const aio = @import("aio");
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
-const resumeTask = @import("core/task.zig").resumeTask;
-const AnyTask = @import("core/task.zig").AnyTask;
+const resumeTask = @import("runtime/task.zig").resumeTask;
+const AnyTask = @import("runtime/task.zig").AnyTask;
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
-const Timeout = @import("core/timeout.zig").Timeout;
+const Timeout = @import("runtime/timeout.zig").Timeout;
 
 /// Generic callback that resumes the task stored in userdata
 pub fn genericCallback(loop: *aio.Loop, completion: *aio.Completion) void {

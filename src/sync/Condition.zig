@@ -55,11 +55,11 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-const resumeTask = @import("../core/task.zig").resumeTask;
+const resumeTask = @import("../runtime/task.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
-const WaitNode = @import("../core/WaitNode.zig");
-const Timeout = @import("../core/timeout.zig").Timeout;
+const WaitNode = @import("../runtime/WaitNode.zig");
+const Timeout = @import("../runtime/timeout.zig").Timeout;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
 

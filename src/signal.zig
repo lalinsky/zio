@@ -8,8 +8,8 @@ const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("core/WaitNode.zig");
-const Timeout = @import("core/timeout.zig").Timeout;
+const WaitNode = @import("runtime/WaitNode.zig");
+const Timeout = @import("runtime/timeout.zig").Timeout;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {

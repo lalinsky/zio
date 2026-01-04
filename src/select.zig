@@ -6,9 +6,9 @@ const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
-const AnyTask = @import("core/task.zig").AnyTask;
-const Awaitable = @import("core/awaitable.zig").Awaitable;
-const WaitNode = @import("core/WaitNode.zig");
+const AnyTask = @import("runtime/task.zig").AnyTask;
+const Awaitable = @import("runtime/awaitable.zig").Awaitable;
+const WaitNode = @import("runtime/WaitNode.zig");
 const meta = @import("meta.zig");
 
 /// Sentinel value indicating no winner has been selected yet

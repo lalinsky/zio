@@ -9,11 +9,11 @@ pub const Io = if (builtin.zig_version.major == 0 and builtin.zig_version.minor 
 
 const Runtime = @import("runtime.zig").Runtime;
 const getNextExecutor = @import("runtime.zig").getNextExecutor;
-const AnyTask = @import("core/task.zig").AnyTask;
-const Closure = @import("core/task.zig").Closure;
-const CreateOptions = @import("core/task.zig").CreateOptions;
-const Awaitable = @import("core/awaitable.zig").Awaitable;
-const zio_group = @import("core/group.zig");
+const AnyTask = @import("runtime/task.zig").AnyTask;
+const Closure = @import("runtime/task.zig").Closure;
+const CreateOptions = @import("runtime/task.zig").CreateOptions;
+const Awaitable = @import("runtime/awaitable.zig").Awaitable;
+const zio_group = @import("runtime/group.zig");
 const Group = zio_group.Group;
 const GroupNode = zio_group.GroupNode;
 const select = @import("select.zig");
