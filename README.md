@@ -5,15 +5,11 @@
 [![Zig](https://img.shields.io/badge/zig-0.15.1-orange.svg)](https://ziglang.org/download/)
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
 
-There are two ways of doing asynchronous I/O, either you use callbacks and have the I/O operation call you when it's done, or you have some sort of continuation system and suspend your code while waiting for I/O. Callback-based APIs are easier to implement, they don't need any special runtime or language support. However, they are much harder to use, you need to manage state yourself and most likely need many more allocations to do so.
-
-This project started out of my frustration with the state of networking in Zig. I've tried to write a nice wrapper for libuv in Zig, but it just doesn't work, you have to allocate memory all the time, you need to depend on reference counted pointers. Then it occurred to me that I could do Go-style stackful coroutines and use the stack for storing the state. The resulting code feels much more idiomatic. So I did an experiment with custom assembly for switching contexts, used libuv as my event loop, created a translation layer from libuv callbacks to coroutines, later switched libuv for libxev, and then worked more on the scheduler, especially making it run in multi-threaded mode.
-
-The project consists of a runtime for executing many stackful coroutines (fibers, green threads) on one or more CPU threads, synchronization primitives that work with this runtime and an asynchronous I/O layer that makes it look like I/O calls are blocking, allowing surrounding state to be stored directly on the stack. This makes it possible for you to handle thousands of network connections on a single CPU thread. And if you use multiple executors, you can spread the load across multiple CPU threads. When using the multi-threaded runtime, coroutines migrate from one thread to another, both for reduced latency in message passing applications, but also for load balancing.
-
-Streams implement the standard `std.Io.Reader` and `std.Io.Writer` interfaces, so you can use external libraries, that were never written with asynchronous I/O in mind and they will just work. Additionally, when Zig 0.16 is released with the `std.Io` interface, I will implement that as well, allowing you to use the entire standard library with this runtime.
-
-You can see this as an alternative to the Go runtime, the Tokio project for Rust, or Python's asyncio. In a single-threaded mode, Zio outperforms any of these. In multi-threaded mode, it has comparable performance to Go and Tokio, but those are more mature projects and they have invested a lot of effort to ensuring fairness and load balancing of their schedulers.
+The project consists of a few high-level components:
+- Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
+- Asynchronous I/O layer that makes it look like operations are blocking, but uses event-driven I/O APIs under the hood.
+- Synchronization primitives that cooperate with this runtime.
+- Integration with standard library interfaces, like `std.Io.Reader` and `std.Io.Writer`.
 
 ## Features
 
