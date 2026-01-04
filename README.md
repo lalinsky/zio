@@ -125,4 +125,4 @@ To make CI testing easier, I've extracted platform-specific code to separate pac
 
 This project is licensed under the [MIT license].
 
-[MIT license]: https://github.com/tokio-rs/tokio/blob/master/LICENSE
+[MIT license]: https://github.com/lalinsky/zio/blob/main/LICENSE
