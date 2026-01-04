@@ -11,53 +11,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        zig_version: ['0.15.2', 'master']
+        config:
+          - { os: ubuntu-24.04, run: native, target: native }
+          - { os: ubuntu-24.04-arm, run: native, target: native }
+          - { os: ubuntu-latest, target: riscv64-linux, run: qemu, qemu_binary: qemu-riscv64-static }
+          - { os: ubuntu-latest, target: loongarch64-linux, run: qemu, qemu_binary: qemu-loongarch64-static }
+          - { os: ubuntu-latest, target: x86_64-freebsd, run: vm, vm_type: freebsd }
+          - { os: ubuntu-latest, target: x86_64-netbsd, run: vm, vm_type: netbsd }
+          - { os: macos-latest, target: native, run: native }
+          - { os: macos-15-intel, target: native, run: native }
+          - { os: windows-latest, target: native, run: native }
+          - { os: windows-11-arm, target: native, run: native }
 
-          - os: ubuntu-24.04
-            run: native
-            target: native
-
-          - os: ubuntu-24.04-arm
-            run: native
-            target: native
-
-          - os: ubuntu-latest
-            target: riscv64-linux
-            run: qemu
-            qemu_binary: qemu-riscv64-static
-
-          - os: ubuntu-latest
-            target: loongarch64-linux
-            run: qemu
-            qemu_binary: qemu-loongarch64-static
-
-          - os: ubuntu-latest
-            target: x86_64-freebsd
-            run: vm
-            vm_type: freebsd
-
-          - os: ubuntu-latest
-            target: x86_64-netbsd
-            run: vm
-            vm_type: netbsd
-
-          - os: macos-latest
-            target: native
-            run: native
-
-          - os: macos-15-intel
-            target: native
-            run: native
-            
-          - os: windows-latest
-            target: native
-            run: native
-
-          - os: windows-11-arm
-            target: native
-            run: native
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.config.os }}
 
     steps:
     - name: Checkout code
@@ -66,48 +33,48 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.15.2
+        version: ${{ matrix.zig_version }}
 
     - name: Build
       run: >
         zig build --release=safe -Dinstall-tests
-        ${{ matrix.target != 'native' && format('-Dtarget={0}', matrix.target) || '' }}
+        ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
       timeout-minutes: 5
 
     - name: Build signal tests
-      if: matrix.run == 'native'
+      if: matrix.config.run == 'native'
       run: zig build install-signal-tests
       timeout-minutes: 5
 
     - name: Run tests (native)
-      if: matrix.run == 'native'
+      if: matrix.config.run == 'native'
       run: ./zig-out/bin/test
       timeout-minutes: 5
 
     - name: Run signal tests (native)
-      if: matrix.run == 'native'
+      if: matrix.config.run == 'native'
       run: python3 src/tests/run_signal_tests.py
       timeout-minutes: 5
 
     - name: Install QEMU
-      if: matrix.run == 'qemu'
+      if: matrix.config.run == 'qemu'
       run: |
         sudo apt-get update -q -y
         sudo apt-get install -q -y qemu-user-static
 
     - name: Run tests (QEMU)
-      if: matrix.run == 'qemu'
-      run: ${{ matrix.qemu_binary }} ./zig-out/bin/test
+      if: matrix.config.run == 'qemu'
+      run: ${{ matrix.config.qemu_binary }} ./zig-out/bin/test
       timeout-minutes: 10
 
     - name: Run tests (FreeBSD VM)
-      if: matrix.run == 'vm' && matrix.vm_type == 'freebsd'
+      if: matrix.config.run == 'vm' && matrix.config.vm_type == 'freebsd'
       uses: vmactions/freebsd-vm@v1
       with:
         run: ./zig-out/bin/test
 
     - name: Run tests (NetBSD VM)
-      if: matrix.run == 'vm' && matrix.vm_type == 'netbsd'
+      if: matrix.config.run == 'vm' && matrix.config.vm_type == 'netbsd'
       uses: vmactions/netbsd-vm@v1
       with:
         release: '10.1'
