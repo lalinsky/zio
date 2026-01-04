@@ -498,59 +498,111 @@ pub inline fn switchContext(
 ///
 /// The function is called with the context pointer as the first argument.
 ///
-/// x86_64 handles stack alignment here since we use JMP instead of CALL:
-/// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
-/// - CALL would push 8-byte return address, so we push sentinel label address
-/// - We use a real address (not 0) to avoid integer overflow in stack trace dumping
+/// Return address handling (for stack trace termination):
+/// - Zig 0.15: Uses a sentinel label address. Stack trace dumping subtracts 1 from
+///   return addresses, causing integer overflow panic if we use 0.
+/// - Zig 0.16: Uses 0. The DWARF unwinder loops infinitely with sentinel labels
+///   because the CFI for the label points back to itself.
 ///
-/// ARM64 stores return address in x30 register (not stack). x30 is set to the
-/// sentinel label address instead of 0.
+/// Architecture notes:
+/// - x86_64: Return address pushed on stack. System V ABI requires 16-byte alignment
+///   before CALL; we push the return address to satisfy this.
+/// - aarch64/riscv64/loongarch64: Return address stored in link register (x30/ra/$ra).
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
             if (builtin.os.tag == .windows) {
-                // Windows x64 ABI: first integer arg in RCX
-                // Allocate shadow space before return address to match call convention
+                // Windows x64 ABI: first integer arg in RCX, requires 32-byte shadow space
+                if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                    asm volatile (
+                        \\ subq $32, %%rsp
+                        \\ leaq 1f(%%rip), %%rax
+                        \\ pushq %%rax
+                        \\ movq 48(%%rsp), %%rcx
+                        \\ jmpq *40(%%rsp)
+                        \\1:
+                    );
+                } else {
+                    asm volatile (
+                        \\ subq $32, %%rsp
+                        \\ pushq $0
+                        \\ movq 48(%%rsp), %%rcx
+                        \\ jmpq *40(%%rsp)
+                    );
+                }
+            } else {
+                // System V AMD64 ABI: first integer arg in RDI
+                if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                    asm volatile (
+                        \\ leaq 1f(%%rip), %%rax
+                        \\ pushq %%rax
+                        \\ movq 16(%%rsp), %%rdi
+                        \\ jmpq *8(%%rsp)
+                        \\1:
+                    );
+                } else {
+                    asm volatile (
+                        \\ pushq $0
+                        \\ movq 16(%%rsp), %%rdi
+                        \\ jmpq *8(%%rsp)
+                    );
+                }
+            }
+        },
+        .aarch64 => {
+            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
                 asm volatile (
-                    \\ subq $32, %%rsp
-                    \\ leaq 1f(%%rip), %%rax
-                    \\ pushq %%rax
-                    \\ movq 48(%%rsp), %%rcx
-                    \\ jmpq *40(%%rsp)
+                    \\ adr x30, 1f
+                    \\ ldr x0, [sp, #8]
+                    \\ ldr x2, [sp]
+                    \\ br x2
                     \\1:
                 );
             } else {
-                // System V AMD64 ABI: first integer arg in RDI
                 asm volatile (
-                    \\ leaq 1f(%%rip), %%rax
-                    \\ pushq %%rax
-                    \\ movq 16(%%rsp), %%rdi
-                    \\ jmpq *8(%%rsp)
-                    \\1:
+                    \\ mov x30, #0
+                    \\ ldr x0, [sp, #8]
+                    \\ ldr x2, [sp]
+                    \\ br x2
                 );
             }
         },
-        .aarch64 => asm volatile (
-            \\ adr x30, 1f
-            \\ ldr x0, [sp, #8]
-            \\ ldr x2, [sp]
-            \\ br x2
-            \\1:
-        ),
-        .riscv64 => asm volatile (
-            \\ lla ra, 1f
-            \\ ld a0, 8(sp)
-            \\ ld t0, 0(sp)
-            \\ jr t0
-            \\1:
-        ),
-        .loongarch64 => asm volatile (
-            \\ la.local $ra, 1f
-            \\ ld.d $a0, $sp, 8
-            \\ ld.d $t0, $sp, 0
-            \\ jr $t0
-            \\1:
-        ),
+        .riscv64 => {
+            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                asm volatile (
+                    \\ lla ra, 1f
+                    \\ ld a0, 8(sp)
+                    \\ ld t0, 0(sp)
+                    \\ jr t0
+                    \\1:
+                );
+            } else {
+                asm volatile (
+                    \\ li ra, 0
+                    \\ ld a0, 8(sp)
+                    \\ ld t0, 0(sp)
+                    \\ jr t0
+                );
+            }
+        },
+        .loongarch64 => {
+            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                asm volatile (
+                    \\ la.local $ra, 1f
+                    \\ ld.d $a0, $sp, 8
+                    \\ ld.d $t0, $sp, 0
+                    \\ jr $t0
+                    \\1:
+                );
+            } else {
+                asm volatile (
+                    \\ li.d $ra, 0
+                    \\ ld.d $a0, $sp, 8
+                    \\ ld.d $t0, $sp, 0
+                    \\ jr $t0
+                );
+            }
+        },
         else => @compileError("unsupported architecture"),
     }
 }
