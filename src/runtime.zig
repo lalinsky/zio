@@ -420,7 +420,7 @@ pub const Executor = struct {
         cleanupStackGrowth();
     }
 
-    pub fn spawn(self: *Executor, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
+    pub fn spawn(self: *Executor, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
 
         const task = try Task(Result).create(self, func, args, .{
@@ -935,7 +935,7 @@ pub const Runtime = struct {
     }
 
     // High-level public API - delegates to appropriate Executor
-    pub fn spawn(self: *Runtime, func: anytype, args: meta.ArgsType(func), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
+    pub fn spawn(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
         if (self.shutting_down.load(.acquire)) {
             return error.RuntimeShutdown;
         }
@@ -944,7 +944,7 @@ pub const Runtime = struct {
         return executor.spawn(func, args, options);
     }
 
-    pub fn spawnBlocking(self: *Runtime, func: anytype, args: meta.ArgsType(func)) !JoinHandle(meta.ReturnType(func)) {
+    pub fn spawnBlocking(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
         // Check if runtime is shutting down
         if (self.shutting_down.load(.acquire)) {
             return error.RuntimeShutdown;

@@ -171,7 +171,7 @@ pub fn BlockingTask(comptime T: type) type {
         pub fn create(
             runtime: *Runtime,
             func: anytype,
-            args: meta.ArgsType(func),
+            args: std.meta.ArgsTuple(@TypeOf(func)),
         ) !Self {
             const Wrapper = struct {
                 fn start(ctx: *const anyopaque, result: *anyopaque) void {

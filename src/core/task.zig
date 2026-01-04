@@ -413,7 +413,7 @@ pub fn Task(comptime T: type) type {
         pub fn create(
             executor: *Executor,
             func: anytype,
-            args: meta.ArgsType(func),
+            args: std.meta.ArgsTuple(@TypeOf(func)),
             options: CreateOptions,
         ) !Self {
             const Wrapper = struct {

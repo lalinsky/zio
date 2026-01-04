@@ -3,11 +3,6 @@
 
 const std = @import("std");
 
-/// Extract the argument tuple type from a function.
-pub fn ArgsType(func: anytype) type {
-    return std.meta.ArgsTuple(@TypeOf(func));
-}
-
 /// Extract the return type from a function.
 /// Returns void if the function has no return type.
 pub fn ReturnType(func: anytype) type {
