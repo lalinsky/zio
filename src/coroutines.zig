@@ -501,13 +501,14 @@ pub inline fn switchContext(
 /// Return address handling (for stack trace termination):
 /// - Zig 0.15: Uses a sentinel label address. Stack trace dumping subtracts 1 from
 ///   return addresses, causing integer overflow panic if we use 0.
-/// - Zig 0.16: Uses 0. The DWARF unwinder loops infinitely with sentinel labels
-///   because the CFI for the label points back to itself.
+/// - Zig 0.16: Creates a sentinel frame with FP=0/LR=0 for proper FP-based unwinding
+///   (needed for macOS). Sets LR=0 for DWARF unwinding termination.
 ///
 /// Architecture notes:
 /// - x86_64: Return address pushed on stack. System V ABI requires 16-byte alignment
 ///   before CALL; we push the return address to satisfy this.
 /// - aarch64/riscv64/loongarch64: Return address stored in link register (x30/ra/$ra).
+///   On Zig 0.16+, we create a sentinel frame on stack for FP-based unwinding.
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
@@ -559,10 +560,12 @@ fn coroEntry() callconv(.naked) noreturn {
                     \\1:
                 );
             } else {
+                // Create sentinel frame for FP-based unwinding (needed for macOS)
                 asm volatile (
-                    \\ mov x30, #0
-                    \\ ldr x0, [sp, #8]
-                    \\ ldr x2, [sp]
+                    \\ stp xzr, xzr, [sp, #-16]!
+                    \\ mov x29, sp
+                    \\ mov x30, xzr
+                    \\ ldp x2, x0, [sp, #16]
                     \\ br x2
                 );
             }
@@ -577,10 +580,15 @@ fn coroEntry() callconv(.naked) noreturn {
                     \\1:
                 );
             } else {
+                // Create sentinel frame for FP-based unwinding
                 asm volatile (
+                    \\ addi sp, sp, -16
+                    \\ sd zero, 0(sp)
+                    \\ sd zero, 8(sp)
+                    \\ addi s0, sp, 16
                     \\ li ra, 0
-                    \\ ld a0, 8(sp)
-                    \\ ld t0, 0(sp)
+                    \\ ld t0, 16(sp)
+                    \\ ld a0, 24(sp)
                     \\ jr t0
                 );
             }
@@ -595,10 +603,15 @@ fn coroEntry() callconv(.naked) noreturn {
                     \\1:
                 );
             } else {
+                // Create sentinel frame for FP-based unwinding
                 asm volatile (
+                    \\ addi.d $sp, $sp, -16
+                    \\ st.d $zero, $sp, 0
+                    \\ st.d $zero, $sp, 8
+                    \\ addi.d $fp, $sp, 16
                     \\ li.d $ra, 0
-                    \\ ld.d $a0, $sp, 8
-                    \\ ld.d $t0, $sp, 0
+                    \\ ld.d $t0, $sp, 16
+                    \\ ld.d $a0, $sp, 24
                     \\ jr $t0
                 );
             }
