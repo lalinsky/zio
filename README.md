@@ -9,17 +9,20 @@ The project consists of a few high-level components:
 - Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
 - Asynchronous I/O layer that makes it look like operations are blocking, but uses event-driven I/O APIs under the hood.
 - Synchronization primitives that cooperate with this runtime.
-- Integration with standard library interfaces, like `std.Io`, `std.Io.Reader` and `std.Io.Writer`.
+- Integration with standard library interfaces, like [`std.Io`](https://ziglang.org/documentation/master/std/#std.Io), [`std.Io.Reader`](https://ziglang.org/documentation/master/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/master/std/#std.Io.Writer).
+
+It's similar to [goroutines](https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency) in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
 
 ## Features
 
-- Support Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and other systems (`poll`).
-- Stackful coroutines for `x86_64`, `aarch64`, `riscv64` and `loongarch64` architectures.
+- Support Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and many other systems (`poll`).
+- User-mode coroutine context switching for `x86_64`, `aarch64`, `riscv64` and `loongarch64` architectures.
 - Growable stacks for the coroutines implemented by auto-extending virtual memory reservations.
 - Multi-threaded coroutine scheduler.
-- Fully asynchronous network I/O.
+- Fully asynchronous network I/O on all systems.
 - Asynchronous file I/O on Linux and Windows, simulated using auxiliary thread pool on other systems.
 - Cancelation support for all operations.
+- Structured concurrency using task groups.
 - Synchronization primitives, including more advanced ones, like channels.
 
 ## Installation
