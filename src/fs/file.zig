@@ -10,6 +10,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const waitForIo = @import("../io.zig").waitForIo;
 const genericCallback = @import("../io.zig").genericCallback;
 const fillBuf = @import("../io.zig").fillBuf;
+const Dir = @import("dir.zig").Dir;
 
 const Handle = std.fs.File.Handle;
 
@@ -336,12 +337,10 @@ pub const FileWriter = struct {
 };
 
 test "File: basic read and write" {
-    const fs = @import("../fs.zig");
-
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const dir = fs.cwd();
+    const dir = Dir.cwd();
     const file_path = "test_file_basic.txt";
     var zio_file = try dir.createFile(rt, file_path, .{});
 
@@ -365,12 +364,10 @@ test "File: basic read and write" {
 }
 
 test "File: positional read and write" {
-    const fs = @import("../fs.zig");
-
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const dir = fs.cwd();
+    const dir = Dir.cwd();
     const file_path = "test_file_positional.txt";
     var zio_file = try dir.createFile(rt, file_path, .{ .read = true });
 
@@ -395,12 +392,10 @@ test "File: positional read and write" {
 }
 
 test "File: close operation" {
-    const fs = @import("../fs.zig");
-
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const dir = fs.cwd();
+    const dir = Dir.cwd();
     const file_path = "test_file_close.txt";
     var zio_file = try dir.createFile(rt, file_path, .{});
 
@@ -415,12 +410,10 @@ test "File: close operation" {
 }
 
 test "File: reader and writer interface" {
-    const fs = @import("../fs.zig");
-
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const dir = fs.cwd();
+    const dir = Dir.cwd();
     const file_path = "test_file_rw_interface.txt";
 
     // Write using writer interface

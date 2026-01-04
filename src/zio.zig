@@ -4,55 +4,44 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Re-export runtime functionality
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const SpawnOptions = runtime.SpawnOptions;
 pub const JoinHandle = runtime.JoinHandle;
 
-// Re-export timeout functionality
 pub const Timeout = @import("core/timeout.zig").Timeout;
 
-// Re-export task group functionality
 pub const Group = @import("core/group.zig").Group;
 
-// Re-export common error sets
 const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
 pub const Timeoutable = common.Timeoutable;
 
-// Re-export I/O functionality
-// TODO: Migrate Pipe to aio
-// pub const Pipe = @import("io/pipe.zig").Pipe;
-pub const fs = @import("fs.zig");
-pub const File = fs.File;
-pub const Dir = fs.Dir;
+pub const File = @import("fs/file.zig").File;
+pub const Dir = @import("fs/dir.zig").Dir;
+// pub const Pipe = @import("fs/pipe.zig").Pipe;
 
-// Re-export network functionality
 pub const net = @import("net.zig");
 
-// Re-export synchronization primitives
-pub const Mutex = @import("sync.zig").Mutex;
-pub const Condition = @import("sync.zig").Condition;
-pub const ResetEvent = @import("sync.zig").ResetEvent;
-pub const Notify = @import("sync.zig").Notify;
-pub const Semaphore = @import("sync.zig").Semaphore;
-pub const Barrier = @import("sync.zig").Barrier;
-pub const Channel = @import("sync.zig").Channel;
-pub const BroadcastChannel = @import("sync.zig").BroadcastChannel;
+pub const Mutex = @import("sync/Mutex.zig");
+pub const Condition = @import("sync/Condition.zig");
+pub const ResetEvent = @import("sync/ResetEvent.zig");
+pub const Notify = @import("sync/Notify.zig");
+pub const Semaphore = @import("sync/Semaphore.zig");
+pub const Barrier = @import("sync/Barrier.zig");
 pub const Futex = @import("sync/Futex.zig");
+pub const Channel = @import("sync/channel.zig").Channel;
+pub const BroadcastChannel = @import("sync/broadcast_channel.zig").BroadcastChannel;
+pub const Future = @import("sync/future.zig").Future;
 
-// Re-export signal handling
 pub const Signal = @import("signal.zig").Signal;
 pub const SignalKind = @import("signal.zig").SignalKind;
 
-// Re-export select functionality
 pub const select = @import("select.zig").select;
 pub const wait = @import("select.zig").wait;
 pub const SelectResult = @import("select.zig").SelectResult;
 pub const WaitResult = @import("select.zig").WaitResult;
 
-// Re-export low-level utilities
 pub const util = @import("utils.zig");
 
 pub const Io = @import("stdio.zig").Io;
