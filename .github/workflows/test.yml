@@ -35,6 +35,15 @@ jobs:
       with:
         version: ${{ matrix.zig_version }}
 
+    - name: Apply NetBSD patch (zig master)
+      if: matrix.zig_version == 'master'
+      shell: bash
+      run: |
+        ZIG_LIB=$(zig env | grep '\.lib_dir' | sed 's/.*"\(.*\)".*/\1/')
+        echo "Zig lib dir: $ZIG_LIB"
+        sed -i.bak 's/_lwp_park = netbsd\._lwp_park/_lwp_park = netbsd.___lwp_park60/' "$ZIG_LIB/std/c.zig"
+        sed -i.bak 's/pub extern "c" fn _lwp_park(/pub extern "c" fn ___lwp_park60(/' "$ZIG_LIB/std/c/netbsd.zig"
+
     - name: Install QEMU
       if: matrix.config.qemu
       run: |
