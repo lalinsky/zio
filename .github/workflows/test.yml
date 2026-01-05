@@ -13,16 +13,16 @@ jobs:
       matrix:
         zig_version: ['0.15.2', 'master']
         config:
-          - { os: ubuntu-24.04, run: native, target: native }
-          - { os: ubuntu-24.04-arm, run: native, target: native }
-          - { os: ubuntu-latest, target: riscv64-linux, run: qemu, qemu_binary: qemu-riscv64-static }
-          - { os: ubuntu-latest, target: loongarch64-linux, run: qemu, qemu_binary: qemu-loongarch64-static }
-          - { os: ubuntu-latest, target: x86_64-freebsd, run: vm, vm_type: freebsd }
-          - { os: ubuntu-latest, target: x86_64-netbsd, run: vm, vm_type: netbsd }
-          - { os: macos-latest, target: native, run: native }
-          - { os: macos-15-intel, target: native, run: native }
-          - { os: windows-latest, target: native, run: native }
-          - { os: windows-11-arm, target: native, run: native }
+          - { os: ubuntu-24.04, target: native }
+          - { os: ubuntu-24.04-arm, target: native }
+          - { os: ubuntu-latest, target: riscv64-linux, qemu: true }
+          - { os: ubuntu-latest, target: loongarch64-linux, qemu: true }
+          - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd }
+          - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd }
+          - { os: macos-latest, target: native }
+          - { os: macos-15-intel, target: native }
+          - { os: windows-latest, target: native }
+          - { os: windows-11-arm, target: native }
 
     runs-on: ${{ matrix.config.os }}
 
@@ -35,46 +35,43 @@ jobs:
       with:
         version: ${{ matrix.zig_version }}
 
-    - name: Build
-      run: >
-        zig build --release=safe -Dinstall-tests
-        ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
-      timeout-minutes: 5
-
-    - name: Build signal tests
-      if: matrix.config.run == 'native'
-      run: zig build install-signal-tests
-      timeout-minutes: 5
-
-    - name: Run tests (native)
-      if: matrix.config.run == 'native'
-      run: ./zig-out/bin/test
-      timeout-minutes: 5
-
-    - name: Run signal tests (native)
-      if: matrix.config.run == 'native'
-      run: python3 src/tests/run_signal_tests.py
-      timeout-minutes: 5
-
     - name: Install QEMU
-      if: matrix.config.run == 'qemu'
+      if: matrix.config.qemu
       run: |
         sudo apt-get update -q -y
         sudo apt-get install -q -y qemu-user-static
 
-    - name: Run tests (QEMU)
-      if: matrix.config.run == 'qemu'
-      run: ${{ matrix.config.qemu_binary }} ./zig-out/bin/test
+    - name: Run tests
+      if: ${{ !matrix.config.vm }}
+      run: >
+        zig build test --release=safe
+        ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
+        ${{ matrix.config.qemu && '-fqemu' || '' }}
       timeout-minutes: 10
 
+    - name: Build signal tests
+      if: matrix.config.target == 'native'
+      run: zig build install-signal-tests
+      timeout-minutes: 5
+
+    - name: Run signal tests
+      if: matrix.config.target == 'native'
+      run: python3 src/tests/run_signal_tests.py
+      timeout-minutes: 5
+
+    - name: Build for VM
+      if: matrix.config.vm
+      run: zig build --release=safe -Dinstall-tests -Dtarget=${{ matrix.config.target }}
+      timeout-minutes: 5
+
     - name: Run tests (FreeBSD VM)
-      if: matrix.config.run == 'vm' && matrix.config.vm_type == 'freebsd'
+      if: matrix.config.vm == 'freebsd'
       uses: vmactions/freebsd-vm@v1
       with:
         run: ./zig-out/bin/test
 
     - name: Run tests (NetBSD VM)
-      if: matrix.config.run == 'vm' && matrix.config.vm_type == 'netbsd'
+      if: matrix.config.vm == 'netbsd'
       uses: vmactions/netbsd-vm@v1
       with:
         release: '10.1'
