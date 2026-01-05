@@ -40,7 +40,6 @@ pub const Context = switch (builtin.cpu.arch) {
         sp: u64,
         fp: u64,
         pc: u64,
-        fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
         stack_info: StackInfo,
 
         pub const stack_alignment = 16;
