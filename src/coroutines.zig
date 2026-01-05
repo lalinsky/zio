@@ -554,8 +554,7 @@ fn coroEntry() callconv(.naked) noreturn {
             if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
                 asm volatile (
                     \\ adr x30, 1f
-                    \\ ldr x0, [sp, #8]
-                    \\ ldr x2, [sp]
+                    \\ ldp x2, x0, [sp]
                     \\ br x2
                     \\1:
                 );
