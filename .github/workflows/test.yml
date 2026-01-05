@@ -7,13 +7,20 @@ on:
   pull_request:
 
 jobs:
-  # Native build+test jobs (no artifact overhead needed)
-  test-linux-native:
-    runs-on: ubuntu-latest
+  test:
     strategy:
       fail-fast: false
       matrix:
-        zig-version: ['0.15.2', 'master']
+        zig_version: ['0.15.2', 'master']
+        config:
+          - { os: ubuntu-latest, target: x86_64-linux, backends: 'io_uring epoll poll' }
+          - { os: macos-latest, target: native, backends: 'kqueue poll' }
+          - { os: windows-latest, target: native, backends: 'iocp poll' }
+          - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
+          - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd, backends: 'kqueue poll' }
+
+    runs-on: ${{ matrix.config.os }}
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -21,177 +28,47 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: ${{ matrix.zig-version }}
+        version: ${{ matrix.zig_version }}
 
-    - name: Build and test
+    - name: Build and test (native)
+      if: ${{ !matrix.config.vm }}
       shell: bash
       run: |
-        for backend in io_uring epoll poll; do
-          echo "Building and testing with backend: $backend"
-          zig build -Dinstall-tests -Dbackend=$backend -Dtarget=x86_64-linux
+        for backend in ${{ matrix.config.backends }}; do
+          echo "Testing with backend: $backend"
+          zig build -Dinstall-tests -Dbackend=$backend ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
           ./zig-out/bin/test
         done
       timeout-minutes: 10
 
-  test-macos-native:
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        zig-version: ['0.15.2', 'master']
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Zig
-      uses: mlugg/setup-zig@v2
-      with:
-        version: ${{ matrix.zig-version }}
-
-    - name: Build and test
+    - name: Build for VM
+      if: matrix.config.vm
       shell: bash
       run: |
-        for backend in kqueue poll; do
-          echo "Building and testing with backend: $backend"
-          zig build -Dinstall-tests -Dbackend=$backend
-          ./zig-out/bin/test
-        done
-      timeout-minutes: 10
-
-  test-windows-native:
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        zig-version: ['0.15.2', 'master']
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Zig
-      uses: mlugg/setup-zig@v2
-      with:
-        version: ${{ matrix.zig-version }}
-
-    - name: Build and test
-      shell: bash
-      run: |
-        for backend in iocp poll; do
-          echo "Building and testing with backend: $backend"
-          zig build -Dinstall-tests -Dbackend=$backend
-          ./zig-out/bin/test
-        done
-      timeout-minutes: 10
-
-  # Build jobs for cross-compiled targets
-  build-freebsd:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        zig-version: ['0.15.2', 'master']
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Zig
-      uses: mlugg/setup-zig@v2
-      with:
-        version: ${{ matrix.zig-version }}
-
-    - name: Build tests
-      shell: bash
-      run: |
-        for backend in kqueue poll; do
+        for backend in ${{ matrix.config.backends }}; do
           echo "Building with backend: $backend"
-          zig build -Dinstall-tests -Dbackend=$backend -Dtarget=x86_64-freebsd
+          zig build -Dinstall-tests -Dbackend=$backend -Dtarget=${{ matrix.config.target }}
           cp zig-out/bin/test zig-out/bin/test-$backend
         done
       timeout-minutes: 5
 
-    - name: Upload test binaries
-      uses: actions/upload-artifact@v4
-      with:
-        name: freebsd-tests-${{ matrix.zig-version }}
-        path: zig-out/bin/test-*
-        retention-days: 1
-
-  build-netbsd:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        zig-version: ['0.15.2', 'master']
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Zig
-      uses: mlugg/setup-zig@v2
-      with:
-        version: ${{ matrix.zig-version }}
-
-    - name: Build tests
-      shell: bash
-      run: |
-        for backend in kqueue poll; do
-          echo "Building with backend: $backend"
-          zig build -Dinstall-tests -Dbackend=$backend -Dtarget=x86_64-netbsd
-          cp zig-out/bin/test zig-out/bin/test-$backend
-        done
-      timeout-minutes: 5
-
-    - name: Upload test binaries
-      uses: actions/upload-artifact@v4
-      with:
-        name: netbsd-tests-${{ matrix.zig-version }}
-        path: zig-out/bin/test-*
-        retention-days: 1
-
-  # VM test jobs
-  test-freebsd-vm:
-    needs: build-freebsd
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        zig-version: ['0.15.2', 'master']
-    steps:
-    - name: Download test binaries
-      uses: actions/download-artifact@v4
-      with:
-        name: freebsd-tests-${{ matrix.zig-version }}
-
-    - name: Run tests in FreeBSD VM
+    - name: Run tests (FreeBSD VM)
+      if: matrix.config.vm == 'freebsd'
       uses: vmactions/freebsd-vm@v1
       with:
         run: |
-          chmod +x test-*
-          for test in test-*; do
+          for test in zig-out/bin/test-*; do
             echo "Running $test"
             ./$test
           done
 
-  test-netbsd-vm:
-    needs: build-netbsd
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        zig-version: ['0.15.2', 'master']
-    steps:
-    - name: Download test binaries
-      uses: actions/download-artifact@v4
-      with:
-        name: netbsd-tests-${{ matrix.zig-version }}
-
-    - name: Run tests in NetBSD VM
+    - name: Run tests (NetBSD VM)
+      if: matrix.config.vm == 'netbsd'
       uses: vmactions/netbsd-vm@v1
       with:
         release: '10.1'
         run: |
-          chmod +x test-*
-          for test in test-*; do
+          for test in zig-out/bin/test-*; do
             echo "Running $test"
             ./$test
           done
