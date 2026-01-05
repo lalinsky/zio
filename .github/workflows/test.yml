@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.15.2', 'master']
+        zig_version: ['0.15.2']
         config:
           - { os: ubuntu-latest, target: x86_64-linux, backends: 'io_uring epoll poll' }
           - { os: macos-latest, target: native, backends: 'kqueue poll' }
