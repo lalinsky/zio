@@ -13,6 +13,12 @@ pub fn build(b: *std.Build) void {
         "Install tests binary",
     ) orelse false;
 
+    const test_filter = b.option(
+        []const u8,
+        "test-filter",
+        "Filter for test names",
+    );
+
     const mod = b.addModule("coro", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -22,6 +28,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = mod,
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
 
     const test_step = b.step("test", "Run tests");
