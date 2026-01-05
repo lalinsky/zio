@@ -10,6 +10,16 @@ pub const fd_t = switch (builtin.os.tag) {
     else => posix.system.fd_t,
 };
 
+/// Returns a file descriptor for the current working directory.
+/// Used with *at() functions like openat(), unlinkat(), etc.
+pub fn cwd() fd_t {
+    if (builtin.os.tag == .windows) {
+        return std.os.windows.peb().ProcessParameters.CurrentDirectory.Handle;
+    } else {
+        return posix.system.AT.FDCWD;
+    }
+}
+
 pub const iovec = @import("base.zig").iovec;
 pub const iovec_const = @import("base.zig").iovec_const;
 

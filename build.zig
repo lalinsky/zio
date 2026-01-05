@@ -19,6 +19,12 @@ pub fn build(b: *std.Build) void {
         "Install tests binary",
     ) orelse false;
 
+    const test_filter = b.option(
+        []const u8,
+        "test-filter",
+        "Filter for test names",
+    );
+
     var options = b.addOptions();
     options.addOption(?[]const u8, "backend", backend);
 
@@ -33,10 +39,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = mod,
-        .test_runner = .{
-            .path = b.path("src/test/runner.zig"),
-            .mode = .simple,
-        },
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
 
     const test_step = b.step("test", "Run tests");

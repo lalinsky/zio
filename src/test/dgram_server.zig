@@ -362,7 +362,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     defer {
         if (domain == .unix) {
             const path = std.mem.sliceTo(&server.server_addr.path, 0);
-            std.fs.cwd().deleteFile(path) catch {};
+            aio.system.fs.unlinkat(std.testing.allocator, aio.system.fs.cwd(), path) catch {};
         }
     }
     server.start();
@@ -387,7 +387,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     defer {
         if (domain == .unix) {
             const path = std.mem.sliceTo(&client.client_addr.path, 0);
-            std.fs.cwd().deleteFile(path) catch {};
+            aio.system.fs.unlinkat(std.testing.allocator, aio.system.fs.cwd(), path) catch {};
         }
     }
     client.start();

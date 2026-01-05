@@ -11,9 +11,9 @@ test "File: open/close" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = std.fs.cwd();
+    const cwd = aio.system.fs.cwd();
 
-    var file_create = aio.FileCreate.init(cwd.fd, "test-file", .{ .read = true, .truncate = true, .mode = 0o664 });
+    var file_create = aio.FileCreate.init(cwd, "test-file", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
 
     try loop.run(.until_done);
@@ -87,10 +87,10 @@ test "File: rename/delete" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = std.fs.cwd();
+    const cwd = aio.system.fs.cwd();
 
     // Create a test file
-    var file_create = aio.FileCreate.init(cwd.fd, "test-rename-src", .{ .read = true, .truncate = true, .mode = 0o664 });
+    var file_create = aio.FileCreate.init(cwd, "test-rename-src", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_create.c.state);
@@ -111,7 +111,7 @@ test "File: rename/delete" {
     try std.testing.expectEqual(.dead, file_close.c.state);
 
     // Rename the file
-    var file_rename = aio.FileRename.init(cwd.fd, "test-rename-src", cwd.fd, "test-rename-dst");
+    var file_rename = aio.FileRename.init(cwd, "test-rename-src", cwd, "test-rename-dst");
     loop.add(&file_rename.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_rename.c.state);
@@ -119,7 +119,7 @@ test "File: rename/delete" {
     try file_rename.getResult();
 
     // Verify the renamed file exists by opening it
-    var file_open = aio.FileOpen.init(cwd.fd, "test-rename-dst", .{ .mode = .read_only });
+    var file_open = aio.FileOpen.init(cwd, "test-rename-dst", .{ .mode = .read_only });
     loop.add(&file_open.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_open.c.state);
@@ -143,7 +143,7 @@ test "File: rename/delete" {
     try std.testing.expectEqual(.dead, file_close2.c.state);
 
     // Delete the file
-    var file_delete = aio.FileDelete.init(cwd.fd, "test-rename-dst");
+    var file_delete = aio.FileDelete.init(cwd, "test-rename-dst");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_delete.c.state);
@@ -151,7 +151,7 @@ test "File: rename/delete" {
     try file_delete.getResult();
 
     // Verify the file no longer exists
-    var file_open_fail = aio.FileOpen.init(cwd.fd, "test-rename-dst", .{ .mode = .read_only });
+    var file_open_fail = aio.FileOpen.init(cwd, "test-rename-dst", .{ .mode = .read_only });
     loop.add(&file_open_fail.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_open_fail.c.state);
@@ -167,10 +167,10 @@ test "File: read EOF" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = std.fs.cwd();
+    const cwd = aio.system.fs.cwd();
 
     // Create and write a small file
-    var file_create = aio.FileCreate.init(cwd.fd, "test-eof", .{ .read = true, .truncate = true, .mode = 0o664 });
+    var file_create = aio.FileCreate.init(cwd, "test-eof", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
     const fd = try file_create.getResult();
@@ -209,7 +209,7 @@ test "File: read EOF" {
     try loop.run(.until_done);
     try file_close.getResult();
 
-    var file_delete = aio.FileDelete.init(cwd.fd, "test-eof");
+    var file_delete = aio.FileDelete.init(cwd, "test-eof");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();
@@ -224,10 +224,10 @@ test "File: size" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = std.fs.cwd();
+    const cwd = aio.system.fs.cwd();
 
     // Create a file
-    var file_create = aio.FileCreate.init(cwd.fd, "test-size", .{ .read = true, .truncate = true, .mode = 0o664 });
+    var file_create = aio.FileCreate.init(cwd, "test-size", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
     const fd = try file_create.getResult();
@@ -279,7 +279,7 @@ test "File: size" {
     try loop.run(.until_done);
     try file_close.getResult();
 
-    var file_delete = aio.FileDelete.init(cwd.fd, "test-size");
+    var file_delete = aio.FileDelete.init(cwd, "test-size");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();
@@ -294,10 +294,10 @@ test "File: stat" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = std.fs.cwd();
+    const cwd = aio.system.fs.cwd();
 
     // Create a file
-    var file_create = aio.FileCreate.init(cwd.fd, "test-stat", .{ .read = true, .truncate = true, .mode = 0o664 });
+    var file_create = aio.FileCreate.init(cwd, "test-stat", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
     const fd = try file_create.getResult();
@@ -337,7 +337,7 @@ test "File: stat" {
     try loop.run(.until_done);
     try file_close.getResult();
 
-    var file_delete = aio.FileDelete.init(cwd.fd, "test-stat");
+    var file_delete = aio.FileDelete.init(cwd, "test-stat");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();
@@ -352,10 +352,10 @@ test "File: stat_path" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = std.fs.cwd();
+    const cwd = aio.system.fs.cwd();
 
     // Create a file
-    var file_create = aio.FileCreate.init(cwd.fd, "test-stat-path", .{ .read = true, .truncate = true, .mode = 0o664 });
+    var file_create = aio.FileCreate.init(cwd, "test-stat-path", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
     const fd = try file_create.getResult();
@@ -375,7 +375,7 @@ test "File: stat_path" {
     try file_close.getResult();
 
     // Stat by path (using FileStat with non-null path)
-    var file_stat = aio.FileStat.init(cwd.fd, "test-stat-path");
+    var file_stat = aio.FileStat.init(cwd, "test-stat-path");
     loop.add(&file_stat.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_stat.c.state);
@@ -386,7 +386,7 @@ test "File: stat_path" {
     try std.testing.expect(stat.inode != 0);
 
     // Delete the file
-    var file_delete = aio.FileDelete.init(cwd.fd, "test-stat-path");
+    var file_delete = aio.FileDelete.init(cwd, "test-stat-path");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();
