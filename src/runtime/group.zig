@@ -15,16 +15,12 @@ const AnyTask = @import("task.zig").AnyTask;
 const CreateOptions = @import("task.zig").CreateOptions;
 const ResetEvent = @import("../sync/ResetEvent.zig");
 
-const Io = @import("../stdio.zig").Io;
-
 pub const Group = struct {
-    inner: Io.Group,
+    state: std.atomic.Value(usize) = .init(0),
+    completed: ResetEvent = .init,
+    tasks: CompactWaitQueue(GroupNode) = .empty,
 
-    pub const init: Group = .{ .inner = .init };
-
-    pub fn fromStd(io_group: *Io.Group) *Group {
-        return @fieldParentPtr("inner", io_group);
-    }
+    pub const init: Group = .{};
 
     // State encoding:
     // - Bits 0-60: pending task counter
@@ -36,71 +32,56 @@ pub const Group = struct {
     const fail_fast_flag: usize = 1 << (@bitSizeOf(usize) - 3);
     const counter_mask: usize = ~(canceled_flag | failed_flag | fail_fast_flag);
 
-    /// Get the state as an atomic.
-    fn getState(self: *Group) *std.atomic.Value(usize) {
-        return @ptrCast(&self.inner.state);
-    }
-
     /// Increment the pending task counter.
     pub fn incrCounter(self: *Group) void {
-        _ = self.getState().fetchAdd(1, .acq_rel);
+        _ = self.state.fetchAdd(1, .acq_rel);
     }
 
     /// Decrement the pending task counter. Returns true if this was the last task.
     pub fn decrCounter(self: *Group) bool {
-        const prev = self.getState().fetchSub(1, .acq_rel);
+        const prev = self.state.fetchSub(1, .acq_rel);
         return (prev & counter_mask) == 1;
     }
 
     /// Get the current counter value.
     pub fn getCounter(self: *Group) usize {
-        return self.getState().load(.acquire) & counter_mask;
+        return self.state.load(.acquire) & counter_mask;
     }
 
     /// Set the failed flag. If fail_fast is set, also signals the event.
     pub fn setFailed(self: *Group) void {
-        const prev = self.getState().fetchOr(failed_flag, .acq_rel);
+        const prev = self.state.fetchOr(failed_flag, .acq_rel);
         if ((prev & fail_fast_flag) != 0) {
-            self.getEvent().set();
+            self.completed.set();
         }
     }
 
     /// Check if the failed flag is set.
     pub fn hasFailed(self: *Group) bool {
-        return (self.getState().load(.acquire) & failed_flag) != 0;
+        return (self.state.load(.acquire) & failed_flag) != 0;
     }
 
     /// Set the canceled flag. If fail_fast is set, also signals the event.
     pub fn setCanceled(self: *Group) void {
-        const prev = self.getState().fetchOr(canceled_flag, .acq_rel);
+        const prev = self.state.fetchOr(canceled_flag, .acq_rel);
         if ((prev & fail_fast_flag) != 0) {
-            self.getEvent().set();
+            self.completed.set();
         }
     }
 
     /// Check if the canceled flag is set.
     pub fn isCanceled(self: *Group) bool {
-        return (self.getState().load(.acquire) & canceled_flag) != 0;
+        return (self.state.load(.acquire) & canceled_flag) != 0;
     }
 
     /// Set the fail_fast flag. When set, the group will signal early on first error.
     pub fn setFailFast(self: *Group) void {
-        _ = self.getState().fetchOr(fail_fast_flag, .acq_rel);
+        _ = self.state.fetchOr(fail_fast_flag, .acq_rel);
     }
 
     /// Check if the fail_fast flag is set.
     pub fn isFailFast(self: *Group) bool {
-        return (self.getState().load(.acquire) & fail_fast_flag) != 0;
-    }
-
-    /// Get the event for coroutines waiting on the group.
-    pub fn getEvent(self: *Group) *ResetEvent {
-        return @ptrCast(&self.inner.context);
-    }
-
-    /// Get the list of spawned tasks (for cancellation).
-    pub fn getTaskList(self: *Group) *CompactWaitQueue(GroupNode) {
-        return @ptrCast(&self.inner.token.raw);
+        return (self.state.load(.acquire) & fail_fast_flag) != 0;
     }
 
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
@@ -143,8 +124,8 @@ pub const Group = struct {
 
         // Associate the task with the group
         task.awaitable.group_node.group = self;
-        self.getTaskList().push(&task.awaitable.group_node);
-        errdefer _ = self.getTaskList().remove(&task.awaitable.group_node);
+        self.tasks.push(&task.awaitable.group_node);
+        errdefer _ = self.tasks.remove(&task.awaitable.group_node);
 
         rt.tasks.add(&task.awaitable);
 
@@ -154,7 +135,7 @@ pub const Group = struct {
 
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
         errdefer group.cancel(rt);
-        try group.waitForRemainingTasks(rt, group.getTaskList());
+        try group.waitForRemainingTasks(rt, &group.tasks);
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
@@ -162,9 +143,8 @@ pub const Group = struct {
         defer rt.endShield();
 
         // Request cancellation for all tasks in the list
-        const list = group.getTaskList();
         var local_list: SimpleWaitQueue(GroupNode) = .empty;
-        while (list.pop()) |node| {
+        while (group.tasks.pop()) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             awaitable.cancel();
             local_list.push(node);
@@ -174,7 +154,7 @@ pub const Group = struct {
     }
 
     fn waitForRemainingTasks(group: *Group, rt: *Runtime, tasks: anytype) Cancelable!void {
-        try group.getEvent().wait(rt);
+        try group.completed.wait(rt);
         while (tasks.pop()) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             rt.releaseAwaitable(awaitable, false);

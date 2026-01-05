@@ -31,8 +31,6 @@ const BlockingTask = @import("runtime/blocking_task.zig").BlockingTask;
 const Timeout = @import("runtime/timeout.zig").Timeout;
 
 const select = @import("select.zig");
-const stdio = @import("stdio.zig");
-const Io = @import("zio.zig").Io;
 const Futex = @import("sync/Futex.zig");
 
 /// Executor selection for spawning a coroutine
@@ -561,7 +559,7 @@ pub const Executor = struct {
                         // For group tasks, remove from group list and release group's reference
                         // Only release if we successfully removed it (groupCancel might have popped it first)
                         if (current_awaitable.group_node.group) |group| {
-                            if (group.getTaskList().remove(&current_awaitable.group_node)) {
+                            if (group.tasks.remove(&current_awaitable.group_node)) {
                                 self.runtime.releaseAwaitable(current_awaitable, false);
                             }
                         }
@@ -1153,14 +1151,6 @@ pub const Runtime = struct {
         // Shutdown thread pool
         self.thread_pool.stop();
     }
-
-    pub fn io(self: *Runtime) Io {
-        return stdio.fromRuntime(self);
-    }
-
-    pub fn fromIo(io_: Io) *Runtime {
-        return stdio.toRuntime(io_);
-    }
 };
 
 test "runtime with thread pool smoke test" {
@@ -1325,15 +1315,4 @@ test "runtime: sleep is cancelable" {
     // Ensure the sleep was canceled before completion
     const elapsed = timer.read();
     try testing.expect(elapsed <= 500 * std.time.ns_per_ms);
-}
-
-test "runtime: std.Io interface" {
-    const testing = std.testing;
-
-    const rt = try Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    const io = rt.io();
-    const rt2 = Runtime.fromIo(io);
-    _ = rt2;
 }

@@ -96,7 +96,7 @@ fn completionCallback(
     // For group tasks, remove from group list and release group's reference
     // Only release if we successfully removed it (groupCancel might have popped it first)
     if (any_blocking_task.awaitable.group_node.group) |group| {
-        if (group.getTaskList().remove(&any_blocking_task.awaitable.group_node)) {
+        if (group.tasks.remove(&any_blocking_task.awaitable.group_node)) {
             const runtime = any_blocking_task.runtime;
             runtime.releaseAwaitable(&any_blocking_task.awaitable, false);
         }

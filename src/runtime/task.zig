@@ -81,7 +81,7 @@ pub const Closure = struct {
 
                 // Decrement counter and signal event if this was the last task
                 if (group.decrCounter()) {
-                    group.getEvent().set();
+                    group.completed.set();
                 }
             },
         }

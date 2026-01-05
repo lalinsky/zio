@@ -63,7 +63,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sleep", .file = "examples/sleep.zig" },
         .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
         .{ .name = "tcp-echo-server-plain", .file = "examples/tcp_echo_server_plain.zig" },
-        .{ .name = "tcp-echo-server-stdio", .file = "examples/tcp_echo_server_stdio.zig" },
         .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
         .{ .name = "http-server", .file = "examples/http_server.zig" },
         .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },

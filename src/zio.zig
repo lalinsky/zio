@@ -42,8 +42,6 @@ pub const wait = @import("select.zig").wait;
 pub const SelectResult = @import("select.zig").SelectResult;
 pub const WaitResult = @import("select.zig").WaitResult;
 
-pub const Io = @import("stdio.zig").Io;
-
 test {
     std.testing.refAllDecls(@This());
 }
