@@ -101,10 +101,12 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const emit_test_bin = b.option(bool, "emit-test-bin", "Build test binary without running") orelse false;
+    const test_filter = b.option([]const u8, "test-filter", "Filter for test names");
 
     const lib_unit_tests = b.addTest(.{
         .root_module = zio,
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
 
     const test_step = b.step("test", "Run unit tests");
@@ -123,6 +125,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         }),
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
 
     const test_coro_step = b.step("test-coro", "Run coro library tests");
