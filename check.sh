@@ -71,7 +71,7 @@ if [ -n "$TEST_FILTER" ]; then
 else
     echo "Running all unit tests..."
 fi
-zig build build-tests
+zig build test -Demit-test-bin
 timeout 30s ./zig-out/bin/test
 
 echo "=== Building examples ==="

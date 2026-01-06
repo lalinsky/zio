@@ -34,7 +34,7 @@ jobs:
       timeout-minutes: 5
 
     - name: Build tests
-      run: zig build build-tests --release=safe
+      run: zig build test -Demit-test-bin -Doptimize=ReleaseSafe
       timeout-minutes: 5
 
     - name: Build examples

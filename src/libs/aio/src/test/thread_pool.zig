@@ -48,10 +48,22 @@ test "aio.ThreadPool: many tasks" {
     });
     defer loop.deinit();
 
+    var active = std.atomic.Value(usize).init(0);
+    var max_active = std.atomic.Value(usize).init(0);
+
     const TestFn = struct {
         called: usize = 0,
+        active: *std.atomic.Value(usize),
+        max_active: *std.atomic.Value(usize),
+
         pub fn main(work: *aio.Work) void {
             var self: *@This() = @ptrCast(@alignCast(work.userdata));
+
+            // Track concurrent execution
+            const current = self.active.fetchAdd(1, .acq_rel) + 1;
+            defer _ = self.active.fetchSub(1, .acq_rel);
+            _ = self.max_active.fetchMax(current, .acq_rel);
+
             aio.system.time.sleep(12);
             self.called += 1;
         }
@@ -63,7 +75,7 @@ test "aio.ThreadPool: many tasks" {
     var work: [num_tasks]aio.Work = undefined;
 
     for (0..num_tasks) |i| {
-        test_fn[i] = .{};
+        test_fn[i] = .{ .active = &active, .max_active = &max_active };
         work[i] = aio.Work.init(&TestFn.main, @ptrCast(&test_fn[i]));
         loop.add(&work[i].c);
     }
@@ -75,5 +87,6 @@ test "aio.ThreadPool: many tasks" {
         try std.testing.expectEqual(1, test_fn[i].called);
     }
 
-    try std.testing.expect(thread_pool.running_threads.load(.acquire) > 1);
+    // Verify tasks actually ran concurrently
+    try std.testing.expect(max_active.load(.acquire) > 1);
 }
