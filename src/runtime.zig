@@ -12,12 +12,12 @@ const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 
-const Coroutine = @import("libs/coro/src/coroutines.zig").Coroutine;
-const Context = @import("libs/coro/src/coroutines.zig").Context;
-const StackPool = @import("libs/coro/src/stack_pool.zig").StackPool;
-const StackPoolConfig = @import("libs/coro/src/stack_pool.zig").Config;
-const setupStackGrowth = @import("libs/coro/src/stack.zig").setupStackGrowth;
-const cleanupStackGrowth = @import("libs/coro/src/stack.zig").cleanupStackGrowth;
+const Coroutine = @import("coro/coroutines.zig").Coroutine;
+const Context = @import("coro/coroutines.zig").Context;
+const StackPool = @import("coro/stack_pool.zig").StackPool;
+const StackPoolConfig = @import("coro/stack_pool.zig").Config;
+const setupStackGrowth = @import("coro/stack.zig").setupStackGrowth;
+const cleanupStackGrowth = @import("coro/stack.zig").cleanupStackGrowth;
 
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 

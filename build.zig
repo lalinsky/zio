@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) void {
     // Coro library tests
     const coro_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/libs/coro/src/coroutines.zig"),
+            .root_source_file = b.path("src/coro/root.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
