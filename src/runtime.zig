@@ -66,7 +66,7 @@ pub const RuntimeOptions = struct {
         .maximum_size = 8 * 1024 * 1024, // 8MB reserved
         .committed_size = 64 * 1024, // 64KB initial commit
         .max_unused_stacks = 16,
-        .max_age_ns = 60 * std.time.ns_per_s, // 60 seconds
+        .max_age_ms = 60 * std.time.ms_per_s, // 60 seconds
     },
     /// Number of executor threads to run.
     /// - null: auto-detect CPU count (multi-threaded)
@@ -548,7 +548,7 @@ pub const Executor = struct {
 
                         // Release stack immediately
                         if (current_coro.context.stack_info.allocation_len > 0) {
-                            self.runtime.stack_pool.release(current_coro.context.stack_info);
+                            self.runtime.stack_pool.release(current_coro.context.stack_info, self.loop.now());
                             current_coro.context.stack_info.allocation_len = 0;
                         }
 

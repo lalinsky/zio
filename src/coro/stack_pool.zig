@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const builtin = @import("builtin");
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 
@@ -11,7 +10,7 @@ const FreeNode = struct {
     prev: ?*FreeNode,
     next: ?*FreeNode,
     stack_info: StackInfo,
-    timestamp: std.time.Instant,
+    timestamp_ms: u64,
 };
 
 pub const Config = struct {
@@ -27,10 +26,10 @@ pub const Config = struct {
     /// When this limit is exceeded, the oldest stack is freed.
     max_unused_stacks: usize = 16,
 
-    /// Maximum age of an unused stack in nanoseconds.
-    /// Stacks older than this will be freed on the next acquire() call.
+    /// Maximum age of an unused stack in milliseconds.
+    /// Stacks older than this will be freed on the next release() call.
     /// 0 means no age limit.
-    max_age_ns: u64 = 0,
+    max_age_ms: u64 = 0,
 };
 
 pub const StackPool = struct {
@@ -90,7 +89,8 @@ pub const StackPool = struct {
     /// Expired stacks are removed before adding the new stack to avoid depleting the pool.
     /// If the pool is full, frees the oldest stack and adds this one.
     /// If the stack's committed region is too small to store the FreeNode, the stack is freed instead.
-    pub fn release(self: *StackPool, stack_info: StackInfo) void {
+    /// The timestamp_ms parameter is the current time in milliseconds (monotonic).
+    pub fn release(self: *StackPool, stack_info: StackInfo, timestamp_ms: u64) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -108,11 +108,10 @@ pub const StackPool = struct {
         // Remove expired stacks from the front of the list
         // Do this before adding the new stack to avoid the situation where we'd
         // remove all stacks (including the one we're about to add) and end up with an empty pool
-        if (self.config.max_age_ns > 0) {
-            const now = std.time.Instant.now() catch unreachable;
+        if (self.config.max_age_ms > 0) {
             while (self.head) |node| {
-                const age_ns = now.since(node.timestamp);
-                if (age_ns > self.config.max_age_ns) {
+                const age_ms = timestamp_ms -| node.timestamp_ms;
+                if (age_ms > self.config.max_age_ms) {
                     self.removeNode(node);
                     stack.stackFree(node.stack_info);
                 } else {
@@ -139,7 +138,7 @@ pub const StackPool = struct {
             .prev = null,
             .next = null,
             .stack_info = stack_info,
-            .timestamp = std.time.Instant.now() catch unreachable,
+            .timestamp_ms = timestamp_ms,
         };
 
         // Add to the tail of the list (most recently released)
@@ -189,7 +188,7 @@ test "StackPool basic acquire and release" {
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 4,
-        .max_age_ns = 0,
+        .max_age_ms = 0,
     });
     defer pool.deinit();
 
@@ -199,7 +198,7 @@ test "StackPool basic acquire and release" {
     try testing.expect(stack1.base > stack1.limit); // Stack grows downward
 
     // Release it back
-    pool.release(stack1);
+    pool.release(stack1, 0);
     try testing.expectEqual(1, pool.pool_size);
 
     // Acquire again - should reuse the same stack
@@ -218,7 +217,7 @@ test "StackPool respects max_unused_stacks" {
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 2,
-        .max_age_ns = 0,
+        .max_age_ms = 0,
     });
     defer pool.deinit();
 
@@ -227,14 +226,14 @@ test "StackPool respects max_unused_stacks" {
     const stack2 = try pool.acquire();
     const stack3 = try pool.acquire();
 
-    pool.release(stack1);
+    pool.release(stack1, 0);
     try testing.expectEqual(1, pool.pool_size);
 
-    pool.release(stack2);
+    pool.release(stack2, 0);
     try testing.expectEqual(2, pool.pool_size);
 
     // Releasing the third should evict the first (oldest)
-    pool.release(stack3);
+    pool.release(stack3, 0);
     try testing.expectEqual(2, pool.pool_size);
 
     // Verify that stack1 is not in the pool (stack2 and stack3 should be)
@@ -253,33 +252,32 @@ test "StackPool respects max_unused_stacks" {
 test "StackPool age-based expiration" {
     const testing = std.testing;
 
+    const max_age_ms = 100; // 100ms
+
     var pool = StackPool.init(.{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 4,
-        .max_age_ns = 100_000_000, // 100ms
+        .max_age_ms = max_age_ms,
     });
     defer pool.deinit();
 
-    // Acquire and release a stack
+    // Acquire and release a stack at timestamp 0
     const stack1 = try pool.acquire();
-    pool.release(stack1);
+    pool.release(stack1, 0);
     try testing.expectEqual(1, pool.pool_size);
 
-    // Wait for it to expire
-    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-        std.Thread.sleep(150 * std.time.ns_per_ms);
-    } else {
-        try testing.io.sleep(.fromMilliseconds(150), .awake);
-    }
-
-    // Next acquire should allocate a new stack (old one expired)
+    // Acquire a new stack and release it with timestamp past expiration
+    // This triggers expiration check and should evict stack1
     const stack2 = try pool.acquire();
     try testing.expectEqual(0, pool.pool_size);
+    pool.release(stack2, max_age_ms + 1);
+    try testing.expectEqual(1, pool.pool_size);
 
-    // Note: We don't check if stack1.base != stack2.base because the OS
-    // may reuse the same virtual address range, which is valid behavior
+    // Verify the pool contains stack2 (stack1 was expired)
+    const reused = try pool.acquire();
+    try testing.expectEqual(stack2.base, reused.base);
 
     // Clean up
-    stack.stackFree(stack2);
+    stack.stackFree(reused);
 }
