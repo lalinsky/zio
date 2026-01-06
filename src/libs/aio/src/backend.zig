@@ -1,6 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const options = @import("aio_options");
+const options = @import("zio_options");
 
 pub const BackendType = enum {
     poll,

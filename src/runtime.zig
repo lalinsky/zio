@@ -6,19 +6,18 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-const aio = @import("aio");
+const aio = @import("libs/aio/src/root.zig");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 
-const Coroutine = @import("coro").Coroutine;
-const Context = @import("coro").Context;
-const StackPool = @import("coro").StackPool;
-const StackPoolConfig = @import("coro").StackPoolConfig;
-const StackInfo = @import("coro").StackInfo;
-const setupStackGrowth = @import("coro").setupStackGrowth;
-const cleanupStackGrowth = @import("coro").cleanupStackGrowth;
+const Coroutine = @import("libs/coro/src/coroutines.zig").Coroutine;
+const Context = @import("libs/coro/src/coroutines.zig").Context;
+const StackPool = @import("libs/coro/src/stack_pool.zig").StackPool;
+const StackPoolConfig = @import("libs/coro/src/stack_pool.zig").Config;
+const setupStackGrowth = @import("libs/coro/src/stack.zig").setupStackGrowth;
+const cleanupStackGrowth = @import("libs/coro/src/stack.zig").cleanupStackGrowth;
 
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 

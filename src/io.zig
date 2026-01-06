@@ -3,7 +3,7 @@
 
 const std = @import("std");
 
-const aio = @import("aio");
+const aio = @import("libs/aio/src/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
 const resumeTask = @import("runtime/task.zig").resumeTask;

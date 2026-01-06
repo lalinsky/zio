@@ -10,19 +10,12 @@ pub fn build(b: *std.Build) void {
     const backend = b.option(
         []const u8,
         "backend",
-        "Override the default aio backend (io_uring, epoll, kqueue, iocp, wasi_poll)",
+        "Override the default aio backend (io_uring, epoll, kqueue, iocp, poll)",
     );
 
-    const aio = b.dependency("aio", .{
-        .target = target,
-        .optimize = optimize,
-        .backend = backend,
-    });
-
-    const coro = b.dependency("coro", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    // Create options for backend selection
+    var options = b.addOptions();
+    options.addOption(?[]const u8, "backend", backend);
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
@@ -30,8 +23,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    zio.addImport("aio", aio.module("aio"));
-    zio.addImport("coro", coro.module("coro"));
+    zio.addOptions("zio_options", options);
 
     const zio_lib = b.addLibrary(.{
         .name = "zio",

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const aio = @import("aio");
+const aio = @import("../libs/aio/src/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const File = @import("file.zig").File;
 const Cancelable = @import("../common.zig").Cancelable;

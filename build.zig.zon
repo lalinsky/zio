@@ -9,12 +9,5 @@
         "src",
         "examples",
     },
-    .dependencies = .{
-        .aio = .{
-            .path = "src/libs/aio",
-        },
-        .coro = .{
-            .path = "src/libs/coro",
-        },
-    },
+    .dependencies = .{},
 }

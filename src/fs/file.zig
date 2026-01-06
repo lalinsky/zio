@@ -4,7 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const aio = @import("aio");
+const aio = @import("../libs/aio/src/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
 const waitForIo = @import("../io.zig").waitForIo;
