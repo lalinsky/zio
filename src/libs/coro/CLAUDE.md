@@ -1,0 +1,22 @@
+General:
+- read README.md for overview of the project
+
+Testing:
+- use `./check.sh` to format code, run unit tests
+- use `./check.sh --filter "test name"` to run specific tests
+- use `./check.sh --target x86_64-windows --wine` to cross-compile and test via Wine
+- use `./check.sh --target riscv64-linux --qemu` to cross-compile and test via QEMU
+- run full check after you are done
+
+Zig compatibility:
+- use `zig env` to get the path to the Zig standard library, if you need to check something
+- don't assume you know how std APIs work, you mostly likely have outdated information
+- we are about to upgrade to Zig 0.16 and that version is removing `std.posix`, we can't depend on any of that anymore, we need our own wrappers
+
+Release process:
+1. Update docs/changelog.md - change [Unreleased] to [X.Y.Z] with current date
+2. Update version in build.zig.zon
+3. Commit files with message "Release vX.Y.Z"
+4. Tag the commit with vX.Y.Z
+5. Push commit and tags: `git push && git push --tags`
+6. Create GitHub release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes "<changelog content>"`
