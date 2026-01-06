@@ -11,12 +11,10 @@
     },
     .dependencies = .{
         .aio = .{
-            .url = "git+https://github.com/lalinsky/aio.zig?ref=v0.1.0#5e2db8aadd14ee141084922c49d4e8952edaa969",
-            .hash = "aio-0.4.0-k5779gHcBgDaPq8pM2EnhXXL-GhLNLEI740wtNZgGUzt",
+            .path = "src/libs/aio",
         },
         .coro = .{
-            .url = "git+https://github.com/lalinsky/coro.zig?ref=v0.1.0#b981bc3a9b0e4da280af24e9e93ac157522a4dcb",
-            .hash = "coro-0.1.0-PlYYwPo3AQD7pfDBSQ1JywF2mHogRiAsfS00jsUQv8CZ",
+            .path = "src/libs/coro",
         },
     },
 }
