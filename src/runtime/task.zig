@@ -312,7 +312,7 @@ pub const AnyTask = struct {
         const self = fromAwaitable(awaitable);
 
         if (self.coro.context.stack_info.allocation_len > 0) {
-            rt.stack_pool.release(self.coro.context.stack_info);
+            rt.stack_pool.release(self.coro.context.stack_info, rt.now());
         }
 
         self.closure.free(AnyTask, rt, self);
