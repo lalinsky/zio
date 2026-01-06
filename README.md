@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lalinsky/zio/actions/workflows/test.yml/badge.svg)](https://github.com/lalinsky/zio/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Zig](https://img.shields.io/badge/zig-0.15.1-orange.svg)](https://ziglang.org/download/)
+[![Zig](https://img.shields.io/badge/zig-0.15.2-orange.svg)](https://ziglang.org/download/)
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
 
 The project consists of a few high-level components:
@@ -15,6 +15,7 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 
 [`std.Io.Reader`]: https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader
 [`std.Io.Writer`]: https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer
+[`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io.Writer
 [goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
 
 ## Features
