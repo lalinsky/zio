@@ -76,11 +76,6 @@ pub fn build(b: *std.Build) void {
         });
         exe.root_module.addImport("zio", zio);
 
-        // Link libc for examples that need mprotect/signals
-        if (std.mem.eql(u8, example.name, "stack-overflow-demo")) {
-            exe.linkLibC();
-        }
-
         const install_exe = b.addInstallArtifact(exe, .{});
         examples_step.dependOn(&install_exe.step);
     }
@@ -105,16 +100,36 @@ pub fn build(b: *std.Build) void {
     }
 
     // Tests
+    const emit_test_bin = b.option(bool, "emit-test-bin", "Build test binary without running") orelse false;
+
     const lib_unit_tests = b.addTest(.{
         .root_module = zio,
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
 
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
+    if (emit_test_bin) {
+        test_step.dependOn(&b.addInstallArtifact(lib_unit_tests, .{}).step);
+    } else {
+        const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+        test_step.dependOn(&run_lib_unit_tests.step);
+    }
 
-    // Build tests without running them (useful for cross-compilation)
-    const build_tests_step = b.step("build-tests", "Build unit tests without running");
-    build_tests_step.dependOn(&b.addInstallArtifact(lib_unit_tests, .{}).step);
+    // Coro library tests
+    const coro_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/libs/coro/src/coroutines.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    const test_coro_step = b.step("test-coro", "Run coro library tests");
+    if (emit_test_bin) {
+        test_coro_step.dependOn(&b.addInstallArtifact(coro_tests, .{}).step);
+    } else {
+        const run_coro_tests = b.addRunArtifact(coro_tests);
+        test_coro_step.dependOn(&run_coro_tests.step);
+    }
 }

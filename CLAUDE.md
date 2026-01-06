@@ -7,7 +7,7 @@
 
 Extra notes:
 - use `zig env` to get the path to the Zig standard library, if you need to check something
-- to test Windows builds on Linux: `zig build build-tests -Dtarget=x86_64-windows && wine zig-out/bin/test.exe`
+- to test Windows builds on Linux: `zig build test -Demit-test-bin -Dtarget=x86_64-windows && wine zig-out/bin/test.exe`
 
 Release process:
 1. Update docs/changelog.md - change [Unreleased] to [X.Y.Z] with current date
