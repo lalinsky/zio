@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-const aio = @import("libs/aio/src/root.zig");
+const aio = @import("aio/root.zig");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;

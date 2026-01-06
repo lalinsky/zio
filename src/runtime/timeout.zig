@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const aio = @import("../libs/aio/src/root.zig");
+const aio = @import("../aio/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("task.zig").AnyTask;
 const resumeTask = @import("task.zig").resumeTask;
