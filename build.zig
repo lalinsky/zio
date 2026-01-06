@@ -114,6 +114,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addInstallArtifact(lib_unit_tests, .{}).step);
     } else {
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+        run_lib_unit_tests.has_side_effects = true;
         test_step.dependOn(&run_lib_unit_tests.step);
     }
 
@@ -133,6 +134,7 @@ pub fn build(b: *std.Build) void {
         test_coro_step.dependOn(&b.addInstallArtifact(coro_tests, .{}).step);
     } else {
         const run_coro_tests = b.addRunArtifact(coro_tests);
+        run_coro_tests.has_side_effects = true;
         test_coro_step.dependOn(&run_coro_tests.step);
     }
 }
