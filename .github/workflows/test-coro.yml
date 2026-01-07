@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.15.2', 'master']
+        zig_version: ['0.15.2']
         optimize: ['Debug', 'ReleaseSafe']
         config:
           - { os: ubuntu-24.04, target: native }
@@ -41,15 +41,6 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ matrix.zig_version }}
-
-    - name: Apply NetBSD patch (zig master)
-      if: matrix.zig_version == 'master'
-      shell: bash
-      run: |
-        ZIG_LIB=$(zig env | grep '\.lib_dir' | sed 's/.*"\(.*\)".*/\1/')
-        echo "Zig lib dir: $ZIG_LIB"
-        sed -i.bak 's/_lwp_park = netbsd\._lwp_park/_lwp_park = netbsd.___lwp_park60/' "$ZIG_LIB/std/c.zig"
-        sed -i.bak 's/pub extern "c" fn _lwp_park(/pub extern "c" fn ___lwp_park60(/' "$ZIG_LIB/std/c/netbsd.zig"
 
     - name: Install QEMU
       if: matrix.config.qemu
