@@ -61,14 +61,14 @@ jobs:
       if: ${{ !matrix.config.vm }}
       shell: bash
       run: >
-        zig build test -Dtest-filter=coro -Doptimize=${{ matrix.optimize }} --summary all
+        zig build test -Dtest-filter="coro." -Doptimize=${{ matrix.optimize }} --summary all
         ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
         ${{ matrix.config.qemu && '-fqemu' || '' }}
       timeout-minutes: 10
 
     - name: Build for VM
       if: matrix.config.vm
-      run: zig build test -Dtest-filter=coro -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.config.target }} -Demit-test-bin
+      run: zig build test -Dtest-filter="coro." -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.config.target }} -Demit-test-bin
       timeout-minutes: 5
 
     - name: Run tests (FreeBSD VM)
