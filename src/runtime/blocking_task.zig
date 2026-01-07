@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const aio = @import("../aio/root.zig");
+const ev = @import("../ev/root.zig");
 
 const Runtime = @import("../runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
@@ -15,7 +15,7 @@ const assert = std.debug.assert;
 
 pub const AnyBlockingTask = struct {
     awaitable: Awaitable,
-    work: aio.Work,
+    work: ev.Work,
     runtime: *Runtime,
     closure: Closure,
 
@@ -56,7 +56,7 @@ pub const AnyBlockingTask = struct {
                     .vtable = &AnyBlockingTask.wait_node_vtable,
                 },
             },
-            .work = aio.Work.init(workFunc, self),
+            .work = ev.Work.init(workFunc, self),
             .runtime = runtime,
             .closure = alloc_result.closure,
         };
@@ -74,18 +74,18 @@ pub const AnyBlockingTask = struct {
 };
 
 // Work function for blocking tasks - runs in thread pool
-fn workFunc(work: *aio.Work) void {
+fn workFunc(work: *ev.Work) void {
     const any_blocking_task: *AnyBlockingTask = @ptrCast(@alignCast(work.userdata.?));
 
     // Execute the user's blocking function
-    // aio handles cancellation - if canceled, this won't be called
+    // ev handles cancellation - if canceled, this won't be called
     any_blocking_task.closure.call(AnyBlockingTask, any_blocking_task, any_blocking_task.awaitable.group_node.group);
 }
 
-// Completion callback - called by aio event loop when work finishes
+// Completion callback - called by ev event loop when work finishes
 fn completionCallback(
-    _: *aio.Loop,
-    completion: *aio.Completion,
+    _: *ev.Loop,
+    completion: *ev.Completion,
 ) void {
     const any_blocking_task: *AnyBlockingTask = @ptrCast(@alignCast(completion.userdata.?));
 

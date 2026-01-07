@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-const aio = @import("aio/root.zig");
+const ev = @import("ev/root.zig");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
@@ -61,7 +61,7 @@ pub const SpawnOptions = struct {
 
 // Runtime configuration options
 pub const RuntimeOptions = struct {
-    thread_pool: aio.ThreadPool.Options = .{},
+    thread_pool: ev.ThreadPool.Options = .{},
     stack_pool: StackPoolConfig = .{
         .maximum_size = 8 * 1024 * 1024, // 8MB reserved
         .committed_size = 64 * 1024, // 64KB initial commit
@@ -83,8 +83,8 @@ pub const RuntimeOptions = struct {
 
 // Noop callback for async timer cancellation
 fn noopTimerCancelCallback(
-    l: *aio.Loop,
-    c: *aio.Completion,
+    l: *ev.Loop,
+    c: *ev.Completion,
 ) void {
     _ = l;
     _ = c;
@@ -312,7 +312,7 @@ pub fn getNextExecutor(rt: *Runtime) *Executor {
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
-    loop: aio.Loop,
+    loop: ev.Loop,
     allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
@@ -842,7 +842,7 @@ pub const Executor = struct {
 
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
-    thread_pool: aio.ThreadPool,
+    thread_pool: ev.ThreadPool,
     stack_pool: StackPool,
     task_pool: TaskPool,
     allocator: Allocator,

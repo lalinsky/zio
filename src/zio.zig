@@ -45,6 +45,9 @@ pub const WaitResult = @import("select.zig").WaitResult;
 /// Low-level coroutine library.
 pub const coro = @import("coro/root.zig");
 
+/// Low-level event loop library.
+pub const ev = @import("ev/root.zig");
+
 test {
     std.testing.refAllDecls(@This());
 }

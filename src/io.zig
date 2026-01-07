@@ -3,7 +3,7 @@
 
 const std = @import("std");
 
-const aio = @import("aio/root.zig");
+const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
 const resumeTask = @import("runtime/task.zig").resumeTask;
@@ -14,21 +14,21 @@ const Timeoutable = @import("common.zig").Timeoutable;
 const Timeout = @import("runtime/timeout.zig").Timeout;
 
 /// Generic callback that resumes the task stored in userdata
-pub fn genericCallback(loop: *aio.Loop, completion: *aio.Completion) void {
+pub fn genericCallback(loop: *ev.Loop, completion: *ev.Completion) void {
     _ = loop;
     const task: *AnyTask = @ptrCast(@alignCast(completion.userdata.?));
     resumeTask(task, .local);
 }
 
 /// Cancels the I/O operation and waits for full completion.
-pub fn cancelIo(rt: *Runtime, completion: *aio.Completion) void {
+pub fn cancelIo(rt: *Runtime, completion: *ev.Completion) void {
     // We can't handle user cancelations during this
     rt.beginShield();
     defer rt.endShield();
 
     // Cancel the operation and wait for the cancelation to complete
-    var cancel = aio.Cancel{
-        .c = aio.Completion.init(.cancel),
+    var cancel = ev.Cancel{
+        .c = ev.Completion.init(.cancel),
         .target = completion,
     };
     const task = rt.getCurrentTask();
@@ -44,7 +44,7 @@ pub fn cancelIo(rt: *Runtime, completion: *aio.Completion) void {
     waitForIo(rt, completion) catch unreachable;
 }
 
-pub fn waitForIo(rt: *Runtime, completion: *aio.Completion) Cancelable!void {
+pub fn waitForIo(rt: *Runtime, completion: *ev.Completion) Cancelable!void {
     const task = rt.getCurrentTask();
     var executor = task.getExecutor();
 
@@ -70,7 +70,7 @@ pub fn waitForIo(rt: *Runtime, completion: *aio.Completion) Cancelable!void {
     std.debug.assert(completion.state == .dead);
 }
 
-pub fn timedWaitForIo(rt: *Runtime, completion: *aio.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     const task = rt.getCurrentTask();
     var executor = task.getExecutor();
 
@@ -105,7 +105,7 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *aio.Completion, timeout_ns: u64
 }
 
 // Note: runIo and IoOperation have been removed in favor of working directly
-// with aio's typed completions (FileRead, FileWrite, etc.)
+// with ev's typed completions (FileRead, FileWrite, etc.)
 
 /// Helper function to fill an iovec buffer for writing with support for splatting patterns.
 /// Used by both FileWriter and Stream.Writer to handle the splat parameter correctly.

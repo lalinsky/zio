@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
     const backend = b.option(
         []const u8,
         "backend",
-        "Override the default aio backend (io_uring, epoll, kqueue, iocp, poll)",
+        "Override the default event loop backend (io_uring, epoll, kqueue, iocp, poll)",
     );
 
     // Create options for backend selection
@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "signal-demo", .file = "examples/signal_demo.zig" },
         .{ .name = "udp-echo-server", .file = "examples/udp_echo_server.zig" },
         .{ .name = "coro-demo", .file = "examples/coro_demo.zig" },
+        .{ .name = "ev-demo", .file = "examples/ev_demo.zig" },
     };
 
     // Benchmarks configuration

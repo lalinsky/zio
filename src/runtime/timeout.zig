@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const aio = @import("../aio/root.zig");
+const ev = @import("../ev/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("task.zig").AnyTask;
 const resumeTask = @import("task.zig").resumeTask;
@@ -16,7 +16,7 @@ const genericCallback = @import("../io.zig").genericCallback;
 /// When a timeout expires, operations return error.Canceled and the `triggered` field is set to true,
 /// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
 pub const Timeout = struct {
-    timer: aio.Timer = .init(0),
+    timer: ev.Timer = .init(0),
     triggered: bool = false,
     task: ?*AnyTask = null,
 
@@ -45,7 +45,7 @@ pub const Timeout = struct {
         // Convert nanoseconds to milliseconds
         const timeout_ms: u64 = (timeout_ns + std.time.ns_per_ms / 2) / std.time.ns_per_ms;
 
-        // Initialize aio.Timer
+        // Initialize ev.Timer
         self.timer.c.userdata = self;
         self.timer.c.callback = timeoutCallback;
 
@@ -56,8 +56,8 @@ pub const Timeout = struct {
 
 /// Callback when timeout timer fires
 fn timeoutCallback(
-    _: *aio.Loop,
-    completion: *aio.Completion,
+    _: *ev.Loop,
+    completion: *ev.Completion,
 ) void {
     const timeout: *Timeout = @ptrCast(@alignCast(completion.userdata.?));
     const task = timeout.task orelse return;

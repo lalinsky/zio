@@ -245,7 +245,7 @@ pub const NetShutdownError = error{
 
 const Self = @This();
 
-const log = std.log.scoped(.aio_iocp);
+const log = std.log.scoped(.ev_iocp);
 
 allocator: std.mem.Allocator,
 shared_state: *SharedState,

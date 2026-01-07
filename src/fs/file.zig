@@ -4,7 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const aio = @import("../aio/root.zig");
+const ev = @import("../ev/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
 const waitForIo = @import("../io.zig").waitForIo;
@@ -17,8 +17,8 @@ const Handle = std.fs.File.Handle;
 pub const File = struct {
     fd: Handle,
 
-    pub const ReadError = aio.system.fs.FileReadError || Cancelable;
-    pub const WriteError = aio.system.fs.FileWriteError || Cancelable;
+    pub const ReadError = ev.system.fs.FileReadError || Cancelable;
+    pub const WriteError = ev.system.fs.FileWriteError || Cancelable;
 
     pub fn fromFd(fd: Handle) File {
         return .{ .fd = fd };
@@ -28,8 +28,8 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [1]aio.system.iovec = undefined;
-        var op = aio.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
+        var storage: [1]ev.system.iovec = undefined;
+        var op = ev.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -43,8 +43,8 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [1]aio.system.iovec_const = undefined;
-        var op = aio.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
+        var storage: [1]ev.system.iovec_const = undefined;
+        var op = ev.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -59,8 +59,8 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [16]aio.system.iovec = undefined;
-        var op = aio.FileRead.init(self.fd, aio.ReadBuf.fromSlices(slices, &storage), offset);
+        var storage: [16]ev.system.iovec = undefined;
+        var op = ev.FileRead.init(self.fd, ev.ReadBuf.fromSlices(slices, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -75,8 +75,8 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [16]aio.system.iovec_const = undefined;
-        var op = aio.FileWrite.init(self.fd, aio.WriteBuf.fromSlices(slices, &storage), offset);
+        var storage: [16]ev.system.iovec_const = undefined;
+        var op = ev.FileWrite.init(self.fd, ev.WriteBuf.fromSlices(slices, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -87,11 +87,11 @@ pub const File = struct {
     }
 
     /// Read from file using ReadBuf (direct iovec access).
-    pub fn readBuf(self: File, rt: *Runtime, buf: aio.ReadBuf, offset: u64) ReadError!usize {
+    pub fn readBuf(self: File, rt: *Runtime, buf: ev.ReadBuf, offset: u64) ReadError!usize {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.FileRead.init(self.fd, buf, offset);
+        var op = ev.FileRead.init(self.fd, buf, offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -102,11 +102,11 @@ pub const File = struct {
     }
 
     /// Write to file using WriteBuf (direct iovec access).
-    pub fn writeBuf(self: File, rt: *Runtime, buf: aio.WriteBuf, offset: u64) WriteError!usize {
+    pub fn writeBuf(self: File, rt: *Runtime, buf: ev.WriteBuf, offset: u64) WriteError!usize {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.FileWrite.init(self.fd, buf, offset);
+        var op = ev.FileWrite.init(self.fd, buf, offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -120,7 +120,7 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.FileClose.init(self.fd);
+        var op = ev.FileClose.init(self.fd);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -134,13 +134,13 @@ pub const File = struct {
         _ = op.getResult() catch {};
     }
 
-    pub const StatError = aio.system.fs.FileStatError || Cancelable;
+    pub const StatError = ev.system.fs.FileStatError || Cancelable;
 
-    pub fn stat(self: File, rt: *Runtime) StatError!aio.system.fs.FileStatInfo {
+    pub fn stat(self: File, rt: *Runtime) StatError!ev.system.fs.FileStatInfo {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.FileStat.init(self.fd, null);
+        var op = ev.FileStat.init(self.fd, null);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -236,14 +236,14 @@ pub const FileReader = struct {
             .windows => 1,
             else => 16,
         };
-        var iovec_storage: [max_vecs]aio.system.iovec = undefined;
+        var iovec_storage: [max_vecs]ev.system.iovec = undefined;
         const dest_n, const data_size = if (builtin.os.tag == .windows)
             try io_reader.writableVectorWsa(&iovec_storage, data)
         else
             try io_reader.writableVectorPosix(&iovec_storage, data);
         if (dest_n == 0) return 0;
 
-        const buf = aio.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
+        const buf = ev.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
         const n = r.file.readBuf(r.runtime, buf, r.position) catch |err| {
             r.err = err;
             return error.ReadFailed;
@@ -456,8 +456,8 @@ pub fn fileWritePositional(rt: *Runtime, fd: Handle, buffers: []const []const u8
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var storage: [16]aio.system.iovec_const = undefined;
-    var op = aio.FileWrite.init(fd, aio.WriteBuf.fromSlices(buffers, &storage), offset);
+    var storage: [16]ev.system.iovec_const = undefined;
+    var op = ev.FileWrite.init(fd, ev.WriteBuf.fromSlices(buffers, &storage), offset);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -473,8 +473,8 @@ pub fn fileReadPositional(rt: *Runtime, fd: Handle, buffers: [][]u8, offset: u64
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var storage: [16]aio.system.iovec = undefined;
-    var op = aio.FileRead.init(fd, aio.ReadBuf.fromSlices(buffers, &storage), offset);
+    var storage: [16]ev.system.iovec = undefined;
+    var op = ev.FileRead.init(fd, ev.ReadBuf.fromSlices(buffers, &storage), offset);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 

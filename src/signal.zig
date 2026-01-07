@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const aio = @import("aio/root.zig");
+const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;

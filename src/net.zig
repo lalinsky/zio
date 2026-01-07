@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const aio = @import("aio/root.zig");
+const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
 
@@ -11,7 +11,7 @@ const waitForIo = @import("io.zig").waitForIo;
 const genericCallback = @import("io.zig").genericCallback;
 const fillBuf = @import("io.zig").fillBuf;
 
-const Handle = aio.Backend.NetHandle;
+const Handle = ev.Backend.NetHandle;
 
 pub const has_unix_sockets = switch (builtin.os.tag) {
     .windows => builtin.os.version_range.windows.isAtLeast(.win10_rs4) orelse false,
@@ -21,27 +21,27 @@ pub const has_unix_sockets = switch (builtin.os.tag) {
 
 pub const default_kernel_backlog = 128;
 
-pub const ShutdownHow = aio.system.net.ShutdownHow;
+pub const ShutdownHow = ev.system.net.ShutdownHow;
 
 /// Get the socket address length for a given sockaddr.
 /// Determines the appropriate length based on the address family.
-fn getSockAddrLen(addr: *const aio.system.net.sockaddr) usize {
+fn getSockAddrLen(addr: *const ev.system.net.sockaddr) usize {
     return switch (addr.family) {
-        aio.system.net.AF.INET => @sizeOf(aio.system.net.sockaddr.in),
-        aio.system.net.AF.INET6 => @sizeOf(aio.system.net.sockaddr.in6),
-        aio.system.net.AF.UNIX => @sizeOf(aio.system.net.sockaddr.un),
+        ev.system.net.AF.INET => @sizeOf(ev.system.net.sockaddr.in),
+        ev.system.net.AF.INET6 => @sizeOf(ev.system.net.sockaddr.in6),
+        ev.system.net.AF.UNIX => @sizeOf(ev.system.net.sockaddr.un),
         else => unreachable,
     };
 }
 
 pub const IpAddress = extern union {
-    any: aio.system.net.sockaddr,
-    in: aio.system.net.sockaddr.in,
-    in6: aio.system.net.sockaddr.in6,
+    any: ev.system.net.sockaddr,
+    in: ev.system.net.sockaddr.in,
+    in6: ev.system.net.sockaddr.in6,
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
         return .{ .in = .{
-            .family = aio.system.net.AF.INET,
+            .family = ev.system.net.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
             .addr = @as(*align(1) const u32, @ptrCast(&addr)).*,
         } };
@@ -53,24 +53,24 @@ pub const IpAddress = extern union {
 
     pub fn fromStd(addr: std.net.Address) IpAddress {
         switch (addr.any.family) {
-            aio.system.net.AF.INET => return .{ .in = addr.in.sa },
-            aio.system.net.AF.INET6 => return .{ .in6 = addr.in6.sa },
+            ev.system.net.AF.INET => return .{ .in = addr.in.sa },
+            ev.system.net.AF.INET6 => return .{ .in6 = addr.in6.sa },
             else => unreachable,
         }
     }
 
-    pub fn initPosix(addr: *const aio.system.net.sockaddr, len: aio.system.net.socklen_t) IpAddress {
+    pub fn initPosix(addr: *const ev.system.net.sockaddr, len: ev.system.net.socklen_t) IpAddress {
         return switch (addr.family) {
-            aio.system.net.AF.INET => blk: {
-                std.debug.assert(len >= @sizeOf(aio.system.net.sockaddr.in));
+            ev.system.net.AF.INET => blk: {
+                std.debug.assert(len >= @sizeOf(ev.system.net.sockaddr.in));
                 var result: IpAddress = .{ .in = undefined };
-                @memcpy(std.mem.asBytes(&result.in), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(aio.system.net.sockaddr.in)]);
+                @memcpy(std.mem.asBytes(&result.in), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(ev.system.net.sockaddr.in)]);
                 break :blk result;
             },
-            aio.system.net.AF.INET6 => blk: {
-                std.debug.assert(len >= @sizeOf(aio.system.net.sockaddr.in6));
+            ev.system.net.AF.INET6 => blk: {
+                std.debug.assert(len >= @sizeOf(ev.system.net.sockaddr.in6));
                 var result: IpAddress = .{ .in6 = undefined };
-                @memcpy(std.mem.asBytes(&result.in6), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(aio.system.net.sockaddr.in6)]);
+                @memcpy(std.mem.asBytes(&result.in6), @as([*]const u8, @ptrCast(addr))[0..@sizeOf(ev.system.net.sockaddr.in6)]);
                 break :blk result;
             },
             else => unreachable,
@@ -79,7 +79,7 @@ pub const IpAddress = extern union {
 
     pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) IpAddress {
         return .{ .in6 = .{
-            .family = aio.system.net.AF.INET6,
+            .family = ev.system.net.AF.INET6,
             .port = std.mem.nativeToBig(u16, port),
             .flowinfo = flowinfo,
             .addr = addr,
@@ -190,8 +190,8 @@ pub const IpAddress = extern union {
     /// Asserts that the address is ip4 or ip6.
     pub fn getPort(self: IpAddress) u16 {
         return switch (self.any.family) {
-            aio.system.net.AF.INET => std.mem.bigToNative(u16, self.in.port),
-            aio.system.net.AF.INET6 => std.mem.bigToNative(u16, self.in6.port),
+            ev.system.net.AF.INET => std.mem.bigToNative(u16, self.in.port),
+            ev.system.net.AF.INET6 => std.mem.bigToNative(u16, self.in6.port),
             else => unreachable,
         };
     }
@@ -200,19 +200,19 @@ pub const IpAddress = extern union {
     /// Asserts that the address is ip4 or ip6.
     pub fn setPort(self: *IpAddress, port: u16) void {
         switch (self.any.family) {
-            aio.system.net.AF.INET => self.in.port = std.mem.nativeToBig(u16, port),
-            aio.system.net.AF.INET6 => self.in6.port = std.mem.nativeToBig(u16, port),
+            ev.system.net.AF.INET => self.in.port = std.mem.nativeToBig(u16, port),
+            ev.system.net.AF.INET6 => self.in6.port = std.mem.nativeToBig(u16, port),
             else => unreachable,
         }
     }
 
     pub fn format(self: IpAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
-            aio.system.net.AF.INET => {
+            ev.system.net.AF.INET => {
                 const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
                 try w.print("{d}.{d}.{d}.{d}:{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3], self.getPort() });
             },
-            aio.system.net.AF.INET6 => {
+            ev.system.net.AF.INET6 => {
                 const port = self.getPort();
                 const addr = self.in6.addr;
 
@@ -312,14 +312,14 @@ pub const IpAddress = extern union {
 };
 
 pub const UnixAddress = extern union {
-    any: aio.system.net.sockaddr,
-    un: if (has_unix_sockets) aio.system.net.sockaddr.un else void,
+    any: ev.system.net.sockaddr,
+    un: if (has_unix_sockets) ev.system.net.sockaddr.un else void,
 
     pub const max_len = 108;
 
     pub fn init(path: []const u8) !UnixAddress {
         if (!has_unix_sockets) unreachable;
-        var un = aio.system.net.sockaddr.un{ .family = aio.system.net.AF.UNIX, .path = undefined };
+        var un = ev.system.net.sockaddr.un{ .family = ev.system.net.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
         @memcpy(un.path[0..path.len], path);
         un.path[path.len] = 0;
@@ -337,7 +337,7 @@ pub const UnixAddress = extern union {
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
-            aio.system.net.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
+            ev.system.net.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
             else => unreachable,
         }
     }
@@ -356,16 +356,16 @@ pub const UnixAddress = extern union {
 };
 
 pub const Address = extern union {
-    any: aio.system.net.sockaddr,
+    any: ev.system.net.sockaddr,
     ip: IpAddress,
     unix: UnixAddress,
 
     /// Convert to std.net.Address
     pub fn toStd(self: *const Address) std.net.Address {
         return switch (self.any.family) {
-            aio.system.net.AF.INET => std.net.Address{ .in = .{ .sa = self.ip.in } },
-            aio.system.net.AF.INET6 => std.net.Address{ .in6 = .{ .sa = self.ip.in6 } },
-            aio.system.net.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            ev.system.net.AF.INET => std.net.Address{ .in = .{ .sa = self.ip.in } },
+            ev.system.net.AF.INET6 => std.net.Address{ .in6 = .{ .sa = self.ip.in6 } },
+            ev.system.net.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
             else => unreachable,
         };
     }
@@ -373,9 +373,9 @@ pub const Address = extern union {
     /// Convert from std.net.Address
     pub fn fromStd(addr: std.net.Address) Address {
         return switch (addr.any.family) {
-            aio.system.net.AF.INET => Address{ .ip = .{ .in = addr.in.sa } },
-            aio.system.net.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6.sa } },
-            aio.system.net.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            ev.system.net.AF.INET => Address{ .ip = .{ .in = addr.in.sa } },
+            ev.system.net.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6.sa } },
+            ev.system.net.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
             else => unreachable,
         };
     }
@@ -383,14 +383,14 @@ pub const Address = extern union {
     /// Convert sockaddr to IpAddress from raw bytes.
     /// This properly handles IPv4 and IPv6 addresses without alignment issues.
     fn fromStorageIp(data: []const u8) IpAddress {
-        const sockaddr: *align(1) const aio.system.net.sockaddr = @ptrCast(data.ptr);
+        const sockaddr: *align(1) const ev.system.net.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
-            aio.system.net.AF.INET => blk: {
+            ev.system.net.AF.INET => blk: {
                 var addr: IpAddress = .{ .in = undefined };
                 @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
                 break :blk addr;
             },
-            aio.system.net.AF.INET6 => blk: {
+            ev.system.net.AF.INET6 => blk: {
                 var addr: IpAddress = .{ .in6 = undefined };
                 @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
                 break :blk addr;
@@ -402,13 +402,13 @@ pub const Address = extern union {
     /// Convert sockaddr to Address from raw bytes.
     /// This properly handles IPv4, IPv6, and Unix socket addresses without alignment issues.
     fn fromStorage(data: []const u8) Address {
-        const sockaddr: *align(1) const aio.system.net.sockaddr = @ptrCast(data.ptr);
+        const sockaddr: *align(1) const ev.system.net.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
-            aio.system.net.AF.INET, aio.system.net.AF.INET6 => Address{ .ip = fromStorageIp(data) },
-            aio.system.net.AF.UNIX => blk: {
+            ev.system.net.AF.INET, ev.system.net.AF.INET6 => Address{ .ip = fromStorageIp(data) },
+            ev.system.net.AF.UNIX => blk: {
                 if (!has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
-                const copy_len = @min(data.len, @sizeOf(aio.system.net.sockaddr.un));
+                const copy_len = @min(data.len, @sizeOf(ev.system.net.sockaddr.un));
                 @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
                 break :blk addr;
             },
@@ -418,16 +418,16 @@ pub const Address = extern union {
 
     pub fn format(self: Address, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.any.family) {
-            aio.system.net.AF.INET, aio.system.net.AF.INET6 => return self.ip.format(w),
-            aio.system.net.AF.UNIX => return self.unix.format(w),
+            ev.system.net.AF.INET, ev.system.net.AF.INET6 => return self.ip.format(w),
+            ev.system.net.AF.UNIX => return self.unix.format(w),
             else => unreachable,
         }
     }
 
     pub fn connect(self: Address, rt: *Runtime) !Stream {
         switch (self.any.family) {
-            aio.system.net.AF.INET, aio.system.net.AF.INET6 => return self.ip.connect(rt),
-            aio.system.net.AF.UNIX => return self.unix.connect(rt),
+            ev.system.net.AF.INET, ev.system.net.AF.INET6 => return self.ip.connect(rt),
+            ev.system.net.AF.UNIX => return self.unix.connect(rt),
             else => unreachable,
         }
     }
@@ -486,7 +486,7 @@ pub const Socket = struct {
 
     /// Helper function to set a boolean socket option
     fn setBoolOption(self: Socket, level: i32, optname: u32, enabled: bool) !void {
-        // aio.Backend.NetHandle is already the correct type for the platform
+        // ev.Backend.NetHandle is already the correct type for the platform
         const value: c_int = if (enabled) 1 else 0;
         const bytes = std.mem.asBytes(&value);
         try std.posix.setsockopt(self.handle, level, optname, bytes);
@@ -499,9 +499,9 @@ pub const Socket = struct {
 
         // Copy addr to self.address so NetBind can update it with actual bound address
         self.address = addr;
-        var addr_len: aio.system.net.socklen_t = @intCast(getSockAddrLen(&self.address.any));
+        var addr_len: ev.system.net.socklen_t = @intCast(getSockAddrLen(&self.address.any));
 
-        var op = aio.NetBind.init(self.handle, &self.address.any, &addr_len);
+        var op = ev.NetBind.init(self.handle, &self.address.any, &addr_len);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -515,7 +515,7 @@ pub const Socket = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.NetListen.init(self.handle, backlog);
+        var op = ev.NetListen.init(self.handle, backlog);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -546,7 +546,7 @@ pub const Socket = struct {
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
     pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        // All backends use the same implementation with aio
+        // All backends use the same implementation with ev
         return try self.receiveFromRecvfrom(rt, buf);
     }
 
@@ -554,11 +554,11 @@ pub const Socket = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [1]aio.system.iovec = undefined;
+        var storage: [1]ev.system.iovec = undefined;
         var result: ReceiveFromResult = undefined;
-        var peer_addr_len: aio.system.net.socklen_t = @sizeOf(@TypeOf(result.from));
+        var peer_addr_len: ev.system.net.socklen_t = @sizeOf(@TypeOf(result.from));
 
-        var op = aio.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
+        var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -571,14 +571,14 @@ pub const Socket = struct {
     }
 
     fn receiveFromRecvmsg(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        // aio handles this the same way as recvfrom
+        // ev handles this the same way as recvfrom
         return self.receiveFromRecvfrom(rt, buf);
     }
 
     /// Sends a datagram to the specified address.
     /// Used for UDP and other datagram-based protocols.
     pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        // All backends use the same implementation with aio
+        // All backends use the same implementation with ev
         return try self.sendToSendto(rt, addr, data);
     }
 
@@ -586,9 +586,9 @@ pub const Socket = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [1]aio.system.iovec_const = undefined;
-        const addr_len: aio.system.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
-        var op = aio.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
+        var storage: [1]ev.system.iovec_const = undefined;
+        const addr_len: ev.system.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
+        var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -599,7 +599,7 @@ pub const Socket = struct {
     }
 
     fn sendToSendmsg(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        // aio handles this the same way as sendto
+        // ev handles this the same way as sendto
         return self.sendToSendto(rt, addr, data);
     }
 
@@ -639,14 +639,14 @@ pub const Stream = struct {
         return netRead(rt, self.socket.handle, &bufs);
     }
 
-    /// Low-level read function that accepts aio.ReadBuf slice directly.
+    /// Low-level read function that accepts ev.ReadBuf slice directly.
     /// Returns the number of bytes read, which may be less than requested.
     /// A return value of 0 indicates end-of-stream.
-    pub fn readBuf(self: Stream, rt: *Runtime, buffers: []aio.ReadBuf) !usize {
+    pub fn readBuf(self: Stream, rt: *Runtime, buffers: []ev.ReadBuf) !usize {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.NetRecv.init(self.socket.handle, buffers, .{});
+        var op = ev.NetRecv.init(self.socket.handle, buffers, .{});
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -677,13 +677,13 @@ pub const Stream = struct {
         return netWrite(rt, self.socket.handle, buf, &.{empty}, 0);
     }
 
-    /// Low-level write function that accepts aio.WriteBuf slice directly.
+    /// Low-level write function that accepts ev.WriteBuf slice directly.
     /// Returns the number of bytes written, which may be less than requested.
-    pub fn writeBuf(self: Stream, rt: *Runtime, buffers: []const aio.WriteBuf) !usize {
+    pub fn writeBuf(self: Stream, rt: *Runtime, buffers: []const ev.WriteBuf) !usize {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var op = aio.NetSend.init(self.socket.handle, buffers, .{});
+        var op = ev.NetSend.init(self.socket.handle, buffers, .{});
         op.c.userdata = task;
         op.c.callback = genericCallback;
 
@@ -717,7 +717,7 @@ pub const Stream = struct {
         rt: *Runtime,
         stream: Stream,
         interface: std.Io.Reader,
-        err: ?aio.NetRecv.Error = null,
+        err: ?ev.NetRecv.Error = null,
 
         pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
             return .{
@@ -769,7 +769,7 @@ pub const Stream = struct {
         rt: *Runtime,
         stream: Stream,
         interface: std.Io.Writer,
-        err: ?aio.NetSend.Error = null,
+        err: ?ev.NetSend.Error = null,
 
         pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
             return .{
@@ -810,7 +810,7 @@ fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var op = aio.NetOpen.init(@enumFromInt(family), .stream, .{});
+    var op = ev.NetOpen.init(@enumFromInt(family), .stream, .{});
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -824,7 +824,7 @@ fn createDatagramSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var op = aio.NetOpen.init(@enumFromInt(family), .dgram, .{});
+    var op = ev.NetOpen.init(@enumFromInt(family), .dgram, .{});
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -931,10 +931,10 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
     const executor = task.getExecutor();
 
     // Convert [][]u8 to ReadBuf
-    var storage: [16]aio.system.iovec = undefined;
-    const read_bufs = aio.ReadBuf.fromSlices(bufs, &storage);
+    var storage: [16]ev.system.iovec = undefined;
+    const read_bufs = ev.ReadBuf.fromSlices(bufs, &storage);
 
-    var op = aio.NetRecv.init(fd, read_bufs, .{});
+    var op = ev.NetRecv.init(fd, read_bufs, .{});
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -952,8 +952,8 @@ pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []co
     var slices: [16][]const u8 = undefined;
     const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
 
-    var storage: [16]aio.system.iovec_const = undefined;
-    var op = aio.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage), .{});
+    var storage: [16]ev.system.iovec_const = undefined;
+    var op = ev.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage), .{});
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -968,9 +968,9 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
     const executor = task.getExecutor();
 
     var peer_addr: Address = undefined;
-    var peer_addr_len: aio.system.net.socklen_t = @sizeOf(Address);
+    var peer_addr_len: ev.system.net.socklen_t = @sizeOf(Address);
 
-    var op = aio.NetAccept.init(fd, &peer_addr.any, &peer_addr_len);
+    var op = ev.NetAccept.init(fd, &peer_addr.any, &peer_addr_len);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -987,9 +987,9 @@ pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
     const executor = task.getExecutor();
 
     var addr_copy = addr;
-    const addr_len: aio.system.net.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
+    const addr_len: ev.system.net.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
 
-    var op = aio.NetConnect.init(fd, &addr_copy.any, addr_len);
+    var op = ev.NetConnect.init(fd, &addr_copy.any, addr_len);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -1003,7 +1003,7 @@ pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var op = aio.NetShutdown.init(fd, how);
+    var op = ev.NetShutdown.init(fd, how);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -1017,7 +1017,7 @@ pub fn netClose(rt: *Runtime, fd: Handle) void {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var op = aio.NetClose.init(fd);
+    var op = ev.NetClose.init(fd);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
@@ -1031,15 +1031,15 @@ pub fn netClose(rt: *Runtime, fd: Handle) void {
 }
 
 pub const IpAddressIterator = struct {
-    head: ?*aio.system.net.addrinfo,
-    current: ?*aio.system.net.addrinfo,
+    head: ?*ev.system.net.addrinfo,
+    current: ?*ev.system.net.addrinfo,
 
     pub fn next(self: *IpAddressIterator) ?IpAddress {
         while (self.current) |info| {
             self.current = info.next;
             const addr = info.addr orelse continue;
             // Skip unsupported address families
-            if (addr.family != aio.system.net.AF.INET and addr.family != aio.system.net.AF.INET6) continue;
+            if (addr.family != ev.system.net.AF.INET and addr.family != ev.system.net.AF.INET6) continue;
             return IpAddress.initPosix(addr, @intCast(info.addrlen));
         }
         return null;
@@ -1047,7 +1047,7 @@ pub const IpAddressIterator = struct {
 
     pub fn deinit(self: *IpAddressIterator) void {
         if (self.head) |head| {
-            aio.system.net.freeaddrinfo(head);
+            ev.system.net.freeaddrinfo(head);
         }
     }
 };
@@ -1100,14 +1100,14 @@ fn lookupHostBlocking(
     const name_c = try allocator.dupeZ(u8, name);
     const port_c = try std.fmt.allocPrintSentinel(allocator, "{d}", .{port}, 0);
 
-    var hints: aio.system.net.addrinfo = std.mem.zeroes(aio.system.net.addrinfo);
-    hints.family = aio.system.net.AF.UNSPEC;
+    var hints: ev.system.net.addrinfo = std.mem.zeroes(ev.system.net.addrinfo);
+    hints.family = ev.system.net.AF.UNSPEC;
     hints.socktype = std.posix.SOCK.STREAM;
     hints.protocol = std.posix.IPPROTO.TCP;
 
-    var res: ?*aio.system.net.addrinfo = null;
+    var res: ?*ev.system.net.addrinfo = null;
 
-    aio.system.net.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res) catch |err| {
+    ev.system.net.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res) catch |err| {
         return switch (err) {
             error.ServiceNotAvailable => error.ServiceUnavailable,
             error.InvalidFlags => unreachable,
@@ -1304,17 +1304,17 @@ test "tcpConnectToHost: basic" {
 
 test "IpAddress: initIp4" {
     const addr = IpAddress.initIp4(.{0} ** 4, 8080);
-    try std.testing.expectEqual(aio.system.net.AF.INET, addr.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET, addr.any.family);
 }
 
 test "IpAddress: initIp6" {
     const addr = IpAddress.initIp6(.{0} ** 16, 8080, 0, 0);
-    try std.testing.expectEqual(aio.system.net.AF.INET6, addr.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET6, addr.any.family);
 }
 
 test "IpAddress: parseIp4" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 8080);
-    try std.testing.expectEqual(aio.system.net.AF.INET, addr.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
 
     var buf: [32]u8 = undefined;
@@ -1324,7 +1324,7 @@ test "IpAddress: parseIp4" {
 
 test "IpAddress: parseIp6" {
     const addr = try IpAddress.parseIp6("::1", 8080);
-    try std.testing.expectEqual(aio.system.net.AF.INET6, addr.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET6, addr.any.family);
     try std.testing.expectEqual(8080, addr.getPort());
 
     var buf: [64]u8 = undefined;
@@ -1334,17 +1334,17 @@ test "IpAddress: parseIp6" {
 
 test "IpAddress: parseIp" {
     const addr1 = try IpAddress.parseIp("127.0.0.1", 8080);
-    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.getPort());
 
     const addr2 = try IpAddress.parseIp("::1", 8080);
-    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.getPort());
 }
 
 test "IpAddress: parseIpAndPort" {
     const addr1 = try IpAddress.parseIpAndPort("127.0.0.1:8080");
-    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.getPort());
 
     var buf1: [32]u8 = undefined;
@@ -1352,7 +1352,7 @@ test "IpAddress: parseIpAndPort" {
     try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
 
     const addr2 = try IpAddress.parseIpAndPort("[::1]:8080");
-    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.getPort());
 
     var buf2: [64]u8 = undefined;
@@ -1362,17 +1362,17 @@ test "IpAddress: parseIpAndPort" {
 
 test "Address: parseIp" {
     const addr1 = try Address.parseIp("127.0.0.1", 8080);
-    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.ip.getPort());
 
     const addr2 = try Address.parseIp("::1", 8080);
-    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.ip.getPort());
 }
 
 test "Address: parseIpAndHost" {
     const addr1 = try Address.parseIpAndHost("127.0.0.1:8080");
-    try std.testing.expectEqual(aio.system.net.AF.INET, addr1.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET, addr1.any.family);
     try std.testing.expectEqual(8080, addr1.ip.getPort());
 
     var buf1: [32]u8 = undefined;
@@ -1380,7 +1380,7 @@ test "Address: parseIpAndHost" {
     try std.testing.expectEqualStrings("127.0.0.1:8080", formatted1);
 
     const addr2 = try Address.parseIpAndHost("[::1]:8080");
-    try std.testing.expectEqual(aio.system.net.AF.INET6, addr2.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.INET6, addr2.any.family);
     try std.testing.expectEqual(8080, addr2.ip.getPort());
 
     var buf2: [64]u8 = undefined;
@@ -1395,7 +1395,7 @@ test "UnixAddress: init" {
     defer std.fs.cwd().deleteFile(path) catch {};
 
     const addr = try UnixAddress.init(path);
-    try std.testing.expectEqual(aio.system.net.AF.UNIX, addr.any.family);
+    try std.testing.expectEqual(ev.system.net.AF.UNIX, addr.any.family);
 }
 
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {

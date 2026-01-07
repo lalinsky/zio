@@ -1,20 +1,20 @@
 const std = @import("std");
-const aio = @import("../root.zig");
-const Loop = aio.Loop;
-const Timer = aio.Timer;
-const Cancel = aio.Cancel;
-const Async = aio.Async;
-const Work = aio.Work;
-const ThreadPool = aio.ThreadPool;
-const NetOpen = aio.NetOpen;
-const NetBind = aio.NetBind;
-const NetListen = aio.NetListen;
-const NetAccept = aio.NetAccept;
-const NetRecv = aio.NetRecv;
-const NetSend = aio.NetSend;
-const NetClose = aio.NetClose;
-const NetConnect = aio.NetConnect;
-const net = aio.system.net;
+const ev = @import("../root.zig");
+const Loop = ev.Loop;
+const Timer = ev.Timer;
+const Cancel = ev.Cancel;
+const Async = ev.Async;
+const Work = ev.Work;
+const ThreadPool = ev.ThreadPool;
+const NetOpen = ev.NetOpen;
+const NetBind = ev.NetBind;
+const NetListen = ev.NetListen;
+const NetAccept = ev.NetAccept;
+const NetRecv = ev.NetRecv;
+const NetSend = ev.NetSend;
+const NetClose = ev.NetClose;
+const NetConnect = ev.NetConnect;
+const net = ev.system.net;
 
 test "cancel: timer with Cancel completion" {
     var loop: Loop = undefined;
@@ -321,7 +321,7 @@ test "cancel: net_recv with Cancel completion" {
     try loop.run(.until_done);
     const client_sock = try client_open.getResult();
 
-    var client_conn = aio.NetConnect.init(client_sock, @ptrCast(&addr), addr_len);
+    var client_conn = ev.NetConnect.init(client_sock, @ptrCast(&addr), addr_len);
     loop.add(&client_conn.c);
 
     // Accept connection
@@ -334,7 +334,7 @@ test "cancel: net_recv with Cancel completion" {
 
     // Start recv on accepted socket
     var buf: [128]u8 = undefined;
-    var read_iov: [1]aio.system.iovec = undefined;
+    var read_iov: [1]ev.system.iovec = undefined;
     var recv: NetRecv = .init(accepted_sock, .fromSlice(&buf, &read_iov), .{});
     loop.add(&recv.c);
 
@@ -398,7 +398,7 @@ test "cancel: net_recv with loop.cancel()" {
     try loop.run(.until_done);
     const client_sock = try client_open.getResult();
 
-    var client_conn = aio.NetConnect.init(client_sock, @ptrCast(&addr), addr_len);
+    var client_conn = ev.NetConnect.init(client_sock, @ptrCast(&addr), addr_len);
     loop.add(&client_conn.c);
 
     // Accept connection
@@ -411,7 +411,7 @@ test "cancel: net_recv with loop.cancel()" {
 
     // Start recv on accepted socket
     var buf: [128]u8 = undefined;
-    var read_iov: [1]aio.system.iovec = undefined;
+    var read_iov: [1]ev.system.iovec = undefined;
     var recv: NetRecv = .init(accepted_sock, .fromSlice(&buf, &read_iov), .{});
     loop.add(&recv.c);
 
@@ -484,7 +484,7 @@ test "cancel: callback is invoked on canceled operation" {
         called: bool = false,
         was_canceled: bool = false,
 
-        fn callback(l: *Loop, c: *aio.Completion) void {
+        fn callback(l: *Loop, c: *ev.Completion) void {
             _ = l;
             const self: *@This() = @ptrCast(@alignCast(c.userdata.?));
             self.called = true;
@@ -551,7 +551,7 @@ test "cancel: multiple timers, cancel one" {
 }
 
 test "cancel: work after completion returns AlreadyCompleted" {
-    var thread_pool: aio.ThreadPool = undefined;
+    var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
         .max_threads = 1,
@@ -586,7 +586,7 @@ test "cancel: work after completion returns AlreadyCompleted" {
 }
 
 test "cancel: work before run" {
-    var thread_pool: aio.ThreadPool = undefined;
+    var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
         .max_threads = 1,
@@ -621,7 +621,7 @@ test "cancel: work before run" {
 }
 
 test "cancel: work double cancel returns AlreadyCanceled" {
-    var thread_pool: aio.ThreadPool = undefined;
+    var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
         .max_threads = 1,
