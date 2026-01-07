@@ -1,3 +1,14 @@
+//! Low-level event loop primitives.
+//!
+//! This module provides a callback-based async I/O event loop, similar to libuv or libxev.
+//! For most use cases, prefer `zio.Runtime` which provides coroutines,
+//! structured concurrency, and easier I/O.
+//!
+//! Use this module when you need:
+//! - Callback-based async instead of coroutines
+//! - Building a custom scheduler/runtime on top of zio.ev
+//! - Embedding in a game loop or other custom run loops
+
 const std = @import("std");
 
 pub const backend = @import("backend.zig").backend;
