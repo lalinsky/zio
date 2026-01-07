@@ -38,7 +38,6 @@ nav:
     - Files: files.md
     - Synchronization: sync.md
     - Signals: signals.md
-    - std.Io: stdio.md
   - Reference:
     - API Documentation: apidocs/
   - Project:
