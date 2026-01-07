@@ -10,11 +10,12 @@ const Timeoutable = @import("common.zig").Timeoutable;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");
 const Timeout = @import("runtime/timeout.zig").Timeout;
+const w = @import("os/windows.zig");
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
-        interrupt = std.os.windows.CTRL_C_EVENT,
-        terminate = std.os.windows.CTRL_CLOSE_EVENT,
+        interrupt = w.CTRL_C_EVENT,
+        terminate = w.CTRL_CLOSE_EVENT,
     },
     else => enum(u8) {
         interrupt = std.posix.SIG.INT,
@@ -124,7 +125,7 @@ const HandlerRegistryWindows = struct {
 
         if (prev_total == 0) {
             // First handler of any type - install the global console control handler
-            const result = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 1);
+            const result = w.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, w.TRUE);
             if (result == 0) {
                 return error.SetConsoleCtrlHandlerFailed;
             }
@@ -133,7 +134,7 @@ const HandlerRegistryWindows = struct {
         errdefer {
             // Restore previous handler if this was the last handler
             if (prev_total == 0) {
-                _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 0);
+                _ = w.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, w.FALSE);
             }
         }
 
@@ -165,7 +166,7 @@ const HandlerRegistryWindows = struct {
         // Restore previous handler if this was the last handler
         const new_total = self.total_handlers.fetchSub(1, .acq_rel) - 1;
         if (new_total == 0) {
-            _ = std.os.windows.kernel32.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, 0);
+            _ = w.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, w.FALSE);
         }
 
         // Mark as available
@@ -191,11 +192,11 @@ fn signalHandlerUnix(signum: c_int) callconv(.c) void {
     }
 }
 
-fn consoleCtrlHandlerWindows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
+fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
     // Map Windows control events to SignalKind values
     const signal_value: u8 = switch (ctrl_type) {
-        std.os.windows.CTRL_C_EVENT => @intFromEnum(SignalKind.interrupt),
-        std.os.windows.CTRL_CLOSE_EVENT => @intFromEnum(SignalKind.terminate),
+        w.CTRL_C_EVENT => @intFromEnum(SignalKind.interrupt),
+        w.CTRL_CLOSE_EVENT => @intFromEnum(SignalKind.terminate),
         else => return 0, // Not handled
     };
 

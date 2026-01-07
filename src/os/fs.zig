@@ -1,12 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
-const w2 = @import("windows.zig");
+const w = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 
 pub const fd_t = switch (builtin.os.tag) {
-    .windows => std.os.windows.HANDLE,
+    .windows => w.HANDLE,
     else => posix.system.fd_t,
 };
 
@@ -14,7 +14,7 @@ pub const fd_t = switch (builtin.os.tag) {
 /// Used with *at() functions like openat(), unlinkat(), etc.
 pub fn cwd() fd_t {
     if (builtin.os.tag == .windows) {
-        return std.os.windows.peb().ProcessParameters.CurrentDirectory.Handle;
+        return w.peb().ProcessParameters.CurrentDirectory.Handle;
     } else {
         return posix.system.AT.FDCWD;
     }
@@ -212,8 +212,6 @@ pub const FileStatError = error{
 /// Open an existing file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
             error.AccessDenied => error.AccessDenied,
@@ -234,7 +232,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         else
             w.FILE_ATTRIBUTE_NORMAL;
 
-        const handle = w2.CreateFileW(
+        const handle = w.CreateFileW(
             path_w.span().ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
@@ -245,7 +243,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         );
 
         if (handle == w.INVALID_HANDLE_VALUE) {
-            return switch (w2.GetLastError()) {
+            return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
@@ -281,8 +279,6 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
 /// Open a directory using openat() syscall
 pub fn opendirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
             error.AccessDenied => error.AccessDenied,
@@ -297,7 +293,7 @@ pub fn opendirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flag
         // FILE_FLAG_BACKUP_SEMANTICS is required to open directory handles
         const file_flags: w.DWORD = w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS;
 
-        const handle = w2.CreateFileW(
+        const handle = w.CreateFileW(
             path_w.span().ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
@@ -308,7 +304,7 @@ pub fn opendirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flag
         );
 
         if (handle == w.INVALID_HANDLE_VALUE) {
-            return switch (w2.GetLastError()) {
+            return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
@@ -348,8 +344,6 @@ pub fn opendirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flag
 /// Create a file using openat() syscall
 pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
             error.AccessDenied => error.AccessDenied,
@@ -376,7 +370,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         else
             w.FILE_ATTRIBUTE_NORMAL;
 
-        const handle = w2.CreateFileW(
+        const handle = w.CreateFileW(
             path_w.span().ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
@@ -387,7 +381,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         );
 
         if (handle == w.INVALID_HANDLE_VALUE) {
-            return switch (w2.GetLastError()) {
+            return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
@@ -424,7 +418,6 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
 /// Close a file descriptor
 pub fn close(fd: fd_t) FileCloseError!void {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
         _ = w.CloseHandle(fd);
         return;
     }
@@ -442,8 +435,6 @@ pub fn close(fd: fd_t) FileCloseError!void {
 /// Read from file at offset using preadv()
 pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         var total_read: usize = 0;
         for (buffers) |buffer| {
             var bytes_read: w.DWORD = undefined;
@@ -451,7 +442,7 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(offset + total_read);
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate((offset + total_read) >> 32);
 
-            const success = w2.ReadFile(
+            const success = w.ReadFile(
                 fd,
                 buffer.buf,
                 @intCast(buffer.len),
@@ -460,7 +451,7 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
             );
 
             if (success == w.FALSE) {
-                const err = w2.GetLastError();
+                const err = w.GetLastError();
                 switch (err) {
                     .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
                     else => return errnoToFileReadError(err),
@@ -487,8 +478,6 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
 /// Write to file at offset using pwritev()
 pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteError!usize {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         var total_written: usize = 0;
         for (buffers) |buffer| {
             var bytes_written: w.DWORD = undefined;
@@ -496,7 +485,7 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(offset + total_written);
             overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate((offset + total_written) >> 32);
 
-            const success = w2.WriteFile(
+            const success = w.WriteFile(
                 fd,
                 buffer.buf,
                 @intCast(buffer.len),
@@ -505,7 +494,7 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
             );
 
             if (success == w.FALSE) {
-                return errnoToFileWriteError(w2.GetLastError());
+                return errnoToFileWriteError(w.GetLastError());
             }
 
             total_written += bytes_written;
@@ -528,13 +517,11 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
 /// Read from file descriptor using readv() - for pipes and stream-like fds
 pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         var total_read: usize = 0;
         for (buffers) |buffer| {
             var bytes_read: w.DWORD = undefined;
 
-            const success = w2.ReadFile(
+            const success = w.ReadFile(
                 fd,
                 buffer.buf,
                 @intCast(buffer.len),
@@ -543,7 +530,7 @@ pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
             );
 
             if (success == w.FALSE) {
-                const err = w2.GetLastError();
+                const err = w.GetLastError();
                 switch (err) {
                     .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
                     else => return errnoToFileReadError(err),
@@ -570,13 +557,11 @@ pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
 /// Write to file descriptor using writev() - for pipes and stream-like fds
 pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         var total_written: usize = 0;
         for (buffers) |buffer| {
             var bytes_written: w.DWORD = undefined;
 
-            const success = w2.WriteFile(
+            const success = w.WriteFile(
                 fd,
                 buffer.buf,
                 @intCast(buffer.len),
@@ -585,7 +570,7 @@ pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
             );
 
             if (success == w.FALSE) {
-                return errnoToFileWriteError(w2.GetLastError());
+                return errnoToFileWriteError(w.GetLastError());
             }
 
             total_written += bytes_written;
@@ -608,11 +593,9 @@ pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
 /// Sync file data to disk
 pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
-        const success = w2.FlushFileBuffers(fd);
+        const success = w.FlushFileBuffers(fd);
         if (success == w.FALSE) {
-            switch (w2.GetLastError()) {
+            switch (w.GetLastError()) {
                 .ACCESS_DENIED => return error.NotOpenForWriting,
                 .INVALID_HANDLE => return error.InvalidFileDescriptor,
                 else => |err| return unexpectedError(err),
@@ -638,8 +621,6 @@ pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 /// Rename a file using renameat() syscall
 pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) FileRenameError!void {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         // Convert paths to UTF-16 with proper prefixing and directory handling
         const old_path_w = w.sliceToPrefixedFileW(old_dir, old_path) catch |err| return switch (err) {
             error.AccessDenied => error.AccessDenied,
@@ -656,14 +637,14 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
             else => error.Unexpected,
         };
 
-        const success = w2.MoveFileExW(
+        const success = w.MoveFileExW(
             old_path_w.span().ptr,
             new_path_w.span().ptr,
-            w2.MOVEFILE_REPLACE_EXISTING,
+            w.MOVEFILE_REPLACE_EXISTING,
         );
 
         if (success == w.FALSE) {
-            switch (w2.GetLastError()) {
+            switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => return error.FileNotFound,
                 .PATH_NOT_FOUND => return error.FileNotFound,
                 .ACCESS_DENIED => return error.AccessDenied,
@@ -694,8 +675,6 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
 /// Delete a file using unlinkat() syscall
 pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileDeleteError!void {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
             error.AccessDenied => error.AccessDenied,
@@ -705,19 +684,15 @@ pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileD
             else => error.Unexpected,
         };
 
-        w.DeleteFile(path_w.span(), .{ .dir = dir, .remove_dir = false }) catch |e| {
-            return switch (e) {
-                error.FileNotFound => error.FileNotFound,
-                error.AccessDenied => error.AccessDenied,
-                error.FileBusy => error.FileBusy,
-                error.IsDir => error.IsDir,
-                error.NameTooLong => error.NameTooLong,
-                error.NotDir => error.NotDir,
-                error.NetworkNotFound => error.FileNotFound,
-                error.DirNotEmpty => error.DirNotEmpty,
-                error.Unexpected => error.Unexpected,
+        if (w.DeleteFileW(path_w.span().ptr) == w.FALSE) {
+            return switch (w.GetLastError()) {
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .PATH_NOT_FOUND => error.FileNotFound,
+                .ACCESS_DENIED => error.AccessDenied,
+                .SHARING_VIOLATION => error.FileBusy,
+                else => |err| return unexpectedError(err),
             };
-        };
+        }
 
         return;
     }
@@ -759,7 +734,7 @@ pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
     };
 }
 
-pub const E = if (builtin.os.tag == .windows) std.os.windows.Win32Error else posix.system.E;
+pub const E = if (builtin.os.tag == .windows) w.Win32Error else posix.system.E;
 
 pub fn errnoToFileReadError(err: E) FileReadError {
     switch (builtin.os.tag) {
@@ -892,13 +867,11 @@ pub fn errnoToFileDeleteError(errno: posix.system.E) FileDeleteError {
 /// Get the size of a file
 pub fn fsize(fd: fd_t) FileSizeError!u64 {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
         var file_size: w.LARGE_INTEGER = undefined;
-        const success = w2.GetFileSizeEx(fd, &file_size);
+        const success = w.GetFileSizeEx(fd, &file_size);
 
         if (success == w.FALSE) {
-            switch (w2.GetLastError()) {
+            switch (w.GetLastError()) {
                 .INVALID_HANDLE => return error.InvalidFileDescriptor,
                 .ACCESS_DENIED => return error.AccessDenied,
                 else => |err| return unexpectedError(err) catch error.Unexpected,
@@ -945,13 +918,11 @@ pub fn errnoToFileSizeError(errno: posix.system.E) FileSizeError {
 /// Get file metadata by file descriptor
 pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
     if (builtin.os.tag == .windows) {
-        const w = std.os.windows;
-
-        var info: w2.BY_HANDLE_FILE_INFORMATION = undefined;
-        const success = w2.GetFileInformationByHandle(fd, &info);
+        var info: w.BY_HANDLE_FILE_INFORMATION = undefined;
+        const success = w.GetFileInformationByHandle(fd, &info);
 
         if (success == w.FALSE) {
-            switch (w2.GetLastError()) {
+            switch (w.GetLastError()) {
                 .INVALID_HANDLE => return error.InvalidFileDescriptor,
                 .ACCESS_DENIED => return error.AccessDenied,
                 else => |err| return unexpectedError(err) catch error.Unexpected,
@@ -973,9 +944,9 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
             .size = size,
             .mode = 0, // Windows doesn't have POSIX modes
             .kind = kind,
-            .atime = w2.fileTimeToNanos(info.ftLastAccessTime),
-            .mtime = w2.fileTimeToNanos(info.ftLastWriteTime),
-            .ctime = w2.fileTimeToNanos(info.ftCreationTime),
+            .atime = w.fileTimeToNanos(info.ftLastAccessTime),
+            .mtime = w.fileTimeToNanos(info.ftLastWriteTime),
+            .ctime = w.fileTimeToNanos(info.ftCreationTime),
         };
     }
 
@@ -1010,8 +981,6 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileStatError!FileStatInfo {
     if (builtin.os.tag == .windows) {
         // On Windows, we need to open the file first, then stat it
-        const w = std.os.windows;
-
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
             error.AccessDenied => error.AccessDenied,
             error.BadPathName => error.FileNotFound,
@@ -1021,7 +990,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileSt
         };
 
         // Open with minimal access just to query attributes
-        const handle = w2.CreateFileW(
+        const handle = w.CreateFileW(
             path_w.span().ptr,
             0, // No access needed, just want to query attributes
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
@@ -1032,7 +1001,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileSt
         );
 
         if (handle == w.INVALID_HANDLE_VALUE) {
-            return switch (w2.GetLastError()) {
+            return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
