@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const ev = @import("ev/root.zig");
+const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const waitForIo = @import("io.zig").waitForIo;
@@ -12,14 +13,14 @@ const genericCallback = @import("io.zig").genericCallback;
 const fillBuf = @import("io.zig").fillBuf;
 
 pub const Dir = struct {
-    fd: ev.system.fs.fd_t,
+    fd: os.fs.fd_t,
 
     pub fn cwd() Dir {
         const dir = std.fs.cwd(); // TODO: avoid `std.fs`
         return .{ .fd = dir.fd };
     }
 
-    pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: ev.system.fs.FileOpenFlags) !File {
+    pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileOpenFlags) !File {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
@@ -34,7 +35,7 @@ pub const Dir = struct {
         return .fromFd(fd);
     }
 
-    pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: ev.system.fs.FileCreateFlags) !File {
+    pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) !File {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
@@ -77,9 +78,9 @@ pub const Dir = struct {
         try op.getResult();
     }
 
-    pub const StatError = ev.system.fs.FileStatError || Cancelable;
+    pub const StatError = os.fs.FileStatError || Cancelable;
 
-    pub fn stat(self: Dir, rt: *Runtime) StatError!ev.system.fs.FileStatInfo {
+    pub fn stat(self: Dir, rt: *Runtime) StatError!os.fs.FileStatInfo {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
@@ -93,7 +94,7 @@ pub const Dir = struct {
         return try op.getResult();
     }
 
-    pub fn statPath(self: Dir, rt: *Runtime, path: []const u8) StatError!ev.system.fs.FileStatInfo {
+    pub fn statPath(self: Dir, rt: *Runtime, path: []const u8) StatError!os.fs.FileStatInfo {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
@@ -113,8 +114,8 @@ const Handle = std.fs.File.Handle;
 pub const File = struct {
     fd: Handle,
 
-    pub const ReadError = ev.system.fs.FileReadError || Cancelable;
-    pub const WriteError = ev.system.fs.FileWriteError || Cancelable;
+    pub const ReadError = os.fs.FileReadError || Cancelable;
+    pub const WriteError = os.fs.FileWriteError || Cancelable;
 
     pub fn fromFd(fd: Handle) File {
         return .{ .fd = fd };
@@ -124,7 +125,7 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [1]ev.system.iovec = undefined;
+        var storage: [1]os.iovec = undefined;
         var op = ev.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
@@ -139,7 +140,7 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [1]ev.system.iovec_const = undefined;
+        var storage: [1]os.iovec_const = undefined;
         var op = ev.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
@@ -155,7 +156,7 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [16]ev.system.iovec = undefined;
+        var storage: [16]os.iovec = undefined;
         var op = ev.FileRead.init(self.fd, ev.ReadBuf.fromSlices(slices, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
@@ -171,7 +172,7 @@ pub const File = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
-        var storage: [16]ev.system.iovec_const = undefined;
+        var storage: [16]os.iovec_const = undefined;
         var op = ev.FileWrite.init(self.fd, ev.WriteBuf.fromSlices(slices, &storage), offset);
         op.c.userdata = task;
         op.c.callback = genericCallback;
@@ -230,9 +231,9 @@ pub const File = struct {
         _ = op.getResult() catch {};
     }
 
-    pub const StatError = ev.system.fs.FileStatError || Cancelable;
+    pub const StatError = os.fs.FileStatError || Cancelable;
 
-    pub fn stat(self: File, rt: *Runtime) StatError!ev.system.fs.FileStatInfo {
+    pub fn stat(self: File, rt: *Runtime) StatError!os.fs.FileStatInfo {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
@@ -332,7 +333,7 @@ pub const FileReader = struct {
             .windows => 1,
             else => 16,
         };
-        var iovec_storage: [max_vecs]ev.system.iovec = undefined;
+        var iovec_storage: [max_vecs]os.iovec = undefined;
         const dest_n, const data_size = if (builtin.os.tag == .windows)
             try io_reader.writableVectorWsa(&iovec_storage, data)
         else
@@ -552,7 +553,7 @@ pub fn fileWritePositional(rt: *Runtime, fd: Handle, buffers: []const []const u8
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var storage: [16]ev.system.iovec_const = undefined;
+    var storage: [16]os.iovec_const = undefined;
     var op = ev.FileWrite.init(fd, ev.WriteBuf.fromSlices(buffers, &storage), offset);
     op.c.userdata = task;
     op.c.callback = genericCallback;
@@ -569,7 +570,7 @@ pub fn fileReadPositional(rt: *Runtime, fd: Handle, buffers: [][]u8, offset: u64
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var storage: [16]ev.system.iovec = undefined;
+    var storage: [16]os.iovec = undefined;
     var op = ev.FileRead.init(fd, ev.ReadBuf.fromSlices(buffers, &storage), offset);
     op.c.userdata = task;
     op.c.callback = genericCallback;

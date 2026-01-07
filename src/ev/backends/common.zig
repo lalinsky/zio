@@ -19,8 +19,8 @@ const FileSize = @import("../completion.zig").FileSize;
 const FileStat = @import("../completion.zig").FileStat;
 const DirOpen = @import("../completion.zig").DirOpen;
 const DirClose = @import("../completion.zig").DirClose;
-const net = @import("../os/net.zig");
-const fs = @import("../os/fs.zig");
+const net = @import("../../os/net.zig");
+const fs = @import("../../os/fs.zig");
 
 /// Helper to handle socket open operation
 pub fn handleNetOpen(c: *Completion) void {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ev = @import("../root.zig");
+const os = @import("../../os/root.zig");
 
 test "File: open/close" {
     var thread_pool: ev.ThreadPool = undefined;
@@ -11,7 +12,7 @@ test "File: open/close" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = ev.system.fs.cwd();
+    const cwd = os.fs.cwd();
 
     var file_create = ev.FileCreate.init(cwd, "test-file", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
@@ -30,7 +31,7 @@ test "File: open/close" {
 
     // Write some data to the file
     const write_data = "Hello, zevent!";
-    var write_iov: [1]ev.system.iovec_const = undefined;
+    var write_iov: [1]os.iovec_const = undefined;
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
@@ -49,7 +50,7 @@ test "File: open/close" {
 
     // Read the data back
     var read_buffer = [_]u8{0} ** 64;
-    var read_iov: [1]ev.system.iovec = undefined;
+    var read_iov: [1]os.iovec = undefined;
     var file_read = ev.FileRead.init(fd, .fromSlice(&read_buffer, &read_iov), 0);
     loop.add(&file_read.c);
     try loop.run(.until_done);
@@ -87,7 +88,7 @@ test "File: rename/delete" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = ev.system.fs.cwd();
+    const cwd = os.fs.cwd();
 
     // Create a test file
     var file_create = ev.FileCreate.init(cwd, "test-rename-src", .{ .read = true, .truncate = true, .mode = 0o664 });
@@ -98,7 +99,7 @@ test "File: rename/delete" {
 
     // Write some data
     const write_data = "rename test";
-    var write_iov: [1]ev.system.iovec_const = undefined;
+    var write_iov: [1]os.iovec_const = undefined;
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
@@ -127,7 +128,7 @@ test "File: rename/delete" {
 
     // Read and verify the data
     var read_buffer = [_]u8{0} ** 64;
-    var read_iov2: [1]ev.system.iovec = undefined;
+    var read_iov2: [1]os.iovec = undefined;
     var file_read = ev.FileRead.init(fd2, .fromSlice(&read_buffer, &read_iov2), 0);
     loop.add(&file_read.c);
     try loop.run(.until_done);
@@ -167,7 +168,7 @@ test "File: read EOF" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = ev.system.fs.cwd();
+    const cwd = os.fs.cwd();
 
     // Create and write a small file
     var file_create = ev.FileCreate.init(cwd, "test-eof", .{ .read = true, .truncate = true, .mode = 0o664 });
@@ -176,7 +177,7 @@ test "File: read EOF" {
     const fd = try file_create.getResult();
 
     const write_data = "Hello";
-    var write_iov: [1]ev.system.iovec_const = undefined;
+    var write_iov: [1]os.iovec_const = undefined;
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
@@ -184,7 +185,7 @@ test "File: read EOF" {
 
     // Read all data
     var read_buffer1 = [_]u8{0} ** 64;
-    var read_iov1: [1]ev.system.iovec = undefined;
+    var read_iov1: [1]os.iovec = undefined;
     var file_read1 = ev.FileRead.init(fd, .fromSlice(&read_buffer1, &read_iov1), 0);
     loop.add(&file_read1.c);
     try loop.run(.until_done);
@@ -194,7 +195,7 @@ test "File: read EOF" {
 
     // Read at EOF - should return 0 bytes, not an error
     var read_buffer2 = [_]u8{0} ** 64;
-    var read_iov2: [1]ev.system.iovec = undefined;
+    var read_iov2: [1]os.iovec = undefined;
     var file_read2 = ev.FileRead.init(fd, .fromSlice(&read_buffer2, &read_iov2), write_data.len);
     loop.add(&file_read2.c);
     try loop.run(.until_done);
@@ -224,7 +225,7 @@ test "File: size" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = ev.system.fs.cwd();
+    const cwd = os.fs.cwd();
 
     // Create a file
     var file_create = ev.FileCreate.init(cwd, "test-size", .{ .read = true, .truncate = true, .mode = 0o664 });
@@ -243,7 +244,7 @@ test "File: size" {
 
     // Write some data
     const write_data = "Hello, file size test!";
-    var write_iov: [1]ev.system.iovec_const = undefined;
+    var write_iov: [1]os.iovec_const = undefined;
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
@@ -260,7 +261,7 @@ test "File: size" {
 
     // Write more data at different offset
     const more_data = " More data!";
-    var write_iov2: [1]ev.system.iovec_const = undefined;
+    var write_iov2: [1]os.iovec_const = undefined;
     var file_write2 = ev.FileWrite.init(fd, .fromSlice(more_data, &write_iov2), write_data.len);
     loop.add(&file_write2.c);
     try loop.run(.until_done);
@@ -294,7 +295,7 @@ test "File: stat" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = ev.system.fs.cwd();
+    const cwd = os.fs.cwd();
 
     // Create a file
     var file_create = ev.FileCreate.init(cwd, "test-stat", .{ .read = true, .truncate = true, .mode = 0o664 });
@@ -315,7 +316,7 @@ test "File: stat" {
 
     // Write some data
     const write_data = "Hello, file stat test!";
-    var write_iov: [1]ev.system.iovec_const = undefined;
+    var write_iov: [1]os.iovec_const = undefined;
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
@@ -352,7 +353,7 @@ test "File: stat_path" {
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    const cwd = ev.system.fs.cwd();
+    const cwd = os.fs.cwd();
 
     // Create a file
     var file_create = ev.FileCreate.init(cwd, "test-stat-path", .{ .read = true, .truncate = true, .mode = 0o664 });
@@ -362,7 +363,7 @@ test "File: stat_path" {
 
     // Write some data
     const write_data = "Hello, file stat_path test!";
-    var write_iov: [1]ev.system.iovec_const = undefined;
+    var write_iov: [1]os.iovec_const = undefined;
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);

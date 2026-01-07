@@ -1,8 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ev = @import("../root.zig");
-const net = ev.system.net;
-const time = ev.system.time;
+const os = @import("../../os/root.zig");
+const net = os.net;
+const time = os.time;
 
 pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
     return struct {
@@ -29,8 +30,8 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         // Buffer for echo
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]ev.system.iovec = undefined,
-        send_iov: [1]ev.system.iovec_const = undefined,
+        recv_iov: [1]os.iovec = undefined,
+        send_iov: [1]os.iovec_const = undefined,
         bytes_received: usize = 0,
 
         pub const State = enum {
@@ -202,9 +203,9 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         // Buffers
         send_buf: []const u8,
-        send_iov: [1]ev.system.iovec_const = undefined,
+        send_iov: [1]os.iovec_const = undefined,
         recv_buf: [1024]u8 = undefined,
-        recv_iov: [1]ev.system.iovec = undefined,
+        recv_iov: [1]os.iovec = undefined,
         recv_addr: sockaddr = undefined,
         recv_addr_len: net.socklen_t = undefined,
         bytes_received: usize = 0,
@@ -362,7 +363,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     defer {
         if (domain == .unix) {
             const path = std.mem.sliceTo(&server.server_addr.path, 0);
-            ev.system.fs.unlinkat(std.testing.allocator, ev.system.fs.cwd(), path) catch {};
+            os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
         }
     }
     server.start();
@@ -387,7 +388,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     defer {
         if (domain == .unix) {
             const path = std.mem.sliceTo(&client.client_addr.path, 0);
-            ev.system.fs.unlinkat(std.testing.allocator, ev.system.fs.cwd(), path) catch {};
+            os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
         }
     }
     client.start();

@@ -1,8 +1,8 @@
-pub const time = @import("os/time.zig");
-pub const net = @import("os/net.zig");
-pub const fs = @import("os/fs.zig");
+pub const time = @import("time.zig");
+pub const net = @import("net.zig");
+pub const fs = @import("fs.zig");
 
-pub const posix = @import("os/posix.zig");
+pub const posix = @import("posix.zig");
 
 pub const iovec = fs.iovec;
 pub const iovec_const = fs.iovec_const;

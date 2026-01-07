@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = @import("../os/posix.zig");
-const net = @import("../os/net.zig");
-const time = @import("../os/time.zig");
+const posix = @import("../../os/posix.zig");
+const net = @import("../../os/net.zig");
+const time = @import("../../os/time.zig");
 const common = @import("common.zig");
 const ReadBuf = @import("../buf.zig").ReadBuf;
 const WriteBuf = @import("../buf.zig").WriteBuf;
@@ -30,7 +30,7 @@ const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
 pub const NetHandle = net.fd_t;
 
 const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
-const fs = @import("../os/fs.zig");
+const fs = @import("../../os/fs.zig");
 
 pub const capabilities: BackendCapabilities = .{};
 

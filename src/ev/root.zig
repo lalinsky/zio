@@ -46,13 +46,6 @@ pub const FileStreamPoll = completion.FileStreamPoll;
 pub const FileStreamRead = completion.FileStreamRead;
 pub const FileStreamWrite = completion.FileStreamWrite;
 
-/// Low level system APIs
-pub const system = @import("system.zig");
-
 test {
     std.testing.refAllDecls(@This());
-    _ = system.time;
-    _ = system.net;
-    _ = system.fs;
-    _ = system.posix;
 }

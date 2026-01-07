@@ -22,8 +22,8 @@ const FileStat = @import("completion.zig").FileStat;
 const DirOpen = @import("completion.zig").DirOpen;
 const DirClose = @import("completion.zig").DirClose;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
-const time = @import("os/time.zig");
-const net = @import("os/net.zig");
+const time = @import("../os/time.zig");
+const net = @import("../os/net.zig");
 const common = @import("backends/common.zig");
 
 const log = std.log.scoped(.zevent_loop);

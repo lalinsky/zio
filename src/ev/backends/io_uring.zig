@@ -1,9 +1,9 @@
 const std = @import("std");
 const linux = std.os.linux;
-const posix_os = @import("../os/posix.zig");
-const net = @import("../os/net.zig");
-const fs = @import("../os/fs.zig");
-const time = @import("../os/time.zig");
+const posix_os = @import("../../os/posix.zig");
+const net = @import("../../os/net.zig");
+const fs = @import("../../os/fs.zig");
+const time = @import("../../os/time.zig");
 const common = @import("common.zig");
 const ReadBuf = @import("../buf.zig").ReadBuf;
 const WriteBuf = @import("../buf.zig").WriteBuf;
@@ -649,7 +649,7 @@ fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
 }
 
 pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
-    const linux_os = @import("../os/linux.zig");
+    const linux_os = @import("../../os/linux.zig");
 
     // Re-arm waker if needed (after drain() in previous tick)
     try self.waker.rearm();
@@ -989,7 +989,7 @@ fn sendFlagsToMsg(flags: net.SendFlags) u32 {
 
 // Async notification mechanism using eventfd with POLL_ADD
 const Waker = struct {
-    const linux_os = @import("../os/linux.zig");
+    const linux_os = @import("../../os/linux.zig");
 
     ring: *linux.IoUring,
     eventfd: i32,

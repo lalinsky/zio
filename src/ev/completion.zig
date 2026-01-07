@@ -5,8 +5,8 @@ const Backend = @import("backend.zig").Backend;
 const HeapNode = @import("heap.zig").HeapNode;
 const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
-const net = @import("os/net.zig");
-const fs = @import("os/fs.zig");
+const net = @import("../os/net.zig");
+const fs = @import("../os/fs.zig");
 
 pub const BackendCapabilities = struct {
     file_read: bool = false,

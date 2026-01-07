@@ -1,11 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = @import("../os/posix.zig");
-const net = @import("../os/net.zig");
-const time = @import("../os/time.zig");
+const posix = @import("../../os/posix.zig");
+const net = @import("../../os/net.zig");
+const time = @import("../../os/time.zig");
 const common = @import("common.zig");
 
-const unexpectedError = @import("../os/base.zig").unexpectedError;
+const unexpectedError = @import("../../os/base.zig").unexpectedError;
 const ReadBuf = @import("../buf.zig").ReadBuf;
 const WriteBuf = @import("../buf.zig").WriteBuf;
 const LoopState = @import("../loop.zig").LoopState;
@@ -28,7 +28,7 @@ const NetShutdown = @import("../completion.zig").NetShutdown;
 const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
 const FileStreamRead = @import("../completion.zig").FileStreamRead;
 const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
-const fs = @import("../os/fs.zig");
+const fs = @import("../../os/fs.zig");
 
 pub const NetHandle = net.fd_t;
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const ev = @import("../root.zig");
+const os = @import("../../os/root.zig");
 const Loop = ev.Loop;
 const Timer = ev.Timer;
 const Cancel = ev.Cancel;
@@ -14,7 +15,7 @@ const NetRecv = ev.NetRecv;
 const NetSend = ev.NetSend;
 const NetClose = ev.NetClose;
 const NetConnect = ev.NetConnect;
-const net = ev.system.net;
+const net = os.net;
 
 test "cancel: timer with Cancel completion" {
     var loop: Loop = undefined;
@@ -334,7 +335,7 @@ test "cancel: net_recv with Cancel completion" {
 
     // Start recv on accepted socket
     var buf: [128]u8 = undefined;
-    var read_iov: [1]ev.system.iovec = undefined;
+    var read_iov: [1]os.iovec = undefined;
     var recv: NetRecv = .init(accepted_sock, .fromSlice(&buf, &read_iov), .{});
     loop.add(&recv.c);
 
@@ -411,7 +412,7 @@ test "cancel: net_recv with loop.cancel()" {
 
     // Start recv on accepted socket
     var buf: [128]u8 = undefined;
-    var read_iov: [1]ev.system.iovec = undefined;
+    var read_iov: [1]os.iovec = undefined;
     var recv: NetRecv = .init(accepted_sock, .fromSlice(&buf, &read_iov), .{});
     loop.add(&recv.c);
 

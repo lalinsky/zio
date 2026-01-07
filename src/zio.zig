@@ -48,6 +48,9 @@ pub const coro = @import("coro/root.zig");
 /// Low-level event loop library.
 pub const ev = @import("ev/root.zig");
 
+/// Low-level OS APIs.
+pub const os = @import("os/root.zig");
+
 test {
     std.testing.refAllDecls(@This());
 }

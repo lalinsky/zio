@@ -11,10 +11,10 @@ const FileStreamRead = @import("completion.zig").FileStreamRead;
 const FileStreamWrite = @import("completion.zig").FileStreamWrite;
 const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
-const net = @import("os/net.zig");
-const time = @import("os/time.zig");
-const posix = @import("os/posix.zig");
-const fs = @import("os/fs.zig");
+const net = @import("../os/net.zig");
+const time = @import("../os/time.zig");
+const posix = @import("../os/posix.zig");
+const fs = @import("../os/fs.zig");
 
 test {
     _ = @import("test/thread_pool.zig");
