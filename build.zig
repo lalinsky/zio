@@ -119,24 +119,4 @@ pub fn build(b: *std.Build) void {
         run_lib_unit_tests.has_side_effects = true;
         test_step.dependOn(&run_lib_unit_tests.step);
     }
-
-    // Coro library tests
-    const coro_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/coro/coroutines.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-        .filters = if (test_filter) |f| &.{f} else &.{},
-    });
-
-    const test_coro_step = b.step("test-coro", "Run coro library tests");
-    if (emit_test_bin) {
-        test_coro_step.dependOn(&b.addInstallArtifact(coro_tests, .{}).step);
-    } else {
-        const run_coro_tests = b.addRunArtifact(coro_tests);
-        run_coro_tests.has_side_effects = true;
-        test_coro_step.dependOn(&run_coro_tests.step);
-    }
 }
