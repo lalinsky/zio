@@ -1,0 +1,32 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: MIT
+
+const std = @import("std");
+
+const coroutines = @import("coroutines.zig");
+pub const Coroutine = coroutines.Coroutine;
+pub const Context = coroutines.Context;
+pub const Closure = coroutines.Closure;
+pub const EntryPointFn = coroutines.EntryPointFn;
+pub const setupContext = coroutines.setupContext;
+pub const switchContext = coroutines.switchContext;
+
+/// Returns the current coroutine context for this thread, or null if not in a coroutine.
+pub fn getCurrent() ?*Context {
+    return coroutines.current_context;
+}
+
+const stack = @import("stack.zig");
+pub const Stack = stack.StackInfo;
+pub const stackAlloc = stack.stackAlloc;
+pub const stackFree = stack.stackFree;
+pub const stackRecycle = stack.stackRecycle;
+pub const stackExtend = stack.stackExtend;
+pub const setupStackGrowth = stack.setupStackGrowth;
+pub const cleanupStackGrowth = stack.cleanupStackGrowth;
+
+pub const StackPool = @import("stack_pool.zig").StackPool;
+
+test {
+    std.testing.refAllDecls(@This());
+}

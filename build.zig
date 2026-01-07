@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
         .{ .name = "signal-demo", .file = "examples/signal_demo.zig" },
         .{ .name = "udp-echo-server", .file = "examples/udp_echo_server.zig" },
+        .{ .name = "coro-demo", .file = "examples/coro_demo.zig" },
     };
 
     // Benchmarks configuration
