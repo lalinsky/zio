@@ -496,16 +496,16 @@ pub const AI = packed struct(u32) {
     _9: u1 = 0,
     ADDRCONFIG: bool = false,
     V4MAPPED: bool = false,
+    _12: u2 = 0,
     NON_AUTHORITATIVE: bool = false,
     SECURE: bool = false,
     RETURN_PREFERRED_NAMES: bool = false,
-    _15: u1 = 0,
     FQDN: bool = false,
     FILESERVER: bool = false,
     DISABLE_IDN_ENCODING: bool = false,
-    EXTENDED: bool = false,
+    _20: u10 = 0,
     RESOLUTION_HANDLE: bool = false,
-    _: u11 = 0,
+    EXTENDED: bool = false,
 };
 
 // Winsock functions
