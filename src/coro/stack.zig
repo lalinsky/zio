@@ -4,7 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
-const windows = std.os.windows;
+const w = @import("../os/windows.zig");
 const coroutines = @import("coroutines.zig");
 
 pub const page_size = std.heap.page_size_min;
@@ -37,28 +37,6 @@ const MADV_FREE = switch (builtin.os.tag) {
     .netbsd => 6,
     else => std.c.MADV.FREE,
 };
-
-// Windows ntdll.dll functions for stack management
-const INITIAL_TEB = extern struct {
-    OldStackBase: windows.PVOID,
-    OldStackLimit: windows.PVOID,
-    StackBase: windows.PVOID,
-    StackLimit: windows.PVOID,
-    StackAllocationBase: windows.PVOID,
-};
-
-extern "ntdll" fn RtlCreateUserStack(
-    CommittedStackSize: windows.SIZE_T,
-    MaximumStackSize: windows.SIZE_T,
-    ZeroBits: windows.ULONG_PTR,
-    PageSize: windows.SIZE_T,
-    ReserveAlignment: windows.ULONG_PTR,
-    InitialTeb: *INITIAL_TEB,
-) callconv(.winapi) windows.NTSTATUS;
-
-extern "ntdll" fn RtlFreeUserStack(
-    StackAllocationBase: windows.PVOID,
-) callconv(.winapi) void;
 
 pub const StackInfo = extern struct {
     allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
@@ -264,9 +242,9 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
 
     // Use RtlCreateUserStack for automatic stack growth via PAGE_GUARD
     const ALLOCATION_GRANULARITY = 65536; // 64KB on Windows
-    var initial_teb: INITIAL_TEB = undefined;
+    var initial_teb: w.INITIAL_TEB = undefined;
 
-    const status = RtlCreateUserStack(
+    const status = w.RtlCreateUserStack(
         commit_size,
         max_size,
         0, // ZeroBits
@@ -296,7 +274,7 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
 }
 
 fn stackFreeWindows(info: StackInfo) void {
-    RtlFreeUserStack(info.allocation_ptr);
+    w.RtlFreeUserStack(info.allocation_ptr);
 }
 
 /// Windows handles stack growth automatically via PAGE_GUARD mechanism

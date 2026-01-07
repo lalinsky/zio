@@ -5,6 +5,7 @@ const unexpectedError = @import("base.zig").unexpectedError;
 
 pub const system = switch (builtin.os.tag) {
     .linux => std.os.linux,
+    .windows => @import("windows.zig"),
     else => std.c,
 };
 

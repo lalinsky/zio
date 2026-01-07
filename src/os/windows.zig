@@ -8,8 +8,57 @@ pub const HANDLE = std.os.windows.HANDLE;
 pub const LPVOID = std.os.windows.LPVOID;
 pub const LARGE_INTEGER = std.os.windows.LARGE_INTEGER;
 pub const OVERLAPPED = std.os.windows.OVERLAPPED;
+pub const OVERLAPPED_ENTRY = std.os.windows.OVERLAPPED_ENTRY;
+pub const ULONG = std.os.windows.ULONG;
 pub const ULONG_PTR = std.os.windows.ULONG_PTR;
+pub const SECURITY_ATTRIBUTES = std.os.windows.SECURITY_ATTRIBUTES;
+pub const PVOID = std.os.windows.PVOID;
+pub const SIZE_T = std.os.windows.SIZE_T;
+pub const NTSTATUS = std.os.windows.NTSTATUS;
 pub const PAPCFUNC = *const fn (ULONG_PTR) callconv(.winapi) void;
+pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(.winapi) BOOL;
+
+// Constants
+pub const TRUE: BOOL = 1;
+pub const FALSE: BOOL = 0;
+pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
+
+// DuplicateHandle options
+pub const DUPLICATE_SAME_ACCESS: DWORD = 2;
+
+// Console control events
+pub const CTRL_C_EVENT: DWORD = 0;
+pub const CTRL_CLOSE_EVENT: DWORD = 2;
+
+// Generic access rights
+pub const GENERIC_READ: DWORD = 0x80000000;
+pub const GENERIC_WRITE: DWORD = 0x40000000;
+pub const GENERIC_EXECUTE: DWORD = 0x20000000;
+pub const GENERIC_ALL: DWORD = 0x10000000;
+
+// File share modes
+pub const FILE_SHARE_READ: DWORD = 0x00000001;
+pub const FILE_SHARE_WRITE: DWORD = 0x00000002;
+pub const FILE_SHARE_DELETE: DWORD = 0x00000004;
+
+// Creation disposition
+pub const CREATE_NEW: DWORD = 1;
+pub const CREATE_ALWAYS: DWORD = 2;
+pub const OPEN_EXISTING: DWORD = 3;
+pub const OPEN_ALWAYS: DWORD = 4;
+
+// File attributes
+pub const FILE_ATTRIBUTE_READONLY: DWORD = 0x1;
+pub const FILE_ATTRIBUTE_HIDDEN: DWORD = 0x2;
+pub const FILE_ATTRIBUTE_SYSTEM: DWORD = 0x4;
+pub const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x10;
+pub const FILE_ATTRIBUTE_ARCHIVE: DWORD = 0x20;
+pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x80;
+pub const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x400;
+
+// File flags
+pub const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x02000000;
+pub const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
 
 // MoveFileEx flags
 pub const MOVEFILE_COPY_ALLOWED = 2;
@@ -30,7 +79,7 @@ pub extern "kernel32" fn CreateFileW(
     lpFileName: LPCWSTR,
     dwDesiredAccess: DWORD,
     dwShareMode: DWORD,
-    lpSecurityAttributes: ?*std.os.windows.SECURITY_ATTRIBUTES,
+    lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
     dwCreationDisposition: DWORD,
     dwFlagsAndAttributes: DWORD,
     hTemplateFile: ?HANDLE,
@@ -61,6 +110,12 @@ pub extern "kernel32" fn GetFileSizeEx(
     lpFileSize: *LARGE_INTEGER,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn GetFileInformationByHandle(
+    hFile: HANDLE,
+    lpFileInformation: *BY_HANDLE_FILE_INFORMATION,
+) callconv(.winapi) BOOL;
+
+// File time structures
 pub const FILETIME = extern struct {
     dwLowDateTime: DWORD,
     dwHighDateTime: DWORD,
@@ -79,11 +134,6 @@ pub const BY_HANDLE_FILE_INFORMATION = extern struct {
     nFileIndexLow: DWORD,
 };
 
-pub extern "kernel32" fn GetFileInformationByHandle(
-    hFile: HANDLE,
-    lpFileInformation: *BY_HANDLE_FILE_INFORMATION,
-) callconv(.winapi) BOOL;
-
 /// Convert Windows FILETIME to nanoseconds since Unix epoch.
 /// FILETIME is 100-nanosecond intervals since January 1, 1601.
 /// Unix epoch is January 1, 1970.
@@ -95,11 +145,18 @@ pub fn fileTimeToNanos(ft: FILETIME) i64 {
 }
 
 // IOCP functions
+pub extern "kernel32" fn CreateIoCompletionPort(
+    FileHandle: HANDLE,
+    ExistingCompletionPort: ?HANDLE,
+    CompletionKey: ULONG_PTR,
+    NumberOfConcurrentThreads: DWORD,
+) callconv(.winapi) ?HANDLE;
+
 pub extern "kernel32" fn GetQueuedCompletionStatusEx(
     CompletionPort: HANDLE,
-    lpCompletionPortEntries: [*]std.os.windows.OVERLAPPED_ENTRY,
-    ulCount: DWORD,
-    ulNumEntriesRemoved: *DWORD,
+    lpCompletionPortEntries: [*]OVERLAPPED_ENTRY,
+    ulCount: ULONG,
+    ulNumEntriesRemoved: *ULONG,
     dwMilliseconds: DWORD,
     fAlertable: BOOL,
 ) callconv(.winapi) BOOL;
@@ -126,7 +183,11 @@ pub extern "kernel32" fn DuplicateHandle(
     dwOptions: DWORD,
 ) callconv(.winapi) BOOL;
 
-// Thread/APC functions
+// Thread/process functions
+pub extern "kernel32" fn GetCurrentThread() callconv(.winapi) HANDLE;
+pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
+
+// APC functions
 pub extern "kernel32" fn QueueUserAPC(
     pfnAPC: PAPCFUNC,
     hThread: HANDLE,
@@ -142,8 +203,68 @@ pub extern "kernel32" fn SleepEx(
     bAlertable: BOOL,
 ) callconv(.winapi) DWORD;
 
+// Console functions
+pub extern "kernel32" fn SetConsoleCtrlHandler(
+    HandlerRoutine: ?HANDLER_ROUTINE,
+    Add: BOOL,
+) callconv(.winapi) BOOL;
+
+// Time functions (ntdll)
+pub extern "ntdll" fn RtlGetSystemTimePrecise() callconv(.winapi) LARGE_INTEGER;
+pub extern "ntdll" fn RtlQueryPerformanceCounter(PerformanceCounter: *LARGE_INTEGER) callconv(.winapi) BOOL;
+pub extern "ntdll" fn RtlQueryPerformanceFrequency(PerformanceFrequency: *LARGE_INTEGER) callconv(.winapi) BOOL;
+
+// Stack management (ntdll)
+pub const INITIAL_TEB = extern struct {
+    OldStackBase: PVOID,
+    OldStackLimit: PVOID,
+    StackBase: PVOID,
+    StackLimit: PVOID,
+    StackAllocationBase: PVOID,
+};
+
+pub extern "ntdll" fn RtlCreateUserStack(
+    CommittedStackSize: SIZE_T,
+    MaximumStackSize: SIZE_T,
+    ZeroBits: ULONG_PTR,
+    PageSize: SIZE_T,
+    ReserveAlignment: ULONG_PTR,
+    InitialTeb: *INITIAL_TEB,
+) callconv(.winapi) NTSTATUS;
+
+pub extern "ntdll" fn RtlFreeUserStack(
+    StackAllocationBase: PVOID,
+) callconv(.winapi) void;
+
+// Handle management
+pub extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
+
+// File deletion
+pub extern "kernel32" fn DeleteFileW(lpFileName: LPCWSTR) callconv(.winapi) BOOL;
+
+// Re-export helper functions from std.os.windows
+pub const sliceToPrefixedFileW = std.os.windows.sliceToPrefixedFileW;
+pub const peb = std.os.windows.peb;
+
+// Win32 error codes (copied from Zig std)
+pub const Win32Error = @import("windows/win32error.zig").Win32Error;
+
+/// Query the performance counter (monotonic clock ticks).
+pub fn QueryPerformanceCounter() u64 {
+    var result: LARGE_INTEGER = undefined;
+    std.debug.assert(RtlQueryPerformanceCounter(&result) != 0);
+    return @bitCast(result);
+}
+
+/// Query the performance counter frequency (ticks per second).
+pub fn QueryPerformanceFrequency() u64 {
+    var result: LARGE_INTEGER = undefined;
+    std.debug.assert(RtlQueryPerformanceFrequency(&result) != 0);
+    return @bitCast(result);
+}
+
 // Error handling
-pub extern "kernel32" fn GetLastError() callconv(.winapi) std.os.windows.Win32Error;
+pub extern "kernel32" fn GetLastError() callconv(.winapi) Win32Error;
 
 /// Custom WinsockError enum for compatibility between Zig 0.15 and 0.16.
 /// Zig 0.15 uses WSAE* prefix, Zig 0.16 uses E* prefix.
@@ -250,7 +371,303 @@ pub const WinsockError = enum(u16) {
     _,
 };
 
-/// Get the last Winsock error as our custom WinsockError type.
-pub fn WSAGetLastError() WinsockError {
-    return @enumFromInt(@intFromEnum(std.os.windows.ws2_32.WSAGetLastError()));
-}
+pub extern "ws2_32" fn WSAGetLastError() callconv(.winapi) WinsockError;
+
+// ============================================================================
+// Winsock types and functions
+// ============================================================================
+
+pub const WORD = std.os.windows.WORD;
+pub const SHORT = std.os.windows.SHORT;
+pub const INT = std.os.windows.INT;
+
+pub const SOCKET = *opaque {};
+pub const INVALID_SOCKET: SOCKET = @ptrFromInt(~@as(usize, 0));
+pub const SOCKET_ERROR: i32 = -1;
+
+pub const ADDRESS_FAMILY = u16;
+pub const socklen_t = u32;
+
+pub const sockaddr = extern struct {
+    family: ADDRESS_FAMILY,
+    data: [14]u8,
+
+    pub const SS_MAXSIZE = 128;
+
+    pub const storage = extern struct {
+        family: ADDRESS_FAMILY align(8),
+        padding: [SS_MAXSIZE - @sizeOf(ADDRESS_FAMILY)]u8 = undefined,
+    };
+
+    pub const in = extern struct {
+        family: ADDRESS_FAMILY = AF.INET,
+        port: u16,
+        addr: u32,
+        zero: [8]u8 = [_]u8{0} ** 8,
+    };
+
+    pub const in6 = extern struct {
+        family: ADDRESS_FAMILY = AF.INET6,
+        port: u16,
+        flowinfo: u32 = 0,
+        addr: [16]u8,
+        scope_id: u32 = 0,
+    };
+
+    pub const un = extern struct {
+        family: ADDRESS_FAMILY = AF.UNIX,
+        path: [108]u8,
+    };
+};
+
+// Forward from std to maintain compatibility with std.Io.Reader
+pub const WSABUF = std.os.windows.ws2_32.WSABUF;
+
+pub const pollfd = extern struct {
+    fd: SOCKET,
+    events: SHORT,
+    revents: SHORT,
+};
+
+pub const WSADESCRIPTION_LEN = 256;
+pub const WSASYS_STATUS_LEN = 128;
+
+pub const WSADATA = if (@sizeOf(usize) == @sizeOf(u64))
+    extern struct {
+        wVersion: WORD,
+        wHighVersion: WORD,
+        iMaxSockets: u16,
+        iMaxUdpDg: u16,
+        lpVendorInfo: ?*u8,
+        szDescription: [WSADESCRIPTION_LEN + 1]u8,
+        szSystemStatus: [WSASYS_STATUS_LEN + 1]u8,
+    }
+else
+    extern struct {
+        wVersion: WORD,
+        wHighVersion: WORD,
+        szDescription: [WSADESCRIPTION_LEN + 1]u8,
+        szSystemStatus: [WSASYS_STATUS_LEN + 1]u8,
+        iMaxSockets: u16,
+        iMaxUdpDg: u16,
+        lpVendorInfo: ?*u8,
+    };
+
+// Poll events
+pub const POLL = struct {
+    pub const RDNORM: SHORT = 256;
+    pub const RDBAND: SHORT = 512;
+    pub const PRI: SHORT = 1024;
+    pub const WRNORM: SHORT = 16;
+    pub const WRBAND: SHORT = 32;
+    pub const ERR: SHORT = 1;
+    pub const HUP: SHORT = 2;
+    pub const NVAL: SHORT = 4;
+    pub const IN: SHORT = RDNORM | RDBAND;
+    pub const OUT: SHORT = WRNORM;
+};
+
+// Message flags
+pub const MSG = struct {
+    pub const PEEK: u32 = 2;
+    pub const WAITALL: u32 = 8;
+};
+
+// Shutdown modes
+pub const SD_RECEIVE: i32 = 0;
+pub const SD_SEND: i32 = 1;
+pub const SD_BOTH: i32 = 2;
+
+// Socket flags
+pub const WSA_FLAG_OVERLAPPED: u32 = 1;
+
+// ioctlsocket commands
+pub const FIONBIO: i32 = -2147195266;
+
+// Address info flags
+pub const AI = packed struct(u32) {
+    PASSIVE: bool = false,
+    CANONNAME: bool = false,
+    NUMERICHOST: bool = false,
+    NUMERICSERV: bool = false,
+    DNS_ONLY: bool = false,
+    _5: u3 = 0,
+    ALL: bool = false,
+    _9: u1 = 0,
+    ADDRCONFIG: bool = false,
+    V4MAPPED: bool = false,
+    _12: u2 = 0,
+    NON_AUTHORITATIVE: bool = false,
+    SECURE: bool = false,
+    RETURN_PREFERRED_NAMES: bool = false,
+    FQDN: bool = false,
+    FILESERVER: bool = false,
+    DISABLE_IDN_ENCODING: bool = false,
+    _20: u10 = 0,
+    RESOLUTION_HANDLE: bool = false,
+    EXTENDED: bool = false,
+};
+
+// Winsock functions
+pub extern "ws2_32" fn WSAStartup(
+    wVersionRequired: WORD,
+    lpWSAData: *WSADATA,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSAPoll(
+    fdArray: [*]pollfd,
+    fds: u32,
+    timeout: i32,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSASocketW(
+    af: i32,
+    type_: i32,
+    protocol: i32,
+    lpProtocolInfo: ?*anyopaque,
+    g: u32,
+    dwFlags: u32,
+) callconv(.winapi) SOCKET;
+
+pub extern "ws2_32" fn ioctlsocket(s: SOCKET, cmd: i32, argp: *u32) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn bind(s: SOCKET, name: *const sockaddr, namelen: i32) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn connect(s: SOCKET, name: *const sockaddr, namelen: i32) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*sockaddr, addrlen: ?*i32) callconv(.winapi) SOCKET;
+
+pub extern "ws2_32" fn getsockname(s: SOCKET, name: *sockaddr, namelen: *i32) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn getsockopt(s: SOCKET, level: i32, optname: i32, optval: [*]u8, optlen: *i32) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSARecv(
+    s: SOCKET,
+    lpBuffers: [*]WSABUF,
+    dwBufferCount: u32,
+    lpNumberOfBytesRecvd: ?*u32,
+    lpFlags: *u32,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?*anyopaque,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSASend(
+    s: SOCKET,
+    lpBuffers: [*]WSABUF,
+    dwBufferCount: u32,
+    lpNumberOfBytesSent: ?*u32,
+    dwFlags: u32,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?*anyopaque,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSARecvFrom(
+    s: SOCKET,
+    lpBuffers: [*]WSABUF,
+    dwBufferCount: u32,
+    lpNumberOfBytesRecvd: ?*u32,
+    lpFlags: *u32,
+    lpFrom: ?*sockaddr,
+    lpFromlen: ?*i32,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?*anyopaque,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSASendTo(
+    s: SOCKET,
+    lpBuffers: [*]WSABUF,
+    dwBufferCount: u32,
+    lpNumberOfBytesSent: ?*u32,
+    dwFlags: u32,
+    lpTo: ?*const sockaddr,
+    iToLen: i32,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?*anyopaque,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn setsockopt(
+    s: SOCKET,
+    level: i32,
+    optname: i32,
+    optval: ?[*]const u8,
+    optlen: i32,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSAIoctl(
+    s: SOCKET,
+    dwIoControlCode: DWORD,
+    lpvInBuffer: ?*const anyopaque,
+    cbInBuffer: DWORD,
+    lpvOutBuffer: ?*anyopaque,
+    cbOutBuffer: DWORD,
+    lpcbBytesReturned: *DWORD,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?*anyopaque,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSAGetOverlappedResult(
+    s: SOCKET,
+    lpOverlapped: *OVERLAPPED,
+    lpcbTransfer: *DWORD,
+    fWait: BOOL,
+    lpdwFlags: *DWORD,
+) callconv(.winapi) BOOL;
+
+// GUID type
+pub const GUID = extern struct {
+    Data1: u32,
+    Data2: u16,
+    Data3: u16,
+    Data4: [8]u8,
+};
+
+// Address families
+pub const AF = struct {
+    pub const UNSPEC: u16 = 0;
+    pub const UNIX: u16 = 1;
+    pub const INET: u16 = 2;
+    pub const INET6: u16 = 23;
+};
+
+// Socket types
+pub const SOCK = struct {
+    pub const STREAM: i32 = 1;
+    pub const DGRAM: i32 = 2;
+    pub const RAW: i32 = 3;
+    pub const SEQPACKET: i32 = 5;
+};
+
+// Socket option levels
+pub const SOL = struct {
+    pub const SOCKET: i32 = 0xffff;
+};
+
+// Protocol levels
+pub const IPPROTO = struct {
+    pub const TCP: i32 = 6;
+};
+
+// Socket options (SOL_SOCKET level)
+pub const SO = struct {
+    pub const REUSEADDR: i32 = 0x0004;
+    pub const KEEPALIVE: i32 = 0x0008;
+    pub const ERROR: i32 = 0x1007;
+};
+
+// TCP options (IPPROTO_TCP level)
+pub const TCP = struct {
+    pub const NODELAY: i32 = 0x0001;
+};
+
+// Winsock-specific socket options
+pub const SO_UPDATE_ACCEPT_CONTEXT: i32 = 0x700b;
+pub const SO_UPDATE_CONNECT_CONTEXT: i32 = 0x7010;
+
+// WSAIoctl codes
+pub const SIO_GET_EXTENSION_FUNCTION_POINTER: DWORD = 0xc8000006;

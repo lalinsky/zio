@@ -8,7 +8,7 @@ const unexpectedError = @import("base.zig").unexpectedError;
 
 const log = std.log.scoped(.zio_socket);
 
-// Windows addrinfo definitions (removed from std.os.windows.ws2_32 in Zig 0.16)
+// Windows addrinfo definitions
 const windows_addrinfo = if (builtin.os.tag == .windows) extern struct {
     flags: i32,
     family: i32,
@@ -16,7 +16,7 @@ const windows_addrinfo = if (builtin.os.tag == .windows) extern struct {
     protocol: i32,
     addrlen: usize,
     canonname: ?[*:0]u8,
-    addr: ?*std.os.windows.ws2_32.sockaddr,
+    addr: ?*windows.sockaddr,
     next: ?*windows_addrinfo,
 } else void;
 
@@ -49,8 +49,8 @@ var wsa_init_once = std.once(wsaInit);
 
 fn wsaInit() void {
     if (builtin.os.tag == .windows) {
-        var wsa_data: std.os.windows.ws2_32.WSADATA = undefined;
-        _ = std.os.windows.ws2_32.WSAStartup(2 << 8 | 2, &wsa_data);
+        var wsa_data: windows.WSADATA = undefined;
+        _ = windows.WSAStartup(2 << 8 | 2, &wsa_data);
     }
 }
 
@@ -59,17 +59,17 @@ pub fn ensureWSAInitialized() void {
 }
 
 pub const fd_t = switch (builtin.os.tag) {
-    .windows => std.os.windows.ws2_32.SOCKET,
+    .windows => windows.SOCKET,
     else => posix.system.fd_t,
 };
 
 pub const pollfd = switch (builtin.os.tag) {
-    .windows => std.os.windows.ws2_32.pollfd,
+    .windows => windows.pollfd,
     else => posix.system.pollfd,
 };
 
 pub const POLL = switch (builtin.os.tag) {
-    .windows => std.os.windows.ws2_32.POLL,
+    .windows => windows.POLL,
     else => posix.system.POLL,
 };
 
@@ -108,7 +108,7 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
     switch (builtin.os.tag) {
         .windows => {
             while (true) {
-                const rc = std.os.windows.ws2_32.WSAPoll(fds.ptr, @intCast(fds.len), timeout);
+                const rc = windows.WSAPoll(fds.ptr, @intCast(fds.len), timeout);
                 if (rc >= 0) {
                     return @intCast(rc);
                 }
@@ -144,7 +144,7 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
 pub fn close(fd: fd_t) void {
     switch (builtin.os.tag) {
         .windows => {
-            _ = std.os.windows.ws2_32.closesocket(fd);
+            _ = windows.closesocket(fd);
         },
         else => {
             while (true) {
@@ -184,12 +184,12 @@ pub fn shutdown(fd: fd_t, how: ShutdownHow) ShutdownError!void {
     switch (builtin.os.tag) {
         .windows => {
             const system_how: i32 = switch (how) {
-                .receive => std.os.windows.ws2_32.SD_RECEIVE,
-                .send => std.os.windows.ws2_32.SD_SEND,
-                .both => std.os.windows.ws2_32.SD_BOTH,
+                .receive => windows.SD_RECEIVE,
+                .send => windows.SD_SEND,
+                .both => windows.SD_BOTH,
             };
-            const rc = std.os.windows.ws2_32.shutdown(fd, system_how);
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            const rc = windows.shutdown(fd, system_how);
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToShutdownError(err);
             }
@@ -245,21 +245,21 @@ pub const OpenError = error{
 pub fn socket(domain: Domain, socket_type: Type, flags: OpenFlags) OpenError!fd_t {
     switch (builtin.os.tag) {
         .windows => {
-            const sock = std.os.windows.ws2_32.WSASocketW(
+            const sock = windows.WSASocketW(
                 @intFromEnum(domain),
                 @intFromEnum(socket_type),
                 0,
                 null,
                 0,
-                std.os.windows.ws2_32.WSA_FLAG_OVERLAPPED,
+                windows.WSA_FLAG_OVERLAPPED,
             );
-            if (sock == std.os.windows.ws2_32.INVALID_SOCKET) {
+            if (sock == windows.INVALID_SOCKET) {
                 const err = windows.WSAGetLastError();
                 return errnoToOpenError(err);
             }
             if (flags.nonblocking) {
                 var mode: c_ulong = 1;
-                _ = std.os.windows.ws2_32.ioctlsocket(sock, std.os.windows.ws2_32.FIONBIO, &mode);
+                _ = windows.ioctlsocket(sock, windows.FIONBIO, &mode);
             }
             return sock;
         },
@@ -363,8 +363,8 @@ pub fn errnoToBindError(err: E) BindError {
 pub fn bind(fd: fd_t, addr: *const sockaddr, addr_len: socklen_t) BindError!void {
     switch (builtin.os.tag) {
         .windows => {
-            const rc = std.os.windows.ws2_32.bind(fd, @ptrCast(addr), @intCast(addr_len));
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            const rc = windows.bind(fd, @ptrCast(addr), @intCast(addr_len));
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToBindError(err);
             }
@@ -421,8 +421,8 @@ pub fn errnoToListenError(err: E) ListenError {
 pub fn listen(fd: fd_t, backlog: u31) ListenError!void {
     switch (builtin.os.tag) {
         .windows => {
-            const rc = std.os.windows.ws2_32.listen(fd, backlog);
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            const rc = windows.listen(fd, backlog);
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToListenError(err);
             }
@@ -466,8 +466,8 @@ pub const ConnectError = error{
 pub fn connect(fd: fd_t, addr: *const sockaddr, addr_len: socklen_t) ConnectError!void {
     switch (builtin.os.tag) {
         .windows => {
-            const rc = std.os.windows.ws2_32.connect(fd, @ptrCast(addr), @intCast(addr_len));
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            const rc = windows.connect(fd, @ptrCast(addr), @intCast(addr_len));
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToConnectError(err);
             }
@@ -505,18 +505,18 @@ pub const AcceptError = error{
 pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlags) AcceptError!fd_t {
     switch (builtin.os.tag) {
         .windows => {
-            const sock = std.os.windows.ws2_32.accept(
+            const sock = windows.accept(
                 fd,
                 if (addr) |a| @ptrCast(a) else null,
                 addr_len,
             );
-            if (sock == std.os.windows.ws2_32.INVALID_SOCKET) {
+            if (sock == windows.INVALID_SOCKET) {
                 const err = windows.WSAGetLastError();
                 return errnoToAcceptError(err);
             }
             if (flags.nonblocking) {
                 var mode: c_ulong = 1;
-                _ = std.os.windows.ws2_32.ioctlsocket(sock, std.os.windows.ws2_32.FIONBIO, &mode);
+                _ = windows.ioctlsocket(sock, windows.FIONBIO, &mode);
             }
             return sock;
         },
@@ -581,7 +581,7 @@ pub const GetSockNameError = error{Unexpected};
 pub fn getsockname(fd: fd_t, addr: *sockaddr, addr_len: *socklen_t) GetSockNameError!void {
     switch (builtin.os.tag) {
         .windows => {
-            const rc = std.os.windows.ws2_32.getsockname(fd, @ptrCast(addr), @ptrCast(addr_len));
+            const rc = windows.getsockname(fd, @ptrCast(addr), @ptrCast(addr_len));
             if (rc != 0) {
                 return unexpectedError(windows.WSAGetLastError());
             }
@@ -602,7 +602,7 @@ pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
         .windows => {
             var err: i32 = 0;
             var len: i32 = @sizeOf(i32);
-            const rc = std.os.windows.ws2_32.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
+            const rc = windows.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
             if (rc != 0) {
                 return unexpectedError(windows.WSAGetLastError());
             }
@@ -867,9 +867,9 @@ pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
 
     switch (builtin.os.tag) {
         .windows => {
-            var bytes_received: std.os.windows.DWORD = 0;
-            var win_flags: std.os.windows.DWORD = @intCast(sys_flags);
-            const rc = std.os.windows.ws2_32.WSARecv(
+            var bytes_received: windows.DWORD = 0;
+            var win_flags: windows.DWORD = @intCast(sys_flags);
+            const rc = windows.WSARecv(
                 fd,
                 @ptrCast(buffers.ptr),
                 @intCast(buffers.len),
@@ -878,7 +878,7 @@ pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
                 null,
                 null,
             );
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToRecvError(err);
             }
@@ -962,8 +962,8 @@ pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!
 
     switch (builtin.os.tag) {
         .windows => {
-            var bytes_sent: std.os.windows.DWORD = 0;
-            const rc = std.os.windows.ws2_32.WSASend(
+            var bytes_sent: windows.DWORD = 0;
+            const rc = windows.WSASend(
                 fd,
                 @ptrCast(@constCast(buffers.ptr)),
                 @intCast(buffers.len),
@@ -972,7 +972,7 @@ pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!
                 null,
                 null,
             );
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToSendError(err);
             }
@@ -1036,22 +1036,22 @@ pub fn recvfrom(
     var sys_flags: c_int = 0;
     if (flags.peek) {
         sys_flags |= if (builtin.os.tag == .windows)
-            std.os.windows.ws2_32.MSG.PEEK
+            windows.MSG.PEEK
         else
             posix.system.MSG.PEEK;
     }
     if (flags.waitall) {
         sys_flags |= if (builtin.os.tag == .windows)
-            std.os.windows.ws2_32.MSG.WAITALL
+            windows.MSG.WAITALL
         else
             posix.system.MSG.WAITALL;
     }
 
     switch (builtin.os.tag) {
         .windows => {
-            var bytes_received: std.os.windows.DWORD = 0;
+            var bytes_received: windows.DWORD = 0;
             var from_len: c_int = if (addr_len) |len| @intCast(len.*) else 0;
-            const rc = std.os.windows.ws2_32.WSARecvFrom(
+            const rc = windows.WSARecvFrom(
                 fd,
                 @ptrCast(buffers.ptr),
                 @intCast(buffers.len),
@@ -1063,7 +1063,7 @@ pub fn recvfrom(
                 null,
             );
             if (addr_len) |len| len.* = @intCast(from_len);
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToRecvError(err);
             }
@@ -1136,8 +1136,8 @@ pub fn sendto(
 
     switch (builtin.os.tag) {
         .windows => {
-            var bytes_sent: std.os.windows.DWORD = 0;
-            const rc = std.os.windows.ws2_32.WSASendTo(
+            var bytes_sent: windows.DWORD = 0;
+            const rc = windows.WSASendTo(
                 fd,
                 @ptrCast(@constCast(buffers.ptr)),
                 @intCast(buffers.len),
@@ -1148,7 +1148,7 @@ pub fn sendto(
                 null,
                 null,
             );
-            if (rc == std.os.windows.ws2_32.SOCKET_ERROR) {
+            if (rc == windows.SOCKET_ERROR) {
                 const err = windows.WSAGetLastError();
                 return errnoToSendError(err);
             }
@@ -1258,7 +1258,7 @@ pub const addrinfo = switch (builtin.os.tag) {
 };
 
 pub const AI = switch (builtin.os.tag) {
-    .windows => std.os.windows.ws2_32.AI,
+    .windows => windows.AI,
     else => std.c.AI,
 };
 

@@ -460,7 +460,11 @@ pub const Socket = struct {
     /// Enable or disable address reuse (SO_REUSEADDR)
     /// Allows binding to an address in TIME_WAIT state
     pub fn setReuseAddress(self: Socket, enabled: bool) !void {
-        try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, enabled);
+        if (builtin.os.tag == .windows) {
+            try self.setBoolOptionWindows(os.windows.SOL.SOCKET, os.windows.SO.REUSEADDR, enabled);
+        } else {
+            try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, enabled);
+        }
     }
 
     /// Enable or disable port reuse (SO_REUSEPORT)
@@ -476,21 +480,37 @@ pub const Socket = struct {
     /// Enable or disable TCP keepalive (SO_KEEPALIVE)
     /// Periodically sends keepalive probes to detect dead connections
     pub fn setKeepAlive(self: Socket, enabled: bool) !void {
-        try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, enabled);
+        if (builtin.os.tag == .windows) {
+            try self.setBoolOptionWindows(os.windows.SOL.SOCKET, os.windows.SO.KEEPALIVE, enabled);
+        } else {
+            try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, enabled);
+        }
     }
 
     /// Enable or disable Nagle's algorithm (TCP_NODELAY)
     /// When enabled (true), disables buffering for low-latency communication
     pub fn setNoDelay(self: Socket, enabled: bool) !void {
-        try self.setBoolOption(std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, enabled);
+        if (builtin.os.tag == .windows) {
+            try self.setBoolOptionWindows(os.windows.IPPROTO.TCP, os.windows.TCP.NODELAY, enabled);
+        } else {
+            try self.setBoolOption(std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, enabled);
+        }
     }
 
-    /// Helper function to set a boolean socket option
+    /// Helper function to set a boolean socket option (POSIX)
     fn setBoolOption(self: Socket, level: i32, optname: u32, enabled: bool) !void {
-        // ev.Backend.NetHandle is already the correct type for the platform
         const value: c_int = if (enabled) 1 else 0;
         const bytes = std.mem.asBytes(&value);
         try std.posix.setsockopt(self.handle, level, optname, bytes);
+    }
+
+    /// Helper function to set a boolean socket option (Windows)
+    fn setBoolOptionWindows(self: Socket, level: i32, optname: i32, enabled: bool) !void {
+        const value: c_int = if (enabled) 1 else 0;
+        const rc = os.windows.setsockopt(self.handle, level, optname, std.mem.asBytes(&value).ptr, @sizeOf(c_int));
+        if (rc == os.windows.SOCKET_ERROR) {
+            return error.Unexpected;
+        }
     }
 
     /// Bind the socket to an address
@@ -1041,7 +1061,8 @@ pub const IpAddressIterator = struct {
             const addr = info.addr orelse continue;
             // Skip unsupported address families
             if (addr.family != os.net.AF.INET and addr.family != os.net.AF.INET6) continue;
-            return IpAddress.initPosix(addr, @intCast(info.addrlen));
+            // Cast needed on Windows where we have our own sockaddr type
+            return IpAddress.initPosix(@ptrCast(addr), @intCast(info.addrlen));
         }
         return null;
     }

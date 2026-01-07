@@ -24,7 +24,7 @@ test "File: open/close" {
 
     const fd = try file_create.getResult();
     if (builtin.os.tag == .windows) {
-        try std.testing.expect(fd != std.os.windows.INVALID_HANDLE_VALUE);
+        try std.testing.expect(fd != os.windows.INVALID_HANDLE_VALUE);
     } else {
         try std.testing.expect(fd > 0);
     }

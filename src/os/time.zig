@@ -14,8 +14,8 @@ pub fn now(clock: Clock) u64 {
             switch (clock) {
                 .monotonic => {
                     // QPC on Windows doesn't fail on >= XP/2000 and includes time suspended.
-                    const qpc = std.os.windows.QueryPerformanceCounter();
-                    const qpf = std.os.windows.QueryPerformanceFrequency();
+                    const qpc = w.QueryPerformanceCounter();
+                    const qpf = w.QueryPerformanceFrequency();
 
                     // Convert QPC ticks to milliseconds
                     // Using fixed-point arithmetic to avoid overflow: (qpc * 1000) / qpf
@@ -33,7 +33,7 @@ pub fn now(clock: Clock) u64 {
                     // RtlGetSystemTimePrecise() has a granularity of 100 nanoseconds
                     // and uses the NTFS/Windows epoch, which is 1601-01-01.
                     // Convert to Unix epoch (1970-01-01) by subtracting the difference.
-                    const ticks = std.os.windows.ntdll.RtlGetSystemTimePrecise();
+                    const ticks = w.RtlGetSystemTimePrecise();
                     const ms_since_windows_epoch = @divFloor(ticks, std.time.ns_per_ms / 100);
                     // Seconds between Windows epoch (1601) and Unix epoch (1970)
                     const epoch_diff_ms: i64 = 11644473600 * std.time.ms_per_s;
@@ -66,7 +66,7 @@ pub fn sleep(timeout_ms: i32) void {
     switch (builtin.os.tag) {
         .windows => {
             if (timeout_ms > 0) {
-                _ = w.SleepEx(@intCast(timeout_ms), std.os.windows.FALSE);
+                _ = w.SleepEx(@intCast(timeout_ms), w.FALSE);
             }
         },
         else => {
