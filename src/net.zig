@@ -1414,7 +1414,7 @@ test "UnixAddress: init" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     const addr = try UnixAddress.init(path);
     try std.testing.expectEqual(os.net.AF.UNIX, addr.any.family);
@@ -1566,7 +1566,7 @@ test "UnixAddress: listen/accept/connect/read/write" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     var write_buffer: [32]u8 = undefined;
     const addr = try UnixAddress.init(path);
@@ -1592,7 +1592,7 @@ test "UnixAddress: listen/accept/connect/read/write unbuffered" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     const addr = try UnixAddress.init(path);
     try checkListen(addr, UnixAddress.ListenOptions{}, &.{});
@@ -1630,10 +1630,10 @@ test "UnixAddress: bind/sendTo/receiveFrom" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const server_path = "zio-test-udp-server.sock";
-    defer std.fs.cwd().deleteFile(server_path) catch {};
+    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), server_path) catch {};
 
     const client_path = "zio-test-udp-client.sock";
-    defer std.fs.cwd().deleteFile(client_path) catch {};
+    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), client_path) catch {};
 
     const server_addr = try UnixAddress.init(server_path);
     const client_addr = try UnixAddress.init(client_path);
@@ -1644,7 +1644,7 @@ test "UnixAddress: listen/accept/connect/read/EOF" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     const addr = try UnixAddress.init(path);
     try checkShutdown(addr, UnixAddress.ListenOptions{});

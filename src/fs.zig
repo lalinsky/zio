@@ -16,8 +16,7 @@ pub const Dir = struct {
     fd: os.fs.fd_t,
 
     pub fn cwd() Dir {
-        const dir = std.fs.cwd(); // TODO: avoid `std.fs`
-        return .{ .fd = dir.fd };
+        return .{ .fd = os.fs.cwd() };
     }
 
     pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileOpenFlags) !File {
@@ -109,7 +108,7 @@ pub const Dir = struct {
     }
 };
 
-const Handle = std.fs.File.Handle;
+const Handle = os.fs.fd_t;
 
 pub const File = struct {
     fd: Handle,
