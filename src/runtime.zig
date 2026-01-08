@@ -489,7 +489,8 @@ pub const Executor = struct {
         }
         // If yielding with .ready state (cooperative yield), schedule for later execution
         // This bypasses LIFO slot for fairness - yields always go to back of queue
-        if (desired_state == .ready) {
+        // main_task is never queued - it just checks state in runSchedulerLoop
+        if (desired_state == .ready and !is_main) {
             self.scheduleTaskLocal(current_task, true); // is_yield = true
         }
 
@@ -605,16 +606,13 @@ pub const Executor = struct {
     /// This is useful for cleanup operations (like close()) that must complete even if canceled.
     /// Must be paired with endShield().
     pub fn beginShield(self: *Executor) void {
-        const current_coro = self.current_coroutine orelse unreachable;
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        current_task.shield_count += 1;
+        self.getCurrentTask().shield_count += 1;
     }
 
     /// End a cancellation shield.
     /// Must be paired with beginShield().
     pub fn endShield(self: *Executor) void {
-        const current_coro = self.current_coroutine orelse unreachable;
-        const current_task = AnyTask.fromCoroutine(current_coro);
+        const current_task = self.getCurrentTask();
         std.debug.assert(current_task.shield_count > 0);
         current_task.shield_count -= 1;
     }
@@ -623,9 +621,7 @@ pub const Executor = struct {
     /// This consumes one pending error if available.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
     pub fn checkCanceled(self: *Executor) Cancelable!void {
-        const current_coro = self.current_coroutine orelse unreachable;
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        try current_task.checkCanceled(self.runtime);
+        try self.getCurrentTask().checkCanceled(self.runtime);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).
@@ -1003,11 +999,11 @@ pub const Runtime = struct {
 
     /// Cooperatively yield control to allow other tasks to run.
     /// The current task will be rescheduled and continue execution later.
-    /// No-op if not called from within a coroutine.
+    /// Can be called from the main thread or from within a coroutine.
+    /// No-op if called from a thread without an executor.
     pub fn yield(self: *Runtime) Cancelable!void {
         _ = self;
         const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
         return executor.yield(.ready, .ready, .allow_cancel);
     }
 
@@ -1018,20 +1014,20 @@ pub const Runtime = struct {
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.
-    /// No-op if not called from within a coroutine.
+    /// Can be called from the main thread or from within a coroutine.
+    /// No-op if called from a thread without an executor.
     pub fn beginShield(self: *Runtime) void {
         _ = self;
         const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
         executor.beginShield();
     }
 
     /// End a cancellation shield.
-    /// No-op if not called from within a coroutine.
+    /// Can be called from the main thread or from within a coroutine.
+    /// No-op if called from a thread without an executor.
     pub fn endShield(self: *Runtime) void {
         _ = self;
         const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
         executor.endShield();
     }
 
@@ -1070,11 +1066,11 @@ pub const Runtime = struct {
     /// Check if cancellation has been requested and return error.Canceled if so.
     /// This consumes the cancellation flag.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
-    /// No-op (returns successfully) if not called from within a coroutine.
+    /// Can be called from the main thread or from within a coroutine.
+    /// No-op (returns successfully) if called from a thread without an executor.
     pub fn checkCanceled(self: *Runtime) Cancelable!void {
         _ = self;
         const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
         return executor.checkCanceled();
     }
 
@@ -1340,4 +1336,66 @@ test "runtime: sleep is cancelable" {
     // Ensure the sleep was canceled before completion
     const elapsed = timer.read();
     try testing.expect(elapsed <= 500 * std.time.ns_per_ms);
+}
+
+test "runtime: yield from main allows tasks to run" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var counter: usize = 0;
+
+    const yieldingTask = struct {
+        fn call(rt: *Runtime, counter_ptr: *usize) !void {
+            for (0..10) |_| {
+                counter_ptr.* += 1;
+                try rt.yield();
+            }
+        }
+    }.call;
+
+    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter }, .{});
+    defer handle.cancel(runtime);
+
+    // Instead of join(), use yield() from main to let the task run
+    var iterations: usize = 0;
+    while (counter < 10) : (iterations += 1) {
+        if (iterations >= 100) {
+            std.debug.print("yield from main not working: counter={}, iterations={}\n", .{ counter, iterations });
+            return error.TestExpectedEqual;
+        }
+        try runtime.yield();
+    }
+
+    try std.testing.expectEqual(10, counter);
+}
+
+test "runtime: sleep from main allows tasks to run" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var counter: usize = 0;
+
+    const yieldingTask = struct {
+        fn call(rt: *Runtime, counter_ptr: *usize) !void {
+            for (0..10) |_| {
+                counter_ptr.* += 1;
+                try rt.yield();
+            }
+        }
+    }.call;
+
+    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter }, .{});
+    defer handle.cancel(runtime);
+
+    // Instead of join(), use sleep() from main to let the task run
+    var iterations: usize = 0;
+    while (counter < 10) : (iterations += 1) {
+        if (iterations >= 100) {
+            std.debug.print("sleep from main not working: counter={}, iterations={}\n", .{ counter, iterations });
+            return error.TestExpectedEqual;
+        }
+        try runtime.sleep(1);
+    }
+
+    try std.testing.expectEqual(10, counter);
 }
