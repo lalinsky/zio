@@ -5,6 +5,7 @@ IFS=$'\n\t'
 
 # Default values
 CI_MODE=false
+FULL_MODE=false
 TEST_FILTER=""
 TARGET=""
 USE_WINE=false
@@ -12,7 +13,7 @@ USE_QEMU=false
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--wine] [--qemu] [--ci]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--wine] [--qemu] [--ci] [--full]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -38,6 +39,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ci)
             CI_MODE=true
+            shift
+            ;;
+        --full)
+            FULL_MODE=true
             shift
             ;;
         *)
@@ -75,10 +80,12 @@ if [ "$USE_QEMU" = true ]; then
 fi
 eval zig build $BUILD_ARGS --summary all
 
-echo "=== Building examples ==="
-zig build examples
+if [ "$FULL_MODE" = true ]; then
+    echo "=== Building examples ==="
+    zig build examples
 
-echo "=== Running benchmarks ==="
-zig build benchmarks
+    echo "=== Building benchmarks ==="
+    zig build benchmarks
+fi
 
 echo "=== All checks passed! ==="

@@ -4,7 +4,7 @@
 - use `./check.sh --target x86_64-windows --wine` to cross-compile and test via Wine
 - use `./check.sh --target riscv64-linux --qemu` to cross-compile and test via QEMU
 - prefer only running specific tests and stopping on the first failure, while working on the feature
-- run full check after you are done
+- use `./check.sh --full` before committing to also build examples and benchmarks
 
 Extra notes:
 - use `zig env` to get the path to the Zig standard library, if you need to check something
