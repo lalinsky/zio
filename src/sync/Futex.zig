@@ -372,10 +372,12 @@ test "Futex: multiple waiters different addresses" {
 test "Futex: same bucket different addresses" {
     const Main = struct {
         fn waiterFunc(io: *Runtime, v: *u32, w: *u32) !void {
+            std.debug.print("waiterFunc started for addr=0x{x}\n", .{@intFromPtr(v)});
             while (@atomicLoad(u32, v, .acquire) == 0) {
                 try Futex.wait(io, v, 0);
             }
-            _ = @atomicRmw(u32, w, .Add, 1, .monotonic);
+            const count = @atomicRmw(u32, w, .Add, 1, .monotonic);
+            std.debug.print("waiterFunc completed for addr=0x{x}, woken count now {}\n", .{ @intFromPtr(v), count + 1 });
         }
 
         fn wakerFunc(io: *Runtime, val: *u32) !void {
@@ -384,6 +386,7 @@ test "Futex: same bucket different addresses" {
             while (i < 10) : (i += 1) {
                 try io.yield();
             }
+            std.debug.print("wakerFunc waking addr=0x{x}\n", .{@intFromPtr(val)});
             @atomicStore(u32, val, 1, .release);
             Futex.wake(io, val, 1);
         }
@@ -413,6 +416,12 @@ test "Futex: same bucket different addresses" {
             try std.testing.expect(found);
             try std.testing.expect(addr1 != addr2);
 
+            std.debug.print("Test setup: addr1=0x{x}, addr2=0x{x}, bucket_index={}\n", .{
+                @intFromPtr(addr1),
+                @intFromPtr(addr2),
+                @intFromPtr(bucket1) - @intFromPtr(&io.futex_table.buckets[0]),
+            });
+
             // Spawn two waiters, each on a different address (but same bucket)
             var waiter1 = try io.spawn(waiterFunc, .{ io, addr1, w }, .{});
             defer waiter1.cancel(io);
@@ -420,21 +429,33 @@ test "Futex: same bucket different addresses" {
             var waiter2 = try io.spawn(waiterFunc, .{ io, addr2, w }, .{});
             defer waiter2.cancel(io);
 
+            std.debug.print("Spawned waiters, about to spawn waker\n", .{});
+
             // Wake only addr1
             var waker = try io.spawn(wakerFunc, .{ io, addr1 }, .{});
             try waker.join(io);
+
+            std.debug.print("Waker completed, setting timeout and joining waiters\n", .{});
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
             timeout.set(io, 10 * std.time.ns_per_ms);
 
             // waiter1 should complete successfully
-            try waiter1.join(io);
+            std.debug.print("Joining waiter1...\n", .{});
+            waiter1.join(io) catch |err| {
+                std.debug.print("waiter1 failed with error: {}\n", .{err});
+                return err;
+            };
+            std.debug.print("waiter1 completed successfully\n", .{});
 
             // waiter2 should timeout since it's on addr2 which was never woken
+            std.debug.print("Joining waiter2...\n", .{});
             waiter2.join(io) catch |err| {
+                std.debug.print("waiter2 failed as expected: {}\n", .{err});
                 return if (err == error.Canceled) {} else err;
             };
+            std.debug.print("waiter2 unexpectedly succeeded\n", .{});
         }
     };
 
@@ -447,5 +468,6 @@ test "Futex: same bucket different addresses" {
     try task.join(rt);
 
     // Only waiter1 should have woken - waiter2 was on a different address in same bucket
+    std.debug.print("Final woken count: {}\n", .{woken});
     try std.testing.expectEqual(1, woken);
 }
