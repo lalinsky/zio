@@ -459,6 +459,10 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
                     rt.beginShield();
                     shielded = true;
                     fut.cancel();
+                    // Reset state before next yield - wakeup set it to .ready but we need
+                    // .preparing_to_wait for yield's CAS to work correctly
+                    const prev = task.state.swap(.preparing_to_wait, .release);
+                    std.debug.assert(prev == .ready);
                     continue;
                 },
             };

@@ -496,17 +496,24 @@ pub const Loop = struct {
         }
     }
 
-    fn checkTimers(self: *Loop) ?u64 {
+    const TimerCheckResult = struct {
+        next_timeout_ms: ?u64,
+        fired: bool,
+    };
+
+    fn checkTimers(self: *Loop) TimerCheckResult {
         self.state.updateNow();
+        var fired = false;
         while (self.state.timers.peek()) |timer| {
             if (timer.deadline_ms > self.state.now_ms) {
-                return timer.deadline_ms - self.state.now_ms;
+                return .{ .next_timeout_ms = timer.deadline_ms - self.state.now_ms, .fired = fired };
             }
             timer.c.setResult(.timer, {});
             self.state.clearTimer(timer);
             self.state.markCompleted(&timer.c);
+            fired = true;
         }
-        return null;
+        return .{ .next_timeout_ms = null, .fired = fired };
     }
 
     /// Check if an async handle is pending and set its result if so.
@@ -625,14 +632,14 @@ pub const Loop = struct {
     pub fn tick(self: *Loop, wait: bool) !void {
         if (self.done()) return;
 
-        const timer_timeout_ms = self.checkTimers();
+        const timer_result = self.checkTimers();
 
         var timeout_ms: u64 = 0;
         if (wait) {
-            // Don't block if we have completions waiting to be processed
-            if (!self.state.completions.empty() or !self.state.work_completions.empty()) {
+            // Don't block if we have completions waiting to be processed or timers fired
+            if (!self.state.completions.empty() or !self.state.work_completions.empty() or timer_result.fired) {
                 timeout_ms = 0;
-            } else if (timer_timeout_ms) |t| {
+            } else if (timer_result.next_timeout_ms) |t| {
                 // Use timer timeout, capped at max_wait_ms
                 timeout_ms = @min(t, self.max_wait_ms);
             } else {
