@@ -11,6 +11,7 @@ const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");
 const Timeout = @import("runtime/timeout.zig").Timeout;
 const w = @import("os/windows.zig");
+const Waiter = @import("sync/common.zig").Waiter;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -281,17 +282,20 @@ pub const Signal = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
+        // Stack-allocated waiter - separates operation wait node from task wait node
+        var waiter: Waiter = .init(&task.awaitable);
+
         // Transition to preparing_to_wait state before adding to queue
         task.state.store(.preparing_to_wait, .release);
 
         // Add to wait queue
-        self.entry.waiters.push(&task.awaitable.wait_node);
+        self.entry.waiters.push(&waiter.wait_node);
 
         // Yield with atomic state transition (.preparing_to_wait -> .waiting)
         // If signal arrives before the yield, the CAS inside yield() will fail and we won't suspend
         executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
             // On cancellation, remove from queue
-            _ = self.entry.waiters.remove(&task.awaitable.wait_node);
+            _ = self.entry.waiters.remove(&waiter.wait_node);
             return err;
         };
 
@@ -321,11 +325,14 @@ pub const Signal = struct {
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
 
+        // Stack-allocated waiter - separates operation wait node from task wait node
+        var waiter: Waiter = .init(&task.awaitable);
+
         // Transition to preparing_to_wait state before adding to queue
         task.state.store(.preparing_to_wait, .release);
 
         // Add to wait queue
-        self.entry.waiters.push(&task.awaitable.wait_node);
+        self.entry.waiters.push(&waiter.wait_node);
 
         // Set up timeout
         var timeout = Timeout.init;
@@ -336,7 +343,7 @@ pub const Signal = struct {
         // If signal arrives before the yield, the CAS inside yield() will fail and we won't suspend
         executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
             // Try to remove from queue
-            _ = self.entry.waiters.remove(&task.awaitable.wait_node);
+            _ = self.entry.waiters.remove(&waiter.wait_node);
 
             // Check if this timeout triggered, otherwise it was user cancellation
             return rt.checkTimeout(&timeout, err);

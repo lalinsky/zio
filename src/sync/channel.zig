@@ -6,6 +6,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const select = @import("../select.zig").select;
+const Waiter = @import("common.zig").Waiter;
 
 /// Specifies how a channel should be closed.
 pub const CloseMode = enum {
@@ -102,6 +103,9 @@ pub fn Channel(comptime T: type) type {
             const task = rt.getCurrentTask();
             const executor = task.getExecutor();
 
+            // Stack-allocated waiter - separates operation wait node from task wait node
+            var waiter: Waiter = .init(&task.awaitable);
+
             while (true) {
                 self.mutex.lock();
 
@@ -128,14 +132,14 @@ pub fn Channel(comptime T: type) type {
 
                 // Slow path: empty, need to wait
                 task.state.store(.preparing_to_wait, .release);
-                self.receiver_queue.push(&task.awaitable.wait_node);
+                self.receiver_queue.push(&waiter.wait_node);
                 self.mutex.unlock();
 
                 // Yield with cancellation support
                 executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
                     // Cancelled - try to remove from queue
                     self.mutex.lock();
-                    const was_in_queue = self.receiver_queue.remove(&task.awaitable.wait_node);
+                    const was_in_queue = self.receiver_queue.remove(&waiter.wait_node);
                     if (!was_in_queue) {
                         // We were already removed by a sender who will wake us.
                         // Since we're being cancelled and won't consume the item,
@@ -194,6 +198,9 @@ pub fn Channel(comptime T: type) type {
             const task = rt.getCurrentTask();
             const executor = task.getExecutor();
 
+            // Stack-allocated waiter - separates operation wait node from task wait node
+            var waiter: Waiter = .init(&task.awaitable);
+
             while (true) {
                 self.mutex.lock();
 
@@ -219,14 +226,14 @@ pub fn Channel(comptime T: type) type {
 
                 // Slow path: full, need to wait
                 task.state.store(.preparing_to_wait, .release);
-                self.sender_queue.push(&task.awaitable.wait_node);
+                self.sender_queue.push(&waiter.wait_node);
                 self.mutex.unlock();
 
                 // Yield with cancellation support
                 executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
                     // Cancelled - try to remove from queue
                     self.mutex.lock();
-                    const was_in_queue = self.sender_queue.remove(&task.awaitable.wait_node);
+                    const was_in_queue = self.sender_queue.remove(&waiter.wait_node);
                     if (!was_in_queue) {
                         // We were already removed by a receiver who will wake us.
                         // Since we're being cancelled and won't send the item,

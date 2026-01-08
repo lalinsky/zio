@@ -30,7 +30,7 @@ pub fn SimpleQueue(comptime T: type) type {
         tail: ?*T = null,
 
         pub fn push(self: *Self, item: *T) void {
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(!item.in_list);
                 item.in_list = true;
             }
@@ -48,7 +48,7 @@ pub fn SimpleQueue(comptime T: type) type {
 
         pub fn pop(self: *Self) ?*T {
             const head = self.head orelse return null;
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 head.in_list = false;
             }
             self.head = head.next;
@@ -90,7 +90,7 @@ pub fn SimpleQueue(comptime T: type) type {
             if (item.next == null and self.tail != item) return false;
 
             // Mark as removed
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 item.in_list = false;
             }
 

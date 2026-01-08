@@ -47,7 +47,6 @@
 //! ```
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -55,6 +54,7 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Timeout = @import("../runtime/timeout.zig").Timeout;
+const Waiter = @import("common.zig").Waiter;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
 
@@ -110,17 +110,20 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
+    // Stack-allocated waiter - separates operation wait node from task wait node
+    var waiter: Waiter = .init(&task.awaitable);
+
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
 
     // Push to wait queue
-    self.wait_queue.push(&task.awaitable.wait_node);
+    self.wait_queue.push(&waiter.wait_node);
 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // We were already removed by signal() which will wake us.
             // Since we're being cancelled and won't process the signal,
@@ -135,11 +138,6 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
     // Ensures visibility of all writes made before signal() was called
     _ = self.wait_queue.getState();
-
-    // Debug: verify we were removed from the list by signal() or broadcast()
-    if (builtin.mode == .Debug) {
-        std.debug.assert(!task.awaitable.wait_node.in_list);
-    }
 }
 
 /// Waits for a signal or broadcast with a timeout.
@@ -154,6 +152,9 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
+    // Stack-allocated waiter - separates operation wait node from task wait node
+    var waiter: Waiter = .init(&task.awaitable);
+
     // Set up timeout
     var timeout = Timeout.init;
     defer timeout.clear(runtime);
@@ -163,13 +164,13 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     task.state.store(.preparing_to_wait, .release);
 
     // Push to wait queue
-    self.wait_queue.push(&task.awaitable.wait_node);
+    self.wait_queue.push(&waiter.wait_node);
 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // We were already removed by signal() which will wake us.
             // Since we're being cancelled and won't process the signal,
@@ -186,11 +187,6 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
     // Ensures visibility of all writes made before signal() was called
     _ = self.wait_queue.getState();
-
-    // Debug: verify we were removed from the list by signal(), broadcast(), or timeout
-    if (builtin.mode == .Debug) {
-        std.debug.assert(!task.awaitable.wait_node.in_list);
-    }
 
     // If timeout fired, we should have received error.Canceled from yield
     std.debug.assert(!timeout.triggered);

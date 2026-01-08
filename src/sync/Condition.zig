@@ -60,6 +60,7 @@ const Mutex = @import("Mutex.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Timeout = @import("../runtime/timeout.zig").Timeout;
+const Waiter = @import("common.zig").Waiter;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
 
@@ -91,11 +92,14 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
+    // Stack-allocated waiter - separates operation wait node from task wait node
+    var waiter: Waiter = .init(&task.awaitable);
+
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
 
     // Add to wait queue before releasing mutex
-    self.wait_queue.push(&task.awaitable.wait_node);
+    self.wait_queue.push(&waiter.wait_node);
 
     // Atomically release mutex
     mutex.unlock(runtime);
@@ -104,7 +108,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // We were already removed by signal() which will wake us.
             // Since we're being cancelled and won't process the signal,
@@ -161,10 +165,13 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
+    // Stack-allocated waiter - separates operation wait node from task wait node
+    var waiter: Waiter = .init(&task.awaitable);
+
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
 
-    self.wait_queue.push(&task.awaitable.wait_node);
+    self.wait_queue.push(&waiter.wait_node);
 
     // Set up timeout
     var timeout = Timeout.init;
@@ -178,7 +185,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&task.awaitable.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // We were already removed by signal() which will wake us.
             // Since we're being cancelled and won't process the signal,

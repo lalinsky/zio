@@ -28,7 +28,7 @@ pub fn SimpleStack(comptime T: type) type {
         head: ?*T = null,
 
         pub fn push(self: *Self, item: *T) void {
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(!item.in_list);
                 item.in_list = true;
             }
@@ -38,7 +38,7 @@ pub fn SimpleStack(comptime T: type) type {
 
         pub fn pop(self: *Self) ?*T {
             const head = self.head orelse return null;
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 head.in_list = false;
             }
             self.head = head.next;

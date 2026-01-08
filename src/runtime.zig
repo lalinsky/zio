@@ -740,6 +740,9 @@ pub const Executor = struct {
     /// - `false`: Task is being woken - goes to LIFO slot (immediate) or ready_queue (FIFO)
     fn scheduleTaskLocal(self: *Executor, task: *AnyTask, is_yield: bool) void {
         const wait_node = &task.awaitable.wait_node;
+        if (std.debug.runtime_safety) {
+            std.debug.assert(!wait_node.in_list);
+        }
         if (is_yield) {
             // Yields → next_ready_queue (runs next iteration for fairness)
             self.next_ready_queue.push(wait_node);
@@ -761,6 +764,9 @@ pub const Executor = struct {
     /// Uses the thread-safe remote queue and notifies the executor.
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         const wait_node = &task.awaitable.wait_node;
+        if (std.debug.runtime_safety) {
+            std.debug.assert(!wait_node.in_list);
+        }
 
         // Push to remote ready queue (thread-safe)
         self.next_ready_queue_remote.push(wait_node);

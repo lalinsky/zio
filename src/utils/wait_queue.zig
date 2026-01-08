@@ -67,7 +67,7 @@ pub fn SimpleWaitQueue(comptime T: type) type {
         /// Add item to the end of the queue.
         /// Must be called with external synchronization.
         pub fn push(self: *Self, item: *T) void {
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(!item.in_list);
                 item.in_list = true;
             }
@@ -90,7 +90,7 @@ pub fn SimpleWaitQueue(comptime T: type) type {
         pub fn pop(self: *Self) ?*T {
             const head = self.head orelse return null;
 
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(head.in_list);
                 head.in_list = false;
             }
@@ -130,7 +130,7 @@ pub fn SimpleWaitQueue(comptime T: type) type {
                 return false;
             }
 
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 item.in_list = false;
             }
 
@@ -343,7 +343,7 @@ pub fn WaitQueue(comptime T: type) type {
         /// Releases lock implicitly (via head.store) if queue was empty, or explicitly otherwise.
         fn pushInternal(self: *Self, old_state: State, item: *T) void {
             // Initialize item
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(!item.in_list);
                 item.in_list = true;
             }
@@ -438,7 +438,7 @@ pub fn WaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(old_head.in_list);
                 old_head.in_list = false;
             }
@@ -491,7 +491,7 @@ pub fn WaitQueue(comptime T: type) type {
             }
 
             // Mark as removed from list
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 item.in_list = false;
             }
 
@@ -574,7 +574,7 @@ pub fn WaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(old_head.in_list);
                 old_head.in_list = false;
             }
@@ -772,7 +772,7 @@ pub fn CompactWaitQueue(comptime T: type) type {
         /// Assumes mutation lock is held. Releases lock before returning.
         fn pushInternal(self: *Self, old_state: State, item: *T) void {
             // Initialize item
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(!item.in_list);
                 item.in_list = true;
             }
@@ -858,7 +858,7 @@ pub fn CompactWaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(old_head.in_list);
                 old_head.in_list = false;
             }
@@ -905,7 +905,7 @@ pub fn CompactWaitQueue(comptime T: type) type {
             }
 
             // Mark as removed from list
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 item.in_list = false;
             }
 
@@ -975,7 +975,7 @@ pub fn CompactWaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            if (builtin.mode == .Debug) {
+            if (std.debug.runtime_safety) {
                 std.debug.assert(old_head.in_list);
                 old_head.in_list = false;
             }
