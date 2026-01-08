@@ -863,6 +863,10 @@ pub const Runtime = struct {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
+        const num_executors = options.num_executors orelse (std.Thread.getCpuCount() catch 1);
+        var futex_table = try Futex.Table.init(allocator, num_executors);
+        errdefer futex_table.deinit(allocator);
+
         self.* = .{
             .allocator = allocator,
             .options = options,
@@ -870,7 +874,7 @@ pub const Runtime = struct {
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
             .task_pool = .init(allocator),
-            .futex_table = Futex.Table.init(allocator),
+            .futex_table = futex_table,
         };
 
         try self.thread_pool.init(allocator, options.thread_pool);
@@ -925,7 +929,7 @@ pub const Runtime = struct {
         self.task_pool.deinit();
 
         // Clean up futex table
-        self.futex_table.deinit();
+        self.futex_table.deinit(allocator);
 
         // Free the Runtime allocation
         allocator.destroy(self);
@@ -1265,6 +1269,22 @@ test "Runtime: sleep from main" {
 
     try testing.expect(end > start);
     try testing.expect(end - start >= 10);
+}
+
+test "runtime: basic sleep" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const Sleeper = struct {
+        fn run(rt: *Runtime) !void {
+            try rt.sleep(1);
+        }
+    };
+
+    var task = try runtime.spawn(Sleeper.run, .{runtime}, .{});
+    task.detach(runtime);
+
+    try runtime.run();
 }
 
 test "runtime: now() returns monotonic time" {
