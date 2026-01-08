@@ -55,6 +55,7 @@ const resumeTask = @import("../runtime/task.zig").resumeTask;
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Timeout = @import("../runtime/timeout.zig").Timeout;
+const Waiter = @import("common.zig").Waiter;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
 
@@ -124,12 +125,15 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
+    // Stack-allocated waiter - separates operation wait node from task wait node
+    var waiter: Waiter = .init(&task.awaitable);
+
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
-    if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
+    if (!self.wait_queue.pushUnless(is_set, &waiter.wait_node)) {
         // Event was set, return immediately
         task.state.store(.ready, .release);
         return;
@@ -139,18 +143,13 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // On cancellation, remove from queue
-        _ = self.wait_queue.remove(&task.awaitable.wait_node);
+        _ = self.wait_queue.remove(&waiter.wait_node);
         return err;
     };
 
     // Acquire fence: synchronize-with set()'s .release in popAll
     // Ensures visibility of all writes made before set() was called
     _ = self.wait_queue.getState();
-
-    // Debug: verify we were removed from the list by set()
-    if (builtin.mode == .Debug) {
-        std.debug.assert(!task.awaitable.wait_node.in_list);
-    }
 }
 
 /// Waits for the event to be set with a timeout.
@@ -174,12 +173,15 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
+    // Stack-allocated waiter - separates operation wait node from task wait node
+    var waiter: Waiter = .init(&task.awaitable);
+
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
-    if (!self.wait_queue.pushUnless(is_set, &task.awaitable.wait_node)) {
+    if (!self.wait_queue.pushUnless(is_set, &waiter.wait_node)) {
         // Event was set, return immediately
         task.state.store(.ready, .release);
         return;
@@ -194,7 +196,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Try to remove from queue
-        _ = self.wait_queue.remove(&task.awaitable.wait_node);
+        _ = self.wait_queue.remove(&waiter.wait_node);
 
         // Check if this timeout triggered, otherwise it was user cancellation
         return runtime.checkTimeout(&timeout, err);
@@ -203,11 +205,6 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     // Acquire fence: synchronize-with set()'s .release in popAll
     // Ensures visibility of all writes made before set() was called
     _ = self.wait_queue.getState();
-
-    // Debug: verify we were removed from the list by set() or timeout
-    if (builtin.mode == .Debug) {
-        std.debug.assert(!task.awaitable.wait_node.in_list);
-    }
 
     // If timeout fired, we should have received error.Canceled from yield
     std.debug.assert(!timeout.triggered);
@@ -382,18 +379,29 @@ test "ResetEvent: cancel waiting task" {
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
+    var started = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent) !void {
+        fn waiter(rt: *Runtime, event: *ResetEvent, started_flag: *std.atomic.Value(bool)) !void {
+            // Signal that we're about to wait
+            started_flag.store(true, .release);
             try event.wait(rt);
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event }, .{});
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &started }, .{});
     defer waiter_task.cancel(runtime);
 
+    // Wait until waiter has actually started and is blocked
+    try runtime.sleep(100);
+    while (!started.load(.acquire)) {
+        try runtime.yield();
+    }
+    // One more yield to ensure waiter is actually blocked in wait()
     try runtime.yield();
+
     waiter_task.cancel(runtime);
+
     try testing.expectError(error.Canceled, waiter_task.join(runtime));
 }
 

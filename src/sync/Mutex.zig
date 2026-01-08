@@ -32,6 +32,7 @@ const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime/task.zig").resumeTask;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
+const Waiter = @import("common.zig").Waiter;
 
 const Mutex = @This();
 
@@ -77,12 +78,15 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 
     // Slow path: add to FIFO wait queue
 
+    // Stack-allocated waiter - separates operation wait node from task wait node
+    var waiter: Waiter = .init(&task.awaitable);
+
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue, or if mutex is unlocked, acquire it atomically
     // This prevents the race: unlocked -> has_waiters (skipping locked_once)
-    const result = self.queue.pushOrTransition(unlocked, locked_once, &task.awaitable.wait_node);
+    const result = self.queue.pushOrTransition(unlocked, locked_once, &waiter.wait_node);
     if (result == .transitioned) {
         // Mutex was unlocked, we acquired it via transition to locked_once
         task.state.store(.ready, .release);
@@ -93,7 +97,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Cancellation - try to remove ourselves from queue
-        if (!self.queue.remove(&task.awaitable.wait_node)) {
+        if (!self.queue.remove(&waiter.wait_node)) {
             // Already inherited the lock
             self.unlock(runtime);
         }
