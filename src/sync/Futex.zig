@@ -381,9 +381,9 @@ test "Futex: same bucket different addresses" {
         }
 
         fn wakerFunc(io: *Runtime, val: *u32) !void {
-            // Yield multiple times to ensure waiters have time to block
+            // Yield multiple times to ensure waiters have time to block (especially on Windows)
             var i: usize = 0;
-            while (i < 10) : (i += 1) {
+            while (i < 100) : (i += 1) {
                 try io.yield();
             }
             std.debug.print("wakerFunc waking addr=0x{x}\n", .{@intFromPtr(val)});
