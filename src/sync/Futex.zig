@@ -63,9 +63,6 @@ pub const Table = struct {
 const Bucket = struct {
     mutex: std.Thread.Mutex = .{},
     waiters: SimpleWaitQueue(FutexWaiter) = .empty,
-    /// Number of waiters in this bucket. Used for fast-path optimization in wake().
-    /// Checked atomically before taking the lock - if 0, no need to lock.
-    num_waiters: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 };
 
 fn getBucket(table: *Table, address: usize) *Bucket {
@@ -129,13 +126,8 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout_ns: u6
     // Add to bucket under lock
     bucket.mutex.lock();
 
-    // Increment waiter count BEFORE checking value to avoid race with wake's fast path.
-    // If wake sees 0 waiters, we're guaranteed to see wake's store to ptr.
-    _ = bucket.num_waiters.fetchAdd(1, .acquire);
-
     // Double-check under lock to avoid lost wakeups
     if (@atomicLoad(u32, ptr, .monotonic) != expect) {
-        _ = bucket.num_waiters.fetchSub(1, .monotonic);
         bucket.mutex.unlock();
         return;
     }
@@ -165,9 +157,7 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout_ns: u6
 fn removeFromBucket(bucket: *Bucket, waiter: *FutexWaiter) void {
     bucket.mutex.lock();
     defer bucket.mutex.unlock();
-    if (bucket.waiters.remove(waiter)) {
-        _ = bucket.num_waiters.fetchSub(1, .release);
-    }
+    _ = bucket.waiters.remove(waiter);
 }
 
 /// Unblocks at most `max_waiters` callers blocked in a `wait()` call on `ptr`.
@@ -176,11 +166,6 @@ pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
 
     const address = @intFromPtr(ptr);
     const bucket = getBucket(&runtime.futex_table, address);
-
-    // Fast path: no waiters in this bucket.
-    // Use fetchAdd(0, .release) to ensure the store to ptr is ordered before this check.
-    // Paired with fetchAdd(1, .acquire) in wait - if we see 0, waiter will see our store.
-    if (bucket.num_waiters.fetchAdd(0, .release) == 0) return;
 
     var total_woken: u32 = 0;
 
@@ -205,11 +190,6 @@ pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
             }
 
             node = next;
-        }
-
-        // Decrement counter for removed waiters
-        if (batch_count > 0) {
-            _ = bucket.num_waiters.fetchSub(batch_count, .release);
         }
 
         bucket.mutex.unlock();
@@ -277,13 +257,13 @@ test "Futex: spurious wakeup - value already changed" {
     try Futex.wait(rt, &value, 0);
 }
 
-test "Futex: wake with no waiters (fast path)" {
+test "Futex: wake with no waiters" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     var value: u32 = 0;
 
-    // Wake with no waiters should be a fast no-op (no lock taken)
+    // Wake with no waiters should be a no-op
     Futex.wake(rt, &value, 1);
     Futex.wake(rt, &value, std.math.maxInt(u32));
 }
