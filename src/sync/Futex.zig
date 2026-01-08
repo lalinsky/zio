@@ -233,7 +233,7 @@ test "Futex: basic wait/wake" {
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
-            timeout.set(io, 10);
+            timeout.set(io, 10 * std.time.ns_per_ms);
 
             try waiter.join(io);
             try std.testing.expect(woken);
@@ -302,7 +302,7 @@ test "Futex: multiple waiters same address" {
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
-            timeout.set(io, 10);
+            timeout.set(io, 10 * std.time.ns_per_ms);
 
             try waiter1.join(io);
             try waiter2.join(io);
@@ -346,7 +346,7 @@ test "Futex: multiple waiters different addresses" {
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
-            timeout.set(io, 10);
+            timeout.set(io, 10 * std.time.ns_per_ms);
 
             try waiter1.join(io);
             waiter2.join(io) catch |err| {
@@ -426,7 +426,7 @@ test "Futex: same bucket different addresses" {
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
-            timeout.set(io, 10);
+            timeout.set(io, 10 * std.time.ns_per_ms);
 
             // waiter1 should complete successfully
             try waiter1.join(io);
@@ -444,7 +444,7 @@ test "Futex: same bucket different addresses" {
     var woken: u32 = 0;
 
     var task = try rt.spawn(Main.run, .{ rt, &woken }, .{});
-    task.join(rt) catch {};
+    try task.join(rt);
 
     // Only waiter1 should have woken - waiter2 was on a different address in same bucket
     try std.testing.expectEqual(1, woken);
