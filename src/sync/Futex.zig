@@ -368,3 +368,79 @@ test "Futex: multiple waiters different addresses" {
     // and was canceled by the timeout
     try std.testing.expectEqual(1, woken);
 }
+
+test "Futex: same bucket different addresses" {
+    const Main = struct {
+        fn waiterFunc(io: *Runtime, v: *u32, w: *u32) !void {
+            while (@atomicLoad(u32, v, .acquire) == 0) {
+                try Futex.wait(io, v, 0);
+            }
+            _ = @atomicRmw(u32, w, .Add, 1, .monotonic);
+        }
+
+        fn wakerFunc(io: *Runtime, val: *u32) !void {
+            @atomicStore(u32, val, 1, .release);
+            Futex.wake(io, val, 1);
+        }
+
+        fn run(io: *Runtime, w: *u32) !void {
+            // Allocate array of values to find addresses in the same bucket
+            var values = try std.testing.allocator.alloc(u32, 2000);
+            defer std.testing.allocator.free(values);
+            @memset(values, 0);
+
+            // Find two addresses that hash to the same bucket
+            const addr1: *u32 = &values[0];
+            var addr2: *u32 = &values[1];
+            const bucket1 = getBucket(&io.futex_table, @intFromPtr(addr1));
+
+            var found = false;
+            for (values[1..]) |*val| {
+                const bucket2 = getBucket(&io.futex_table, @intFromPtr(val));
+                if (bucket1 == bucket2) {
+                    addr2 = val;
+                    found = true;
+                    break;
+                }
+            }
+
+            // Verify we found two addresses in the same bucket
+            try std.testing.expect(found);
+            try std.testing.expect(addr1 != addr2);
+
+            // Spawn two waiters, each on a different address (but same bucket)
+            var waiter1 = try io.spawn(waiterFunc, .{ io, addr1, w }, .{});
+            defer waiter1.cancel(io);
+
+            var waiter2 = try io.spawn(waiterFunc, .{ io, addr2, w }, .{});
+            defer waiter2.cancel(io);
+
+            // Wake only addr1
+            var waker = try io.spawn(wakerFunc, .{ io, addr1 }, .{});
+            try waker.join(io);
+
+            var timeout: Timeout = .init;
+            defer timeout.clear(io);
+            timeout.set(io, 10);
+
+            // waiter1 should complete successfully
+            try waiter1.join(io);
+
+            // waiter2 should timeout since it's on addr2 which was never woken
+            waiter2.join(io) catch |err| {
+                return if (err == error.Canceled) {} else err;
+            };
+        }
+    };
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var woken: u32 = 0;
+
+    var task = try rt.spawn(Main.run, .{ rt, &woken }, .{});
+    task.join(rt) catch {};
+
+    // Only waiter1 should have woken - waiter2 was on a different address in same bucket
+    try std.testing.expectEqual(1, woken);
+}
