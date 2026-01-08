@@ -375,6 +375,28 @@ test "ResetEvent size" {
     _ = @sizeOf(ResetEvent);
 }
 
+test "ResetEvent: cancel waiting task" {
+    const testing = std.testing;
+
+    const runtime = try Runtime.init(testing.allocator, .{});
+    defer runtime.deinit();
+
+    var reset_event = ResetEvent.init;
+
+    const TestFn = struct {
+        fn waiter(rt: *Runtime, event: *ResetEvent) !void {
+            try event.wait(rt);
+        }
+    };
+
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event }, .{});
+    defer waiter_task.cancel(runtime);
+
+    try runtime.yield();
+    waiter_task.cancel(runtime);
+    try testing.expectError(error.Canceled, waiter_task.join(runtime));
+}
+
 test "ResetEvent: select" {
     const select = @import("../select.zig").select;
 
