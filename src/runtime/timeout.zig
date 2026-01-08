@@ -270,7 +270,7 @@ test "Timeout: cancels spawned task via join" {
 
             var timeout = Timeout.init;
             defer timeout.clear(rt);
-            timeout.set(rt, 10);
+            timeout.set(rt, 10 * std.time.ns_per_ms);
 
             // Join should be canceled by timeout
             handle.join(rt) catch |err| {
