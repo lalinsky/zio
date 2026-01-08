@@ -379,6 +379,11 @@ test "Futex: same bucket different addresses" {
         }
 
         fn wakerFunc(io: *Runtime, val: *u32) !void {
+            // Yield multiple times to ensure waiters have time to block
+            var i: usize = 0;
+            while (i < 10) : (i += 1) {
+                try io.yield();
+            }
             @atomicStore(u32, val, 1, .release);
             Futex.wake(io, val, 1);
         }
