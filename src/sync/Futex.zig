@@ -46,7 +46,7 @@ pub const Table = struct {
     pub fn init(allocator: std.mem.Allocator, num_executors: usize) !Table {
         // Round up to power of 2 for efficient hashing
         const min_buckets = buckets_per_executor * num_executors;
-        const bucket_count = std.math.ceilPowerOfTwo(usize, min_buckets) catch min_buckets;
+        const bucket_count = try std.math.ceilPowerOfTwo(usize, min_buckets);
         const buckets = try allocator.alloc(Bucket, bucket_count);
         @memset(buckets, .{});
         return .{
