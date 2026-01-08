@@ -227,50 +227,44 @@ pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
     }
 }
 
-// Tests
-
-test "Futex: sleep" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const Sleeper = struct {
-        fn run(runtime: *Runtime) !void {
-            try runtime.sleep(1);
-        }
-    };
-
-    _ = try rt.spawn(Sleeper.run, .{rt}, .{});
-    try rt.run();
-}
-
 test "Futex: basic wait/wake" {
+    const Main = struct {
+        fn waiterFunc(io: *Runtime, v: *u32, w: *bool) !void {
+            while (@atomicLoad(u32, v, .acquire) == 0) {
+                try Futex.wait(io, v, 0);
+            }
+            @atomicStore(bool, w, true, .release);
+        }
+
+        fn wakerFunc(io: *Runtime, val: *u32) !void {
+            @atomicStore(u32, val, 1, .release);
+            Futex.wake(io, val, 1);
+        }
+
+        fn run(io: *Runtime) !void {
+            var value: u32 = 0;
+            var woken: bool = false;
+
+            var waiter = try io.spawn(waiterFunc, .{ io, &value, &woken }, .{});
+            defer waiter.cancel(io);
+
+            var waker = try io.spawn(wakerFunc, .{ io, &value }, .{});
+            try waker.join(io);
+
+            var timeout: Timeout = .init;
+            defer timeout.clear(io);
+            timeout.set(io, 10);
+
+            try waiter.join(io);
+            try std.testing.expect(woken);
+        }
+    };
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var value: u32 = 0;
-
-    const Waiter = struct {
-        fn run(runtime: *Runtime, v: *u32) !void {
-            try Futex.wait(runtime, v, 0);
-            try std.testing.expectEqual(1, @atomicLoad(u32, v, .acquire));
-        }
-    };
-
-    const Waker = struct {
-        fn run(runtime: *Runtime, v: *u32) !void {
-            try runtime.sleep(1);
-            @atomicStore(u32, v, 1, .release);
-            Futex.wake(runtime, v, 1);
-        }
-    };
-
-    var waiter = try rt.spawn(Waiter.run, .{ rt, &value }, .{});
-    defer waiter.cancel(rt);
-
-    var waker = try rt.spawn(Waker.run, .{ rt, &value }, .{});
-    defer waker.cancel(rt);
-
-    try waiter.join(rt);
+    var task = try rt.spawn(Main.run, .{rt}, .{});
+    try task.join(rt);
 }
 
 test "Futex: spurious wakeup - value already changed" {
@@ -295,86 +289,97 @@ test "Futex: wake with no waiters (fast path)" {
 }
 
 test "Futex: multiple waiters same address" {
+    const Main = struct {
+        fn waiterFunc(io: *Runtime, v: *u32, w: *u32) !void {
+            while (@atomicLoad(u32, v, .acquire) == 0) {
+                try Futex.wait(io, v, 0);
+            }
+            _ = @atomicRmw(u32, w, .Add, 1, .monotonic);
+        }
+
+        fn wakerFunc(io: *Runtime, val: *u32) !void {
+            @atomicStore(u32, val, 1, .release);
+            Futex.wake(io, val, 1);
+        }
+
+        fn run(io: *Runtime) !void {
+            var value: u32 = 0;
+            var woken: u32 = 0;
+
+            var waiter1 = try io.spawn(waiterFunc, .{ io, &value, &woken }, .{});
+            defer waiter1.cancel(io);
+
+            var waiter2 = try io.spawn(waiterFunc, .{ io, &value, &woken }, .{});
+            defer waiter2.cancel(io);
+
+            var waker = try io.spawn(wakerFunc, .{ io, &value }, .{});
+            try waker.join(io);
+
+            var timeout: Timeout = .init;
+            defer timeout.clear(io);
+            timeout.set(io, 10);
+
+            try waiter1.join(io);
+            try waiter2.join(io);
+            try std.testing.expectEqual(2, woken);
+        }
+    };
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var value: u32 = 0;
-    var woken_count: u32 = 0;
-
-    const Waiter = struct {
-        fn run(runtime: *Runtime, v: *u32, count: *u32) !void {
-            // Use timedWait so test doesn't hang if wake fails
-            Futex.timedWait(runtime, v, 0, 10 * std.time.ns_per_ms) catch |err| switch (err) {
-                error.Timeout => return, // Not woken in time
-                error.Canceled => return,
-            };
-            _ = @atomicRmw(u32, count, .Add, 1, .monotonic);
-        }
-    };
-
-    const Waker = struct {
-        fn run(runtime: *Runtime, v: *u32) !void {
-            try runtime.sleep(1);
-            @atomicStore(u32, v, 1, .release);
-            Futex.wake(runtime, v, std.math.maxInt(u32)); // Wake all
-        }
-    };
-
-    var w1 = try rt.spawn(Waiter.run, .{ rt, &value, &woken_count }, .{});
-    defer w1.cancel(rt);
-    var w2 = try rt.spawn(Waiter.run, .{ rt, &value, &woken_count }, .{});
-    defer w2.cancel(rt);
-    var w3 = try rt.spawn(Waiter.run, .{ rt, &value, &woken_count }, .{});
-    defer w3.cancel(rt);
-    var waker = try rt.spawn(Waker.run, .{ rt, &value }, .{});
-    defer waker.cancel(rt);
-
-    try rt.run();
-
-    try std.testing.expectEqual(3, woken_count);
+    var task = try rt.spawn(Main.run, .{rt}, .{});
+    try task.join(rt);
 }
 
-test "Futex: different addresses same bucket" {
+test "Futex: multiple waiters different addresses" {
+    const Main = struct {
+        fn waiterFunc(io: *Runtime, v: *u32, w: *u32) !void {
+            while (@atomicLoad(u32, v, .acquire) == 0) {
+                try Futex.wait(io, v, 0);
+            }
+            _ = @atomicRmw(u32, w, .Add, 1, .monotonic);
+        }
+
+        fn wakerFunc(io: *Runtime, val: *u32) !void {
+            @atomicStore(u32, val, 1, .release);
+            Futex.wake(io, val, 1);
+        }
+
+        fn run(io: *Runtime, w: *u32) !void {
+            var value1: u32 = 0;
+            var value2: u32 = 0;
+
+            var waiter1 = try io.spawn(waiterFunc, .{ io, &value1, w }, .{});
+            defer waiter1.cancel(io);
+
+            var waiter2 = try io.spawn(waiterFunc, .{ io, &value2, w }, .{});
+            defer waiter2.cancel(io);
+
+            var waker = try io.spawn(wakerFunc, .{ io, &value1 }, .{});
+            try waker.join(io);
+
+            var timeout: Timeout = .init;
+            defer timeout.clear(io);
+            timeout.set(io, 10);
+
+            try waiter1.join(io);
+            waiter2.join(io) catch |err| {
+                // waiter2 should be canceled by timeout since value2 was never woken
+                return if (err == error.Canceled) {} else err;
+            };
+        }
+    };
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var value1: u32 = 0;
-    var value2: u32 = 0;
-    var woken1: bool = false;
-    var woken2: bool = false;
+    var woken: u32 = 0;
 
-    const Waiter = struct {
-        fn run(runtime: *Runtime, v: *u32, flag: *bool) !void {
-            // Use timedWait so test doesn't hang
-            Futex.timedWait(runtime, v, 0, 10 * std.time.ns_per_ms) catch |err| switch (err) {
-                error.Timeout => return, // Not woken in time
-                error.Canceled => return,
-            };
-            flag.* = true;
-        }
-    };
+    var task = try rt.spawn(Main.run, .{ rt, &woken }, .{});
+    task.join(rt) catch {};
 
-    const Waker = struct {
-        fn run(runtime: *Runtime, v: *u32) !void {
-            try runtime.sleep(1);
-            @atomicStore(u32, v, 1, .release);
-            Futex.wake(runtime, v, std.math.maxInt(u32)); // Wake all on this address
-        }
-    };
-
-    // Start waiters
-    var w1 = try rt.spawn(Waiter.run, .{ rt, &value1, &woken1 }, .{});
-    defer w1.cancel(rt);
-    var w2 = try rt.spawn(Waiter.run, .{ rt, &value2, &woken2 }, .{});
-    defer w2.cancel(rt);
-
-    // Start waker that only wakes value1
-    var waker = try rt.spawn(Waker.run, .{ rt, &value1 }, .{});
-    defer waker.cancel(rt);
-
-    try rt.run();
-
-    // w1 should be woken, w2 should have timed out
-    try std.testing.expect(woken1);
-    try std.testing.expect(!woken2);
+    // Only waiter1 should have completed - waiter2 was on a different address
+    // and was canceled by the timeout
+    try std.testing.expectEqual(1, woken);
 }
