@@ -32,6 +32,9 @@ const Group = @import("runtime/group.zig").Group;
 
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
+const Futex = @import("sync/Futex.zig");
+const waitForIo = @import("common.zig").waitForIo;
+const stdio = @import("stdio.zig");
 
 const mod = @This();
 
@@ -962,6 +965,15 @@ pub const Runtime = struct {
     /// Deprecated: use zio.now() instead.
     pub fn now(_: *Runtime) Timestamp {
         return mod.now();
+    }
+
+    pub fn io(self: *Runtime) stdio.Io {
+        return stdio.fromRuntime(self);
+    }
+
+    pub fn fromIo(io_: stdio.Io) !*Runtime {
+        if (io_.vtable != &stdio.vtable) return error.InvalidIo;
+        return stdio.toRuntime(io_);
     }
 };
 
