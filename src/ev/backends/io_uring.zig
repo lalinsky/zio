@@ -633,7 +633,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 return;
             };
             // Use statx with empty pathname to get stats for the fd itself
-            const mask = linux.STATX_SIZE;
+            const mask: linux.STATX = .{ .SIZE = true };
             const flags = linux.AT.EMPTY_PATH;
             sqe.prep_statx(data.handle, "", flags, mask, &data.internal.statx);
             sqe.user_data = @intFromPtr(c);
@@ -641,9 +641,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
         .file_stat => {
             const data = c.cast(FileStat);
-            const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO |
-                linux.STATX_SIZE | linux.STATX_ATIME | linux.STATX_MTIME |
-                linux.STATX_CTIME;
+            const mask: linux.STATX = .{
+                .TYPE = true,
+                .MODE = true,
+                .INO = true,
+                .SIZE = true,
+                .ATIME = true,
+                .MTIME = true,
+                .CTIME = true,
+            };
 
             if (data.path) |user_path| {
                 // Path provided - stat relative to handle
