@@ -18,6 +18,10 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 [`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io.Writer
 [goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
 
+*The `main` branch works with Zig 0.15. If you want to use the library with the development version of Zig, use the [`zig-0.16`] branch.*
+
+[`zig-0.16`]: https://github.com/lalinsky/zio/tree/zig-0.16
+
 ## Features
 
 - Support for Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and many other systems (`poll`).
