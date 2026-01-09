@@ -31,7 +31,7 @@ fn serverTask(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
 
 fn signalHandler(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
     // Create signal handler for SIGINT (Ctrl+C)
-    var sig = try zio.Signal.init(.interrupt);
+    var sig = try zio.Signal.init(.INT);
     defer sig.deinit();
 
     // Wait for SIGINT (Ctrl+C)
