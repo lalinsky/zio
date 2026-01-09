@@ -515,7 +515,7 @@ fn aioFileStatToStdIo(aio_stat: os.fs.FileStatInfo) Io.File.Stat {
 
     return .{
         .inode = aio_stat.inode,
-        .nlink = 1, // TODO: get actual nlink from stat
+        .nlink = if (Io.File.NLink == u0) 0 else 1, // TODO: get actual nlink from stat
         .size = aio_stat.size,
         .permissions = @enumFromInt(aio_stat.mode),
         .kind = kind,
