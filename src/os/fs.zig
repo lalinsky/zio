@@ -1318,7 +1318,7 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
         const linux = std.os.linux;
         var statx_buf: linux.Statx = undefined;
         while (true) {
-            const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX_SIZE, &statx_buf);
+            const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX{ .SIZE = true }, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statx_buf.size,
                 .INTR => continue,
@@ -1385,9 +1385,7 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
-        const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO |
-            linux.STATX_SIZE | linux.STATX_ATIME | linux.STATX_MTIME |
-            linux.STATX_CTIME;
+        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
         var statx_buf: linux.Statx = undefined;
         while (true) {
             const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, mask, &statx_buf);
@@ -1445,9 +1443,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileSt
 
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
-        const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO |
-            linux.STATX_SIZE | linux.STATX_ATIME | linux.STATX_MTIME |
-            linux.STATX_CTIME;
+        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
         var statx_buf: linux.Statx = undefined;
         while (true) {
             const rc = linux.statx(dir, path_z.ptr, 0, mask, &statx_buf);
