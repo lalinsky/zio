@@ -381,8 +381,8 @@ pub const WORD = std.os.windows.WORD;
 pub const SHORT = std.os.windows.SHORT;
 pub const INT = std.os.windows.INT;
 
-pub const SOCKET = *opaque {};
-pub const INVALID_SOCKET: SOCKET = @ptrFromInt(~@as(usize, 0));
+pub const SOCKET = std.os.windows.ws2_32.SOCKET;
+pub const INVALID_SOCKET = std.os.windows.ws2_32.INVALID_SOCKET;
 pub const SOCKET_ERROR: i32 = -1;
 
 pub const ADDRESS_FAMILY = u16;
