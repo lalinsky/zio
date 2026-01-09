@@ -36,6 +36,7 @@ const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const runIo = @import("io.zig").runIo;
+const stdio = @import("stdio.zig");
 
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u6) {
@@ -1066,6 +1067,15 @@ pub const Runtime = struct {
 
         // Shutdown thread pool
         self.thread_pool.stop();
+    }
+
+    pub fn io(self: *Runtime) stdio.Io {
+        return stdio.fromRuntime(self);
+    }
+
+    pub fn fromIo(io_: stdio.Io) !*Runtime {
+        if (io_.vtable != &stdio.vtable) return error.InvalidIo;
+        return stdio.toRuntime(io_);
     }
 };
 
