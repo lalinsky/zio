@@ -48,7 +48,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "tcp-echo-server-plain", .file = "examples/tcp_echo_server_plain.zig" },
         .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
         .{ .name = "http-server", .file = "examples/http_server.zig" },
-        .{ .name = "tls-demo", .file = "examples/tls_demo.zig" },
         .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig" },
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
         .{ .name = "signal-demo", .file = "examples/signal_demo.zig" },
