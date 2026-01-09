@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
+const MemoryPoolAligned = @import("../utils/memory_pool.zig").MemoryPoolAligned;
 
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
@@ -473,7 +474,7 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
 pub const TaskPool = struct {
     pub const pool_item_size = std.mem.alignForward(usize, @sizeOf(AnyTask) + 128, 128);
 
-    pool: std.heap.MemoryPoolAligned([pool_item_size]u8, .fromByteUnits(Closure.task_alignment)),
+    pool: MemoryPoolAligned([pool_item_size]u8, .fromByteUnits(Closure.task_alignment)),
     mutex: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator) TaskPool {
