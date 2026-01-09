@@ -34,6 +34,7 @@ const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
 
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
+const stdio = @import("stdio.zig");
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -1128,6 +1129,15 @@ pub const Runtime = struct {
 
         // Shutdown thread pool
         self.thread_pool.stop();
+    }
+
+    pub fn io(self: *Runtime) stdio.Io {
+        return stdio.fromRuntime(self);
+    }
+
+    pub fn fromIo(io_: stdio.Io) !*Runtime {
+        if (io_.vtable != &stdio.vtable) return error.InvalidIo;
+        return stdio.toRuntime(io_);
     }
 };
 
