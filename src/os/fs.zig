@@ -514,6 +514,37 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
     }
 }
 
+/// Read from file descriptor - for pipes and stream-like fds
+pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
+    if (builtin.os.tag == .windows) {
+        var bytes_read: w.DWORD = undefined;
+        const success = w.ReadFile(
+            fd,
+            buffer.ptr,
+            @intCast(buffer.len),
+            &bytes_read,
+            null,
+        );
+        if (success == w.FALSE) {
+            const err = w.GetLastError();
+            switch (err) {
+                .HANDLE_EOF => return 0,
+                else => return errnoToFileReadError(err),
+            }
+        }
+        return bytes_read;
+    }
+
+    while (true) {
+        const rc = posix.system.read(fd, buffer.ptr, buffer.len);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToFileReadError(err),
+        }
+    }
+}
+
 /// Read from file descriptor using readv() - for pipes and stream-like fds
 pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
     if (builtin.os.tag == .windows) {
@@ -550,6 +581,33 @@ pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
             else => |err| return errnoToFileReadError(err),
+        }
+    }
+}
+
+/// Write to file descriptor - for pipes and stream-like fds
+pub fn write(fd: fd_t, buffer: []const u8) FileWriteError!usize {
+    if (builtin.os.tag == .windows) {
+        var bytes_written: w.DWORD = undefined;
+        const success = w.WriteFile(
+            fd,
+            buffer.ptr,
+            @intCast(buffer.len),
+            &bytes_written,
+            null,
+        );
+        if (success == w.FALSE) {
+            return errnoToFileWriteError(w.GetLastError());
+        }
+        return bytes_written;
+    }
+
+    while (true) {
+        const rc = posix.system.write(fd, buffer.ptr, buffer.len);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToFileWriteError(err),
         }
     }
 }

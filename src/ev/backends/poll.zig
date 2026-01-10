@@ -693,7 +693,7 @@ pub const Waker = struct {
                 };
             },
             else => {
-                _ = std.posix.write(self.write_fd, &byte) catch |err| {
+                _ = fs.write(self.write_fd, &byte) catch |err| {
                     log.err("Failed to write to wakeup pipe: {}", .{err});
                 };
             },
@@ -709,7 +709,7 @@ pub const Waker = struct {
                 _ = net.recv(self.read_fd, &bufs, .{}) catch {};
             },
             else => {
-                _ = std.posix.read(self.read_fd, &buf) catch {};
+                _ = fs.read(self.read_fd, &buf) catch {};
             },
         }
     }
