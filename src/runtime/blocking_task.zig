@@ -27,6 +27,17 @@ pub const AnyBlockingTask = struct {
         return @fieldParentPtr("awaitable", awaitable);
     }
 
+    /// Get the typed result from this task's closure.
+    pub fn getResult(self: *AnyBlockingTask, comptime T: type) T {
+        const result_ptr: *T = @ptrCast(@alignCast(self.closure.getResultPtr(AnyBlockingTask, self)));
+        return result_ptr.*;
+    }
+
+    pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
+        const self = fromAwaitable(awaitable);
+        self.closure.free(AnyBlockingTask, rt, self);
+    }
+
     pub fn create(
         runtime: *Runtime,
         result_len: usize,
@@ -34,7 +45,6 @@ pub const AnyBlockingTask = struct {
         context: []const u8,
         context_alignment: std.mem.Alignment,
         start: Closure.Start,
-        destroy_fn: *const fn (*Runtime, *Awaitable) void,
     ) !*AnyBlockingTask {
         // Allocate task with closure
         const alloc_result = try Closure.alloc(
@@ -52,7 +62,7 @@ pub const AnyBlockingTask = struct {
         self.* = .{
             .awaitable = .{
                 .kind = .blocking_task,
-                .destroy_fn = destroy_fn,
+                .destroy_fn = &AnyBlockingTask.destroyFn,
                 .wait_node = .{
                     .vtable = &AnyBlockingTask.wait_node_vtable,
                 },
@@ -104,95 +114,33 @@ fn completionCallback(
     runtime.releaseAwaitable(&any_blocking_task.awaitable, true);
 }
 
-// Typed blocking task that wraps a pointer to AnyBlockingTask
-pub fn BlockingTask(comptime T: type) type {
-    return struct {
-        const Self = @This();
+const getNextExecutor = @import("../runtime.zig").getNextExecutor;
 
-        task: *AnyBlockingTask,
+/// Spawn a blocking task with raw context bytes and start function.
+/// Used by Runtime.spawnBlocking.
+pub fn spawnBlockingTask(
+    rt: *Runtime,
+    result_len: usize,
+    result_alignment: std.mem.Alignment,
+    context: []const u8,
+    context_alignment: std.mem.Alignment,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) !*AnyBlockingTask {
+    const executor = try getNextExecutor(rt);
+    const task = try AnyBlockingTask.create(
+        rt,
+        result_len,
+        result_alignment,
+        context,
+        context_alignment,
+        .{ .regular = start },
+    );
+    errdefer AnyBlockingTask.destroyFn(rt, &task.awaitable);
 
-        pub const Result = T;
+    rt.tasks.add(&task.awaitable);
 
-        pub fn fromAny(any_blocking_task: *AnyBlockingTask) Self {
-            return Self{ .task = any_blocking_task };
-        }
+    task.awaitable.ref_count.incr();
+    executor.loop.add(&task.work.c);
 
-        pub fn fromAwaitable(awaitable: *Awaitable) Self {
-            return fromAny(AnyBlockingTask.fromAwaitable(awaitable));
-        }
-
-        pub fn toAwaitable(self: Self) *Awaitable {
-            return &self.task.awaitable;
-        }
-
-        pub fn cancel(self: Self) void {
-            self.task.awaitable.cancel();
-        }
-
-        pub fn wait(self: Self, runtime: *Runtime) !T {
-            try self.task.awaitable.wait(runtime);
-            return self.getResult();
-        }
-
-        pub fn asyncWait(self: Self, comptime options: Awaitable.AsyncWaitOptions) Awaitable.AsyncWaitResult(options) {
-            return self.task.awaitable.asyncWait(options);
-        }
-
-        pub fn asyncCancelWait(self: Self, comptime options: Awaitable.AsyncWaitOptions) Awaitable.AsyncCancelWaitResult(options) {
-            return self.task.awaitable.asyncCancelWait(options);
-        }
-
-        pub fn deinit(_: Self) void {
-            // Result stored inline, no separate deallocation needed
-        }
-
-        fn getResultPtr(self: Self) *T {
-            const c = &self.task.closure;
-            const result_ptr = c.getResultPtr(AnyBlockingTask, self.task);
-            return @ptrCast(@alignCast(result_ptr));
-        }
-
-        pub fn getResult(self: Self) T {
-            return self.getResultPtr().*;
-        }
-
-        pub fn getRuntime(self: Self) *Runtime {
-            return self.task.runtime;
-        }
-
-        pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
-            const any_blocking_task = AnyBlockingTask.fromAwaitable(awaitable);
-            any_blocking_task.closure.free(AnyBlockingTask, rt, any_blocking_task);
-        }
-
-        pub fn create(
-            runtime: *Runtime,
-            func: anytype,
-            args: std.meta.ArgsTuple(@TypeOf(func)),
-        ) !Self {
-            const Wrapper = struct {
-                fn start(ctx: *const anyopaque, result: *anyopaque) void {
-                    const a: *const @TypeOf(args) = @ptrCast(@alignCast(ctx));
-                    const r: *T = @ptrCast(@alignCast(result));
-                    r.* = @call(.always_inline, func, a.*);
-                }
-            };
-
-            const any_blocking_task = try AnyBlockingTask.create(
-                runtime,
-                @sizeOf(T),
-                .fromByteUnits(@alignOf(T)),
-                std.mem.asBytes(&args),
-                .fromByteUnits(@alignOf(@TypeOf(args))),
-                .{ .regular = &Wrapper.start },
-                &Self.destroyFn,
-            );
-
-            return Self.fromAny(any_blocking_task);
-        }
-
-        pub fn destroy(self: Self, runtime: *Runtime) void {
-            self.task.awaitable.destroy_fn(runtime, &self.task.awaitable);
-        }
-    };
+    return task;
 }
