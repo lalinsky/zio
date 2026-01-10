@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Io = std.Io;
 const meta = @import("../meta.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const JoinHandle = @import("../runtime.zig").JoinHandle;
@@ -15,16 +16,14 @@ const AnyBlockingTask = @import("blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Futex = @import("../sync/Futex.zig");
 
-/// Matches std.Io.Group layout exactly for future vtable compatibility.
-pub const IoGroup = extern struct {
-    token: std.atomic.Value(?*anyopaque) = .init(null),
-    state: usize = 0,
-};
-
 pub const Group = struct {
-    inner: IoGroup = .{},
+    inner: Io.Group = .init,
 
     pub const init: Group = .{};
+
+    pub fn fromStd(group: *Io.Group) *Group {
+        return @fieldParentPtr("inner", group);
+    }
 
     // Interpret inner.token as CompactWaitQueue head
     //   null (0)  = sentinel0 = idle/done
