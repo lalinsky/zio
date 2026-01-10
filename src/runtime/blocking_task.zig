@@ -10,6 +10,7 @@ const Awaitable = @import("awaitable.zig").Awaitable;
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 const Closure = @import("task.zig").Closure;
+const onGroupTaskComplete = @import("group.zig").onGroupTaskComplete;
 
 const assert = std.debug.assert;
 
@@ -93,13 +94,9 @@ fn completionCallback(
     // Even if canceled, we still mark as complete so waiters wake up
     any_blocking_task.awaitable.markComplete();
 
-    // For group tasks, remove from group list and release group's reference
-    // Only release if we successfully removed it (groupCancel might have popped it first)
+    // For group tasks, decrement counter and release group's reference
     if (any_blocking_task.awaitable.group_node.group) |group| {
-        if (group.tasks.remove(&any_blocking_task.awaitable.group_node)) {
-            const runtime = any_blocking_task.runtime;
-            runtime.releaseAwaitable(&any_blocking_task.awaitable, false);
-        }
+        onGroupTaskComplete(group, any_blocking_task.runtime, &any_blocking_task.awaitable);
     }
 
     // Release the blocking task's reference and check for shutdown
