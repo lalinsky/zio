@@ -121,65 +121,21 @@ pub const File = struct {
     }
 
     pub fn read(self: File, rt: *Runtime, buffer: []u8, offset: u64) ReadError!usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
-        var storage: [1]os.iovec = undefined;
-        var op = ev.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        return try op.getResult();
+        return fileReadPositional(rt, self.fd, @as([*]const []u8, @ptrCast(&buffer))[0..1], offset);
     }
 
     pub fn write(self: File, rt: *Runtime, data: []const u8, offset: u64) WriteError!usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
-        var storage: [1]os.iovec_const = undefined;
-        var op = ev.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        return try op.getResult();
+        return fileWritePositional(rt, self.fd, "", @as([*]const []const u8, @ptrCast(&data))[0..1], 1, offset);
     }
 
     /// Read from file into multiple slices (vectored read).
-    pub fn readVec(self: File, rt: *Runtime, slices: [][]u8, offset: u64) ReadError!usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
-        var storage: [16]os.iovec = undefined;
-        var op = ev.FileRead.init(self.fd, ev.ReadBuf.fromSlices(slices, &storage), offset);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        return try op.getResult();
+    pub fn readVec(self: File, rt: *Runtime, slices: []const []u8, offset: u64) ReadError!usize {
+        return fileReadPositional(rt, self.fd, slices, offset);
     }
 
     /// Write to file from multiple slices (vectored write).
     pub fn writeVec(self: File, rt: *Runtime, slices: []const []const u8, offset: u64) WriteError!usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
-        var storage: [16]os.iovec_const = undefined;
-        var op = ev.FileWrite.init(self.fd, ev.WriteBuf.fromSlices(slices, &storage), offset);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        return try op.getResult();
+        return fileWritePositional(rt, self.fd, "", slices, 1, offset);
     }
 
     /// Read from file using ReadBuf (direct iovec access).
@@ -548,12 +504,23 @@ test "File: reader and writer interface" {
 
 /// Positional write from vectored buffers (for std.Io compatibility).
 /// Does not update any file position.
-pub fn fileWritePositional(rt: *Runtime, fd: Handle, buffers: []const []const u8, offset: u64) !usize {
+pub fn fileWritePositional(rt: *Runtime, fd: Handle, header: []const u8, data: []const []const u8, splat: usize, offset: u64) !usize {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    var storage: [16]os.iovec_const = undefined;
-    var op = ev.FileWrite.init(fd, ev.WriteBuf.fromSlices(buffers, &storage), offset);
+    const max_vecs = switch (builtin.os.tag) {
+        .windows => 1,
+        else => 16,
+    };
+
+    var splat_buf: [64]u8 = undefined;
+    var slices: [max_vecs][]const u8 = undefined;
+    const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
+
+    if (buf_len == 0) return 0;
+
+    var storage: [max_vecs]os.iovec_const = undefined;
+    var op = ev.FileWrite.init(fd, ev.WriteBuf.fromSlices(slices[0..buf_len], &storage), offset);
     op.c.userdata = task;
     op.c.callback = genericCallback;
 
