@@ -122,6 +122,16 @@ fn completionCallback(
 }
 
 const getNextExecutor = @import("../runtime.zig").getNextExecutor;
+const Executor = @import("../runtime.zig").Executor;
+
+/// Register a blocking task with the runtime and submit it for execution.
+/// Adds the task to the runtime's task list, increments its reference count,
+/// and submits it to the thread pool via the executor's event loop.
+pub fn registerBlockingTask(rt: *Runtime, executor: *Executor, task: *AnyBlockingTask) void {
+    rt.tasks.add(&task.awaitable);
+    task.awaitable.ref_count.incr();
+    executor.loop.add(&task.work.c);
+}
 
 /// Spawn a blocking task with raw context bytes and start function.
 /// Used by Runtime.spawnBlocking.
@@ -144,10 +154,7 @@ pub fn spawnBlockingTask(
     );
     errdefer AnyBlockingTask.destroyFn(rt, &task.awaitable);
 
-    rt.tasks.add(&task.awaitable);
-
-    task.awaitable.ref_count.incr();
-    executor.loop.add(&task.work.c);
+    registerBlockingTask(rt, executor, task);
 
     return task;
 }

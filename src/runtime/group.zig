@@ -12,7 +12,9 @@ const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const AnyTask = @import("task.zig").AnyTask;
+const registerTask = @import("task.zig").registerTask;
 const AnyBlockingTask = @import("blocking_task.zig").AnyBlockingTask;
+const registerBlockingTask = @import("blocking_task.zig").registerBlockingTask;
 const Futex = @import("../sync/Futex.zig");
 
 /// Matches std.Io.Group layout exactly for future vtable compatibility.
@@ -235,10 +237,7 @@ pub fn groupSpawnTask(
     }
     errdefer _ = group.getTasks().remove(&task.awaitable.group_node);
 
-    rt.tasks.add(&task.awaitable);
-
-    task.awaitable.ref_count.incr();
-    executor.scheduleTask(task, .maybe_remote);
+    registerTask(rt, task);
 }
 
 /// Spawn a blocking task in the group with raw context bytes and start function.
@@ -276,10 +275,7 @@ pub fn groupSpawnBlockingTask(
     }
     errdefer _ = group.getTasks().remove(&task.awaitable.group_node);
 
-    rt.tasks.add(&task.awaitable);
-
-    task.awaitable.ref_count.incr();
-    executor.loop.add(&task.work.c);
+    registerBlockingTask(rt, executor, task);
 }
 
 /// Called by runtime when a group task completes.
