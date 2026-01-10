@@ -13,6 +13,8 @@ const AnyTask = @import("runtime/task.zig").AnyTask;
 const Closure = @import("runtime/task.zig").Closure;
 const CreateOptions = @import("runtime/task.zig").CreateOptions;
 const Awaitable = @import("runtime/awaitable.zig").Awaitable;
+const Group = @import("runtime/group.zig").Group;
+const groupSpawnTask = @import("runtime/group.zig").groupSpawnTask;
 const select = @import("select.zig");
 const zio_net = @import("net.zig");
 const zio_fs = @import("fs.zig");
@@ -104,35 +106,33 @@ fn cancelRequestedImpl(userdata: ?*anyopaque) bool {
 }
 
 fn groupAsyncImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) Io.Cancelable!void) void {
-    _ = userdata;
-    _ = group;
-    _ = context;
-    _ = context_alignment;
-    _ = start;
-    @panic("TODO: group");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    groupSpawnTask(Group.fromStd(group), rt, context, context_alignment, start) catch {
+        // If we can't schedule, run synchronously like std.Io.Threaded does
+        start(context.ptr) catch |err| switch (err) {
+            // Propagate cancellation to the caller
+            error.Canceled => recancelImpl(userdata),
+        };
+    };
 }
 
 fn groupConcurrentImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) Io.Cancelable!void) Io.ConcurrentError!void {
-    _ = userdata;
-    _ = group;
-    _ = context;
-    _ = context_alignment;
-    _ = start;
-    @panic("TODO: group");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    groupSpawnTask(Group.fromStd(group), rt, context, context_alignment, start) catch {
+        return error.ConcurrencyUnavailable;
+    };
 }
 
 fn groupAwaitImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) Io.Cancelable!void {
-    _ = userdata;
-    _ = group;
     _ = initial_token;
-    @panic("TODO: group");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return Group.fromStd(group).wait(rt);
 }
 
 fn groupCancelImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) void {
-    _ = userdata;
-    _ = group;
     _ = initial_token;
-    @panic("TODO: group");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    Group.fromStd(group).cancel(rt);
 }
 
 fn selectImpl(userdata: ?*anyopaque, futures: []const *Io.AnyFuture) Io.Cancelable!usize {
@@ -1971,4 +1971,56 @@ test "Io: Event set before wait" {
     // Wait should return immediately since already set
     try event.wait(io);
     try std.testing.expect(event.isSet());
+}
+
+test "Io.Group: basic async and await" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+
+    var completed: usize = 0;
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+
+    const task = struct {
+        fn run(c: *usize) void {
+            _ = @atomicRmw(usize, c, .Add, 1, .monotonic);
+        }
+    }.run;
+
+    group.async(io, task, .{&completed});
+    group.async(io, task, .{&completed});
+    group.async(io, task, .{&completed});
+
+    try group.await(io);
+
+    try std.testing.expectEqual(3, completed);
+}
+
+test "Io.Group: concurrent spawn" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+
+    var completed: usize = 0;
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+
+    const task = struct {
+        fn run(c: *usize) void {
+            _ = @atomicRmw(usize, c, .Add, 1, .monotonic);
+        }
+    }.run;
+
+    try group.concurrent(io, task, .{&completed});
+    try group.concurrent(io, task, .{&completed});
+    try group.concurrent(io, task, .{&completed});
+
+    try group.await(io);
+
+    try std.testing.expectEqual(3, completed);
 }
