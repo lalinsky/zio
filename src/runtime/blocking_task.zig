@@ -79,9 +79,9 @@ pub const AnyBlockingTask = struct {
             .closure = alloc_result.closure,
         };
 
-        // Set up the completion callback to be called when work completes
-        self.work.c.userdata = self;
-        self.work.c.callback = completionCallback;
+        // Set up the thread pool completion callback
+        self.work.completion_fn = threadPoolCompletion;
+        self.work.completion_context = self;
 
         // Copy context data into the allocation
         const context_dest = self.closure.getContextSlice(AnyBlockingTask, self);
@@ -93,48 +93,43 @@ pub const AnyBlockingTask = struct {
 
 // Work function for blocking tasks - runs in thread pool
 fn workFunc(work: *ev.Work) void {
-    const any_blocking_task: *AnyBlockingTask = @ptrCast(@alignCast(work.userdata.?));
+    const task: *AnyBlockingTask = @ptrCast(@alignCast(work.userdata.?));
 
     // Execute the user's blocking function
     // ev handles cancellation - if canceled, this won't be called
-    any_blocking_task.closure.call(AnyBlockingTask, any_blocking_task);
+    task.closure.call(AnyBlockingTask, task);
 }
 
-// Completion callback - called by ev event loop when work finishes
-fn completionCallback(
-    _: *ev.Loop,
-    completion: *ev.Completion,
-) void {
-    const any_blocking_task: *AnyBlockingTask = @ptrCast(@alignCast(completion.userdata.?));
+// Completion callback - called by thread pool worker thread when work finishes.
+// All operations here must be thread-safe as this runs on a foreign thread.
+fn threadPoolCompletion(ctx: *anyopaque, _: *ev.Work) void {
+    const task: *AnyBlockingTask = @ptrCast(@alignCast(ctx));
 
     // Mark awaitable as complete and wake all waiters (thread-safe)
     // Even if canceled, we still mark as complete so waiters wake up
-    any_blocking_task.awaitable.markComplete();
+    task.awaitable.markComplete();
 
     // For group tasks, decrement counter and release group's reference
-    if (any_blocking_task.awaitable.group_node.group) |group| {
-        onGroupTaskComplete(group, any_blocking_task.runtime, &any_blocking_task.awaitable);
+    if (task.awaitable.group_node.group) |group| {
+        onGroupTaskComplete(group, task.runtime, &task.awaitable);
     }
 
     // Release the blocking task's reference and check for shutdown
-    const runtime = any_blocking_task.runtime;
-    runtime.releaseAwaitable(&any_blocking_task.awaitable, true);
+    task.runtime.releaseAwaitable(&task.awaitable, true);
 }
 
-const getNextExecutor = @import("../runtime.zig").getNextExecutor;
-const Executor = @import("../runtime.zig").Executor;
-
 /// Register a blocking task with the runtime and submit it for execution.
-/// Adds the task to the runtime's task list, increments its reference count,
-/// and submits it to the thread pool via the executor's event loop.
-pub fn registerBlockingTask(rt: *Runtime, executor: *Executor, task: *AnyBlockingTask) void {
-    rt.tasks.add(&task.awaitable);
+/// Increments its reference count, adds the task to the runtime's task list,
+/// and submits it directly to the thread pool.
+fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) void {
     task.awaitable.ref_count.incr();
-    executor.loop.add(&task.work.c);
+    rt.tasks.add(&task.awaitable);
+    rt.thread_pool.submit(&task.work);
 }
 
 /// Spawn a blocking task with raw context bytes and start function.
 /// Used by Runtime.spawnBlocking and Group.spawnBlocking.
+/// Thread-safe: can be called from any thread.
 pub fn spawnBlockingTask(
     rt: *Runtime,
     result_len: usize,
@@ -144,7 +139,6 @@ pub fn spawnBlockingTask(
     start: Closure.Start,
     group: ?*Group,
 ) !*AnyBlockingTask {
-    const executor = try getNextExecutor(rt);
     const task = try AnyBlockingTask.create(
         rt,
         result_len,
@@ -159,7 +153,7 @@ pub fn spawnBlockingTask(
         try registerGroupTask(g, &task.awaitable);
     }
 
-    registerBlockingTask(rt, executor, task);
+    registerBlockingTask(rt, task);
 
     return task;
 }
