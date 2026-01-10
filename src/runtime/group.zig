@@ -44,6 +44,7 @@ pub const Group = struct {
     const canceled_bit: u32 = 1 << 0;
     const failed_bit: u32 = 1 << 1;
     const fail_fast_bit: u32 = 1 << 2;
+    const closed_bit: u32 = 1 << 3;
 
     fn getTasks(self: *Group) *CompactWaitQueue(GroupNode) {
         return @ptrCast(&self.inner.token);
@@ -63,7 +64,7 @@ pub const Group = struct {
 
     /// Set the failed flag.
     pub fn setFailed(self: *Group) void {
-        _ = @atomicRmw(u32, self.getFlags(), .Or, failed_bit, .acq_rel);
+        _ = @atomicRmw(u32, self.getFlags(), .Or, failed_bit | closed_bit, .acq_rel);
     }
 
     /// Check if the failed flag is set.
@@ -73,7 +74,7 @@ pub const Group = struct {
 
     /// Set the canceled flag.
     pub fn setCanceled(self: *Group) void {
-        _ = @atomicRmw(u32, self.getFlags(), .Or, canceled_bit, .acq_rel);
+        _ = @atomicRmw(u32, self.getFlags(), .Or, canceled_bit | closed_bit, .acq_rel);
     }
 
     /// Check if the canceled flag is set.
@@ -92,7 +93,17 @@ pub const Group = struct {
         return (@atomicLoad(u32, self.getFlags(), .acquire) & fail_fast_bit) != 0;
     }
 
+    fn setClosed(self: *Group) void {
+        _ = @atomicRmw(u32, self.getFlags(), .Or, closed_bit, .acq_rel);
+    }
+
+    fn isClosed(self: *Group) bool {
+        return (@atomicLoad(u32, self.getFlags(), .acquire) & closed_bit) != 0;
+    }
+
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+        if (self.isClosed()) return error.Closed;
+
         const Args = @TypeOf(args);
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
         const Wrapper = struct {
@@ -146,6 +157,7 @@ pub const Group = struct {
     }
 
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
+        group.setClosed();
         errdefer group.cancel(rt);
 
         // Wait for all tasks to complete
