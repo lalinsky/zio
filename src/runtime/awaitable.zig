@@ -66,12 +66,9 @@ pub const Awaitable = struct {
     pub const not_complete = State.sentinel0;
     pub const complete = State.sentinel1;
 
-    /// Request cancellation of this awaitable.
+    /// Set the canceled status on this awaitable.
     /// This will set user_canceled flag and increment pending_errors.
-    /// If the task is currently suspended, we will wake it up,
-    /// so that it can handle the cancellation (e.g. cancel the underlying I/O operation).
-    /// If the task is already running/dead, the wake is a noop.
-    pub fn cancel(self: *Awaitable) void {
+    pub fn setCanceled(self: *Awaitable) void {
         // CAS loop to set user_canceled and increment pending_errors
         var current = self.canceled_status.load(.acquire);
         while (true) {
@@ -92,8 +89,15 @@ pub const Awaitable = struct {
             // CAS succeeded
             break;
         }
+    }
 
-        self.wait_node.wake();
+    /// Request cancellation of this awaitable.
+    /// Dispatches to the sub-type's cancel method.
+    pub fn cancel(self: *Awaitable) void {
+        switch (self.kind) {
+            .task => AnyTask.fromAwaitable(self).cancel(),
+            .blocking_task => AnyBlockingTask.fromAwaitable(self).cancel(),
+        }
     }
 
     /// Re-arm cancellation after it was acknowledged.

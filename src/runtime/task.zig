@@ -316,6 +316,12 @@ pub const AnyTask = struct {
         }
     }
 
+    /// Cancel this task by setting canceled status and waking it if suspended.
+    pub fn cancel(self: *AnyTask) void {
+        self.awaitable.setCanceled();
+        self.awaitable.wait_node.wake();
+    }
+
     pub fn destroy(self: *AnyTask, rt: *Runtime) void {
         if (self.coro.context.stack_info.allocation_len > 0) {
             rt.stack_pool.release(self.coro.context.stack_info, rt.now());

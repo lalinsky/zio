@@ -42,6 +42,13 @@ pub const AnyBlockingTask = struct {
         return result_ptr.*;
     }
 
+    /// Cancel this blocking task by setting canceled status and canceling the thread pool work.
+    pub fn cancel(self: *AnyBlockingTask) void {
+        self.awaitable.setCanceled();
+        // TODO: Actually cancel the task via thread pool
+        // self.runtime.thread_pool.cancel(&self.work);
+    }
+
     pub fn destroy(self: *AnyBlockingTask, rt: *Runtime) void {
         self.closure.free(AnyBlockingTask, rt, self);
     }
@@ -102,8 +109,11 @@ fn workFunc(work: *ev.Work) void {
 
 // Completion callback - called by thread pool worker thread when work finishes.
 // All operations here must be thread-safe as this runs on a foreign thread.
-fn threadPoolCompletion(ctx: *anyopaque, _: *ev.Work) void {
+fn threadPoolCompletion(ctx: ?*anyopaque, work: *ev.Work) void {
     const task: *AnyBlockingTask = @ptrCast(@alignCast(ctx));
+
+    // TODO: Handle error case (work.c.err) when task was canceled
+    _ = work;
 
     // Mark awaitable as complete and wake all waiters (thread-safe)
     // Even if canceled, we still mark as complete so waiters wake up
