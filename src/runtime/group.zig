@@ -204,13 +204,14 @@ pub const Group = struct {
 /// Called by runtime when a group task completes.
 /// Decrements counter, wakes waiters if last task, removes from list, and releases ref.
 pub fn onGroupTaskComplete(group: *Group, rt: *Runtime, awaitable: *Awaitable) void {
-    const counter_ptr = group.getCounter();
-    if (@atomicRmw(u32, counter_ptr, .Sub, 1, .acq_rel) == 1) {
-        Futex.wake(rt, counter_ptr, std.math.maxInt(u32));
-    }
     // Only release if we successfully removed it (cancel might have popped it first)
     if (group.getTasks().remove(&awaitable.group_node)) {
         rt.releaseAwaitable(awaitable, false);
+    }
+
+    const counter_ptr = group.getCounter();
+    if (@atomicRmw(u32, counter_ptr, .Sub, 1, .acq_rel) == 1) {
+        Futex.wake(rt, counter_ptr, std.math.maxInt(u32));
     }
 }
 
