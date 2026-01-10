@@ -42,8 +42,7 @@ pub const AnyBlockingTask = struct {
         return result_ptr.*;
     }
 
-    pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
-        const self = fromAwaitable(awaitable);
+    pub fn destroy(self: *AnyBlockingTask, rt: *Runtime) void {
         self.closure.free(AnyBlockingTask, rt, self);
     }
 
@@ -71,7 +70,6 @@ pub const AnyBlockingTask = struct {
         self.* = .{
             .awaitable = .{
                 .kind = .blocking_task,
-                .destroy_fn = &AnyBlockingTask.destroyFn,
                 .wait_node = .{
                     .vtable = &AnyBlockingTask.wait_node_vtable,
                 },
@@ -155,7 +153,7 @@ pub fn spawnBlockingTask(
         context_alignment,
         start,
     );
-    errdefer AnyBlockingTask.destroyFn(rt, &task.awaitable);
+    errdefer task.destroy(rt);
 
     if (group) |g| {
         try registerGroupTask(g, &task.awaitable);

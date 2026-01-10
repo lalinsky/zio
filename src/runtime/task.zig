@@ -316,9 +316,7 @@ pub const AnyTask = struct {
         }
     }
 
-    pub fn destroyFn(rt: *Runtime, awaitable: *Awaitable) void {
-        const self = fromAwaitable(awaitable);
-
+    pub fn destroy(self: *AnyTask, rt: *Runtime) void {
         if (self.coro.context.stack_info.allocation_len > 0) {
             rt.stack_pool.release(self.coro.context.stack_info, rt.now());
         }
@@ -357,7 +355,6 @@ pub const AnyTask = struct {
             .state = .init(.new),
             .awaitable = .{
                 .kind = .task,
-                .destroy_fn = &AnyTask.destroyFn,
                 .wait_node = .{
                     .vtable = &AnyTask.wait_node_vtable,
                 },
@@ -446,7 +443,7 @@ pub fn spawnTask(
         start,
         .{ .pinned = options.pinned },
     );
-    errdefer AnyTask.destroyFn(rt, &task.awaitable);
+    errdefer task.destroy(rt);
 
     if (group) |g| {
         try registerGroupTask(g, &task.awaitable);

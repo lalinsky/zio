@@ -381,7 +381,6 @@ pub const Executor = struct {
             .state = std.atomic.Value(AnyTask.State).init(.ready),
             .awaitable = .{
                 .kind = .task,
-                .destroy_fn = undefined, // main_task is never destroyed via this
                 .wait_node = .{
                     .vtable = &AnyTask.wait_node_vtable,
                 },
@@ -1098,7 +1097,7 @@ pub const Runtime = struct {
             }
         }
         if (awaitable.ref_count.decr()) {
-            awaitable.destroy_fn(self, awaitable);
+            awaitable.destroy(self);
         }
         // Wake main executor when all tasks complete (for run() to exit)
         // Only wake if main_task is in .new state (waiting in run() mode)

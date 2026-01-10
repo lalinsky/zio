@@ -14,6 +14,8 @@ const select = @import("../select.zig");
 
 // Forward declaration - Runtime is defined in runtime.zig
 const Runtime = @import("../runtime.zig").Runtime;
+const AnyTask = @import("task.zig").AnyTask;
+const AnyBlockingTask = @import("blocking_task.zig").AnyBlockingTask;
 
 // Awaitable kind - distinguishes different awaitable types
 pub const AwaitableKind = enum {
@@ -33,7 +35,6 @@ pub const CanceledStatus = packed struct(u32) {
 pub const Awaitable = struct {
     kind: AwaitableKind,
     ref_count: RefCounter(u32) = RefCounter(u32).init(),
-    destroy_fn: *const fn (*Runtime, *Awaitable) void,
 
     wait_node: WaitNode,
 
@@ -160,6 +161,14 @@ pub const Awaitable = struct {
     /// Part of the Future protocol for use with select()
     pub fn getResult(self: *Awaitable) void {
         _ = self;
+    }
+
+    /// Destroy the awaitable, freeing any associated resources.
+    pub fn destroy(self: *Awaitable, rt: *Runtime) void {
+        switch (self.kind) {
+            .task => AnyTask.fromAwaitable(self).destroy(rt),
+            .blocking_task => AnyBlockingTask.fromAwaitable(self).destroy(rt),
+        }
     }
 };
 
