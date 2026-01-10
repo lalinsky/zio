@@ -10,6 +10,8 @@ const Awaitable = @import("awaitable.zig").Awaitable;
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 const Closure = @import("task.zig").Closure;
+const Group = @import("group.zig").Group;
+const registerGroupTask = @import("group.zig").registerGroupTask;
 const onGroupTaskComplete = @import("group.zig").onGroupTaskComplete;
 
 const assert = std.debug.assert;
@@ -134,14 +136,15 @@ pub fn registerBlockingTask(rt: *Runtime, executor: *Executor, task: *AnyBlockin
 }
 
 /// Spawn a blocking task with raw context bytes and start function.
-/// Used by Runtime.spawnBlocking.
+/// Used by Runtime.spawnBlocking and Group.spawnBlocking.
 pub fn spawnBlockingTask(
     rt: *Runtime,
     result_len: usize,
     result_alignment: std.mem.Alignment,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Closure.Start,
+    group: ?*Group,
 ) !*AnyBlockingTask {
     const executor = try getNextExecutor(rt);
     const task = try AnyBlockingTask.create(
@@ -150,9 +153,13 @@ pub fn spawnBlockingTask(
         result_alignment,
         context,
         context_alignment,
-        .{ .regular = start },
+        start,
     );
     errdefer AnyBlockingTask.destroyFn(rt, &task.awaitable);
+
+    if (group) |g| {
+        try registerGroupTask(g, &task.awaitable);
+    }
 
     registerBlockingTask(rt, executor, task);
 

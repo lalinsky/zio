@@ -29,6 +29,7 @@ const spawnTask = @import("runtime/task.zig").spawnTask;
 const AnyBlockingTask = @import("runtime/blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
 const Timeout = @import("runtime/timeout.zig").Timeout;
+const Group = @import("runtime/group.zig").Group;
 const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
 
 const select = @import("select.zig");
@@ -929,8 +930,9 @@ pub const Runtime = struct {
             .fromByteUnits(@alignOf(Result)),
             std.mem.asBytes(&args),
             .fromByteUnits(@alignOf(Args)),
-            &Wrapper.start,
+            .{ .regular = &Wrapper.start },
             options,
+            null,
         );
 
         return JoinHandle(Result){
@@ -957,7 +959,8 @@ pub const Runtime = struct {
             .fromByteUnits(@alignOf(Result)),
             std.mem.asBytes(&args),
             .fromByteUnits(@alignOf(Args)),
-            &Wrapper.start,
+            .{ .regular = &Wrapper.start },
+            null,
         );
 
         return JoinHandle(Result){

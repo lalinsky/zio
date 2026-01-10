@@ -14,6 +14,8 @@ const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("timeout.zig").Timeout;
+const Group = @import("group.zig").Group;
+const registerGroupTask = @import("group.zig").registerGroupTask;
 /// Options for creating a task
 pub const CreateOptions = struct {
     pinned: bool = false,
@@ -422,16 +424,17 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) void {
     executor.scheduleTask(task, .maybe_remote);
 }
 
-/// Spawn a regular task with raw context bytes and start function.
-/// Used by Runtime.spawn and std.Io vtable implementations.
+/// Spawn a task with raw context bytes and start function.
+/// Used by Runtime.spawn, Group.spawn, and std.Io vtable implementations.
 pub fn spawnTask(
     rt: *Runtime,
     result_len: usize,
     result_alignment: std.mem.Alignment,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Closure.Start,
     options: SpawnOptions,
+    group: ?*Group,
 ) !*AnyTask {
     const executor = try getNextExecutor(rt);
     const task = try AnyTask.create(
@@ -440,10 +443,14 @@ pub fn spawnTask(
         result_alignment,
         context,
         context_alignment,
-        .{ .regular = start },
+        start,
         .{ .pinned = options.pinned },
     );
     errdefer AnyTask.destroyFn(rt, &task.awaitable);
+
+    if (group) |g| {
+        try registerGroupTask(g, &task.awaitable);
+    }
 
     registerTask(rt, task);
 
