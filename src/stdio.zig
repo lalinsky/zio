@@ -8,10 +8,8 @@ const aio = @import("ev/root.zig");
 const Io = std.Io;
 
 const Runtime = @import("runtime.zig").Runtime;
-const getNextExecutor = @import("runtime.zig").getNextExecutor;
 const AnyTask = @import("runtime/task.zig").AnyTask;
-const Closure = @import("runtime/task.zig").Closure;
-const CreateOptions = @import("runtime/task.zig").CreateOptions;
+const spawnTask = @import("runtime/task.zig").spawnTask;
 const Awaitable = @import("runtime/awaitable.zig").Awaitable;
 const Group = @import("runtime/group.zig").Group;
 const groupSpawnTask = @import("runtime/group.zig").groupSpawnTask;
@@ -32,40 +30,9 @@ fn asyncImpl(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alig
 
 fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-
-    // Check if runtime is shutting down
-    if (rt.shutting_down.load(.acquire)) {
+    const task = spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, .{}, null) catch {
         return error.ConcurrencyUnavailable;
-    }
-
-    // Pick an executor (round-robin)
-    const executor = getNextExecutor(rt);
-
-    // Create the task using AnyTask.create
-    const task = AnyTask.create(
-        executor,
-        result_len,
-        result_alignment,
-        context,
-        context_alignment,
-        .{ .regular = start },
-        CreateOptions{},
-    ) catch return error.ConcurrencyUnavailable;
-    errdefer task.closure.free(AnyTask, executor.runtime, task);
-
-    // Add to global awaitable registry
-    rt.tasks.add(&task.awaitable);
-    errdefer _ = rt.tasks.remove(&task.awaitable);
-
-    // Increment ref count for the Future BEFORE scheduling
-    // This prevents race where task completes before we create the Future
-    task.awaitable.ref_count.incr();
-    errdefer _ = task.awaitable.ref_count.decr();
-
-    // Schedule the task to run (handles cross-thread notification)
-    executor.scheduleTask(task, .maybe_remote);
-
-    // Return the awaitable as AnyFuture
+    };
     return @ptrCast(&task.awaitable);
 }
 
