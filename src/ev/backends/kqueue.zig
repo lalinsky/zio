@@ -733,7 +733,7 @@ pub const FdWaker = struct {
             .macos => {
                 // write() is async-signal-safe
                 const byte: [1]u8 = .{1};
-                _ = std.posix.write(self.write_fd, &byte) catch |err| {
+                _ = fs.write(self.write_fd, &byte) catch |err| {
                     log.err("Failed to write to pipe: {}", .{err});
                 };
             },
@@ -751,7 +751,7 @@ pub const FdWaker = struct {
             .macos => {
                 // Read and discard bytes from pipe (up to 64 bytes)
                 var buf: [64]u8 = undefined;
-                _ = std.posix.read(self.read_fd, &buf) catch {};
+                _ = fs.read(self.read_fd, &buf) catch {};
             },
             else => @compileError("Unsupported OS for kqueue backend"),
         }

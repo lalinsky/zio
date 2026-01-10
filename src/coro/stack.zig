@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
+const fs = @import("../os/fs.zig");
 const w = @import("../os/windows.zig");
 const coroutines = @import("coroutines.zig");
 
@@ -502,7 +503,7 @@ fn abortOnStackOverflow(fault_addr: usize, stack_info: *const StackInfo) noretur
         },
     ) catch "Coroutine stack overflow (error formatting message)\n";
 
-    _ = posix.write(posix.STDERR_FILENO, msg) catch {};
+    _ = fs.write(posix.STDERR_FILENO, msg) catch {};
     if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
         posix.abort();
     } else {
