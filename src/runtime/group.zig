@@ -148,9 +148,6 @@ pub const Group = struct {
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
         errdefer group.cancel(rt);
 
-        // Transition to closing state to prevent new spawns
-        _ = group.getTasks().tryTransition(.sentinel0, .sentinel1);
-
         // Wait for all tasks to complete
         const counter_ptr = group.getCounter();
         while (true) {
@@ -160,13 +157,10 @@ pub const Group = struct {
         }
 
         // Pop remaining tasks and release refs
-        while (group.getTasks().popOrTransition(.sentinel0, .sentinel1)) |node| {
+        while (group.getTasks().pop()) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             rt.releaseAwaitable(awaitable, false);
         }
-
-        // Transition back to idle
-        _ = group.getTasks().tryTransition(.sentinel1, .sentinel0);
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
