@@ -102,58 +102,30 @@ pub const Group = struct {
     }
 
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
-        if (self.isClosed()) return error.Closed;
-
         const Args = @TypeOf(args);
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+        const Context = struct { group: *Group, args: Args };
         const Wrapper = struct {
-            fn start(group_ptr: *anyopaque, ctx: *const anyopaque) void {
-                const group: *Group = @ptrCast(@alignCast(group_ptr));
-                const a: *const Args = @ptrCast(@alignCast(ctx));
-                const result = @call(.auto, func, a.*);
-
-                // If the result is an error union and it's an error, set the appropriate flag
+            fn start(ctx: *const anyopaque) Cancelable!void {
+                const context: *const Context = @ptrCast(@alignCast(ctx));
+                const group = context.group;
                 if (@typeInfo(ReturnType) == .error_union) {
-                    if (result) |_| {} else |err| {
+                    @call(.auto, func, context.args) catch |err| {
                         if (err == error.Canceled) {
                             group.setCanceled();
+                            return error.Canceled;
                         } else {
                             group.setFailed();
                         }
-                    }
+                    };
+                } else {
+                    _ = @call(.auto, func, context.args);
                 }
             }
         };
 
-        // Increment counter before spawning
-        _ = @atomicRmw(u32, self.getCounter(), .Add, 1, .acq_rel);
-        errdefer _ = @atomicRmw(u32, self.getCounter(), .Sub, 1, .acq_rel);
-
-        const executor = getNextExecutor(rt);
-        const task = try AnyTask.create(
-            executor,
-            0, // result_len - group tasks return void
-            .@"1", // result_alignment
-            std.mem.asBytes(&args),
-            .fromByteUnits(@alignOf(Args)),
-            .{ .group = &Wrapper.start },
-            .{},
-        );
-        errdefer task.closure.free(AnyTask, rt, task);
-
-        // Associate the task with the group
-        task.awaitable.group_node.group = self;
-
-        // Push to task list, fails if group is closing (sentinel1)
-        if (!self.getTasks().pushUnless(.sentinel1, &task.awaitable.group_node)) {
-            return error.Closed;
-        }
-        errdefer _ = self.getTasks().remove(&task.awaitable.group_node);
-
-        rt.tasks.add(&task.awaitable);
-
-        task.awaitable.ref_count.incr();
-        executor.scheduleTask(task, .maybe_remote);
+        const context: Context = .{ .group = self, .args = args };
+        return groupSpawnTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start);
     }
 
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
@@ -200,6 +172,48 @@ pub const Group = struct {
         _ = group.getTasks().tryTransition(.sentinel1, .sentinel0);
     }
 };
+
+/// Spawn a task in the group with raw context bytes and start function.
+/// Used by Group.spawn and std.Io vtable implementations.
+pub fn groupSpawnTask(
+    group: *Group,
+    rt: *Runtime,
+    context: []const u8,
+    context_alignment: std.mem.Alignment,
+    start: *const fn (context: *const anyopaque) Cancelable!void,
+) !void {
+    if (group.isClosed()) return error.Closed;
+
+    // Increment counter before spawning
+    _ = @atomicRmw(u32, group.getCounter(), .Add, 1, .acq_rel);
+    errdefer _ = @atomicRmw(u32, group.getCounter(), .Sub, 1, .acq_rel);
+
+    const executor = getNextExecutor(rt);
+    const task = try AnyTask.create(
+        executor,
+        0, // result_len - group tasks return void
+        .@"1", // result_alignment
+        context,
+        context_alignment,
+        .{ .group = start },
+        .{},
+    );
+    errdefer task.closure.free(AnyTask, rt, task);
+
+    // Associate the task with the group
+    task.awaitable.group_node.group = group;
+
+    // Push to task list, fails if group is closing (sentinel1)
+    if (!group.getTasks().pushUnless(.sentinel1, &task.awaitable.group_node)) {
+        return error.Closed;
+    }
+    errdefer _ = group.getTasks().remove(&task.awaitable.group_node);
+
+    rt.tasks.add(&task.awaitable);
+
+    task.awaitable.ref_count.incr();
+    executor.scheduleTask(task, .maybe_remote);
+}
 
 /// Called by runtime when a group task completes.
 /// Decrements counter, wakes waiters if last task, removes from list, and releases ref.

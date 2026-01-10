@@ -14,8 +14,6 @@ const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("timeout.zig").Timeout;
-const Group = @import("group.zig").Group;
-
 /// Options for creating a task
 pub const CreateOptions = struct {
     pinned: bool = false,
@@ -31,8 +29,8 @@ pub const Closure = struct {
     pub const Start = union(enum) {
         /// Regular task: fn(context, result) -> void
         regular: *const fn (context: *const anyopaque, result: *anyopaque) void,
-        /// Group task: fn(group, context) -> void, group comes from awaitable.group_node.group
-        group: *const fn (group: *anyopaque, context: *const anyopaque) void,
+        /// Group task: fn(context) -> Cancelable!void
+        group: *const fn (context: *const anyopaque) Cancelable!void,
     };
 
     pub const max_result_len = 1 << 12;
@@ -66,7 +64,7 @@ pub const Closure = struct {
     }
 
     /// Call the start function with the appropriate arguments.
-    pub fn call(self: *const Closure, comptime TaskType: type, task: *TaskType, group_ptr: ?*Group) void {
+    pub fn call(self: *const Closure, comptime TaskType: type, task: *TaskType) void {
         const context = self.getContextPtr(TaskType, task);
 
         switch (self.start) {
@@ -75,7 +73,8 @@ pub const Closure = struct {
                 start(context, result);
             },
             .group => |start| {
-                start(group_ptr.?, context);
+                // The start signature returns Cancelable!void for std.Io compatibility
+                start(context) catch {};
             },
         }
     }
@@ -314,7 +313,7 @@ pub const AnyTask = struct {
 
     pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
         const self = fromCoroutine(coro);
-        self.closure.call(AnyTask, self, self.awaitable.group_node.group);
+        self.closure.call(AnyTask, self);
     }
 
     pub fn create(

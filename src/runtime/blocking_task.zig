@@ -80,7 +80,7 @@ fn workFunc(work: *ev.Work) void {
 
     // Execute the user's blocking function
     // ev handles cancellation - if canceled, this won't be called
-    any_blocking_task.closure.call(AnyBlockingTask, any_blocking_task, any_blocking_task.awaitable.group_node.group);
+    any_blocking_task.closure.call(AnyBlockingTask, any_blocking_task);
 }
 
 // Completion callback - called by ev event loop when work finishes
