@@ -119,11 +119,11 @@ fn threadPoolCompletion(ctx: *anyopaque, _: *ev.Work) void {
 }
 
 /// Register a blocking task with the runtime and submit it for execution.
-/// Adds the task to the runtime's task list, increments its reference count,
+/// Increments its reference count, adds the task to the runtime's task list,
 /// and submits it directly to the thread pool.
 fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) void {
-    rt.tasks.add(&task.awaitable);
     task.awaitable.ref_count.incr();
+    rt.tasks.add(&task.awaitable);
     rt.thread_pool.submit(&task.work);
 }
 

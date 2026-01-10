@@ -412,11 +412,11 @@ const getNextExecutor = @import("../runtime.zig").getNextExecutor;
 const SpawnOptions = @import("../runtime.zig").SpawnOptions;
 
 /// Register a task with the runtime and schedule it for execution.
-/// Adds the task to the runtime's task list, increments its reference count,
+/// Increments its reference count, adds the task to the runtime's task list,
 /// and schedules it on its executor.
 pub fn registerTask(rt: *Runtime, task: *AnyTask) void {
-    rt.tasks.add(&task.awaitable);
     task.awaitable.ref_count.incr();
+    rt.tasks.add(&task.awaitable);
     const executor = Executor.fromCoroutine(&task.coro);
     executor.scheduleTask(task, .maybe_remote);
 }
