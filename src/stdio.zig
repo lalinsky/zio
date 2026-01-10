@@ -591,15 +591,7 @@ fn fileReadStreamingImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u
 
 fn fileReadPositionalImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-
-    if (data.len == 0) return 0;
-
-    // TODO: Cast away const since zio_fs expects mutable slices
-    const mutable_data: [][]u8 = @constCast(data);
-    return zio_fs.fileReadPositional(rt, file.handle, mutable_data, offset) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => return error.Unexpected,
-    };
+    return zio_fs.fileReadPositional(rt, file.handle, data, offset);
 }
 
 fn fileSeekByImpl(userdata: ?*anyopaque, file: Io.File, relative_offset: i64) Io.File.SeekError!void {
