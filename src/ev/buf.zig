@@ -9,7 +9,7 @@ pub const ReadBuf = struct {
         return .{ .iovecs = storage[0..1] };
     }
 
-    pub fn fromSlices(slices: [][]u8, storage: []os.iovec) ReadBuf {
+    pub fn fromSlices(slices: []const []u8, storage: []os.iovec) ReadBuf {
         const len = @min(slices.len, storage.len);
         for (0..len) |i| {
             storage[i] = os.iovecFromSlice(slices[i]);

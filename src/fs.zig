@@ -565,7 +565,7 @@ pub fn fileWritePositional(rt: *Runtime, fd: Handle, buffers: []const []const u8
 
 /// Positional read into vectored buffers (for std.Io compatibility).
 /// Does not update any file position.
-pub fn fileReadPositional(rt: *Runtime, fd: Handle, buffers: [][]u8, offset: u64) !usize {
+pub fn fileReadPositional(rt: *Runtime, fd: Handle, buffers: []const []u8, offset: u64) !usize {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
