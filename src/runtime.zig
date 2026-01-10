@@ -967,11 +967,11 @@ pub const Runtime = struct {
         return mod.now();
     }
 
-    pub fn io(self: *Runtime) stdio.Io {
+    pub fn io(self: *Runtime) std.Io {
         return stdio.fromRuntime(self);
     }
 
-    pub fn fromIo(io_: stdio.Io) !*Runtime {
+    pub fn fromIo(io_: std.Io) !*Runtime {
         if (io_.vtable != &stdio.vtable) return error.InvalidIo;
         return stdio.toRuntime(io_);
     }
