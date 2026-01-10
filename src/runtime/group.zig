@@ -12,7 +12,7 @@ const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const AnyTask = @import("task.zig").AnyTask;
-const CreateOptions = @import("task.zig").CreateOptions;
+const AnyBlockingTask = @import("blocking_task.zig").AnyBlockingTask;
 const Futex = @import("../sync/Futex.zig");
 
 /// Matches std.Io.Group layout exactly for future vtable compatibility.
@@ -128,6 +128,32 @@ pub const Group = struct {
         return groupSpawnTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start);
     }
 
+    pub fn spawnBlocking(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+        const Args = @TypeOf(args);
+        const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+        const Context = struct { group: *Group, args: Args };
+        const Wrapper = struct {
+            fn start(ctx: *const anyopaque, _: *anyopaque) void {
+                const context: *const Context = @ptrCast(@alignCast(ctx));
+                const group = context.group;
+                if (@typeInfo(ReturnType) == .error_union) {
+                    @call(.auto, func, context.args) catch |err| {
+                        if (err == error.Canceled) {
+                            group.setCanceled();
+                        } else {
+                            group.setFailed();
+                        }
+                    };
+                } else {
+                    _ = @call(.auto, func, context.args);
+                }
+            }
+        };
+
+        const context: Context = .{ .group = self, .args = args };
+        return groupSpawnBlockingTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start);
+    }
+
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
         group.setClosed();
         errdefer group.cancel(rt);
@@ -213,6 +239,47 @@ pub fn groupSpawnTask(
 
     task.awaitable.ref_count.incr();
     executor.scheduleTask(task, .maybe_remote);
+}
+
+/// Spawn a blocking task in the group with raw context bytes and start function.
+/// Used by Group.spawnBlocking.
+pub fn groupSpawnBlockingTask(
+    group: *Group,
+    rt: *Runtime,
+    context: []const u8,
+    context_alignment: std.mem.Alignment,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) !void {
+    if (group.isClosed()) return error.Closed;
+
+    // Increment counter before spawning
+    _ = @atomicRmw(u32, group.getCounter(), .Add, 1, .acq_rel);
+    errdefer _ = @atomicRmw(u32, group.getCounter(), .Sub, 1, .acq_rel);
+
+    const executor = try getNextExecutor(rt);
+    const task = try AnyBlockingTask.create(
+        rt,
+        0, // result_len - group tasks return void
+        .@"1", // result_alignment
+        context,
+        context_alignment,
+        .{ .regular = start },
+    );
+    errdefer AnyBlockingTask.destroyFn(rt, &task.awaitable);
+
+    // Associate the task with the group
+    task.awaitable.group_node.group = group;
+
+    // Push to task list, fails if group is closing (sentinel1)
+    if (!group.getTasks().pushUnless(.sentinel1, &task.awaitable.group_node)) {
+        return error.Closed;
+    }
+    errdefer _ = group.getTasks().remove(&task.awaitable.group_node);
+
+    rt.tasks.add(&task.awaitable);
+
+    task.awaitable.ref_count.incr();
+    executor.loop.add(&task.work.c);
 }
 
 /// Called by runtime when a group task completes.
