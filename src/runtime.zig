@@ -26,7 +26,8 @@ const TaskPool = @import("runtime/task.zig").TaskPool;
 const ResumeMode = @import("runtime/task.zig").ResumeMode;
 const resumeTask = @import("runtime/task.zig").resumeTask;
 const spawnTask = @import("runtime/task.zig").spawnTask;
-const BlockingTask = @import("runtime/blocking_task.zig").BlockingTask;
+const AnyBlockingTask = @import("runtime/blocking_task.zig").AnyBlockingTask;
+const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
 const Timeout = @import("runtime/timeout.zig").Timeout;
 const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
 
@@ -109,7 +110,7 @@ pub fn JoinHandle(comptime T: type) type {
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
             self.result = switch (awaitable.kind) {
                 .task => AnyTask.fromAwaitable(awaitable).getResult(T),
-                .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
+                .blocking_task => AnyBlockingTask.fromAwaitable(awaitable).getResult(T),
             };
             rt.releaseAwaitable(awaitable, false);
             self.awaitable = null;
@@ -152,7 +153,7 @@ pub fn JoinHandle(comptime T: type) type {
             if (self.awaitable) |awaitable| {
                 return switch (awaitable.kind) {
                     .task => AnyTask.fromAwaitable(awaitable).getResult(T),
-                    .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
+                    .blocking_task => AnyBlockingTask.fromAwaitable(awaitable).getResult(T),
                 };
             } else {
                 return self.result;
@@ -940,24 +941,27 @@ pub const Runtime = struct {
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
-        const task = try BlockingTask(Result).create(self, func, args);
-        errdefer task.destroy(self);
+        const Args = @TypeOf(args);
 
-        // Add to global awaitable registry
-        self.tasks.add(task.toAwaitable());
-        errdefer _ = self.tasks.remove(task.toAwaitable());
+        const Wrapper = struct {
+            fn start(ctx: *const anyopaque, result: *anyopaque) void {
+                const a: *const Args = @ptrCast(@alignCast(ctx));
+                const r: *Result = @ptrCast(@alignCast(result));
+                r.* = @call(.always_inline, func, a.*);
+            }
+        };
 
-        // Increment ref count for JoinHandle BEFORE scheduling
-        // This prevents race where task completes before we create the handle
-        task.toAwaitable().ref_count.incr();
-        errdefer _ = task.toAwaitable().ref_count.decr();
-
-        // Add the work to an executor's loop (loop will submit to thread pool)
-        const executor = try getNextExecutor(self);
-        executor.loop.add(&task.task.work.c);
+        const task = try spawnBlockingTask(
+            self,
+            @sizeOf(Result),
+            .fromByteUnits(@alignOf(Result)),
+            std.mem.asBytes(&args),
+            .fromByteUnits(@alignOf(Args)),
+            &Wrapper.start,
+        );
 
         return JoinHandle(Result){
-            .awaitable = task.toAwaitable(),
+            .awaitable = &task.awaitable,
             .result = undefined,
         };
     }
