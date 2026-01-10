@@ -163,6 +163,20 @@ pub const Awaitable = struct {
         _ = self;
     }
 
+    /// Check if the awaitable has completed and a result is available.
+    pub fn hasResult(self: *const Awaitable) bool {
+        return self.done.load(.acquire);
+    }
+
+    /// Get the typed result from this awaitable.
+    /// Dispatches to the appropriate task type based on kind.
+    pub fn getTypedResult(self: *Awaitable, comptime T: type) T {
+        return switch (self.kind) {
+            .task => AnyTask.fromAwaitable(self).getResult(T),
+            .blocking_task => AnyBlockingTask.fromAwaitable(self).getResult(T),
+        };
+    }
+
     /// Destroy the awaitable, freeing any associated resources.
     pub fn destroy(self: *Awaitable, rt: *Runtime) void {
         switch (self.kind) {

@@ -109,10 +109,7 @@ pub fn JoinHandle(comptime T: type) type {
 
         /// Helper to get result from awaitable and release it
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
-            self.result = switch (awaitable.kind) {
-                .task => AnyTask.fromAwaitable(awaitable).getResult(T),
-                .blocking_task => AnyBlockingTask.fromAwaitable(awaitable).getResult(T),
-            };
+            self.result = awaitable.getTypedResult(T);
             rt.releaseAwaitable(awaitable, false);
             self.awaitable = null;
         }
@@ -141,7 +138,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// Check if the task has completed and a result is available.
         pub fn hasResult(self: *const Self) bool {
             if (self.awaitable) |awaitable| {
-                return awaitable.done.load(.acquire);
+                return awaitable.hasResult();
             }
             return true; // If awaitable is null, result is already cached
         }
@@ -150,15 +147,10 @@ pub fn JoinHandle(comptime T: type) type {
         /// Asserts that the task has already completed.
         /// This is used internally by select() to preserve error union types.
         pub fn getResult(self: *Self) T {
-            assert(self.hasResult());
             if (self.awaitable) |awaitable| {
-                return switch (awaitable.kind) {
-                    .task => AnyTask.fromAwaitable(awaitable).getResult(T),
-                    .blocking_task => AnyBlockingTask.fromAwaitable(awaitable).getResult(T),
-                };
-            } else {
-                return self.result;
+                return awaitable.getTypedResult(T);
             }
+            return self.result;
         }
 
         /// Registers a wait node to be notified when the task completes.
@@ -196,7 +188,7 @@ pub fn JoinHandle(comptime T: type) type {
             const awaitable = self.awaitable orelse return;
 
             // If already done, just clean up
-            if (awaitable.done.load(.acquire)) {
+            if (awaitable.hasResult()) {
                 self.finishAwaitable(rt, awaitable);
                 return;
             }
@@ -227,17 +219,6 @@ pub fn JoinHandle(comptime T: type) type {
             rt.releaseAwaitable(awaitable, false);
             self.awaitable = null;
             self.result = undefined;
-        }
-
-        /// Get the executor ID for this task.
-        /// Only valid for coroutine tasks (not blocking tasks or futures).
-        /// Returns null if this is not a coroutine task or if already detached/completed.
-        pub fn getExecutorId(self: *const Self) ?usize {
-            const awaitable = self.awaitable orelse return null;
-            return switch (awaitable.kind) {
-                .task => AnyTask.fromAwaitable(awaitable).getExecutor().id,
-                .blocking_task => null,
-            };
         }
 
         /// Cast this JoinHandle to a different error set while keeping the same payload type.
