@@ -13,78 +13,97 @@ const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const AnyTask = @import("task.zig").AnyTask;
 const CreateOptions = @import("task.zig").CreateOptions;
-const ResetEvent = @import("../sync/ResetEvent.zig");
+const Futex = @import("../sync/Futex.zig");
+
+/// Matches std.Io.Group layout exactly for future vtable compatibility.
+pub const IoGroup = extern struct {
+    token: std.atomic.Value(?*anyopaque) = .init(null),
+    state: usize = 0,
+};
 
 pub const Group = struct {
-    state: std.atomic.Value(usize) = .init(0),
-    completed: ResetEvent = .init,
-    tasks: CompactWaitQueue(GroupNode) = .empty,
+    inner: IoGroup = .{},
 
     pub const init: Group = .{};
 
-    // State encoding:
-    // - Bits 0-60: pending task counter
-    // - Bit 61: fail_fast flag (if set, signal event early on error)
-    // - Bit 62: failed flag (set when any task returns an error)
-    // - Bit 63: canceled flag (set when group is canceled)
-    const canceled_flag: usize = 1 << (@bitSizeOf(usize) - 1);
-    const failed_flag: usize = 1 << (@bitSizeOf(usize) - 2);
-    const fail_fast_flag: usize = 1 << (@bitSizeOf(usize) - 3);
-    const counter_mask: usize = ~(canceled_flag | failed_flag | fail_fast_flag);
+    // Interpret inner.token as CompactWaitQueue head
+    //   null (0)  = sentinel0 = idle/done
+    //   1         = sentinel1 = closing (reject new spawns)
+    //   pointer   = has tasks
 
-    /// Increment the pending task counter.
-    pub fn incrCounter(self: *Group) void {
-        _ = self.state.fetchAdd(1, .acq_rel);
+    // Interpret inner.state as State
+    pub const State = extern struct {
+        counter: u32 = 0, // pending task count, also futex target
+        flags: u32 = 0, // atomic Or/And for flag bits
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(State) == @sizeOf(usize));
     }
 
-    /// Decrement the pending task counter. Returns true if this was the last task.
-    pub fn decrCounter(self: *Group) bool {
-        const prev = self.state.fetchSub(1, .acq_rel);
-        return (prev & counter_mask) == 1;
+    const canceled_bit: u32 = 1 << 0;
+    const failed_bit: u32 = 1 << 1;
+    const fail_fast_bit: u32 = 1 << 2;
+    const closed_bit: u32 = 1 << 3;
+
+    fn getTasks(self: *Group) *CompactWaitQueue(GroupNode) {
+        return @ptrCast(&self.inner.token);
     }
 
-    /// Get the current counter value.
-    pub fn getCounter(self: *Group) usize {
-        return self.state.load(.acquire) & counter_mask;
+    fn getStatePtr(self: *Group) *State {
+        return @ptrCast(&self.inner.state);
     }
 
-    /// Set the failed flag. If fail_fast is set, also signals the event.
+    fn getCounter(self: *Group) *u32 {
+        return &self.getStatePtr().counter;
+    }
+
+    fn getFlags(self: *Group) *u32 {
+        return &self.getStatePtr().flags;
+    }
+
+    /// Set the failed flag.
     pub fn setFailed(self: *Group) void {
-        const prev = self.state.fetchOr(failed_flag, .acq_rel);
-        if ((prev & fail_fast_flag) != 0) {
-            self.completed.set();
-        }
+        _ = @atomicRmw(u32, self.getFlags(), .Or, failed_bit | closed_bit, .acq_rel);
     }
 
     /// Check if the failed flag is set.
     pub fn hasFailed(self: *Group) bool {
-        return (self.state.load(.acquire) & failed_flag) != 0;
+        return (@atomicLoad(u32, self.getFlags(), .acquire) & failed_bit) != 0;
     }
 
-    /// Set the canceled flag. If fail_fast is set, also signals the event.
+    /// Set the canceled flag.
     pub fn setCanceled(self: *Group) void {
-        const prev = self.state.fetchOr(canceled_flag, .acq_rel);
-        if ((prev & fail_fast_flag) != 0) {
-            self.completed.set();
-        }
+        _ = @atomicRmw(u32, self.getFlags(), .Or, canceled_bit | closed_bit, .acq_rel);
     }
 
     /// Check if the canceled flag is set.
     pub fn isCanceled(self: *Group) bool {
-        return (self.state.load(.acquire) & canceled_flag) != 0;
+        return (@atomicLoad(u32, self.getFlags(), .acquire) & canceled_bit) != 0;
     }
 
-    /// Set the fail_fast flag. When set, the group will signal early on first error.
+    /// Set the fail_fast flag.
+    // TODO: Implement early wake on first error/cancel when fail_fast is set
     pub fn setFailFast(self: *Group) void {
-        _ = self.state.fetchOr(fail_fast_flag, .acq_rel);
+        _ = @atomicRmw(u32, self.getFlags(), .Or, fail_fast_bit, .acq_rel);
     }
 
     /// Check if the fail_fast flag is set.
     pub fn isFailFast(self: *Group) bool {
-        return (self.state.load(.acquire) & fail_fast_flag) != 0;
+        return (@atomicLoad(u32, self.getFlags(), .acquire) & fail_fast_bit) != 0;
+    }
+
+    fn setClosed(self: *Group) void {
+        _ = @atomicRmw(u32, self.getFlags(), .Or, closed_bit, .acq_rel);
+    }
+
+    fn isClosed(self: *Group) bool {
+        return (@atomicLoad(u32, self.getFlags(), .acquire) & closed_bit) != 0;
     }
 
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+        if (self.isClosed()) return error.Closed;
+
         const Args = @TypeOf(args);
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
         const Wrapper = struct {
@@ -107,8 +126,8 @@ pub const Group = struct {
         };
 
         // Increment counter before spawning
-        self.incrCounter();
-        errdefer _ = self.decrCounter();
+        _ = @atomicRmw(u32, self.getCounter(), .Add, 1, .acq_rel);
+        errdefer _ = @atomicRmw(u32, self.getCounter(), .Sub, 1, .acq_rel);
 
         const executor = getNextExecutor(rt);
         const task = try AnyTask.create(
@@ -124,8 +143,12 @@ pub const Group = struct {
 
         // Associate the task with the group
         task.awaitable.group_node.group = self;
-        self.tasks.push(&task.awaitable.group_node);
-        errdefer _ = self.tasks.remove(&task.awaitable.group_node);
+
+        // Push to task list, fails if group is closing (sentinel1)
+        if (!self.getTasks().pushUnless(.sentinel1, &task.awaitable.group_node)) {
+            return error.Closed;
+        }
+        errdefer _ = self.getTasks().remove(&task.awaitable.group_node);
 
         rt.tasks.add(&task.awaitable);
 
@@ -134,33 +157,63 @@ pub const Group = struct {
     }
 
     pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
+        group.setClosed();
         errdefer group.cancel(rt);
-        try group.waitForRemainingTasks(rt, &group.tasks);
+
+        // Wait for all tasks to complete
+        const counter_ptr = group.getCounter();
+        while (true) {
+            const counter = @atomicLoad(u32, counter_ptr, .acquire);
+            if (counter == 0) break;
+            try Futex.wait(rt, counter_ptr, counter);
+        }
+
+        // Pop remaining tasks and release refs
+        while (group.getTasks().pop()) |node| {
+            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
+            rt.releaseAwaitable(awaitable, false);
+        }
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
         rt.beginShield();
         defer rt.endShield();
 
-        // Request cancellation for all tasks in the list
-        var local_list: SimpleWaitQueue(GroupNode) = .empty;
-        while (group.tasks.pop()) |node| {
+        group.setCanceled();
+
+        // Pop all tasks and cancel them
+        while (group.getTasks().popOrTransition(.sentinel0, .sentinel1)) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             awaitable.cancel();
-            local_list.push(node);
-        }
-
-        group.waitForRemainingTasks(rt, &local_list) catch unreachable;
-    }
-
-    fn waitForRemainingTasks(group: *Group, rt: *Runtime, tasks: anytype) Cancelable!void {
-        try group.completed.wait(rt);
-        while (tasks.pop()) |node| {
-            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             rt.releaseAwaitable(awaitable, false);
         }
+
+        // Wait for all tasks to complete
+        const counter_ptr = group.getCounter();
+        while (true) {
+            const counter = @atomicLoad(u32, counter_ptr, .acquire);
+            if (counter == 0) break;
+            Futex.wait(rt, counter_ptr, counter) catch unreachable;
+        }
+
+        // Transition back to idle
+        _ = group.getTasks().tryTransition(.sentinel1, .sentinel0);
     }
 };
+
+/// Called by runtime when a group task completes.
+/// Decrements counter, wakes waiters if last task, removes from list, and releases ref.
+pub fn onGroupTaskComplete(group: *Group, rt: *Runtime, awaitable: *Awaitable) void {
+    // Only release if we successfully removed it (cancel might have popped it first)
+    if (group.getTasks().remove(&awaitable.group_node)) {
+        rt.releaseAwaitable(awaitable, false);
+    }
+
+    const counter_ptr = group.getCounter();
+    if (@atomicRmw(u32, counter_ptr, .Sub, 1, .acq_rel) == 1) {
+        Futex.wake(rt, counter_ptr, std.math.maxInt(u32));
+    }
+}
 
 pub const GroupNode = struct {
     group: ?*Group = null,

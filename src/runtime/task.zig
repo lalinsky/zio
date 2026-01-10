@@ -66,7 +66,6 @@ pub const Closure = struct {
     }
 
     /// Call the start function with the appropriate arguments.
-    /// For group tasks, handles counter decrement and event signaling.
     pub fn call(self: *const Closure, comptime TaskType: type, task: *TaskType, group_ptr: ?*Group) void {
         const context = self.getContextPtr(TaskType, task);
 
@@ -76,13 +75,7 @@ pub const Closure = struct {
                 start(context, result);
             },
             .group => |start| {
-                const group = group_ptr.?;
-                start(group, context);
-
-                // Decrement counter and signal event if this was the last task
-                if (group.decrCounter()) {
-                    group.completed.set();
-                }
+                start(group_ptr.?, context);
             },
         }
     }
