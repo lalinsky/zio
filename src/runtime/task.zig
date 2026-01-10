@@ -186,6 +186,13 @@ pub const AnyTask = struct {
 
     /// Get the typed result from this task's closure.
     pub fn getResult(self: *AnyTask, comptime T: type) T {
+        // Sanity checks before unsafe casting
+        if (std.debug.runtime_safety) {
+            std.debug.assert(self.awaitable.done.load(.acquire)); // Task must be completed
+            std.debug.assert(@sizeOf(T) == self.closure.result_len); // Size must match
+            std.debug.assert(@alignOf(T) <= Closure.max_result_alignment); // Alignment must fit
+        }
+
         const result_ptr: *T = @ptrCast(@alignCast(self.closure.getResultPtr(AnyTask, self)));
         return result_ptr.*;
     }
