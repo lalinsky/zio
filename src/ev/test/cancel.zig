@@ -656,3 +656,70 @@ test "cancel: work double cancel returns AlreadyCanceled" {
     try std.testing.expectError(error.Canceled, work.getResult());
     try std.testing.expect(!test_fn.called);
 }
+
+test "cancel: queued work via thread pool cancel" {
+    // Test that ThreadPool.cancel() correctly calls completion_fn when
+    // it removes work from the queue (work never started running).
+    var started_event: std.Thread.ResetEvent = .{};
+    var blocker_event: std.Thread.ResetEvent = .{};
+
+    var thread_pool: ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{
+        .min_threads = 1,
+        .max_threads = 1,
+    });
+    defer thread_pool.deinit();
+    defer blocker_event.set(); // Ensure thread unblocks before deinit
+
+    const BlockingFn = struct {
+        started: *std.Thread.ResetEvent,
+        blocker: *std.Thread.ResetEvent,
+
+        pub fn work(w: *Work) void {
+            var self: *@This() = @ptrCast(@alignCast(w.userdata));
+            self.started.set();
+            self.blocker.wait();
+        }
+    };
+
+    const QueuedFn = struct {
+        work_called: bool = false,
+        completion_called: bool = false,
+
+        pub fn work(w: *Work) void {
+            var self: *@This() = @ptrCast(@alignCast(w.userdata));
+            self.work_called = true;
+        }
+
+        pub fn completion(ctx: ?*anyopaque, _: *Work) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.completion_called = true;
+        }
+    };
+
+    var blocking_ctx: BlockingFn = .{ .started = &started_event, .blocker = &blocker_event };
+    var queued_ctx: QueuedFn = .{};
+
+    var blocking_work = Work.init(&BlockingFn.work, @ptrCast(&blocking_ctx));
+
+    var queued_work = Work.init(&QueuedFn.work, @ptrCast(&queued_ctx));
+    queued_work.completion_fn = &QueuedFn.completion;
+    queued_work.completion_context = @ptrCast(&queued_ctx);
+
+    // Submit blocking work first - it will occupy the only thread
+    thread_pool.submit(&blocking_work);
+
+    // Wait for blocking work to start running
+    started_event.wait();
+
+    // Submit second work - it will be queued since thread is busy
+    thread_pool.submit(&queued_work);
+
+    // Cancel the queued work - this tests ThreadPool.cancel() calling completion_fn
+    thread_pool.cancel(&queued_work);
+
+    // Verify completion_fn was called by cancel
+    try std.testing.expect(queued_ctx.completion_called);
+    try std.testing.expect(!queued_ctx.work_called);
+    try std.testing.expectError(error.Canceled, queued_work.getResult());
+}

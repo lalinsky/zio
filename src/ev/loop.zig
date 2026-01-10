@@ -291,21 +291,6 @@ pub const Loop = struct {
         return self.cancelInternal(completion, null);
     }
 
-    /// Helper to cancel a file operation that's running in the thread pool
-    fn cancelFileOpViaThreadPool(self: *Loop, completion: *Completion, work: *Work) void {
-        if (self.thread_pool) |thread_pool| {
-            if (thread_pool.cancel(work)) {
-                // Successfully canceled the internal work
-                completion.setError(error.Canceled);
-                self.state.markCompleted(completion);
-            }
-            // If cancel failed, work is running/completed and will complete normally
-        } else {
-            // No thread pool - file op should already be completed with error.Unexpected
-            std.debug.assert(completion.state == .completed or completion.state == .dead);
-        }
-    }
-
     /// Internal cancel implementation
     fn cancelInternal(self: *Loop, completion: *Completion, cancel_comp: ?*Cancel) !void {
         // Check if already being canceled
@@ -343,27 +328,16 @@ pub const Loop = struct {
                 self.state.markCompleted(&async_handle.c);
             },
             .work => {
+                const thread_pool = self.thread_pool orelse unreachable;
                 const work = completion.cast(Work);
-
-                if (self.thread_pool) |thread_pool| {
-                    // Try to atomically cancel the work
-                    if (thread_pool.cancel(work)) {
-                        // Successfully canceled, work was removed from queue
-                        work.c.setError(error.Canceled);
-                        self.state.markCompleted(&work.c);
-                    }
-                    // If cancel failed, work is already running/completed
-                    // The thread pool will complete it and trigger cancel completion via canceled_by
-                } else {
-                    // No thread pool - work should already be completed with error.NoThreadPool
-                    std.debug.assert(work.c.state == .completed or work.c.state == .dead);
-                }
+                thread_pool.cancel(work);
             },
 
             inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat => |op| {
                 if (!@field(Backend.capabilities, @tagName(op))) {
+                    const thread_pool = self.thread_pool orelse unreachable;
                     const op_data = completion.cast(op.toType());
-                    self.cancelFileOpViaThreadPool(completion, &op_data.internal.work);
+                    thread_pool.cancel(&op_data.internal.work);
                 } else {
                     self.backend.cancel(&self.state, completion);
                 }
@@ -530,7 +504,7 @@ pub const Loop = struct {
     }
 
     /// Standard completion callback for user-submitted Work
-    pub fn loopWorkComplete(ctx: *anyopaque, work: *Work) void {
+    pub fn loopWorkComplete(ctx: ?*anyopaque, work: *Work) void {
         const loop: *Loop = @ptrCast(@alignCast(ctx));
         loop.state.work_completions.push(&work.c);
         loop.wake();
@@ -543,9 +517,14 @@ pub const Loop = struct {
     };
 
     /// Completion callback for internal file ops with linked completion
-    pub fn loopLinkedWorkComplete(ctx: *anyopaque, work: *Work) void {
-        _ = work;
+    pub fn loopLinkedWorkComplete(ctx: ?*anyopaque, work: *Work) void {
         const context: *LinkedWorkContext = @ptrCast(@alignCast(ctx));
+        // Propagate cancel error from work to linked completion
+        if (work.c.err) |err| {
+            if (!context.linked.has_result) {
+                context.linked.setError(err);
+            }
+        }
         context.loop.state.work_completions.push(context.linked);
         context.loop.wake();
     }

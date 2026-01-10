@@ -141,17 +141,30 @@ pub const ThreadPool = struct {
         }
     }
 
-    pub fn cancel(self: *ThreadPool, work: *Work) bool {
+    pub fn cancel(self: *ThreadPool, work: *Work) void {
         // Try to transition from pending to canceled atomically
         if (work.state.cmpxchgStrong(.pending, .canceled, .acq_rel, .acquire)) |_| {
-            // Already in different state (running or completed)
-            return false;
+            // Already running or completed - worker will call completion_fn
+            return;
         }
 
-        // Successfully marked as canceled, now safe to remove from queue
+        // Successfully marked as canceled, try to remove from queue
         self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
-        return self.queue.remove(&work.c);
+        const removed = self.queue.remove(&work.c);
+        if (removed) {
+            self.queue_size -= 1;
+        }
+        self.queue_mutex.unlock();
+
+        // Only call completion_fn if we removed from queue.
+        // If not removed, worker already dequeued it and will call completion_fn
+        // (seeing state == .canceled).
+        if (removed) {
+            work.c.setError(error.Canceled);
+            if (work.completion_fn) |completion_fn| {
+                completion_fn(work.completion_context, work);
+            }
+        }
     }
 
     fn run(self: *ThreadPool, worker_id: u64) void {
@@ -198,7 +211,9 @@ pub const ThreadPool = struct {
             }
 
             // Notify via completion callback
-            work.completion_fn(work.completion_context, work);
+            if (work.completion_fn) |completion_fn| {
+                completion_fn(work.completion_context, work);
+            }
         }
         return true;
     }

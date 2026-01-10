@@ -314,8 +314,8 @@ pub const Work = struct {
     func: *const WorkFn,
     userdata: ?*anyopaque,
 
-    completion_fn: *const CompletionFn,
-    completion_context: *anyopaque,
+    completion_fn: ?*const CompletionFn = null,
+    completion_context: ?*anyopaque = null,
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.pending),
 
     pub const Error = error{NoThreadPool} || Cancelable;
@@ -328,15 +328,13 @@ pub const Work = struct {
     };
 
     pub const WorkFn = fn (work: *Work) void;
-    pub const CompletionFn = fn (ctx: *anyopaque, work: *Work) void;
+    pub const CompletionFn = fn (ctx: ?*anyopaque, work: *Work) void;
 
     pub fn init(func: *const WorkFn, userdata: ?*anyopaque) Work {
         return .{
             .c = .init(.work),
             .func = func,
             .userdata = userdata,
-            .completion_fn = undefined,
-            .completion_context = undefined,
         };
     }
 
