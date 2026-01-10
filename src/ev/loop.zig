@@ -106,6 +106,8 @@ pub const LoopState = struct {
 
     now_ms: u64 = 0,
     timers: TimerHeap = .{ .context = {} },
+    timer_mutex: if (Backend.capabilities.is_multi_threaded) std.Thread.Mutex else void =
+        if (Backend.capabilities.is_multi_threaded) .{} else {},
 
     async_handles: Queue(Completion) = .{},
 
@@ -156,6 +158,18 @@ pub const LoopState = struct {
 
     pub fn updateNow(self: *LoopState) void {
         self.now_ms = time.now(.monotonic);
+    }
+
+    pub fn lockTimers(self: *LoopState) void {
+        if (Backend.capabilities.is_multi_threaded) {
+            self.timer_mutex.lock();
+        }
+    }
+
+    pub fn unlockTimers(self: *LoopState) void {
+        if (Backend.capabilities.is_multi_threaded) {
+            self.timer_mutex.unlock();
+        }
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
@@ -266,6 +280,8 @@ pub const Loop = struct {
 
     /// Set or reset a timer with a new delay (works immediately, no completion required)
     pub fn setTimer(self: *Loop, timer: *Timer, delay_ms: u64) void {
+        self.state.lockTimers();
+        defer self.state.unlockTimers();
         self.state.updateNow();
         timer.delay_ms = delay_ms;
         self.state.setTimer(timer);
@@ -273,6 +289,8 @@ pub const Loop = struct {
 
     /// Clear a timer without completing it (works immediately, no cancellation completion required)
     pub fn clearTimer(self: *Loop, timer: *Timer) void {
+        self.state.lockTimers();
+        defer self.state.unlockTimers();
         const was_active = timer.deadline_ms > 0;
         self.state.clearTimer(timer);
         if (was_active) {
@@ -318,7 +336,9 @@ pub const Loop = struct {
             .timer => {
                 const timer = completion.cast(Timer);
                 timer.c.setError(error.Canceled);
+                self.state.lockTimers();
                 self.state.clearTimer(timer);
+                self.state.unlockTimers();
                 self.state.markCompleted(&timer.c);
             },
             .async => {
@@ -392,7 +412,9 @@ pub const Loop = struct {
         switch (completion.op) {
             .timer => {
                 const timer = completion.cast(Timer);
+                self.state.lockTimers();
                 self.state.setTimer(timer);
+                self.state.unlockTimers();
                 return;
             },
             .async => {
@@ -476,6 +498,8 @@ pub const Loop = struct {
     };
 
     fn checkTimers(self: *Loop) TimerCheckResult {
+        self.state.lockTimers();
+        defer self.state.unlockTimers();
         self.state.updateNow();
         var fired = false;
         while (self.state.timers.peek()) |timer| {

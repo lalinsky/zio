@@ -120,6 +120,7 @@ const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 pub const capabilities: BackendCapabilities = .{
     .file_read = true,
     .file_write = true,
+    .is_multi_threaded = true,
 };
 
 // Backend-specific data stored in Completion.internal
