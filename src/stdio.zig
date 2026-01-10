@@ -521,25 +521,8 @@ fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []const 
 }
 
 fn fileWritePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
-    if (splat != 1) @panic("TODO: splat != 1"); // splat=1 is normal "write each buffer once" case
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-
-    // Combine header and data into one buffer list
-    if (header.len == 0 and data.len == 0) return 0;
-
-    // For now, just write data (ignoring header for simplicity in this stub)
-    if (data.len == 0) {
-        var buf = [_][]const u8{header};
-        return zio_fs.fileWritePositional(rt, file.handle, &buf, offset) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return error.Unexpected,
-        };
-    }
-
-    return zio_fs.fileWritePositional(rt, file.handle, data, offset) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => return error.Unexpected,
-    };
+    return try zio_fs.fileWritePositional(rt, file.handle, header, data, splat, offset);
 }
 
 fn fileReadStreamingImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u8) Io.File.Reader.Error!usize {
