@@ -5,16 +5,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const meta = @import("../meta.zig");
 const Runtime = @import("../runtime.zig").Runtime;
-const Executor = @import("../runtime.zig").Executor;
-const getNextExecutor = @import("../runtime.zig").getNextExecutor;
 const JoinHandle = @import("../runtime.zig").JoinHandle;
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const AnyTask = @import("task.zig").AnyTask;
-const registerTask = @import("task.zig").registerTask;
+const spawnTask = @import("task.zig").spawnTask;
 const AnyBlockingTask = @import("blocking_task.zig").AnyBlockingTask;
-const registerBlockingTask = @import("blocking_task.zig").registerBlockingTask;
+const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Futex = @import("../sync/Futex.zig");
 
 /// Matches std.Io.Group layout exactly for future vtable compatibility.
@@ -210,34 +208,7 @@ pub fn groupSpawnTask(
     context_alignment: std.mem.Alignment,
     start: *const fn (context: *const anyopaque) Cancelable!void,
 ) !void {
-    if (group.isClosed()) return error.Closed;
-
-    // Increment counter before spawning
-    _ = @atomicRmw(u32, group.getCounter(), .Add, 1, .acq_rel);
-    errdefer _ = @atomicRmw(u32, group.getCounter(), .Sub, 1, .acq_rel);
-
-    const executor = try getNextExecutor(rt);
-    const task = try AnyTask.create(
-        executor,
-        0, // result_len - group tasks return void
-        .@"1", // result_alignment
-        context,
-        context_alignment,
-        .{ .group = start },
-        .{},
-    );
-    errdefer AnyTask.destroyFn(rt, &task.awaitable);
-
-    // Associate the task with the group
-    task.awaitable.group_node.group = group;
-
-    // Push to task list, fails if group is closing (sentinel1)
-    if (!group.getTasks().pushUnless(.sentinel1, &task.awaitable.group_node)) {
-        return error.Closed;
-    }
-    errdefer _ = group.getTasks().remove(&task.awaitable.group_node);
-
-    registerTask(rt, task);
+    _ = try spawnTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, .{}, group);
 }
 
 /// Spawn a blocking task in the group with raw context bytes and start function.
@@ -249,33 +220,20 @@ pub fn groupSpawnBlockingTask(
     context_alignment: std.mem.Alignment,
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
 ) !void {
+    _ = try spawnBlockingTask(rt, 0, .@"1", context, context_alignment, .{ .regular = start }, group);
+}
+
+/// Register an awaitable with a group.
+/// Increments counter, sets group_node.group, and adds to task list.
+/// Returns error.Closed if group is closed.
+pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!void {
     if (group.isClosed()) return error.Closed;
-
-    // Increment counter before spawning
     _ = @atomicRmw(u32, group.getCounter(), .Add, 1, .acq_rel);
-    errdefer _ = @atomicRmw(u32, group.getCounter(), .Sub, 1, .acq_rel);
-
-    const executor = try getNextExecutor(rt);
-    const task = try AnyBlockingTask.create(
-        rt,
-        0, // result_len - group tasks return void
-        .@"1", // result_alignment
-        context,
-        context_alignment,
-        .{ .regular = start },
-    );
-    errdefer AnyBlockingTask.destroyFn(rt, &task.awaitable);
-
-    // Associate the task with the group
-    task.awaitable.group_node.group = group;
-
-    // Push to task list, fails if group is closing (sentinel1)
-    if (!group.getTasks().pushUnless(.sentinel1, &task.awaitable.group_node)) {
+    awaitable.group_node.group = group;
+    if (!group.getTasks().pushUnless(.sentinel1, &awaitable.group_node)) {
+        _ = @atomicRmw(u32, group.getCounter(), .Sub, 1, .acq_rel);
         return error.Closed;
     }
-    errdefer _ = group.getTasks().remove(&task.awaitable.group_node);
-
-    registerBlockingTask(rt, executor, task);
 }
 
 /// Called by runtime when a group task completes.
