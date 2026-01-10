@@ -412,6 +412,16 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
 const getNextExecutor = @import("../runtime.zig").getNextExecutor;
 const SpawnOptions = @import("../runtime.zig").SpawnOptions;
 
+/// Register a task with the runtime and schedule it for execution.
+/// Adds the task to the runtime's task list, increments its reference count,
+/// and schedules it on its executor.
+pub fn registerTask(rt: *Runtime, task: *AnyTask) void {
+    rt.tasks.add(&task.awaitable);
+    task.awaitable.ref_count.incr();
+    const executor = Executor.fromCoroutine(&task.coro);
+    executor.scheduleTask(task, .maybe_remote);
+}
+
 /// Spawn a regular task with raw context bytes and start function.
 /// Used by Runtime.spawn and std.Io vtable implementations.
 pub fn spawnTask(
@@ -435,10 +445,7 @@ pub fn spawnTask(
     );
     errdefer AnyTask.destroyFn(rt, &task.awaitable);
 
-    rt.tasks.add(&task.awaitable);
-
-    task.awaitable.ref_count.incr();
-    executor.scheduleTask(task, .maybe_remote);
+    registerTask(rt, task);
 
     return task;
 }
