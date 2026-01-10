@@ -188,7 +188,7 @@ pub fn groupSpawnTask(
     _ = @atomicRmw(u32, group.getCounter(), .Add, 1, .acq_rel);
     errdefer _ = @atomicRmw(u32, group.getCounter(), .Sub, 1, .acq_rel);
 
-    const executor = getNextExecutor(rt);
+    const executor = try getNextExecutor(rt);
     const task = try AnyTask.create(
         executor,
         0, // result_len - group tasks return void
@@ -198,7 +198,7 @@ pub fn groupSpawnTask(
         .{ .group = start },
         .{},
     );
-    errdefer task.closure.free(AnyTask, rt, task);
+    errdefer AnyTask.destroyFn(rt, &task.awaitable);
 
     // Associate the task with the group
     task.awaitable.group_node.group = group;

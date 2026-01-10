@@ -184,6 +184,12 @@ pub const AnyTask = struct {
         return @fieldParentPtr("coro", coro);
     }
 
+    /// Get the typed result from this task's closure.
+    pub fn getResult(self: *AnyTask, comptime T: type) T {
+        const result_ptr: *T = @ptrCast(@alignCast(self.closure.getResultPtr(AnyTask, self)));
+        return result_ptr.*;
+    }
+
     /// Get the executor that owns this task.
     pub inline fn getExecutor(self: *AnyTask) *Executor {
         return Executor.fromCoroutine(&self.coro);
@@ -368,73 +374,6 @@ pub const AnyTask = struct {
     }
 };
 
-// Typed task that wraps a pointer to AnyTask
-pub fn Task(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        task: *AnyTask,
-
-        pub fn fromAwaitable(awaitable: *Awaitable) Self {
-            return Self{ .task = AnyTask.fromAwaitable(awaitable) };
-        }
-
-        pub fn fromAny(task: *AnyTask) Self {
-            return Self{ .task = task };
-        }
-
-        pub fn toAwaitable(self: Self) *Awaitable {
-            return &self.task.awaitable;
-        }
-
-        pub fn getRuntime(self: Self) *Runtime {
-            const executor = Executor.fromCoroutine(&self.task.coro);
-            return executor.runtime;
-        }
-
-        fn getResultPtr(self: Self) *T {
-            const c = &self.task.closure;
-            const result_ptr = c.getResultPtr(AnyTask, self.task);
-            return @ptrCast(@alignCast(result_ptr));
-        }
-
-        pub fn getResult(self: Self) T {
-            return self.getResultPtr().*;
-        }
-
-        pub fn create(
-            executor: *Executor,
-            func: anytype,
-            args: std.meta.ArgsTuple(@TypeOf(func)),
-            options: CreateOptions,
-        ) !Self {
-            const Wrapper = struct {
-                fn start(ctx: *const anyopaque, result: *anyopaque) void {
-                    const a: *const @TypeOf(args) = @ptrCast(@alignCast(ctx));
-                    const r: *T = @ptrCast(@alignCast(result));
-                    r.* = @call(.auto, func, a.*);
-                }
-            };
-
-            const task = try AnyTask.create(
-                executor,
-                @sizeOf(T),
-                .fromByteUnits(@alignOf(T)),
-                std.mem.asBytes(&args),
-                .fromByteUnits(@alignOf(@TypeOf(args))),
-                .{ .regular = &Wrapper.start },
-                options,
-            );
-
-            return Self.fromAny(task);
-        }
-
-        pub fn destroy(self: Self, executor: *Executor) void {
-            self.task.awaitable.destroy_fn(executor.runtime, &self.task.awaitable);
-        }
-    };
-}
-
 /// Resume mode - controls cross-thread checking
 pub const ResumeMode = enum {
     /// May resume on a different executor - checks thread-local executor
@@ -461,6 +400,40 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
 
     const executor = Executor.fromCoroutine(&task.coro);
     executor.scheduleTask(task, mode);
+}
+
+const getNextExecutor = @import("../runtime.zig").getNextExecutor;
+const SpawnOptions = @import("../runtime.zig").SpawnOptions;
+
+/// Spawn a regular task with raw context bytes and start function.
+/// Used by Runtime.spawn and std.Io vtable implementations.
+pub fn spawnTask(
+    rt: *Runtime,
+    result_len: usize,
+    result_alignment: std.mem.Alignment,
+    context: []const u8,
+    context_alignment: std.mem.Alignment,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    options: SpawnOptions,
+) !*AnyTask {
+    const executor = try getNextExecutor(rt);
+    const task = try AnyTask.create(
+        executor,
+        result_len,
+        result_alignment,
+        context,
+        context_alignment,
+        .{ .regular = start },
+        .{ .pinned = options.pinned },
+    );
+    errdefer AnyTask.destroyFn(rt, &task.awaitable);
+
+    rt.tasks.add(&task.awaitable);
+
+    task.awaitable.ref_count.incr();
+    executor.scheduleTask(task, .maybe_remote);
+
+    return task;
 }
 
 pub const TaskPool = struct {

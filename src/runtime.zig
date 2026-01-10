@@ -22,10 +22,10 @@ const cleanupStackGrowth = @import("coro/stack.zig").cleanupStackGrowth;
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 
 const AnyTask = @import("runtime/task.zig").AnyTask;
-const Task = @import("runtime/task.zig").Task;
 const TaskPool = @import("runtime/task.zig").TaskPool;
 const ResumeMode = @import("runtime/task.zig").ResumeMode;
 const resumeTask = @import("runtime/task.zig").resumeTask;
+const spawnTask = @import("runtime/task.zig").spawnTask;
 const BlockingTask = @import("runtime/blocking_task.zig").BlockingTask;
 const Timeout = @import("runtime/timeout.zig").Timeout;
 const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
@@ -108,7 +108,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// Helper to get result from awaitable and release it
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
             self.result = switch (awaitable.kind) {
-                .task => Task(T).fromAwaitable(awaitable).getResult(),
+                .task => AnyTask.fromAwaitable(awaitable).getResult(T),
                 .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
             };
             rt.releaseAwaitable(awaitable, false);
@@ -151,7 +151,7 @@ pub fn JoinHandle(comptime T: type) type {
             assert(self.hasResult());
             if (self.awaitable) |awaitable| {
                 return switch (awaitable.kind) {
-                    .task => Task(T).fromAwaitable(awaitable).getResult(),
+                    .task => AnyTask.fromAwaitable(awaitable).getResult(T),
                     .blocking_task => BlockingTask(T).fromAwaitable(awaitable).getResult(),
                 };
             } else {
@@ -233,11 +233,7 @@ pub fn JoinHandle(comptime T: type) type {
         pub fn getExecutorId(self: *const Self) ?usize {
             const awaitable = self.awaitable orelse return null;
             return switch (awaitable.kind) {
-                .task => {
-                    const task = Task(T).fromAwaitable(awaitable);
-                    const executor = task.task.getExecutor();
-                    return executor.id;
-                },
+                .task => AnyTask.fromAwaitable(awaitable).getExecutor().id,
                 .blocking_task => null,
             };
         }
@@ -302,7 +298,11 @@ pub fn unregisterExecutor(rt: *Runtime, executor: *Executor) void {
     }
 }
 
-pub fn getNextExecutor(rt: *Runtime) *Executor {
+pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
+    if (rt.shutting_down.load(.acquire)) {
+        return error.RuntimeShutdown;
+    }
+
     rt.executors_lock.lock();
     defer rt.executors_lock.unlock();
 
@@ -416,32 +416,6 @@ pub const Executor = struct {
         self.loop.deinit();
 
         cleanupStackGrowth();
-    }
-
-    pub fn spawn(self: *Executor, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        const Result = meta.ReturnType(func);
-
-        const task = try Task(Result).create(self, func, args, .{
-            .pinned = options.pinned,
-        });
-        errdefer task.destroy(self);
-
-        // Add to global awaitable registry
-        self.runtime.tasks.add(task.toAwaitable());
-        errdefer _ = self.runtime.tasks.remove(task.toAwaitable());
-
-        // Increment ref count for JoinHandle BEFORE scheduling
-        // This prevents race where task completes before we create the handle
-        task.toAwaitable().ref_count.incr();
-        errdefer _ = task.toAwaitable().ref_count.decr();
-
-        // Schedule the task to run (handles cross-thread notification)
-        self.scheduleTask(task.task, .maybe_remote);
-
-        return JoinHandle(Result){
-            .awaitable = task.toAwaitable(),
-            .result = undefined,
-        };
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
@@ -935,22 +909,36 @@ pub const Runtime = struct {
         allocator.destroy(self);
     }
 
-    // High-level public API - delegates to appropriate Executor
+    // High-level public API
     pub fn spawn(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
-        if (self.shutting_down.load(.acquire)) {
-            return error.RuntimeShutdown;
-        }
+        const Result = meta.ReturnType(func);
+        const Args = @TypeOf(args);
 
-        const executor = getNextExecutor(self);
-        return executor.spawn(func, args, options);
+        const Wrapper = struct {
+            fn start(ctx: *const anyopaque, result: *anyopaque) void {
+                const a: *const Args = @ptrCast(@alignCast(ctx));
+                const r: *Result = @ptrCast(@alignCast(result));
+                r.* = @call(.auto, func, a.*);
+            }
+        };
+
+        const task = try spawnTask(
+            self,
+            @sizeOf(Result),
+            .fromByteUnits(@alignOf(Result)),
+            std.mem.asBytes(&args),
+            .fromByteUnits(@alignOf(Args)),
+            &Wrapper.start,
+            options,
+        );
+
+        return JoinHandle(Result){
+            .awaitable = &task.awaitable,
+            .result = undefined,
+        };
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
-        // Check if runtime is shutting down
-        if (self.shutting_down.load(.acquire)) {
-            return error.RuntimeShutdown;
-        }
-
         const Result = meta.ReturnType(func);
         const task = try BlockingTask(Result).create(self, func, args);
         errdefer task.destroy(self);
@@ -965,7 +953,7 @@ pub const Runtime = struct {
         errdefer _ = task.toAwaitable().ref_count.decr();
 
         // Add the work to an executor's loop (loop will submit to thread pool)
-        const executor = getNextExecutor(self);
+        const executor = try getNextExecutor(self);
         executor.loop.add(&task.task.work.c);
 
         return JoinHandle(Result){
