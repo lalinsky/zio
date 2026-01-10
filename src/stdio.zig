@@ -66,12 +66,6 @@ fn cancelImpl(userdata: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8, re
     awaitOrCancel(userdata, any_future, result, result_alignment, true);
 }
 
-fn cancelRequestedImpl(userdata: ?*anyopaque) bool {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    rt.checkCanceled() catch return true;
-    return false;
-}
-
 fn groupAsyncImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) Io.Cancelable!void) void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
     groupSpawnTask(Group.fromStd(group), rt, context, context_alignment, start) catch {
