@@ -1828,6 +1828,39 @@ pub fn errnoToHardLinkError(errno: posix.system.E) HardLinkError {
     };
 }
 
+pub const FileHardLinkError = HardLinkError || error{
+    OperationUnsupported,
+};
+
+/// Create a hard link from an open file descriptor using linkat() with AT_EMPTY_PATH
+pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_path: []const u8, flags: HardLinkFlags) FileHardLinkError!void {
+    if (builtin.os.tag == .windows) {
+        return error.OperationUnsupported;
+    }
+
+    // AT_EMPTY_PATH is Linux-specific
+    if (!@hasDecl(posix.AT, "EMPTY_PATH")) {
+        return error.OperationUnsupported;
+    }
+
+    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    defer allocator.free(new_path_z);
+
+    // AT_EMPTY_PATH allows linking from an fd with empty path
+    var at_flags: u32 = posix.AT.EMPTY_PATH;
+    if (flags.follow_symlinks) at_flags |= posix.AT.SYMLINK_FOLLOW;
+
+    while (true) {
+        const rc = posix.system.linkat(fd, "", new_dir, new_path_z.ptr, at_flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .INVAL, .OPNOTSUPP => return error.OperationUnsupported,
+            else => |err| return errnoToHardLinkError(err),
+        }
+    }
+}
+
 pub const DirAccessError = error{
     AccessDenied,
     PermissionDenied,
@@ -1890,6 +1923,174 @@ pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
         .ROFS => error.ReadOnlyFileSystem,
         .NAMETOOLONG => error.NameTooLong,
         .NOTDIR => error.FileNotFound,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub const DirRealPathError = error{
+    OperationUnsupported,
+    NameTooLong,
+    FileNotFound,
+    AccessDenied,
+    PermissionDenied,
+    NotDir,
+    SymLinkLoop,
+    InputOutput,
+    FileSystem,
+    SystemResources,
+    Canceled,
+    Unexpected,
+};
+
+pub const DirRealPathFileError = DirRealPathError || error{
+    FileTooBig,
+    IsDir,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    NoDevice,
+    NoSpaceLeft,
+    DeviceBusy,
+    BadPathName,
+    PathAlreadyExists,
+};
+
+/// Get the real path of a directory fd using /proc/self/fd on Linux or F_GETPATH on macOS/BSD
+pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
+    if (builtin.os.tag == .windows) {
+        return error.OperationUnsupported;
+    }
+
+    if (builtin.os.tag == .linux) {
+        // Handle AT_FDCWD specially - it's not a real fd
+        const actual_fd: std.posix.fd_t = if (fd == posix.system.AT.FDCWD) blk: {
+            // Open "." to get a real fd for cwd
+            const rc = posix.system.openat(fd, ".", .{ .CLOEXEC = true }, @as(mode_t, 0));
+            if (posix.errno(rc) != .SUCCESS) return error.FileNotFound;
+            break :blk @intCast(rc);
+        } else fd;
+        defer if (fd == posix.system.AT.FDCWD) std.posix.close(actual_fd);
+
+        // Use /proc/self/fd/{fd} with readlink
+        var proc_path_buf: [32:0]u8 = undefined;
+        const proc_path = std.fmt.bufPrintZ(&proc_path_buf, "/proc/self/fd/{d}", .{actual_fd}) catch unreachable;
+
+        while (true) {
+            const rc = posix.system.readlink(proc_path, buffer.ptr, buffer.len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                else => |err| return errnoToDirRealPathError(err),
+            }
+        }
+    } else {
+        // macOS/BSD: use fcntl F_GETPATH
+        var sufficient_buffer: [std.posix.PATH_MAX]u8 = undefined;
+        @memset(&sufficient_buffer, 0);
+
+        // Handle AT_FDCWD specially
+        const actual_fd: std.posix.fd_t = if (fd == posix.system.AT.FDCWD) blk: {
+            const rc = posix.system.openat(fd, ".", .{ .CLOEXEC = true }, @as(mode_t, 0));
+            if (posix.errno(rc) != .SUCCESS) return error.FileNotFound;
+            break :blk @intCast(rc);
+        } else fd;
+        defer if (fd == posix.system.AT.FDCWD) std.posix.close(actual_fd);
+
+        while (true) {
+            const rc = posix.system.fcntl(actual_fd, posix.system.F.GETPATH, &sufficient_buffer);
+            switch (posix.errno(rc)) {
+                .SUCCESS => {
+                    const n = std.mem.indexOfScalar(u8, &sufficient_buffer, 0) orelse sufficient_buffer.len;
+                    if (n > buffer.len) return error.NameTooLong;
+                    @memcpy(buffer[0..n], sufficient_buffer[0..n]);
+                    return n;
+                },
+                .INTR => continue,
+                else => |err| return errnoToDirRealPathError(err),
+            }
+        }
+    }
+}
+
+/// Get the real path of a file relative to a directory
+pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
+    if (builtin.os.tag == .windows) {
+        return error.OperationUnsupported;
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    // On non-Linux with libc, we can use realpath() directly for AT_FDCWD
+    if (builtin.os.tag != .linux and builtin.link_libc and dir == posix.system.AT.FDCWD) {
+        if (buffer.len < std.posix.PATH_MAX) return error.NameTooLong;
+        while (true) {
+            if (std.c.realpath(path_z, buffer.ptr)) |_| {
+                return std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
+            }
+            const err: posix.system.E = @enumFromInt(std.c._errno().*);
+            if (err == .INTR) continue;
+            return errnoToDirRealPathFileError(err);
+        }
+    }
+
+    // Open the file with O_PATH to get its fd without actually opening it
+    var open_flags: posix.system.O = .{ .CLOEXEC = true };
+    if (@hasField(posix.system.O, "PATH")) open_flags.PATH = true;
+
+    const file_fd: std.posix.fd_t = while (true) {
+        const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
+        switch (posix.errno(rc)) {
+            .SUCCESS => break @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToDirRealPathFileError(err),
+        }
+    };
+    defer std.posix.close(file_fd);
+
+    // Now get the real path of the opened fd
+    return dirRealPath(file_fd, buffer);
+}
+
+fn errnoToDirRealPathFileError(errno: posix.system.E) DirRealPathFileError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .NOENT => error.FileNotFound,
+        .IO => error.InputOutput,
+        .NOMEM => error.SystemResources,
+        .LOOP => error.SymLinkLoop,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOTDIR => error.NotDir,
+        .BADF => error.FileNotFound,
+        .NOSPC, .RANGE => error.NameTooLong,
+        .CANCELED => error.Canceled,
+        .FBIG, .OVERFLOW => error.FileTooBig,
+        .ISDIR => error.IsDir,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NODEV, .NXIO => error.NoDevice,
+        .EXIST => error.PathAlreadyExists,
+        .BUSY, .TXTBSY => error.DeviceBusy,
+        .ILSEQ, .INVAL => error.BadPathName,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub fn errnoToDirRealPathError(errno: posix.system.E) DirRealPathError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .NOENT => error.FileNotFound,
+        .IO => error.InputOutput,
+        .NOMEM => error.SystemResources,
+        .LOOP => error.SymLinkLoop,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOTDIR => error.NotDir,
+        .BADF => error.FileNotFound,
+        .NOSPC, .RANGE => error.NameTooLong,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
