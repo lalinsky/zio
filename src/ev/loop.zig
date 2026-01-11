@@ -355,7 +355,7 @@ pub const Loop = struct {
                 thread_pool.cancel(work);
             },
 
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
                 if (!@field(Backend.capabilities, @tagName(op))) {
                     const thread_pool = self.thread_pool orelse unreachable;
                     const op_data = completion.cast(op.toType());
@@ -479,7 +479,7 @@ pub const Loop = struct {
                 // Regular backend operation
                 // Route file operations to thread pool for backends without native support
                 switch (completion.op) {
-                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
+                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
                         if (!@field(Backend.capabilities, @tagName(op))) {
                             self.submitFileOpToThreadPool(completion);
                             return;
