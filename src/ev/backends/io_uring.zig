@@ -623,6 +623,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
+        .dir_set_permissions => unreachable, // Handled by thread pool
+        .dir_set_owner => unreachable, // Handled by thread pool
+        .dir_set_file_permissions => unreachable, // Handled by thread pool
+        .dir_set_file_owner => unreachable, // Handled by thread pool
+        .dir_set_file_timestamps => unreachable, // Handled by thread pool
         .file_stream_poll => {
             const data = c.cast(FileStreamPoll);
             const sqe = self.getSqe(state) catch {
@@ -805,6 +810,11 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
         .net_open => unreachable,
         .net_bind => unreachable,
         .net_listen => unreachable,
+        .dir_set_permissions => unreachable, // Handled synchronously
+        .dir_set_owner => unreachable, // Handled synchronously
+        .dir_set_file_permissions => unreachable, // Handled synchronously
+        .dir_set_file_owner => unreachable, // Handled synchronously
+        .dir_set_file_timestamps => unreachable, // Handled synchronously
 
         .net_connect => {
             if (res < 0) {

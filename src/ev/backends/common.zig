@@ -25,6 +25,11 @@ const FileSize = @import("../completion.zig").FileSize;
 const FileStat = @import("../completion.zig").FileStat;
 const DirOpen = @import("../completion.zig").DirOpen;
 const DirClose = @import("../completion.zig").DirClose;
+const DirSetPermissions = @import("../completion.zig").DirSetPermissions;
+const DirSetOwner = @import("../completion.zig").DirSetOwner;
+const DirSetFilePermissions = @import("../completion.zig").DirSetFilePermissions;
+const DirSetFileOwner = @import("../completion.zig").DirSetFileOwner;
+const DirSetFileTimestamps = @import("../completion.zig").DirSetFileTimestamps;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 
@@ -288,6 +293,91 @@ pub fn fileSetTimestampsWork(work: *Work) void {
     handleFileSetTimestamps(&file_set_timestamps.c);
 }
 
+/// Helper to handle dir set permissions operation (on handle)
+pub fn handleDirSetPermissions(c: *Completion) void {
+    const data = c.cast(DirSetPermissions);
+    if (fs.fileSetPermissions(data.handle, data.mode)) |_| {
+        c.setResult(.dir_set_permissions, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirSetPermissions
+pub fn dirSetPermissionsWork(work: *Work) void {
+    const internal: *@FieldType(DirSetPermissions, "internal") = @fieldParentPtr("work", work);
+    const data: *DirSetPermissions = @fieldParentPtr("internal", internal);
+    handleDirSetPermissions(&data.c);
+}
+
+/// Helper to handle dir set owner operation (on handle)
+pub fn handleDirSetOwner(c: *Completion) void {
+    const data = c.cast(DirSetOwner);
+    if (fs.fileSetOwner(data.handle, data.uid, data.gid)) |_| {
+        c.setResult(.dir_set_owner, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirSetOwner
+pub fn dirSetOwnerWork(work: *Work) void {
+    const internal: *@FieldType(DirSetOwner, "internal") = @fieldParentPtr("work", work);
+    const data: *DirSetOwner = @fieldParentPtr("internal", internal);
+    handleDirSetOwner(&data.c);
+}
+
+/// Helper to handle dir set file permissions operation
+pub fn handleDirSetFilePermissions(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirSetFilePermissions);
+    if (fs.dirSetFilePermissions(allocator, data.dir, data.path, data.mode, data.flags)) |_| {
+        c.setResult(.dir_set_file_permissions, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirSetFilePermissions
+pub fn dirSetFilePermissionsWork(work: *Work) void {
+    const internal: *@FieldType(DirSetFilePermissions, "internal") = @fieldParentPtr("work", work);
+    const data: *DirSetFilePermissions = @fieldParentPtr("internal", internal);
+    handleDirSetFilePermissions(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir set file owner operation
+pub fn handleDirSetFileOwner(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirSetFileOwner);
+    if (fs.dirSetFileOwner(allocator, data.dir, data.path, data.uid, data.gid, data.flags)) |_| {
+        c.setResult(.dir_set_file_owner, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirSetFileOwner
+pub fn dirSetFileOwnerWork(work: *Work) void {
+    const internal: *@FieldType(DirSetFileOwner, "internal") = @fieldParentPtr("work", work);
+    const data: *DirSetFileOwner = @fieldParentPtr("internal", internal);
+    handleDirSetFileOwner(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir set file timestamps operation
+pub fn handleDirSetFileTimestamps(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirSetFileTimestamps);
+    if (fs.dirSetFileTimestamps(allocator, data.dir, data.path, data.timestamps, data.flags)) |_| {
+        c.setResult(.dir_set_file_timestamps, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirSetFileTimestamps
+pub fn dirSetFileTimestampsWork(work: *Work) void {
+    const internal: *@FieldType(DirSetFileTimestamps, "internal") = @fieldParentPtr("work", work);
+    const data: *DirSetFileTimestamps = @alignCast(@fieldParentPtr("internal", internal));
+    handleDirSetFileTimestamps(&data.c, data.internal.allocator);
+}
+
 /// Helper to handle dir create dir operation
 pub fn handleDirCreateDir(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(DirCreateDir);
@@ -400,7 +490,7 @@ pub fn fileStatWork(work: *Work) void {
 /// Helper to handle directory open operation
 pub fn handleDirOpen(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(DirOpen);
-    if (fs.opendirat(allocator, data.dir, data.path, data.flags)) |fd| {
+    if (fs.dirOpen(allocator, data.dir, data.path, data.flags)) |fd| {
         c.setResult(.dir_open, fd);
     } else |err| {
         c.setError(err);
