@@ -363,18 +363,17 @@ fn dirReadImpl(userdata: ?*anyopaque, reader: *Io.Dir.Reader, entries: []Io.Dir.
 }
 
 fn dirRealPathImpl(userdata: ?*anyopaque, dir: Io.Dir, out_buffer: []u8) Io.Dir.RealPathError!usize {
-    _ = userdata;
-    _ = dir;
-    _ = out_buffer;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirRealPath.init(dir.handle, out_buffer);
+    try zio_io.runIo(rt, &op.c);
+    return try op.getResult();
 }
 
 fn dirRealPathFileImpl(userdata: ?*anyopaque, dir: Io.Dir, path_name: []const u8, out_buffer: []u8) Io.Dir.RealPathFileError!usize {
-    _ = userdata;
-    _ = dir;
-    _ = path_name;
-    _ = out_buffer;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirRealPathFile.init(dir.handle, path_name, out_buffer);
+    try zio_io.runIo(rt, &op.c);
+    return try op.getResult();
 }
 
 fn dirDeleteFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
@@ -992,19 +991,19 @@ fn fileDowngradeLockImpl(userdata: ?*anyopaque, file: Io.File) Io.File.Downgrade
 }
 
 fn fileRealPathImpl(userdata: ?*anyopaque, file: Io.File, out_buffer: []u8) Io.File.RealPathError!usize {
-    _ = userdata;
-    _ = file;
-    _ = out_buffer;
-    @panic("TODO: fileRealPath");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.FileRealPath.init(file.handle, out_buffer);
+    try zio_io.runIo(rt, &op.c);
+    return try op.getResult();
 }
 
 fn fileHardLinkImpl(userdata: ?*anyopaque, file: Io.File, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
-    _ = userdata;
-    _ = file;
-    _ = new_dir;
-    _ = new_sub_path;
-    _ = options;
-    @panic("TODO: fileHardLink");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.FileHardLink.init(file.handle, new_dir.handle, new_sub_path, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn processExecutableOpenImpl(userdata: ?*anyopaque, flags: Io.File.OpenFlags) std.process.OpenExecutableError!Io.File {
@@ -2018,6 +2017,92 @@ test "Io: Dir access" {
     // Check that a non-existent file returns FileNotFound
     const result = cwd.access(io, "non_existent_file_12345", .{});
     try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "Io: Dir realPath" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+
+    // Get real path of cwd
+    var buffer: [std.posix.PATH_MAX]u8 = undefined;
+    const len = try cwd.realPath(io, &buffer);
+
+    // Should return a non-empty absolute path
+    try std.testing.expect(len > 0);
+    try std.testing.expect(buffer[0] == '/');
+}
+
+test "Io: Dir realPathFile" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const file_path = "test_stdio_realpath_file";
+
+    // Create a target file
+    const file = try cwd.createFile(io, file_path, .{});
+    file.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
+
+    // Get real path of file
+    var buffer: [std.posix.PATH_MAX]u8 = undefined;
+    const len = try cwd.realPathFile(io, file_path, &buffer);
+
+    // Should return an absolute path ending with file_path
+    try std.testing.expect(len > 0);
+    try std.testing.expect(buffer[0] == '/');
+    try std.testing.expect(std.mem.endsWith(u8, buffer[0..len], file_path));
+}
+
+test "Io: File realPath" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const file_path = "test_stdio_file_realpath";
+
+    // Create and open a file
+    const file = try cwd.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
+
+    // Get real path of the open file handle
+    var buffer: [std.posix.PATH_MAX]u8 = undefined;
+    const len = try file.realPath(io, &buffer);
+
+    // Should return an absolute path ending with file_path
+    try std.testing.expect(len > 0);
+    try std.testing.expect(buffer[0] == '/');
+    try std.testing.expect(std.mem.endsWith(u8, buffer[0..len], file_path));
+}
+
+test "Io: File hardLink" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const file_path = "test_stdio_file_hardlink_src";
+    const link_path = "test_stdio_file_hardlink_dst";
+
+    // Create and open a file
+    const file = try cwd.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
+
+    // Create a hard link from the open file handle
+    try file.hardLink(io, cwd, link_path, .{});
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, link_path) catch {};
+
+    // Verify the hard link exists and has the same inode
+    const orig_stat = try cwd.statFile(io, file_path, .{});
+    const link_stat = try cwd.statFile(io, link_path, .{});
+    try std.testing.expectEqual(orig_stat.inode, link_stat.inode);
 }
 
 test "Io: Event wait/set" {
