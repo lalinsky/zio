@@ -79,6 +79,12 @@ pub fn runIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     c.userdata = task;
     c.callback = genericCallback;
 
+    // Clear callback and context in defer when runtime safety is on to catch use-after-return bugs
+    defer if (std.debug.runtime_safety) {
+        c.callback = null;
+        c.userdata = null;
+    };
+
     executor.loop.add(c);
     try waitForIo(rt, c);
 }
