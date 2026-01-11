@@ -34,6 +34,10 @@ const DirSymLink = @import("../completion.zig").DirSymLink;
 const DirReadLink = @import("../completion.zig").DirReadLink;
 const DirHardLink = @import("../completion.zig").DirHardLink;
 const DirAccess = @import("../completion.zig").DirAccess;
+const DirRealPath = @import("../completion.zig").DirRealPath;
+const DirRealPathFile = @import("../completion.zig").DirRealPathFile;
+const FileRealPath = @import("../completion.zig").FileRealPath;
+const FileHardLink = @import("../completion.zig").FileHardLink;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 
@@ -448,6 +452,74 @@ pub fn dirAccessWork(work: *Work) void {
     const internal: *@FieldType(DirAccess, "internal") = @fieldParentPtr("work", work);
     const data: *DirAccess = @fieldParentPtr("internal", internal);
     handleDirAccess(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir real path operation
+pub fn handleDirRealPath(c: *Completion) void {
+    const data = c.cast(DirRealPath);
+    if (fs.dirRealPath(data.fd, data.buffer)) |len| {
+        c.setResult(.dir_real_path, len);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirRealPath
+pub fn dirRealPathWork(work: *Work) void {
+    const internal: *@FieldType(DirRealPath, "internal") = @fieldParentPtr("work", work);
+    const data: *DirRealPath = @fieldParentPtr("internal", internal);
+    handleDirRealPath(&data.c);
+}
+
+/// Helper to handle dir real path file operation
+pub fn handleDirRealPathFile(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirRealPathFile);
+    if (fs.dirRealPathFile(allocator, data.dir, data.path, data.buffer)) |len| {
+        c.setResult(.dir_real_path_file, len);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirRealPathFile
+pub fn dirRealPathFileWork(work: *Work) void {
+    const internal: *@FieldType(DirRealPathFile, "internal") = @fieldParentPtr("work", work);
+    const data: *DirRealPathFile = @fieldParentPtr("internal", internal);
+    handleDirRealPathFile(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle file real path operation
+pub fn handleFileRealPath(c: *Completion) void {
+    const data = c.cast(FileRealPath);
+    if (fs.dirRealPath(data.fd, data.buffer)) |len| {
+        c.setResult(.file_real_path, len);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for FileRealPath
+pub fn fileRealPathWork(work: *Work) void {
+    const internal: *@FieldType(FileRealPath, "internal") = @fieldParentPtr("work", work);
+    const data: *FileRealPath = @fieldParentPtr("internal", internal);
+    handleFileRealPath(&data.c);
+}
+
+/// Helper to handle file hard link operation
+pub fn handleFileHardLink(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(FileHardLink);
+    if (fs.fileHardLink(allocator, data.fd, data.new_dir, data.new_path, data.flags)) |_| {
+        c.setResult(.file_hard_link, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for FileHardLink
+pub fn fileHardLinkWork(work: *Work) void {
+    const internal: *@FieldType(FileHardLink, "internal") = @fieldParentPtr("work", work);
+    const data: *FileHardLink = @fieldParentPtr("internal", internal);
+    handleFileHardLink(&data.c, data.internal.allocator);
 }
 
 /// Helper to handle dir create dir operation
