@@ -224,11 +224,15 @@ fn dirStatFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, opt
 }
 
 fn dirAccessImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirAccess.init(dir.handle, sub_path, .{
+        .read = options.read,
+        .write = options.write,
+        .execute = options.execute,
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirCreateFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, flags: Io.File.CreateFlags) Io.File.OpenError!Io.File {
@@ -1990,6 +1994,30 @@ test "Io: Dir hardLink" {
     const orig_stat = try cwd.statFile(io, file_path, .{});
     const link_stat = try cwd.statFile(io, link_path, .{});
     try std.testing.expectEqual(orig_stat.inode, link_stat.inode);
+}
+
+test "Io: Dir access" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const file_path = "test_stdio_access_file";
+
+    // Create a target file
+    const file = try cwd.createFile(io, file_path, .{});
+    file.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
+
+    // Check that file exists (default access check)
+    try cwd.access(io, file_path, .{});
+
+    // Check read access
+    try cwd.access(io, file_path, .{ .read = true });
+
+    // Check that a non-existent file returns FileNotFound
+    const result = cwd.access(io, "non_existent_file_12345", .{});
+    try std.testing.expectError(error.FileNotFound, result);
 }
 
 test "Io: Event wait/set" {
