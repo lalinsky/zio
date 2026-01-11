@@ -1827,3 +1827,70 @@ pub fn errnoToHardLinkError(errno: posix.system.E) HardLinkError {
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
+
+pub const DirAccessError = error{
+    AccessDenied,
+    PermissionDenied,
+    FileNotFound,
+    InputOutput,
+    SystemResources,
+    FileBusy,
+    SymLinkLoop,
+    ReadOnlyFileSystem,
+    NameTooLong,
+    BadPathName,
+    Canceled,
+    Unexpected,
+};
+
+pub const AccessFlags = struct {
+    read: bool = false,
+    write: bool = false,
+    execute: bool = false,
+    follow_symlinks: bool = true,
+};
+
+/// Check file accessibility using faccessat() syscall
+pub fn dirAccess(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
+    if (builtin.os.tag == .windows) {
+        // TODO: Implement Windows access check
+        return error.Unexpected;
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    var mode: u32 = posix.system.F_OK;
+    if (flags.read) mode |= posix.system.R_OK;
+    if (flags.write) mode |= posix.system.W_OK;
+    if (flags.execute) mode |= posix.system.X_OK;
+
+    const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
+
+    while (true) {
+        const rc = posix.faccessat(dir, path_z.ptr, mode, at_flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToDirAccessError(err),
+        }
+    }
+}
+
+pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .NOENT => error.FileNotFound,
+        .IO => error.InputOutput,
+        .NOMEM => error.SystemResources,
+        .TXTBSY => error.FileBusy,
+        .LOOP => error.SymLinkLoop,
+        .ROFS => error.ReadOnlyFileSystem,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOTDIR => error.FileNotFound,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
