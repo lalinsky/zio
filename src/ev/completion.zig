@@ -35,6 +35,7 @@ pub const BackendCapabilities = struct {
     dir_sym_link: bool = false,
     dir_read_link: bool = false,
     dir_hard_link: bool = false,
+    dir_access: bool = false,
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
     is_multi_threaded: bool = false,
@@ -87,6 +88,7 @@ pub const Op = enum {
     dir_sym_link,
     dir_read_link,
     dir_hard_link,
+    dir_access,
     file_stream_poll,
     file_stream_read,
     file_stream_write,
@@ -136,6 +138,7 @@ pub const Op = enum {
             .dir_sym_link => DirSymLink,
             .dir_read_link => DirReadLink,
             .dir_hard_link => DirHardLink,
+            .dir_access => DirAccess,
             .file_stream_poll => FileStreamPoll,
             .file_stream_read => FileStreamRead,
             .file_stream_write => FileStreamWrite,
@@ -187,6 +190,7 @@ pub const Op = enum {
             DirSymLink => .dir_sym_link,
             DirReadLink => .dir_read_link,
             DirHardLink => .dir_hard_link,
+            DirAccess => .dir_access,
             FileStreamPoll => .file_stream_poll,
             FileStreamRead => .file_stream_read,
             FileStreamWrite => .file_stream_write,
@@ -1165,6 +1169,33 @@ pub const DirHardLink = struct {
 
     pub fn getResult(self: *const DirHardLink) Error!void {
         return self.c.getResult(.dir_hard_link);
+    }
+};
+
+pub const DirAccess = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_access) {
+        true => if (@hasDecl(Backend, "DirAccessData")) Backend.DirAccessData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    flags: fs.AccessFlags,
+
+    pub const Error = fs.DirAccessError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, flags: fs.AccessFlags) DirAccess {
+        return .{
+            .c = .init(.dir_access),
+            .dir = dir,
+            .path = path,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const DirAccess) Error!void {
+        return self.c.getResult(.dir_access);
     }
 };
 

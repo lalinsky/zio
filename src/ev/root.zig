@@ -67,6 +67,7 @@ pub const DirSetFileTimestamps = completion.DirSetFileTimestamps;
 pub const DirSymLink = completion.DirSymLink;
 pub const DirReadLink = completion.DirReadLink;
 pub const DirHardLink = completion.DirHardLink;
+pub const DirAccess = completion.DirAccess;
 pub const FileStreamPoll = completion.FileStreamPoll;
 pub const FileStreamRead = completion.FileStreamRead;
 pub const FileStreamWrite = completion.FileStreamWrite;
