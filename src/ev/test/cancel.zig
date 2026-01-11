@@ -484,8 +484,8 @@ test "cancel: work double cancel is idempotent" {
 test "cancel: queued work via thread pool cancel" {
     // Test that ThreadPool.cancel() correctly calls completion_fn when
     // it removes work from the queue (work never started running).
-    var started_event: os.ResetEvent = .init();
-    var blocker_event: os.ResetEvent = .init();
+    var started_event: std.Thread.ResetEvent = .unset;
+    var blocker_event: std.Thread.ResetEvent = .unset;
 
     var thread_pool: ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
