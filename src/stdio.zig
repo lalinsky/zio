@@ -162,7 +162,8 @@ fn futexWakeImpl(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void 
 
 fn dirCreateDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var op = aio.DirCreateDir.init(dir.handle, sub_path, permissions.toMode());
+    const mode = if (@hasDecl(Io.Dir.Permissions, "toMode")) permissions.toMode() else 0;
+    var op = aio.DirCreateDir.init(dir.handle, sub_path, mode);
     try zio_io.runIo(rt, &op.c);
     try op.getResult();
 }
@@ -859,11 +860,12 @@ fn netLookupImpl(userdata: ?*anyopaque, hostname: Io.net.HostName, queue: *Io.Qu
     }
 }
 
-// Stub implementations for missing VTable fields
+// File operations
 fn fileLengthImpl(userdata: ?*anyopaque, file: Io.File) Io.File.LengthError!u64 {
-    _ = userdata;
-    _ = file;
-    @panic("TODO: fileLength");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.FileSize.init(file.handle);
+    try zio_io.runIo(rt, &op.c);
+    return try op.getResult();
 }
 
 fn fileWriteFileStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, reader: *Io.File.Reader, count: Io.Limit) Io.File.Writer.WriteFileError!usize {
@@ -886,9 +888,10 @@ fn fileWriteFilePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []c
 }
 
 fn fileSyncImpl(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
-    _ = userdata;
-    _ = file;
-    @panic("TODO: fileSync");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.FileSync.init(file.handle, .{});
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn fileIsTtyImpl(userdata: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
@@ -910,32 +913,43 @@ fn fileSupportsAnsiEscapeCodesImpl(userdata: ?*anyopaque, file: Io.File) Io.Canc
 }
 
 fn fileSetLengthImpl(userdata: ?*anyopaque, file: Io.File, length: u64) Io.File.SetLengthError!void {
-    _ = userdata;
-    _ = file;
-    _ = length;
-    @panic("TODO: fileSetLength");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.FileSetSize.init(file.handle, length);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn fileSetOwnerImpl(userdata: ?*anyopaque, file: Io.File, uid: ?Io.File.Uid, gid: ?Io.File.Gid) Io.File.SetOwnerError!void {
-    _ = userdata;
-    _ = file;
-    _ = uid;
-    _ = gid;
-    @panic("TODO: fileSetOwner");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.FileSetOwner.init(file.handle, uid, gid);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn fileSetPermissionsImpl(userdata: ?*anyopaque, file: Io.File, permissions: Io.File.Permissions) Io.File.SetPermissionsError!void {
-    _ = userdata;
-    _ = file;
-    _ = permissions;
-    @panic("TODO: fileSetPermissions");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const mode = if (@hasDecl(Io.File.Permissions, "toMode")) permissions.toMode() else 0;
+    var op = aio.FileSetPermissions.init(file.handle, mode);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn fileSetTimestampsImpl(userdata: ?*anyopaque, file: Io.File, options: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
-    _ = userdata;
-    _ = file;
-    _ = options;
-    @panic("TODO: fileSetTimestamps");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.FileSetTimestamps.init(file.handle, .{
+        .atime = timestampToNanos(options.access_timestamp),
+        .mtime = timestampToNanos(options.modify_timestamp),
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
+}
+
+fn timestampToNanos(ts: Io.File.SetTimestamp) ?i96 {
+    return switch (ts) {
+        .unchanged => null,
+        .now => @as(i96, @intCast(os.time.now(.realtime))) * std.time.ns_per_ms,
+        .new => |t| t.nanoseconds,
+    };
 }
 
 fn fileLockImpl(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
