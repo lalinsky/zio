@@ -884,8 +884,8 @@ pub fn netBindUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.BindOpt
     return socket;
 }
 
-pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
-    // Convert [][]u8 to ReadBuf
+pub fn netRead(rt: *Runtime, fd: Handle, bufs: []const []u8) !usize {
+    // Convert []const []u8 to ReadBuf
     var storage: [16]os.iovec = undefined;
     const read_bufs = ev.ReadBuf.fromSlices(bufs, &storage);
 
