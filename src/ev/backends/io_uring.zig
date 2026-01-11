@@ -444,7 +444,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompleted(c);
                 return;
             };
-            sqe.prep_rw(.FTRUNCATE, data.handle, 0, @intCast(data.length), 0);
+            sqe.prep_rw(.FTRUNCATE, data.handle, 0, 0, @intCast(data.length));
             sqe.user_data = @intFromPtr(c);
         },
         .file_set_permissions => unreachable, // Handled by thread pool
