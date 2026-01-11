@@ -116,6 +116,14 @@ pub fn runIoMulti(rt: *Runtime, completions: []const *ev.Completion) Cancelable!
         c.callback = multiIoCallback;
     }
 
+    // Clear callbacks and context in defer when runtime safety is on to catch use-after-return bugs
+    defer if (std.debug.runtime_safety) {
+        for (completions) |c| {
+            c.callback = null;
+            c.userdata = null;
+        }
+    };
+
     task.state.store(.preparing_to_wait, .release);
 
     for (completions) |c| {
@@ -131,6 +139,10 @@ pub fn runIoMulti(rt: *Runtime, completions: []const *ev.Completion) Cancelable!
         }
         return err;
     };
+
+    for (completions) |c| {
+        std.debug.assert(c.state == .dead);
+    }
 }
 
 pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
