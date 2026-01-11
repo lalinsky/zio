@@ -36,6 +36,10 @@ pub const BackendCapabilities = struct {
     dir_read_link: bool = false,
     dir_hard_link: bool = false,
     dir_access: bool = false,
+    dir_real_path: bool = false,
+    dir_real_path_file: bool = false,
+    file_real_path: bool = false,
+    file_hard_link: bool = false,
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
     is_multi_threaded: bool = false,
@@ -89,6 +93,10 @@ pub const Op = enum {
     dir_read_link,
     dir_hard_link,
     dir_access,
+    dir_real_path,
+    dir_real_path_file,
+    file_real_path,
+    file_hard_link,
     file_stream_poll,
     file_stream_read,
     file_stream_write,
@@ -139,6 +147,10 @@ pub const Op = enum {
             .dir_read_link => DirReadLink,
             .dir_hard_link => DirHardLink,
             .dir_access => DirAccess,
+            .dir_real_path => DirRealPath,
+            .dir_real_path_file => DirRealPathFile,
+            .file_real_path => FileRealPath,
+            .file_hard_link => FileHardLink,
             .file_stream_poll => FileStreamPoll,
             .file_stream_read => FileStreamRead,
             .file_stream_write => FileStreamWrite,
@@ -191,6 +203,10 @@ pub const Op = enum {
             DirReadLink => .dir_read_link,
             DirHardLink => .dir_hard_link,
             DirAccess => .dir_access,
+            DirRealPath => .dir_real_path,
+            DirRealPathFile => .dir_real_path_file,
+            FileRealPath => .file_real_path,
+            FileHardLink => .file_hard_link,
             FileStreamPoll => .file_stream_poll,
             FileStreamRead => .file_stream_read,
             FileStreamWrite => .file_stream_write,
@@ -1196,6 +1212,112 @@ pub const DirAccess = struct {
 
     pub fn getResult(self: *const DirAccess) Error!void {
         return self.c.getResult(.dir_access);
+    }
+};
+
+pub const DirRealPath = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: switch (Backend.capabilities.dir_real_path) {
+        true => if (@hasDecl(Backend, "DirRealPathData")) Backend.DirRealPathData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    fd: fs.fd_t,
+    buffer: []u8,
+
+    pub const Error = fs.DirRealPathError || Cancelable;
+
+    pub fn init(fd: fs.fd_t, buffer: []u8) DirRealPath {
+        return .{
+            .c = .init(.dir_real_path),
+            .fd = fd,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const DirRealPath) Error!usize {
+        return self.c.getResult(.dir_real_path);
+    }
+};
+
+pub const DirRealPathFile = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: switch (Backend.capabilities.dir_real_path_file) {
+        true => if (@hasDecl(Backend, "DirRealPathFileData")) Backend.DirRealPathFileData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    buffer: []u8,
+
+    pub const Error = fs.DirRealPathFileError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, buffer: []u8) DirRealPathFile {
+        return .{
+            .c = .init(.dir_real_path_file),
+            .dir = dir,
+            .path = path,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const DirRealPathFile) Error!usize {
+        return self.c.getResult(.dir_real_path_file);
+    }
+};
+
+pub const FileRealPath = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: switch (Backend.capabilities.file_real_path) {
+        true => if (@hasDecl(Backend, "FileRealPathData")) Backend.FileRealPathData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    fd: fs.fd_t,
+    buffer: []u8,
+
+    pub const Error = fs.DirRealPathError || Cancelable;
+
+    pub fn init(fd: fs.fd_t, buffer: []u8) FileRealPath {
+        return .{
+            .c = .init(.file_real_path),
+            .fd = fd,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const FileRealPath) Error!usize {
+        return self.c.getResult(.file_real_path);
+    }
+};
+
+pub const FileHardLink = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.file_hard_link) {
+        true => if (@hasDecl(Backend, "FileHardLinkData")) Backend.FileHardLinkData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    fd: fs.fd_t,
+    new_dir: fs.fd_t,
+    new_path: []const u8,
+    flags: fs.HardLinkFlags,
+
+    pub const Error = fs.FileHardLinkError || Cancelable;
+
+    pub fn init(fd: fs.fd_t, new_dir: fs.fd_t, new_path: []const u8, flags: fs.HardLinkFlags) FileHardLink {
+        return .{
+            .c = .init(.file_hard_link),
+            .fd = fd,
+            .new_dir = new_dir,
+            .new_path = new_path,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const FileHardLink) Error!void {
+        return self.c.getResult(.file_hard_link);
     }
 };
 

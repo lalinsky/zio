@@ -638,6 +638,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_read_link => unreachable, // Handled by thread pool
         .dir_hard_link => unreachable, // Handled by thread pool
         .dir_access => unreachable, // Handled by thread pool
+        .dir_real_path => unreachable, // Handled by thread pool
+        .dir_real_path_file => unreachable, // Handled by thread pool
+        .file_real_path => unreachable, // Handled by thread pool
+        .file_hard_link => unreachable, // Handled by thread pool
         .file_stream_poll => {
             const data = c.cast(FileStreamPoll);
             const sqe = self.getSqe(state) catch {
@@ -829,6 +833,10 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
         .dir_read_link => unreachable, // Handled synchronously
         .dir_hard_link => unreachable, // Handled synchronously
         .dir_access => unreachable, // Handled synchronously
+        .dir_real_path => unreachable, // Handled synchronously
+        .dir_real_path_file => unreachable, // Handled synchronously
+        .file_real_path => unreachable, // Handled synchronously
+        .file_hard_link => unreachable, // Handled synchronously
 
         .net_connect => {
             if (res < 0) {
