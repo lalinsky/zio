@@ -8,12 +8,13 @@ CI_MODE=false
 FULL_MODE=false
 TEST_FILTER=""
 TARGET=""
+BACKEND=""
 USE_WINE=false
 USE_QEMU=false
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--wine] [--qemu] [--ci] [--full]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--ci] [--full]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,6 +29,10 @@ while [[ $# -gt 0 ]]; do
         --target)
             [[ $# -ge 2 ]] || { echo "--target requires an argument"; usage; exit 1; }
             TARGET="$2"; shift 2
+            ;;
+        --backend)
+            [[ $# -ge 2 ]] || { echo "--backend requires an argument"; usage; exit 1; }
+            BACKEND="$2"; shift 2
             ;;
         --wine)
             USE_WINE=true
@@ -71,6 +76,10 @@ fi
 if [ -n "$TARGET" ]; then
     echo "Target: $TARGET"
     BUILD_ARGS="$BUILD_ARGS -Dtarget=$TARGET"
+fi
+if [ -n "$BACKEND" ]; then
+    echo "Backend: $BACKEND"
+    BUILD_ARGS="$BUILD_ARGS -Dbackend=$BACKEND"
 fi
 if [ "$USE_WINE" = true ]; then
     BUILD_ARGS="$BUILD_ARGS -fwine"
