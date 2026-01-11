@@ -404,20 +404,19 @@ fn dirRenamePreserveImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: [
 }
 
 fn dirSymLinkImpl(userdata: ?*anyopaque, dir: Io.Dir, target_path: []const u8, sym_link_path: []const u8, flags: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
-    _ = userdata;
-    _ = dir;
-    _ = target_path;
-    _ = sym_link_path;
-    _ = flags;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirSymLink.init(dir.handle, target_path, sym_link_path, .{
+        .is_directory = flags.is_directory,
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirReadLinkImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, buffer: []u8) Io.Dir.ReadLinkError!usize {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = buffer;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirReadLink.init(dir.handle, sub_path, buffer);
+    try zio_io.runIo(rt, &op.c);
+    return try op.getResult();
 }
 
 fn dirSetOwnerImpl(userdata: ?*anyopaque, dir: Io.Dir, uid: ?Io.File.Uid, gid: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
@@ -467,13 +466,12 @@ fn dirSetTimestampsImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8
 }
 
 fn dirHardLinkImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
-    _ = userdata;
-    _ = old_dir;
-    _ = old_sub_path;
-    _ = new_dir;
-    _ = new_sub_path;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirHardLink.init(old_dir.handle, old_sub_path, new_dir.handle, new_sub_path, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirCreateFileAtomicImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
@@ -1938,6 +1936,60 @@ test "Io: Dir openDir" {
     // Verify we can stat the opened directory
     const stat = try opened_dir.stat(io);
     try std.testing.expectEqual(Io.File.Kind.directory, stat.kind);
+}
+
+test "Io: Dir symLink and readLink" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const file_path = "test_stdio_symlink_target";
+    const link_path = "test_stdio_symlink_link";
+
+    // Create a target file
+    const file = try cwd.createFile(io, file_path, .{});
+    file.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
+
+    // Create a symbolic link
+    try cwd.symLink(io, file_path, link_path, .{});
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, link_path) catch {};
+
+    // Read the symbolic link
+    var buffer: [256]u8 = undefined;
+    const len = try cwd.readLink(io, link_path, &buffer);
+
+    // Verify the link target
+    try std.testing.expectEqualStrings(file_path, buffer[0..len]);
+}
+
+test "Io: Dir hardLink" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const file_path = "test_stdio_hardlink_target";
+    const link_path = "test_stdio_hardlink_link";
+
+    // Create a target file
+    const file = try cwd.createFile(io, file_path, .{});
+    file.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
+
+    // Create a hard link
+    try cwd.hardLink(file_path, cwd, link_path, io, .{});
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, link_path) catch {};
+
+    // Verify the hard link exists and can be opened
+    const link_file = try cwd.openFile(io, link_path, .{});
+    link_file.close(io);
+
+    // Verify inode is the same (true hard link)
+    const orig_stat = try cwd.statFile(io, file_path, .{});
+    const link_stat = try cwd.statFile(io, link_path, .{});
+    try std.testing.expectEqual(orig_stat.inode, link_stat.inode);
 }
 
 test "Io: Event wait/set" {
