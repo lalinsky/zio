@@ -35,6 +35,7 @@ const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const stdio = @import("stdio.zig");
+const blocking_stdio = @import("io/blocking.zig");
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -1135,6 +1136,17 @@ pub const Runtime = struct {
         return stdio.fromRuntime(self);
     }
 
+    /// Returns a blocking std.Io implementation for use in spawnBlocking tasks.
+    ///
+    /// This implementation directly calls blocking OS functions without going
+    /// through the async I/O submission path. It's simpler and more efficient
+    /// when running on a dedicated blocking thread pool thread.
+    ///
+    /// Note: Cancellation is not supported for blocking I/O operations.
+    pub fn blockingIo(self: *Runtime) std.Io {
+        return blocking_stdio.fromRuntime(self);
+    }
+
     pub fn fromIo(io_: std.Io) !*Runtime {
         if (io_.vtable != &stdio.vtable) return error.InvalidIo;
         return stdio.toRuntime(io_);
@@ -1381,4 +1393,32 @@ test "runtime: sleep from main allows tasks to run" {
     }
 
     try std.testing.expectEqual(10, counter);
+}
+
+test "Runtime: blockingIo" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    // Get blocking Io and verify vtable
+    const bio = runtime.blockingIo();
+    try std.testing.expect(bio.vtable == &blocking_stdio.vtable);
+
+    // Test basic operations via spawnBlocking
+    const TestCtx = struct {
+        fn blockingTask(rt: *Runtime) !void {
+            const io = rt.blockingIo();
+
+            // Test now() works
+            const t1 = try std.Io.Clock.now(.real, io);
+            try std.testing.expect(t1.nanoseconds > 0);
+
+            // Test cwd stat operation
+            const cwd = std.Io.Dir.cwd();
+            const stat = try cwd.stat(io);
+            try std.testing.expect(stat.kind == .directory);
+        }
+    };
+
+    var handle = try runtime.spawnBlocking(TestCtx.blockingTask, .{runtime});
+    try handle.join(runtime);
 }
