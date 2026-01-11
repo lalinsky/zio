@@ -316,11 +316,18 @@ fn dirOpenFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, fla
 }
 
 fn dirOpenDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    const flags: os.fs.DirOpenFlags = .{
+        .follow_symlinks = options.follow_symlinks,
+        .iterate = options.iterate,
+    };
+
+    var op = aio.DirOpen.init(dir.handle, sub_path, flags);
+    try zio_io.runIo(rt, &op.c);
+    const fd = try op.getResult();
+
+    return .{ .handle = fd };
 }
 
 fn dirCloseImpl(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
@@ -414,45 +421,49 @@ fn dirReadLinkImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, buf
 }
 
 fn dirSetOwnerImpl(userdata: ?*anyopaque, dir: Io.Dir, uid: ?Io.File.Uid, gid: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
-    _ = userdata;
-    _ = dir;
-    _ = uid;
-    _ = gid;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirSetOwner.init(dir.handle, uid, gid);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirSetFileOwnerImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, uid: ?Io.File.Uid, gid: ?Io.File.Gid, options: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = uid;
-    _ = gid;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirSetFileOwner.init(dir.handle, sub_path, uid, gid, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirSetPermissionsImpl(userdata: ?*anyopaque, dir: Io.Dir, permissions: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
-    _ = userdata;
-    _ = dir;
-    _ = permissions;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const mode = if (@hasDecl(Io.Dir.Permissions, "toMode")) permissions.toMode() else 0;
+    var op = aio.DirSetPermissions.init(dir.handle, mode);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirSetFilePermissionsImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.File.Permissions, options: Io.Dir.SetFilePermissionsOptions) Io.Dir.SetFilePermissionsError!void {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = permissions;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const mode = if (@hasDecl(Io.File.Permissions, "toMode")) permissions.toMode() else 0;
+    var op = aio.DirSetFilePermissions.init(dir.handle, sub_path, mode, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirSetTimestampsImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.SetTimestampsOptions) Io.Dir.SetTimestampsError!void {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = options;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirSetFileTimestamps.init(dir.handle, sub_path, .{
+        .atime = timestampToNanos(options.access_timestamp),
+        .mtime = timestampToNanos(options.modify_timestamp),
+    }, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirHardLinkImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
@@ -1906,6 +1917,27 @@ test "Io: Dir statFile" {
     try std.testing.expect(stat.mtime.nanoseconds > 0);
     if (stat.atime) |atime| try std.testing.expect(atime.nanoseconds > 0);
     try std.testing.expect(stat.ctime.nanoseconds > 0);
+}
+
+test "Io: Dir openDir" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const dir_path = "test_stdio_open_dir";
+
+    // Create a directory
+    try cwd.createDir(io, dir_path, .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, dir_path) catch {};
+
+    // Open the directory
+    const opened_dir = try cwd.openDir(io, dir_path, .{});
+    defer opened_dir.close(io);
+
+    // Verify we can stat the opened directory
+    const stat = try opened_dir.stat(io);
+    try std.testing.expectEqual(Io.File.Kind.directory, stat.kind);
 }
 
 test "Io: Event wait/set" {
