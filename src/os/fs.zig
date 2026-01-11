@@ -1353,6 +1353,11 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
             };
         }
 
+        // Check for overflow - LARGE_INTEGER is signed, so length must fit in i64
+        if (length >= (1 << 63)) {
+            return error.FileTooBig;
+        }
+
         // Seek to desired length
         const len_signed: w.LARGE_INTEGER = @bitCast(length);
         if (w.SetFilePointerEx(fd, len_signed, null, w.FILE_BEGIN) == w.FALSE) {
