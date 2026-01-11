@@ -234,6 +234,227 @@ pub const DirCreateDirError = error{
     Unexpected,
 };
 
+pub const DirReadError = error{
+    AccessDenied,
+    PermissionDenied,
+    SystemResources,
+    Canceled,
+    Unexpected,
+};
+
+/// Parsed directory entry
+pub const DirEntry = struct {
+    name: []const u8,
+    kind: FileKind,
+    inode: ino_t,
+};
+
+/// Iterator over directory entries in a buffer filled by dirRead.
+/// Handles platform-specific parsing and UTF-16 to UTF-8 conversion on Windows.
+pub const DirEntryIterator = struct {
+    buffer: []u8,
+    /// Current position in raw entries (user-facing, relative to unreserved buffer).
+    index: usize,
+    /// End position of raw entries (user-facing, relative to unreserved buffer).
+    end: usize,
+    /// Position for writing UTF-8 names (Windows only).
+    name_index: usize,
+
+    pub const RawEntry = switch (builtin.os.tag) {
+        .linux => std.os.linux.dirent64,
+        .windows => w.FILE_BOTH_DIR_INFORMATION,
+        .macos, .ios, .tvos, .watchos, .visionos => std.c.dirent,
+        .freebsd, .netbsd, .openbsd, .dragonfly => std.c.dirent,
+        else => @compileError("DirEntryIterator not supported on this OS"),
+    };
+
+    /// On Windows, reserve space at start of buffer for UTF-8 name conversion.
+    /// Raw entries go in the unreserved portion. Names can overwrite processed entries.
+    pub const reserved_len = switch (builtin.os.tag) {
+        .windows => blk: {
+            const max_name_bytes = w.NAME_MAX * 3; // Worst-case UTF-8 expansion
+            const max_info_len = @sizeOf(w.FILE_BOTH_DIR_INFORMATION) + w.NAME_MAX * 2;
+            const info_align = @alignOf(w.FILE_BOTH_DIR_INFORMATION);
+            const reserve_needed = std.mem.alignForward(usize, max_name_bytes, info_align) - max_info_len;
+            break :blk std.mem.alignForward(usize, reserve_needed, info_align);
+        },
+        else => 0,
+    };
+
+    /// Initialize iterator over raw entries in the unreserved portion of buffer.
+    /// `start` is the starting index, `end` is the number of bytes filled by the syscall.
+    pub fn init(buffer: []u8, start: usize, end: usize) DirEntryIterator {
+        return .{
+            .buffer = buffer,
+            .index = start,
+            .end = end,
+            .name_index = 0,
+        };
+    }
+
+    /// Reset the iterator to the beginning.
+    pub fn reset(self: *DirEntryIterator) void {
+        self.index = 0;
+        self.name_index = 0;
+    }
+
+    /// Get the unreserved portion of the buffer (where raw entries should be written by syscall).
+    pub fn getUnreservedBuffer(buffer: []u8) []u8 {
+        return buffer[reserved_len..];
+    }
+
+    /// Convert user-facing index to raw buffer index.
+    inline fn rawIndex(self: *const DirEntryIterator) usize {
+        return reserved_len + self.index;
+    }
+
+    /// Convert user-facing end to raw buffer end.
+    inline fn rawEnd(self: *const DirEntryIterator) usize {
+        return reserved_len + self.end;
+    }
+
+    /// Get next directory entry, skipping "." and "..".
+    /// Returns null when no more entries, or if buffer space exhausted (Windows).
+    pub fn next(self: *DirEntryIterator) ?DirEntry {
+        while (self.index < self.end) {
+            const entry = self.nextRaw() orelse return null;
+
+            // Skip . and ..
+            if (self.isDotOrDotDot(entry)) continue;
+
+            const name = self.extractName(entry) orelse {
+                // On Windows, null means no buffer space - backtrack and stop
+                if (builtin.os.tag == .windows) {
+                    self.backtrack(entry);
+                }
+                return null;
+            };
+
+            return .{
+                .name = name,
+                .kind = self.extractKind(entry),
+                .inode = self.extractInode(entry),
+            };
+        }
+        return null;
+    }
+
+    fn nextRaw(self: *DirEntryIterator) ?*align(1) const RawEntry {
+        if (self.index >= self.end) return null;
+        const entry: *align(1) const RawEntry = @ptrCast(&self.buffer[self.rawIndex()]);
+
+        // Advance to next entry
+        self.index += switch (builtin.os.tag) {
+            .linux => entry.reclen,
+            .windows => if (entry.NextEntryOffset != 0)
+                entry.NextEntryOffset
+            else
+                self.end - self.index,
+            else => entry.d_reclen,
+        };
+
+        return entry;
+    }
+
+    fn backtrack(self: *DirEntryIterator, entry: *align(1) const RawEntry) void {
+        // Revert to where this entry started
+        self.index -= switch (builtin.os.tag) {
+            .linux => entry.reclen,
+            .windows => if (entry.NextEntryOffset != 0)
+                entry.NextEntryOffset
+            else
+                0, // Was last entry, index is already at end
+            else => entry.d_reclen,
+        };
+    }
+
+    fn extractName(self: *DirEntryIterator, entry: *align(1) const RawEntry) ?[]const u8 {
+        return switch (builtin.os.tag) {
+            .linux => blk: {
+                const name_ptr: [*]const u8 = @ptrCast(&entry.name);
+                const max_len = entry.reclen - @offsetOf(std.os.linux.dirent64, "name");
+                break :blk std.mem.sliceTo(name_ptr[0..max_len], 0);
+            },
+            .windows => blk: {
+                const name_ptr: [*]const u16 = @alignCast(@as([*]align(1) const u16, @ptrCast(&entry.FileName)));
+                const name_utf16 = name_ptr[0 .. entry.FileNameLength / 2];
+                const utf8_len = std.unicode.calcWtf8Len(name_utf16);
+
+                // Check if there's space without overwriting unprocessed entries
+                if (self.name_index + utf8_len > self.rawIndex()) return null;
+
+                const name_buf = self.buffer[self.name_index..][0..utf8_len];
+                _ = std.unicode.wtf16LeToWtf8(name_buf, name_utf16);
+                self.name_index += utf8_len;
+                break :blk name_buf;
+            },
+            else => entry.d_name[0..entry.d_namlen],
+        };
+    }
+
+    fn extractKind(_: *DirEntryIterator, entry: *align(1) const RawEntry) FileKind {
+        return switch (builtin.os.tag) {
+            .linux => switch (entry.type) {
+                std.os.linux.DT.BLK => .block_device,
+                std.os.linux.DT.CHR => .character_device,
+                std.os.linux.DT.DIR => .directory,
+                std.os.linux.DT.FIFO => .named_pipe,
+                std.os.linux.DT.LNK => .sym_link,
+                std.os.linux.DT.REG => .file,
+                std.os.linux.DT.SOCK => .unix_domain_socket,
+                else => .unknown,
+            },
+            .windows => blk: {
+                const attrs = entry.FileAttributes;
+                if (attrs.REPARSE_POINT) break :blk .sym_link;
+                if (attrs.DIRECTORY) break :blk .directory;
+                break :blk .file;
+            },
+            else => switch (entry.d_type) {
+                std.posix.DT.BLK => .block_device,
+                std.posix.DT.CHR => .character_device,
+                std.posix.DT.DIR => .directory,
+                std.posix.DT.FIFO => .named_pipe,
+                std.posix.DT.LNK => .sym_link,
+                std.posix.DT.REG => .file,
+                std.posix.DT.SOCK => .unix_domain_socket,
+                std.posix.DT.WHT => .whiteout,
+                else => .unknown,
+            },
+        };
+    }
+
+    fn extractInode(_: *DirEntryIterator, entry: *align(1) const RawEntry) ino_t {
+        return switch (builtin.os.tag) {
+            .linux => entry.ino,
+            .windows => entry.FileIndex,
+            else => entry.d_ino,
+        };
+    }
+
+    fn isDotOrDotDot(self: *DirEntryIterator, entry: *align(1) const RawEntry) bool {
+        _ = self;
+        return switch (builtin.os.tag) {
+            .windows => blk: {
+                const name_ptr: [*]const u16 = @alignCast(@as([*]align(1) const u16, @ptrCast(&entry.FileName)));
+                const name = name_ptr[0 .. entry.FileNameLength / 2];
+                break :blk std.mem.eql(u16, name, &[_]u16{'.'}) or
+                    std.mem.eql(u16, name, &[_]u16{ '.', '.' });
+            },
+            .linux => blk: {
+                const name_ptr: [*]const u8 = @ptrCast(&entry.name);
+                const max_len = entry.reclen - @offsetOf(std.os.linux.dirent64, "name");
+                const name = std.mem.sliceTo(name_ptr[0..max_len], 0);
+                break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
+            },
+            else => blk: {
+                const name = entry.d_name[0..entry.d_namlen];
+                break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
+            },
+        };
+    }
+};
+
 pub const FileSizeError = error{
     AccessDenied,
     PermissionDenied,
@@ -1926,6 +2147,90 @@ pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
+}
+
+/// Read directory entries into buffer.
+/// Returns number of bytes read, 0 when no more entries.
+/// If restart is true, seeks to beginning first (POSIX) or passes RestartScan (Windows).
+pub fn dirRead(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
+    if (builtin.os.tag == .windows) {
+        return dirReadWindows(handle, buffer, restart);
+    } else {
+        return dirReadPosix(handle, buffer, restart);
+    }
+}
+
+fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
+    // Seek to beginning if restart requested
+    if (restart) {
+        const rc = posix.system.lseek(handle, 0, posix.system.SEEK.SET);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {},
+            .BADF => return error.Unexpected,
+            else => |err| return unexpectedError(err) catch error.Unexpected,
+        }
+    }
+
+    // Call getdents64 (Linux) or getdirentries (BSD)
+    while (true) {
+        const rc = switch (builtin.os.tag) {
+            .linux => std.os.linux.getdents64(handle, buffer.ptr, buffer.len),
+            .macos, .ios, .tvos, .watchos, .visionos => blk: {
+                var basep: i64 = 0;
+                break :blk @as(usize, @bitCast(std.c.__getdirentries64(handle, buffer.ptr, buffer.len, &basep)));
+            },
+            .freebsd, .netbsd, .openbsd, .dragonfly => blk: {
+                var basep: c_long = 0;
+                break :blk posix.system.getdirentries(handle, buffer.ptr, buffer.len, &basep);
+            },
+            else => @compileError("dirRead not implemented for this OS"),
+        };
+
+        const errno = if (builtin.os.tag == .linux)
+            std.os.linux.errno(rc)
+        else
+            posix.errno(rc);
+
+        switch (errno) {
+            .SUCCESS => return if (builtin.os.tag == .linux) rc else @intCast(rc),
+            .INTR => continue,
+            .BADF, .FAULT, .NOTDIR => return error.Unexpected,
+            .NOENT => return 0, // Directory deleted during iteration
+            .ACCES => return error.AccessDenied,
+            .PERM => return error.PermissionDenied,
+            .NOMEM => return error.SystemResources,
+            else => |err| return unexpectedError(err) catch error.Unexpected,
+        }
+    }
+}
+
+fn dirReadWindows(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
+    var io_status_block: w.IO_STATUS_BLOCK = undefined;
+
+    while (true) {
+        const rc = w.NtQueryDirectoryFile(
+            handle,
+            null, // Event
+            null, // ApcRoutine
+            null, // ApcContext
+            &io_status_block,
+            buffer.ptr,
+            @intCast(buffer.len),
+            .BothDirectory,
+            0, // ReturnSingleEntry
+            null, // FileName filter
+            @intFromBool(restart),
+        );
+
+        switch (rc) {
+            .SUCCESS => return io_status_block.Information,
+            .NO_MORE_FILES => return 0,
+            .CANCELLED => continue,
+            .ACCESS_DENIED => return error.AccessDenied,
+            .NOT_A_DIRECTORY => return error.Unexpected,
+            else => return error.Unexpected,
+        }
+    }
 }
 
 pub const DirRealPathError = error{

@@ -34,6 +34,7 @@ const DirSymLink = @import("../completion.zig").DirSymLink;
 const DirReadLink = @import("../completion.zig").DirReadLink;
 const DirHardLink = @import("../completion.zig").DirHardLink;
 const DirAccess = @import("../completion.zig").DirAccess;
+const DirRead = @import("../completion.zig").DirRead;
 const DirRealPath = @import("../completion.zig").DirRealPath;
 const DirRealPathFile = @import("../completion.zig").DirRealPathFile;
 const FileRealPath = @import("../completion.zig").FileRealPath;
@@ -452,6 +453,23 @@ pub fn dirAccessWork(work: *Work) void {
     const internal: *@FieldType(DirAccess, "internal") = @fieldParentPtr("work", work);
     const data: *DirAccess = @fieldParentPtr("internal", internal);
     handleDirAccess(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir read operation
+pub fn handleDirRead(c: *Completion) void {
+    const data = c.cast(DirRead);
+    if (fs.dirRead(data.handle, data.buffer, data.restart)) |bytes| {
+        c.setResult(.dir_read, bytes);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirRead
+pub fn dirReadWork(work: *Work) void {
+    const internal: *@FieldType(DirRead, "internal") = @fieldParentPtr("work", work);
+    const data: *DirRead = @fieldParentPtr("internal", internal);
+    handleDirRead(&data.c);
 }
 
 /// Helper to handle dir real path operation

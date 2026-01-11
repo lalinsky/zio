@@ -470,6 +470,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_read_link,
         .dir_hard_link,
         .dir_access,
+        .dir_read,
         .dir_real_path,
         .dir_real_path_file,
         .file_real_path,

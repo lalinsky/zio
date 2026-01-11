@@ -632,6 +632,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_read_link => unreachable, // Handled by thread pool
         .dir_hard_link => unreachable, // Handled by thread pool
         .dir_access => unreachable, // Handled by thread pool
+        .dir_read => unreachable, // Handled by thread pool
         .dir_real_path => unreachable, // Handled by thread pool
         .dir_real_path_file => unreachable, // Handled by thread pool
         .file_real_path => unreachable, // Handled by thread pool
@@ -827,6 +828,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
         .dir_read_link => unreachable, // Handled synchronously
         .dir_hard_link => unreachable, // Handled synchronously
         .dir_access => unreachable, // Handled synchronously
+        .dir_read => unreachable, // Handled synchronously
         .dir_real_path => unreachable, // Handled synchronously
         .dir_real_path_file => unreachable, // Handled synchronously
         .file_real_path => unreachable, // Handled synchronously
