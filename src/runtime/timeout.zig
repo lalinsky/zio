@@ -19,18 +19,18 @@ pub const Timeout = struct {
     timer: ev.Timer = .init(0),
     triggered: bool = false,
     task: ?*AnyTask = null,
+    loop: ?*ev.Loop = null,
 
     pub const init: Timeout = .{};
 
     pub fn clear(self: *Timeout, rt: *Runtime) void {
+        _ = rt;
+        const loop = self.loop orelse return;
         if (self.timer.c.state != .running) return;
 
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-        std.debug.assert(executor.runtime == rt);
-
-        executor.loop.clearTimer(&self.timer);
+        loop.clearTimer(&self.timer);
         self.task = null;
+        self.loop = null;
     }
 
     pub fn set(self: *Timeout, rt: *Runtime, timeout_ns: u64) void {
@@ -41,6 +41,7 @@ pub const Timeout = struct {
         // Set task reference and reset triggered flag
         self.task = task;
         self.triggered = false;
+        self.loop = &executor.loop;
 
         // Convert nanoseconds to milliseconds
         const timeout_ms: u64 = (timeout_ns + std.time.ns_per_ms / 2) / std.time.ns_per_ms;
@@ -72,8 +73,9 @@ fn timeoutCallback(
     // Resume the task
     resumeTask(task, .local);
 
-    // Clear the associated task
+    // Clear the associated task and loop
     timeout.task = null;
+    timeout.loop = null;
 }
 
 const Cancelable = @import("../common.zig").Cancelable;
