@@ -1334,6 +1334,18 @@ test "IpAddress: initIp6" {
     try std.testing.expectEqual(os.net.AF.INET6, addr.any.family);
 }
 
+test "IpAddress: setPort/v4" {
+    var addr = IpAddress.initIp4(.{0} ** 4, 0);
+    addr.setPort(8080);
+    try std.testing.expectEqual(8080, addr.getPort());
+}
+
+test "IpAddress: setPort/v6" {
+    var addr = IpAddress.initIp6(.{0} ** 16, 0, 0, 0);
+    addr.setPort(8080);
+    try std.testing.expectEqual(8080, addr.getPort());
+}
+
 test "IpAddress: parseIp4" {
     const addr = try IpAddress.parseIp4("127.0.0.1", 8080);
     try std.testing.expectEqual(os.net.AF.INET, addr.any.family);
