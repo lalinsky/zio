@@ -498,20 +498,41 @@ pub const Loop = struct {
     };
 
     fn checkTimers(self: *Loop) TimerCheckResult {
-        self.state.lockTimers();
-        defer self.state.unlockTimers();
-        self.state.updateNow();
         var fired = false;
-        while (self.state.timers.peek()) |timer| {
-            if (timer.deadline_ms > self.state.now_ms) {
-                return .{ .next_timeout_ms = timer.deadline_ms - self.state.now_ms, .fired = fired };
+        var next_timeout_ms: ?u64 = null;
+
+        // Process fired timers in batches to avoid holding the lock during callbacks.
+        // This prevents deadlock when callbacks try to set/clear timers.
+        while (true) {
+            var batch: [4]*Timer = undefined;
+            var batch_count: usize = 0;
+
+            self.state.lockTimers();
+            self.state.updateNow();
+            while (self.state.timers.peek()) |timer| {
+                if (timer.deadline_ms > self.state.now_ms) {
+                    next_timeout_ms = timer.deadline_ms - self.state.now_ms;
+                    break;
+                }
+                timer.c.setResult(.timer, {});
+                self.state.clearTimer(timer);
+                batch[batch_count] = timer;
+                batch_count += 1;
+                if (batch_count >= batch.len) break;
             }
-            timer.c.setResult(.timer, {});
-            self.state.clearTimer(timer);
-            self.state.markCompleted(&timer.c);
-            fired = true;
+            self.state.unlockTimers();
+
+            // Mark completions outside the lock
+            for (batch[0..batch_count]) |timer| {
+                self.state.markCompleted(&timer.c);
+                fired = true;
+            }
+
+            // If we didn't fill the batch, we're done
+            if (batch_count < batch.len) break;
         }
-        return .{ .next_timeout_ms = null, .fired = fired };
+
+        return .{ .next_timeout_ms = next_timeout_ms, .fired = fired };
     }
 
     /// Check if an async handle is pending and set its result if so.
