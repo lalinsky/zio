@@ -355,11 +355,70 @@ fn dirCloseImpl(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
     }
 }
 
-fn dirReadImpl(userdata: ?*anyopaque, reader: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
-    _ = userdata;
-    _ = reader;
-    _ = entries;
-    @panic("TODO");
+fn dirReadImpl(userdata: ?*anyopaque, dr: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var entry_index: usize = 0;
+
+    // Get the unreserved portion of buffer for syscall (on Windows, reserved space is at start)
+    const unreserved = os.fs.DirEntryIterator.getUnreservedBuffer(dr.buffer);
+
+    while (entry_index < entries.len) {
+        // Check if buffer needs refilling
+        if (dr.end - dr.index == 0) {
+            // Don't refill if we already have entries (names reference buffer)
+            if (entry_index != 0) break;
+
+            // Async syscall via DirRead - fill unreserved portion
+            var op = aio.DirRead.init(dr.dir.handle, unreserved, dr.state == .reset);
+            try zio_io.runIo(rt, &op.c);
+
+            const bytes = try op.getResult();
+            if (bytes == 0) {
+                dr.state = .finished;
+                return entry_index;
+            }
+
+            dr.index = 0;
+            dr.end = bytes;
+            if (dr.state == .reset) dr.state = .reading;
+        }
+
+        // Parse entries using iterator
+        var iter = os.fs.DirEntryIterator.init(dr.buffer, dr.index, dr.end);
+
+        while (iter.next()) |fs_entry| {
+            entries[entry_index] = .{
+                .name = fs_entry.name,
+                .kind = stdFileKind(fs_entry.kind),
+                .inode = fs_entry.inode,
+            };
+            entry_index += 1;
+            dr.index = iter.index;
+
+            if (entry_index >= entries.len) break;
+        }
+
+        // Update index to mark buffer as consumed
+        dr.index = iter.index;
+    }
+
+    return entry_index;
+}
+
+fn stdFileKind(kind: os.fs.FileKind) Io.File.Kind {
+    return switch (kind) {
+        .block_device => .block_device,
+        .character_device => .character_device,
+        .directory => .directory,
+        .named_pipe => .named_pipe,
+        .sym_link => .sym_link,
+        .file => .file,
+        .unix_domain_socket => .unix_domain_socket,
+        .whiteout => .whiteout,
+        .door => .door,
+        .event_port => .event_port,
+        .unknown => .unknown,
+    };
 }
 
 fn dirRealPathImpl(userdata: ?*anyopaque, dir: Io.Dir, out_buffer: []u8) Io.Dir.RealPathError!usize {
@@ -2211,4 +2270,70 @@ test "Io.Group: concurrent spawn" {
     try group.await(io);
 
     try std.testing.expectEqual(3, completed);
+}
+
+test "Io: Dir read" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const dir_path = "test_stdio_dir_read";
+
+    // Create a test directory
+    try cwd.createDir(io, dir_path, .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, dir_path) catch {};
+
+    // Create test files (using cwd-relative paths)
+    const file1 = try cwd.createFile(io, dir_path ++ "/file1.txt", .{});
+    file1.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, dir_path ++ "/file1.txt") catch {};
+
+    const file2 = try cwd.createFile(io, dir_path ++ "/file2.txt", .{});
+    file2.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, dir_path ++ "/file2.txt") catch {};
+
+    // Create a subdirectory
+    try cwd.createDir(io, dir_path ++ "/subdir", .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, dir_path ++ "/subdir") catch {};
+
+    // Now open for iteration (after files exist)
+    const test_dir = try cwd.openDir(io, dir_path, .{ .iterate = true });
+    defer test_dir.close(io);
+
+    // Iterate directory using Dir.Reader
+    var reader_buffer: [Io.Dir.Reader.min_buffer_len]u8 align(@alignOf(usize)) = undefined;
+    var reader = Io.Dir.Reader.init(test_dir, &reader_buffer);
+
+    var entries: [10]Io.Dir.Entry = undefined;
+    var found_file1 = false;
+    var found_file2 = false;
+    var found_subdir = false;
+    var total_entries: usize = 0;
+
+    while (true) {
+        const count = try reader.read(io, &entries);
+        if (count == 0) break;
+
+        for (entries[0..count]) |entry| {
+            total_entries += 1;
+            if (std.mem.eql(u8, entry.name, "file1.txt")) {
+                found_file1 = true;
+                try std.testing.expectEqual(Io.File.Kind.file, entry.kind);
+            }
+            if (std.mem.eql(u8, entry.name, "file2.txt")) {
+                found_file2 = true;
+                try std.testing.expectEqual(Io.File.Kind.file, entry.kind);
+            }
+            if (std.mem.eql(u8, entry.name, "subdir")) {
+                found_subdir = true;
+                try std.testing.expectEqual(Io.File.Kind.directory, entry.kind);
+            }
+        }
+    }
+
+    try std.testing.expect(found_file1);
+    try std.testing.expect(found_file2);
+    try std.testing.expect(found_subdir);
+    try std.testing.expectEqual(@as(usize, 3), total_entries);
 }
