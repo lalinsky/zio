@@ -10,6 +10,7 @@ pub const system = switch (builtin.os.tag) {
 };
 
 pub const O = system.O;
+pub const AT = system.AT;
 
 pub fn errno(rc: anytype) system.E {
     switch (system) {
@@ -110,6 +111,21 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
             }
         },
         else => @compileError("unsupported OS"),
+    }
+}
+
+pub fn fchownat(dirfd: std.posix.fd_t, path: [*:0]const u8, owner: std.posix.uid_t, group: std.posix.gid_t, flags: u32) usize {
+    if (builtin.os.tag == .linux) {
+        return std.os.linux.syscall5(
+            .fchownat,
+            @as(usize, @bitCast(@as(isize, dirfd))),
+            @intFromPtr(path),
+            owner,
+            group,
+            flags,
+        );
+    } else {
+        return @bitCast(@as(isize, std.c.fchownat(dirfd, path, owner, group, @bitCast(flags))));
     }
 }
 

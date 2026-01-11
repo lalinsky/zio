@@ -355,7 +355,7 @@ pub const Loop = struct {
                 thread_pool.cancel(work);
             },
 
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps => |op| {
                 if (!@field(Backend.capabilities, @tagName(op))) {
                     const thread_pool = self.thread_pool orelse unreachable;
                     const op_data = completion.cast(op.toType());
@@ -479,7 +479,7 @@ pub const Loop = struct {
                 // Regular backend operation
                 // Route file operations to thread pool for backends without native support
                 switch (completion.op) {
-                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
+                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps => |op| {
                         if (!@field(Backend.capabilities, @tagName(op))) {
                             self.submitFileOpToThreadPool(completion);
                             return;
@@ -617,7 +617,7 @@ pub const Loop = struct {
         self.state.active += 1;
 
         switch (completion.op) {
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps => |op| {
                 if (@field(Backend.capabilities, @tagName(op))) {
                     unreachable;
                 }
@@ -641,6 +641,11 @@ pub const Loop = struct {
                     .file_stat => common.fileStatWork,
                     .dir_open => common.dirOpenWork,
                     .dir_close => common.dirCloseWork,
+                    .dir_set_permissions => common.dirSetPermissionsWork,
+                    .dir_set_owner => common.dirSetOwnerWork,
+                    .dir_set_file_permissions => common.dirSetFilePermissionsWork,
+                    .dir_set_file_owner => common.dirSetFileOwnerWork,
+                    .dir_set_file_timestamps => common.dirSetFileTimestampsWork,
                     else => unreachable,
                 };
 
