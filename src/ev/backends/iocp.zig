@@ -461,6 +461,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_stat,
         .dir_open,
         .dir_close,
+        .dir_set_permissions,
+        .dir_set_owner,
+        .dir_set_file_permissions,
+        .dir_set_file_owner,
+        .dir_set_file_timestamps,
+        .dir_sym_link,
+        .dir_read_link,
+        .dir_hard_link,
         => unreachable, // These are handled by thread pool (capabilities = false)
 
         .file_stream_poll => {

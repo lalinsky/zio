@@ -32,6 +32,9 @@ pub const BackendCapabilities = struct {
     dir_set_file_permissions: bool = false,
     dir_set_file_owner: bool = false,
     dir_set_file_timestamps: bool = false,
+    dir_sym_link: bool = false,
+    dir_read_link: bool = false,
+    dir_hard_link: bool = false,
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
     is_multi_threaded: bool = false,
@@ -81,6 +84,9 @@ pub const Op = enum {
     dir_set_file_permissions,
     dir_set_file_owner,
     dir_set_file_timestamps,
+    dir_sym_link,
+    dir_read_link,
+    dir_hard_link,
     file_stream_poll,
     file_stream_read,
     file_stream_write,
@@ -127,6 +133,9 @@ pub const Op = enum {
             .dir_set_file_permissions => DirSetFilePermissions,
             .dir_set_file_owner => DirSetFileOwner,
             .dir_set_file_timestamps => DirSetFileTimestamps,
+            .dir_sym_link => DirSymLink,
+            .dir_read_link => DirReadLink,
+            .dir_hard_link => DirHardLink,
             .file_stream_poll => FileStreamPoll,
             .file_stream_read => FileStreamRead,
             .file_stream_write => FileStreamWrite,
@@ -175,6 +184,9 @@ pub const Op = enum {
             DirSetFilePermissions => .dir_set_file_permissions,
             DirSetFileOwner => .dir_set_file_owner,
             DirSetFileTimestamps => .dir_set_file_timestamps,
+            DirSymLink => .dir_sym_link,
+            DirReadLink => .dir_read_link,
+            DirHardLink => .dir_hard_link,
             FileStreamPoll => .file_stream_poll,
             FileStreamRead => .file_stream_read,
             FileStreamWrite => .file_stream_write,
@@ -1066,6 +1078,93 @@ pub const DirSetFileTimestamps = struct {
 
     pub fn getResult(self: *const DirSetFileTimestamps) Error!void {
         return self.c.getResult(.dir_set_file_timestamps);
+    }
+};
+
+pub const DirSymLink = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_sym_link) {
+        true => if (@hasDecl(Backend, "DirSymLinkData")) Backend.DirSymLinkData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    target: []const u8,
+    link_path: []const u8,
+    flags: fs.SymLinkFlags,
+
+    pub const Error = fs.SymLinkError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, target: []const u8, link_path: []const u8, flags: fs.SymLinkFlags) DirSymLink {
+        return .{
+            .c = .init(.dir_sym_link),
+            .dir = dir,
+            .target = target,
+            .link_path = link_path,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const DirSymLink) Error!void {
+        return self.c.getResult(.dir_sym_link);
+    }
+};
+
+pub const DirReadLink = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: switch (Backend.capabilities.dir_read_link) {
+        true => if (@hasDecl(Backend, "DirReadLinkData")) Backend.DirReadLinkData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    buffer: []u8,
+
+    pub const Error = fs.ReadLinkError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, buffer: []u8) DirReadLink {
+        return .{
+            .c = .init(.dir_read_link),
+            .dir = dir,
+            .path = path,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const DirReadLink) Error!usize {
+        return self.c.getResult(.dir_read_link);
+    }
+};
+
+pub const DirHardLink = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_hard_link) {
+        true => if (@hasDecl(Backend, "DirHardLinkData")) Backend.DirHardLinkData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    old_dir: fs.fd_t,
+    old_path: []const u8,
+    new_dir: fs.fd_t,
+    new_path: []const u8,
+    flags: fs.HardLinkFlags,
+
+    pub const Error = fs.HardLinkError || Cancelable;
+
+    pub fn init(old_dir: fs.fd_t, old_path: []const u8, new_dir: fs.fd_t, new_path: []const u8, flags: fs.HardLinkFlags) DirHardLink {
+        return .{
+            .c = .init(.dir_hard_link),
+            .old_dir = old_dir,
+            .old_path = old_path,
+            .new_dir = new_dir,
+            .new_path = new_path,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const DirHardLink) Error!void {
+        return self.c.getResult(.dir_hard_link);
     }
 };
 
