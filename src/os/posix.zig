@@ -124,8 +124,21 @@ pub fn fchownat(dirfd: std.posix.fd_t, path: [*:0]const u8, owner: std.posix.uid
             group,
             flags,
         );
+    }
+    const libc_fchownat = struct {
+        extern "c" fn fchownat(fd: system.fd_t, path: [*:0]const u8, owner: system.uid_t, group: system.gid_t, flag: c_int) c_int;
+    }.fchownat;
+    const rc = libc_fchownat(dirfd, path, owner, group, @intCast(flags));
+    return @bitCast(@as(isize, rc));
+}
+
+pub fn fchmodat(dirfd: std.posix.fd_t, path: [*:0]const u8, mode: std.posix.mode_t) usize {
+    if (builtin.os.tag == .linux) {
+        return system.fchmodat(dirfd, path, mode);
     } else {
-        return @bitCast(@as(isize, std.c.fchownat(dirfd, path, owner, group, @bitCast(flags))));
+        // BSD/macOS: fchmodat takes 4 arguments, pass 0 for flags
+        const rc = system.fchmodat(dirfd, path, mode, 0);
+        return @bitCast(@as(isize, rc));
     }
 }
 
