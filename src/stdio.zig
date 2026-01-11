@@ -16,6 +16,7 @@ const groupSpawnTask = @import("runtime/group.zig").groupSpawnTask;
 const select = @import("select.zig");
 const zio_net = @import("net.zig");
 const zio_fs = @import("fs.zig");
+const zio_io = @import("io.zig");
 const os = @import("os/root.zig");
 const Futex = @import("sync/Futex.zig");
 const CompactWaitQueue = @import("utils/wait_queue.zig").CompactWaitQueue;
@@ -160,11 +161,10 @@ fn futexWakeImpl(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void 
 }
 
 fn dirCreateDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = permissions;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirCreateDir.init(dir.handle, sub_path, permissions.toMode());
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirCreateDirPathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
@@ -323,9 +323,24 @@ fn dirOpenDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, opti
 }
 
 fn dirCloseImpl(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
-    _ = userdata;
-    _ = dirs;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    rt.beginShield();
+    defer rt.endShield();
+
+    const max_batch = 16;
+    var ops: [max_batch]aio.DirClose = undefined;
+    var ptrs: [max_batch]*aio.Completion = undefined;
+
+    var i: usize = 0;
+    while (i < dirs.len) {
+        const batch_size = @min(dirs.len - i, max_batch);
+        for (0..batch_size) |j| {
+            ops[j] = aio.DirClose.init(dirs[i + j].handle);
+            ptrs[j] = &ops[j].c;
+        }
+        zio_io.runIoMulti(rt, ptrs[0..batch_size]) catch unreachable;
+        i += batch_size;
+    }
 }
 
 fn dirReadImpl(userdata: ?*anyopaque, reader: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
@@ -351,26 +366,24 @@ fn dirRealPathFileImpl(userdata: ?*anyopaque, dir: Io.Dir, path_name: []const u8
 }
 
 fn dirDeleteFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirDeleteFile.init(dir.handle, sub_path);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirDeleteDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteDirError!void {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirDeleteDir.init(dir.handle, sub_path);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirRenameImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8) Io.Dir.RenameError!void {
-    _ = userdata;
-    _ = old_dir;
-    _ = old_sub_path;
-    _ = new_dir;
-    _ = new_sub_path;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = aio.DirRename.init(old_dir.handle, old_sub_path, new_dir.handle, new_sub_path);
+    try zio_io.runIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirRenamePreserveImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8) Io.Dir.RenamePreserveError!void {
@@ -501,11 +514,23 @@ fn fileStatImpl(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.
 }
 
 fn fileCloseImpl(userdata: ?*anyopaque, files: []const Io.File) void {
-    // TODO: batch close operations
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    for (files) |file| {
-        var zio_file = zio_fs.File.fromFd(file.handle);
-        zio_file.close(rt);
+    rt.beginShield();
+    defer rt.endShield();
+
+    const max_batch = 16;
+    var ops: [max_batch]aio.FileClose = undefined;
+    var ptrs: [max_batch]*aio.Completion = undefined;
+
+    var i: usize = 0;
+    while (i < files.len) {
+        const batch_size = @min(files.len - i, max_batch);
+        for (0..batch_size) |j| {
+            ops[j] = aio.FileClose.init(files[i + j].handle);
+            ptrs[j] = &ops[j].c;
+        }
+        zio_io.runIoMulti(rt, ptrs[0..batch_size]) catch unreachable;
+        i += batch_size;
     }
 }
 
@@ -756,10 +781,23 @@ fn netWriteImpl(userdata: ?*anyopaque, dest: Io.net.Socket.Handle, header: []con
 }
 
 fn netCloseImpl(userdata: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
-    // TODO: batch close operations
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    for (handles) |handle| {
-        zio_net.netClose(rt, handle);
+    rt.beginShield();
+    defer rt.endShield();
+
+    const max_batch = 16;
+    var ops: [max_batch]aio.NetClose = undefined;
+    var ptrs: [max_batch]*aio.Completion = undefined;
+
+    var i: usize = 0;
+    while (i < handles.len) {
+        const batch_size = @min(handles.len - i, max_batch);
+        for (0..batch_size) |j| {
+            ops[j] = aio.NetClose.init(handles[i + j]);
+            ptrs[j] = &ops[j].c;
+        }
+        zio_io.runIoMulti(rt, ptrs[0..batch_size]) catch unreachable;
+        i += batch_size;
     }
 }
 
@@ -834,7 +872,7 @@ fn fileWriteFileStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []co
     _ = header;
     _ = reader;
     _ = count;
-    @panic("TODO: fileWriteFileStreaming");
+    return error.Unimplemented;
 }
 
 fn fileWriteFilePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, reader: *Io.File.Reader, count: Io.Limit, offset: u64) Io.File.WriteFilePositionalError!usize {
@@ -844,7 +882,7 @@ fn fileWriteFilePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []c
     _ = reader;
     _ = count;
     _ = offset;
-    @panic("TODO: fileWriteFilePositional");
+    return error.Unimplemented;
 }
 
 fn fileSyncImpl(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
@@ -1038,14 +1076,17 @@ fn netWriteFileImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, header:
     _ = header;
     _ = reader;
     _ = count;
-    @panic("TODO: netWriteFile");
+    return error.Unexpected;
 }
 
 fn netShutdownImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
-    _ = userdata;
-    _ = handle;
-    _ = how;
-    @panic("TODO: netShutdown");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const zio_how: zio_net.ShutdownHow = switch (how) {
+        .recv => .receive,
+        .send => .send,
+        .both => .both,
+    };
+    try zio_net.netShutdown(rt, handle, zio_how);
 }
 
 pub const vtable = Io.VTable{
@@ -1591,7 +1632,7 @@ test "Io: Unix domain socket listen/accept/connect/read/write" {
         fn mainTask(io: Io) !void {
             // Use a simple path for the socket
             const socket_path = "test_stdio_unix.sock";
-            defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), socket_path) catch {};
+            defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), socket_path) catch {};
 
             const addr = try Io.net.UnixAddress.init(socket_path);
             var server = try addr.listen(io, .{});
@@ -1639,7 +1680,7 @@ test "Io: File close" {
     const io = rt.io();
     const cwd = Io.Dir.cwd();
     const file_path = "test_stdio_file_close.txt";
-    defer os.fs.unlinkat(std.testing.allocator, cwd.handle, file_path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
 
     // Create file using Io.Dir
     const file = try cwd.createFile(io, file_path, .{});
@@ -1773,7 +1814,7 @@ test "Io: Dir createFile/openFile" {
 
     // Create a new file
     const created_file = try cwd.createFile(io, file_path, .{});
-    defer os.fs.unlinkat(std.testing.allocator, cwd.handle, file_path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
 
     // Write some data
     var write_buf = [_][]const u8{"hello world"};
@@ -1802,7 +1843,7 @@ test "Io: File stat" {
 
     // Create a file with known content
     const file = try cwd.createFile(io, file_path, .{});
-    defer os.fs.unlinkat(std.testing.allocator, cwd.handle, file_path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
 
     const test_data = "Hello, file stat!";
     var write_buf = [_][]const u8{test_data};
@@ -1833,7 +1874,7 @@ test "Io: Dir statFile" {
 
     // Create a file with known content
     const file = try cwd.createFile(io, file_path, .{});
-    defer os.fs.unlinkat(std.testing.allocator, cwd.handle, file_path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, file_path) catch {};
 
     const test_data = "Hello, stat path!";
     var write_buf = [_][]const u8{test_data};
