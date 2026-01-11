@@ -345,7 +345,7 @@ pub const DirEntryIterator = struct {
 
         // Advance to next entry
         self.index += switch (builtin.os.tag) {
-            .linux => entry.reclen,
+            .linux, .macos, .ios, .tvos, .watchos, .visionos => entry.reclen,
             .windows => if (entry.NextEntryOffset != 0)
                 entry.NextEntryOffset
             else
@@ -359,7 +359,7 @@ pub const DirEntryIterator = struct {
     fn backtrack(self: *DirEntryIterator, entry: *align(1) const RawEntry) void {
         // Revert to where this entry started
         self.index -= switch (builtin.os.tag) {
-            .linux => entry.reclen,
+            .linux, .macos, .ios, .tvos, .watchos, .visionos => entry.reclen,
             .windows => if (entry.NextEntryOffset != 0)
                 entry.NextEntryOffset
             else
@@ -375,6 +375,7 @@ pub const DirEntryIterator = struct {
                 const max_len = entry.reclen - @offsetOf(std.os.linux.dirent64, "name");
                 break :blk std.mem.sliceTo(name_ptr[0..max_len], 0);
             },
+            .macos, .ios, .tvos, .watchos, .visionos => entry.name[0..entry.namlen],
             .windows => blk: {
                 const name_ptr: [*]const u16 = @alignCast(@as([*]align(1) const u16, @ptrCast(&entry.FileName)));
                 const name_utf16 = name_ptr[0 .. entry.FileNameLength / 2];
@@ -394,14 +395,15 @@ pub const DirEntryIterator = struct {
 
     fn extractKind(_: *DirEntryIterator, entry: *align(1) const RawEntry) FileKind {
         return switch (builtin.os.tag) {
-            .linux => switch (entry.type) {
-                std.os.linux.DT.BLK => .block_device,
-                std.os.linux.DT.CHR => .character_device,
-                std.os.linux.DT.DIR => .directory,
-                std.os.linux.DT.FIFO => .named_pipe,
-                std.os.linux.DT.LNK => .sym_link,
-                std.os.linux.DT.REG => .file,
-                std.os.linux.DT.SOCK => .unix_domain_socket,
+            .linux, .macos, .ios, .tvos, .watchos, .visionos => switch (entry.type) {
+                std.posix.DT.BLK => .block_device,
+                std.posix.DT.CHR => .character_device,
+                std.posix.DT.DIR => .directory,
+                std.posix.DT.FIFO => .named_pipe,
+                std.posix.DT.LNK => .sym_link,
+                std.posix.DT.REG => .file,
+                std.posix.DT.SOCK => .unix_domain_socket,
+                std.posix.DT.WHT => .whiteout,
                 else => .unknown,
             },
             .windows => blk: {
@@ -426,7 +428,7 @@ pub const DirEntryIterator = struct {
 
     fn extractInode(_: *DirEntryIterator, entry: *align(1) const RawEntry) ino_t {
         return switch (builtin.os.tag) {
-            .linux => entry.ino,
+            .linux, .macos, .ios, .tvos, .watchos, .visionos => entry.ino,
             .windows => entry.FileIndex,
             else => entry.d_ino,
         };
@@ -445,6 +447,10 @@ pub const DirEntryIterator = struct {
                 const name_ptr: [*]const u8 = @ptrCast(&entry.name);
                 const max_len = entry.reclen - @offsetOf(std.os.linux.dirent64, "name");
                 const name = std.mem.sliceTo(name_ptr[0..max_len], 0);
+                break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
+            },
+            .macos, .ios, .tvos, .watchos, .visionos => blk: {
+                const name = entry.name[0..entry.namlen];
                 break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
             },
             else => blk: {
