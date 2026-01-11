@@ -59,6 +59,7 @@ pub const FileSize = completion.FileSize;
 pub const FileStat = completion.FileStat;
 pub const DirOpen = completion.DirOpen;
 pub const DirClose = completion.DirClose;
+pub const DirRead = completion.DirRead;
 pub const DirSetPermissions = completion.DirSetPermissions;
 pub const DirSetOwner = completion.DirSetOwner;
 pub const DirSetFilePermissions = completion.DirSetFilePermissions;
