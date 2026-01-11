@@ -142,6 +142,23 @@ pub fn fchmodat(dirfd: std.posix.fd_t, path: [*:0]const u8, mode: std.posix.mode
     }
 }
 
+pub fn faccessat(dirfd: std.posix.fd_t, path: [*:0]const u8, mode: u32, flags: u32) usize {
+    if (builtin.os.tag == .linux) {
+        return std.os.linux.syscall4(
+            .faccessat2,
+            @as(usize, @bitCast(@as(isize, dirfd))),
+            @intFromPtr(path),
+            mode,
+            flags,
+        );
+    }
+    const libc_faccessat = struct {
+        extern "c" fn faccessat(fd: system.fd_t, path: [*:0]const u8, mode: c_int, flag: c_int) c_int;
+    }.faccessat;
+    const rc = libc_faccessat(dirfd, path, @intCast(mode), @intCast(flags));
+    return @bitCast(@as(isize, rc));
+}
+
 pub const EFD = @import("eventfd.zig").EFD;
 pub const eventfd = @import("eventfd.zig").eventfd;
 pub const eventfd_read = @import("eventfd.zig").eventfd_read;

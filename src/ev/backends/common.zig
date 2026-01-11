@@ -33,6 +33,7 @@ const DirSetFileTimestamps = @import("../completion.zig").DirSetFileTimestamps;
 const DirSymLink = @import("../completion.zig").DirSymLink;
 const DirReadLink = @import("../completion.zig").DirReadLink;
 const DirHardLink = @import("../completion.zig").DirHardLink;
+const DirAccess = @import("../completion.zig").DirAccess;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 
@@ -430,6 +431,23 @@ pub fn dirHardLinkWork(work: *Work) void {
     const internal: *@FieldType(DirHardLink, "internal") = @fieldParentPtr("work", work);
     const data: *DirHardLink = @fieldParentPtr("internal", internal);
     handleDirHardLink(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir access operation
+pub fn handleDirAccess(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirAccess);
+    if (fs.dirAccess(allocator, data.dir, data.path, data.flags)) |_| {
+        c.setResult(.dir_access, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirAccess
+pub fn dirAccessWork(work: *Work) void {
+    const internal: *@FieldType(DirAccess, "internal") = @fieldParentPtr("work", work);
+    const data: *DirAccess = @fieldParentPtr("internal", internal);
+    handleDirAccess(&data.c, data.internal.allocator);
 }
 
 /// Helper to handle dir create dir operation

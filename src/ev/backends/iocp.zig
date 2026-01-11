@@ -469,6 +469,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_sym_link,
         .dir_read_link,
         .dir_hard_link,
+        .dir_access,
         => unreachable, // These are handled by thread pool (capabilities = false)
 
         .file_stream_poll => {
