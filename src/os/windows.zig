@@ -15,12 +15,17 @@ pub const SECURITY_ATTRIBUTES = std.os.windows.SECURITY_ATTRIBUTES;
 pub const PVOID = std.os.windows.PVOID;
 pub const SIZE_T = std.os.windows.SIZE_T;
 pub const NTSTATUS = std.os.windows.NTSTATUS;
+pub const BOOLEAN = std.os.windows.BOOLEAN;
+pub const IO_STATUS_BLOCK = std.os.windows.IO_STATUS_BLOCK;
+pub const FILE_BOTH_DIR_INFORMATION = std.os.windows.FILE_BOTH_DIR_INFORMATION;
+pub const FILE = std.os.windows.FILE;
 pub const PAPCFUNC = *const fn (ULONG_PTR) callconv(.winapi) void;
 pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(.winapi) BOOL;
 
 // Constants
 pub const TRUE: BOOL = 1;
 pub const FALSE: BOOL = 0;
+pub const NAME_MAX = std.os.windows.NAME_MAX;
 pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
 
 // DuplicateHandle options
@@ -249,6 +254,21 @@ pub extern "kernel32" fn SetConsoleCtrlHandler(
     HandlerRoutine: ?HANDLER_ROUTINE,
     Add: BOOL,
 ) callconv(.winapi) BOOL;
+
+// Directory functions (ntdll)
+pub extern "ntdll" fn NtQueryDirectoryFile(
+    FileHandle: HANDLE,
+    Event: ?HANDLE,
+    ApcRoutine: ?*anyopaque,
+    ApcContext: ?*anyopaque,
+    IoStatusBlock: *IO_STATUS_BLOCK,
+    FileInformation: [*]u8,
+    Length: ULONG,
+    FileInformationClass: FILE.INFORMATION_CLASS,
+    ReturnSingleEntry: BOOLEAN,
+    FileName: ?*anyopaque,
+    RestartScan: BOOLEAN,
+) callconv(.winapi) NTSTATUS;
 
 // Time functions (ntdll)
 pub extern "ntdll" fn RtlGetSystemTimePrecise() callconv(.winapi) LARGE_INTEGER;

@@ -36,6 +36,7 @@ pub const BackendCapabilities = struct {
     dir_read_link: bool = false,
     dir_hard_link: bool = false,
     dir_access: bool = false,
+    dir_read: bool = false,
     dir_real_path: bool = false,
     dir_real_path_file: bool = false,
     file_real_path: bool = false,
@@ -93,6 +94,7 @@ pub const Op = enum {
     dir_read_link,
     dir_hard_link,
     dir_access,
+    dir_read,
     dir_real_path,
     dir_real_path_file,
     file_real_path,
@@ -147,6 +149,7 @@ pub const Op = enum {
             .dir_read_link => DirReadLink,
             .dir_hard_link => DirHardLink,
             .dir_access => DirAccess,
+            .dir_read => DirRead,
             .dir_real_path => DirRealPath,
             .dir_real_path_file => DirRealPathFile,
             .file_real_path => FileRealPath,
@@ -203,6 +206,7 @@ pub const Op = enum {
             DirReadLink => .dir_read_link,
             DirHardLink => .dir_hard_link,
             DirAccess => .dir_access,
+            DirRead => .dir_read,
             DirRealPath => .dir_real_path,
             DirRealPathFile => .dir_real_path_file,
             FileRealPath => .file_real_path,
@@ -1525,6 +1529,33 @@ pub const DirClose = struct {
 
     pub fn getResult(self: *const DirClose) Error!void {
         return self.c.getResult(.dir_close);
+    }
+};
+
+pub const DirRead = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: switch (Backend.capabilities.dir_read) {
+        true => if (@hasDecl(Backend, "DirReadData")) Backend.DirReadData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    buffer: []u8,
+    restart: bool,
+
+    pub const Error = fs.DirReadError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, buffer: []u8, restart: bool) DirRead {
+        return .{
+            .c = .init(.dir_read),
+            .handle = handle,
+            .buffer = buffer,
+            .restart = restart,
+        };
+    }
+
+    pub fn getResult(self: *const DirRead) Error!usize {
+        return self.c.getResult(.dir_read);
     }
 };
 
