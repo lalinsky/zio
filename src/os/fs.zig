@@ -1576,7 +1576,7 @@ pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []co
     _ = flags;
 
     while (true) {
-        const rc = posix.system.fchmodat(dir, path_z.ptr, mode);
+        const rc = posix.fchmodat(dir, path_z.ptr, mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -1643,4 +1643,183 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
             else => |err| return errnoToFileSetTimestampsError(err),
         }
     }
+}
+
+pub const SymLinkError = error{
+    AccessDenied,
+    PermissionDenied,
+    DiskQuota,
+    PathAlreadyExists,
+    SymLinkLoop,
+    FileNotFound,
+    ReadOnlyFileSystem,
+    NotDir,
+    NameTooLong,
+    NoSpaceLeft,
+    SystemResources,
+    Canceled,
+    Unexpected,
+};
+
+pub const SymLinkFlags = struct {
+    is_directory: bool = false,
+};
+
+/// Create a symbolic link using symlinkat() syscall
+pub fn dirSymLink(allocator: std.mem.Allocator, dir: fd_t, target: []const u8, link_path: []const u8, flags: SymLinkFlags) SymLinkError!void {
+    _ = flags;
+
+    if (builtin.os.tag == .windows) {
+        // TODO: Implement Windows symlink creation via CreateSymbolicLinkW
+        return error.Unexpected;
+    }
+
+    const target_z = allocator.dupeZ(u8, target) catch return error.SystemResources;
+    defer allocator.free(target_z);
+
+    const link_path_z = allocator.dupeZ(u8, link_path) catch return error.SystemResources;
+    defer allocator.free(link_path_z);
+
+    while (true) {
+        const rc = posix.system.symlinkat(target_z.ptr, dir, link_path_z.ptr);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToSymLinkError(err),
+        }
+    }
+}
+
+pub fn errnoToSymLinkError(errno: posix.system.E) SymLinkError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .DQUOT => error.DiskQuota,
+        .EXIST => error.PathAlreadyExists,
+        .LOOP => error.SymLinkLoop,
+        .NOENT => error.FileNotFound,
+        .ROFS => error.ReadOnlyFileSystem,
+        .NOTDIR => error.NotDir,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOSPC => error.NoSpaceLeft,
+        .NOMEM => error.SystemResources,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub const ReadLinkError = error{
+    AccessDenied,
+    PermissionDenied,
+    FileNotFound,
+    NotLink,
+    SymLinkLoop,
+    NameTooLong,
+    NotDir,
+    SystemResources,
+    Canceled,
+    Unexpected,
+};
+
+/// Read a symbolic link using readlinkat() syscall
+pub fn dirReadLink(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) ReadLinkError!usize {
+    if (builtin.os.tag == .windows) {
+        // TODO: Implement Windows readlink via DeviceIoControl with FSCTL_GET_REPARSE_POINT
+        return error.Unexpected;
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    while (true) {
+        const rc = posix.system.readlinkat(dir, path_z.ptr, buffer.ptr, buffer.len);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToReadLinkError(err),
+        }
+    }
+}
+
+pub fn errnoToReadLinkError(errno: posix.system.E) ReadLinkError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .NOENT => error.FileNotFound,
+        .INVAL => error.NotLink,
+        .LOOP => error.SymLinkLoop,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOTDIR => error.NotDir,
+        .NOMEM => error.SystemResources,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub const HardLinkError = error{
+    AccessDenied,
+    PermissionDenied,
+    DiskQuota,
+    PathAlreadyExists,
+    SymLinkLoop,
+    FileNotFound,
+    ReadOnlyFileSystem,
+    NotDir,
+    NameTooLong,
+    NoSpaceLeft,
+    SystemResources,
+    CrossDevice,
+    Canceled,
+    Unexpected,
+};
+
+pub const HardLinkFlags = struct {
+    follow_symlinks: bool = false,
+};
+
+/// Create a hard link using linkat() syscall
+pub fn dirHardLink(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8, flags: HardLinkFlags) HardLinkError!void {
+    if (builtin.os.tag == .windows) {
+        // TODO: Implement Windows hardlink via CreateHardLinkW
+        return error.Unexpected;
+    }
+
+    const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+    defer allocator.free(old_path_z);
+
+    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    defer allocator.free(new_path_z);
+
+    const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
+
+    while (true) {
+        const rc = posix.system.linkat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToHardLinkError(err),
+        }
+    }
+}
+
+pub fn errnoToHardLinkError(errno: posix.system.E) HardLinkError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .DQUOT => error.DiskQuota,
+        .EXIST => error.PathAlreadyExists,
+        .LOOP => error.SymLinkLoop,
+        .NOENT => error.FileNotFound,
+        .ROFS => error.ReadOnlyFileSystem,
+        .NOTDIR => error.NotDir,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOSPC => error.NoSpaceLeft,
+        .NOMEM => error.SystemResources,
+        .XDEV => error.CrossDevice,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
 }

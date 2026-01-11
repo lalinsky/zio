@@ -30,6 +30,9 @@ const DirSetOwner = @import("../completion.zig").DirSetOwner;
 const DirSetFilePermissions = @import("../completion.zig").DirSetFilePermissions;
 const DirSetFileOwner = @import("../completion.zig").DirSetFileOwner;
 const DirSetFileTimestamps = @import("../completion.zig").DirSetFileTimestamps;
+const DirSymLink = @import("../completion.zig").DirSymLink;
+const DirReadLink = @import("../completion.zig").DirReadLink;
+const DirHardLink = @import("../completion.zig").DirHardLink;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 
@@ -376,6 +379,57 @@ pub fn dirSetFileTimestampsWork(work: *Work) void {
     const internal: *@FieldType(DirSetFileTimestamps, "internal") = @fieldParentPtr("work", work);
     const data: *DirSetFileTimestamps = @alignCast(@fieldParentPtr("internal", internal));
     handleDirSetFileTimestamps(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir sym link operation
+pub fn handleDirSymLink(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirSymLink);
+    if (fs.dirSymLink(allocator, data.dir, data.target, data.link_path, data.flags)) |_| {
+        c.setResult(.dir_sym_link, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirSymLink
+pub fn dirSymLinkWork(work: *Work) void {
+    const internal: *@FieldType(DirSymLink, "internal") = @fieldParentPtr("work", work);
+    const data: *DirSymLink = @fieldParentPtr("internal", internal);
+    handleDirSymLink(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir read link operation
+pub fn handleDirReadLink(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirReadLink);
+    if (fs.dirReadLink(allocator, data.dir, data.path, data.buffer)) |len| {
+        c.setResult(.dir_read_link, len);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirReadLink
+pub fn dirReadLinkWork(work: *Work) void {
+    const internal: *@FieldType(DirReadLink, "internal") = @fieldParentPtr("work", work);
+    const data: *DirReadLink = @fieldParentPtr("internal", internal);
+    handleDirReadLink(&data.c, data.internal.allocator);
+}
+
+/// Helper to handle dir hard link operation
+pub fn handleDirHardLink(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirHardLink);
+    if (fs.dirHardLink(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path, data.flags)) |_| {
+        c.setResult(.dir_hard_link, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Work function for DirHardLink
+pub fn dirHardLinkWork(work: *Work) void {
+    const internal: *@FieldType(DirHardLink, "internal") = @fieldParentPtr("work", work);
+    const data: *DirHardLink = @fieldParentPtr("internal", internal);
+    handleDirHardLink(&data.c, data.internal.allocator);
 }
 
 /// Helper to handle dir create dir operation
