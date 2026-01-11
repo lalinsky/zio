@@ -106,6 +106,23 @@ pub const FileOpenError = error{
     Unexpected,
 };
 
+pub const DirOpenError = error{
+    AccessDenied,
+    PermissionDenied,
+    SymLinkLoop,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    NoDevice,
+    FileNotFound,
+    NameTooLong,
+    SystemResources,
+    NotDir,
+    BadPathName,
+    NetworkNotFound,
+    Canceled,
+    Unexpected,
+};
+
 pub const FileReadError = error{
     AccessDenied,
     WouldBlock,
@@ -338,7 +355,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
 }
 
 /// Open a directory using openat() syscall
-pub fn opendirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) FileOpenError!fd_t {
+pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd_t {
     if (builtin.os.tag == .windows) {
         // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
@@ -397,7 +414,7 @@ pub fn opendirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flag
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            else => |err| return errnoToFileOpenError(err),
+            else => |err| return errnoToDirOpenError(err),
         }
     }
 }
@@ -921,6 +938,24 @@ pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
         .EXIST => error.PathAlreadyExists,
         .BUSY => error.DeviceBusy,
         .TXTBSY => error.FileBusy,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub fn errnoToDirOpenError(errno: posix.system.E) DirOpenError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .LOOP => error.SymLinkLoop,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NODEV => error.NoDevice,
+        .NOENT => error.FileNotFound,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOMEM => error.SystemResources,
+        .NOTDIR => error.NotDir,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
@@ -1522,4 +1557,90 @@ pub fn errnoToFileSetTimestampsError(errno: posix.system.E) FileSetTimestampsErr
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
+}
+
+/// Options for path-based permission/owner operations
+pub const PathSetFlags = struct {
+    follow_symlinks: bool = true,
+};
+
+/// Set permissions of a file relative to a directory (fchmodat)
+pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: mode_t, flags: PathSetFlags) FileSetPermissionsError!void {
+    // Windows doesn't have POSIX-style permissions
+    if (builtin.os.tag == .windows) return;
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.Unexpected;
+    defer allocator.free(path_z);
+
+    // Note: AT_SYMLINK_NOFOLLOW for fchmodat is not supported on Linux
+    _ = flags;
+
+    while (true) {
+        const rc = posix.system.fchmodat(dir, path_z.ptr, mode);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSetPermissionsError(err),
+        }
+    }
+}
+
+/// Set owner of a file relative to a directory (fchownat)
+pub fn dirSetFileOwner(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, uid: ?uid_t, gid: ?gid_t, flags: PathSetFlags) FileSetOwnerError!void {
+    // Windows doesn't have POSIX-style ownership
+    if (builtin.os.tag == .windows) return;
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.Unexpected;
+    defer allocator.free(path_z);
+
+    // -1 means "don't change"
+    const uid_arg: uid_t = uid orelse @bitCast(@as(i32, -1));
+    const gid_arg: gid_t = gid orelse @bitCast(@as(i32, -1));
+
+    const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
+
+    while (true) {
+        const rc = posix.fchownat(dir, path_z.ptr, uid_arg, gid_arg, at_flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSetOwnerError(err),
+        }
+    }
+}
+
+/// Set timestamps of a file relative to a directory (utimensat)
+pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, timestamps: FileTimestamps, flags: PathSetFlags) FileSetTimestampsError!void {
+    if (builtin.os.tag == .windows) {
+        // On Windows, we need to open the file first, set timestamps, then close
+        // For now, return success (no-op like other Windows permission functions)
+        return;
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.Unexpected;
+    defer allocator.free(path_z);
+
+    const UTIME_OMIT = 0x3ffffffe;
+
+    const times: [2]posix.system.timespec = .{
+        if (timestamps.atime) |ns|
+            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
+        else
+            .{ .sec = 0, .nsec = UTIME_OMIT },
+        if (timestamps.mtime) |ns|
+            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
+        else
+            .{ .sec = 0, .nsec = UTIME_OMIT },
+    };
+
+    const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
+
+    while (true) {
+        const rc = posix.system.utimensat(dir, path_z.ptr, &times, at_flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSetTimestampsError(err),
+        }
+    }
 }

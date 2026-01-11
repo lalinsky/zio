@@ -27,6 +27,11 @@ pub const BackendCapabilities = struct {
     file_stat: bool = false,
     dir_open: bool = false,
     dir_close: bool = false,
+    dir_set_permissions: bool = false,
+    dir_set_owner: bool = false,
+    dir_set_file_permissions: bool = false,
+    dir_set_file_owner: bool = false,
+    dir_set_file_timestamps: bool = false,
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
     is_multi_threaded: bool = false,
@@ -71,6 +76,11 @@ pub const Op = enum {
     file_stat,
     dir_open,
     dir_close,
+    dir_set_permissions,
+    dir_set_owner,
+    dir_set_file_permissions,
+    dir_set_file_owner,
+    dir_set_file_timestamps,
     file_stream_poll,
     file_stream_read,
     file_stream_write,
@@ -112,6 +122,11 @@ pub const Op = enum {
             .file_stat => FileStat,
             .dir_open => DirOpen,
             .dir_close => DirClose,
+            .dir_set_permissions => DirSetPermissions,
+            .dir_set_owner => DirSetOwner,
+            .dir_set_file_permissions => DirSetFilePermissions,
+            .dir_set_file_owner => DirSetFileOwner,
+            .dir_set_file_timestamps => DirSetFileTimestamps,
             .file_stream_poll => FileStreamPoll,
             .file_stream_read => FileStreamRead,
             .file_stream_write => FileStreamWrite,
@@ -155,6 +170,11 @@ pub const Op = enum {
             FileStat => .file_stat,
             DirOpen => .dir_open,
             DirClose => .dir_close,
+            DirSetPermissions => .dir_set_permissions,
+            DirSetOwner => .dir_set_owner,
+            DirSetFilePermissions => .dir_set_file_permissions,
+            DirSetFileOwner => .dir_set_file_owner,
+            DirSetFileTimestamps => .dir_set_file_timestamps,
             FileStreamPoll => .file_stream_poll,
             FileStreamRead => .file_stream_read,
             FileStreamWrite => .file_stream_write,
@@ -908,6 +928,147 @@ pub const FileSetTimestamps = struct {
     }
 };
 
+pub const DirSetPermissions = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_set_permissions) {
+        true => if (@hasDecl(Backend, "DirSetPermissionsData")) Backend.DirSetPermissionsData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    mode: fs.mode_t,
+
+    pub const Error = fs.FileSetPermissionsError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, mode: fs.mode_t) DirSetPermissions {
+        return .{
+            .c = .init(.dir_set_permissions),
+            .handle = handle,
+            .mode = mode,
+        };
+    }
+
+    pub fn getResult(self: *const DirSetPermissions) Error!void {
+        return self.c.getResult(.dir_set_permissions);
+    }
+};
+
+pub const DirSetOwner = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_set_owner) {
+        true => if (@hasDecl(Backend, "DirSetOwnerData")) Backend.DirSetOwnerData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    uid: ?fs.uid_t,
+    gid: ?fs.gid_t,
+
+    pub const Error = fs.FileSetOwnerError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, uid: ?fs.uid_t, gid: ?fs.gid_t) DirSetOwner {
+        return .{
+            .c = .init(.dir_set_owner),
+            .handle = handle,
+            .uid = uid,
+            .gid = gid,
+        };
+    }
+
+    pub fn getResult(self: *const DirSetOwner) Error!void {
+        return self.c.getResult(.dir_set_owner);
+    }
+};
+
+pub const DirSetFilePermissions = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_set_file_permissions) {
+        true => if (@hasDecl(Backend, "DirSetFilePermissionsData")) Backend.DirSetFilePermissionsData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    mode: fs.mode_t,
+    flags: fs.PathSetFlags,
+
+    pub const Error = fs.FileSetPermissionsError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, mode: fs.mode_t, flags: fs.PathSetFlags) DirSetFilePermissions {
+        return .{
+            .c = .init(.dir_set_file_permissions),
+            .dir = dir,
+            .path = path,
+            .mode = mode,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const DirSetFilePermissions) Error!void {
+        return self.c.getResult(.dir_set_file_permissions);
+    }
+};
+
+pub const DirSetFileOwner = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_set_file_owner) {
+        true => if (@hasDecl(Backend, "DirSetFileOwnerData")) Backend.DirSetFileOwnerData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    uid: ?fs.uid_t,
+    gid: ?fs.gid_t,
+    flags: fs.PathSetFlags,
+
+    pub const Error = fs.FileSetOwnerError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, uid: ?fs.uid_t, gid: ?fs.gid_t, flags: fs.PathSetFlags) DirSetFileOwner {
+        return .{
+            .c = .init(.dir_set_file_owner),
+            .dir = dir,
+            .path = path,
+            .uid = uid,
+            .gid = gid,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const DirSetFileOwner) Error!void {
+        return self.c.getResult(.dir_set_file_owner);
+    }
+};
+
+pub const DirSetFileTimestamps = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_set_file_timestamps) {
+        true => if (@hasDecl(Backend, "DirSetFileTimestampsData")) Backend.DirSetFileTimestampsData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    timestamps: fs.FileTimestamps,
+    flags: fs.PathSetFlags,
+
+    pub const Error = fs.FileSetTimestampsError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, timestamps: fs.FileTimestamps, flags: fs.PathSetFlags) DirSetFileTimestamps {
+        return .{
+            .c = .init(.dir_set_file_timestamps),
+            .dir = dir,
+            .path = path,
+            .timestamps = timestamps,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const DirSetFileTimestamps) Error!void {
+        return self.c.getResult(.dir_set_file_timestamps);
+    }
+};
+
 pub const DirCreateDir = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
@@ -1076,7 +1237,7 @@ pub const DirOpen = struct {
     path: []const u8,
     flags: fs.DirOpenFlags,
 
-    pub const Error = fs.FileOpenError || Cancelable;
+    pub const Error = fs.DirOpenError || Cancelable;
 
     pub fn init(dir: fs.fd_t, path: []const u8, flags: fs.DirOpenFlags) DirOpen {
         return .{
