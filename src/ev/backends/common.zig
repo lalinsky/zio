@@ -13,8 +13,14 @@ const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
-const FileRename = @import("../completion.zig").FileRename;
-const FileDelete = @import("../completion.zig").FileDelete;
+const FileSetSize = @import("../completion.zig").FileSetSize;
+const FileSetPermissions = @import("../completion.zig").FileSetPermissions;
+const FileSetOwner = @import("../completion.zig").FileSetOwner;
+const FileSetTimestamps = @import("../completion.zig").FileSetTimestamps;
+const DirCreateDir = @import("../completion.zig").DirCreateDir;
+const DirRename = @import("../completion.zig").DirRename;
+const DirDeleteFile = @import("../completion.zig").DirDeleteFile;
+const DirDeleteDir = @import("../completion.zig").DirDeleteDir;
 const FileSize = @import("../completion.zig").FileSize;
 const FileStat = @import("../completion.zig").FileStat;
 const DirOpen = @import("../completion.zig").DirOpen;
@@ -127,8 +133,48 @@ pub fn handleFileWrite(c: *Completion) void {
 /// Helper to handle file sync operation
 pub fn handleFileSync(c: *Completion) void {
     const data = c.cast(FileSync);
-    if (fs.sync(data.handle, data.flags)) |_| {
+    if (fs.fileSync(data.handle, data.flags)) |_| {
         c.setResult(.file_sync, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle file set size operation
+pub fn handleFileSetSize(c: *Completion) void {
+    const data = c.cast(FileSetSize);
+    if (fs.fileSetSize(data.handle, data.length)) |_| {
+        c.setResult(.file_set_size, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle file set permissions operation
+pub fn handleFileSetPermissions(c: *Completion) void {
+    const data = c.cast(FileSetPermissions);
+    if (fs.fileSetPermissions(data.handle, data.mode)) |_| {
+        c.setResult(.file_set_permissions, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle file set owner operation
+pub fn handleFileSetOwner(c: *Completion) void {
+    const data = c.cast(FileSetOwner);
+    if (fs.fileSetOwner(data.handle, data.uid, data.gid)) |_| {
+        c.setResult(.file_set_owner, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle file set timestamps operation
+pub fn handleFileSetTimestamps(c: *Completion) void {
+    const data = c.cast(FileSetTimestamps);
+    if (fs.fileSetTimestamps(data.handle, data.timestamps)) |_| {
+        c.setResult(.file_set_timestamps, {});
     } else |err| {
         c.setError(err);
     }
@@ -214,44 +260,106 @@ pub fn fileSyncWork(work: *Work) void {
     handleFileSync(&file_sync.c);
 }
 
-/// Helper to handle file rename operation
-pub fn handleFileRename(c: *Completion, allocator: std.mem.Allocator) void {
-    const data = c.cast(FileRename);
+/// Work function for FileSetSize - performs blocking ftruncate() syscall
+pub fn fileSetSizeWork(work: *Work) void {
+    const internal: *@FieldType(FileSetSize, "internal") = @fieldParentPtr("work", work);
+    const file_set_size: *FileSetSize = @fieldParentPtr("internal", internal);
+    handleFileSetSize(&file_set_size.c);
+}
+
+/// Work function for FileSetPermissions - performs blocking fchmod() syscall
+pub fn fileSetPermissionsWork(work: *Work) void {
+    const internal: *@FieldType(FileSetPermissions, "internal") = @fieldParentPtr("work", work);
+    const file_set_permissions: *FileSetPermissions = @fieldParentPtr("internal", internal);
+    handleFileSetPermissions(&file_set_permissions.c);
+}
+
+/// Work function for FileSetOwner - performs blocking fchown() syscall
+pub fn fileSetOwnerWork(work: *Work) void {
+    const internal: *@FieldType(FileSetOwner, "internal") = @fieldParentPtr("work", work);
+    const file_set_owner: *FileSetOwner = @fieldParentPtr("internal", internal);
+    handleFileSetOwner(&file_set_owner.c);
+}
+
+/// Work function for FileSetTimestamps - performs blocking futimens() syscall
+pub fn fileSetTimestampsWork(work: *Work) void {
+    const internal: *@FieldType(FileSetTimestamps, "internal") = @fieldParentPtr("work", work);
+    const file_set_timestamps: *FileSetTimestamps = @alignCast(@fieldParentPtr("internal", internal));
+    handleFileSetTimestamps(&file_set_timestamps.c);
+}
+
+/// Helper to handle dir create dir operation
+pub fn handleDirCreateDir(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirCreateDir);
+    if (fs.mkdirat(allocator, data.dir, data.path, data.mode)) |_| {
+        c.setResult(.dir_create_dir, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle dir rename operation
+pub fn handleDirRename(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirRename);
     if (fs.renameat(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
-        c.setResult(.file_rename, {});
+        c.setResult(.dir_rename, {});
     } else |err| {
         c.setError(err);
     }
 }
 
-/// Helper to handle file delete operation
-pub fn handleFileDelete(c: *Completion, allocator: std.mem.Allocator) void {
-    const data = c.cast(FileDelete);
-    if (fs.unlinkat(allocator, data.dir, data.path)) |_| {
-        c.setResult(.file_delete, {});
+/// Helper to handle dir delete file operation
+pub fn handleDirDeleteFile(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirDeleteFile);
+    if (fs.dirDeleteFile(allocator, data.dir, data.path)) |_| {
+        c.setResult(.dir_delete_file, {});
     } else |err| {
         c.setError(err);
     }
 }
 
-/// Work function for FileRename - performs blocking renameat() syscall
-pub fn fileRenameWork(work: *Work) void {
-    const internal: *@FieldType(FileRename, "internal") = @fieldParentPtr("work", work);
-    const file_rename: *FileRename = @fieldParentPtr("internal", internal);
-    handleFileRename(&file_rename.c, file_rename.internal.allocator);
+/// Helper to handle dir delete dir operation
+pub fn handleDirDeleteDir(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirDeleteDir);
+    if (fs.dirDeleteDir(allocator, data.dir, data.path)) |_| {
+        c.setResult(.dir_delete_dir, {});
+    } else |err| {
+        c.setError(err);
+    }
 }
 
-/// Work function for FileDelete - performs blocking unlinkat() syscall
-pub fn fileDeleteWork(work: *Work) void {
-    const internal: *@FieldType(FileDelete, "internal") = @fieldParentPtr("work", work);
-    const file_delete: *FileDelete = @fieldParentPtr("internal", internal);
-    handleFileDelete(&file_delete.c, file_delete.internal.allocator);
+/// Work function for DirCreateDir - performs blocking mkdirat() syscall
+pub fn dirCreateDirWork(work: *Work) void {
+    const internal: *@FieldType(DirCreateDir, "internal") = @fieldParentPtr("work", work);
+    const dir_create_dir: *DirCreateDir = @fieldParentPtr("internal", internal);
+    handleDirCreateDir(&dir_create_dir.c, dir_create_dir.internal.allocator);
+}
+
+/// Work function for DirRename - performs blocking renameat() syscall
+pub fn dirRenameWork(work: *Work) void {
+    const internal: *@FieldType(DirRename, "internal") = @fieldParentPtr("work", work);
+    const dir_rename: *DirRename = @fieldParentPtr("internal", internal);
+    handleDirRename(&dir_rename.c, dir_rename.internal.allocator);
+}
+
+/// Work function for DirDeleteFile - performs blocking unlinkat() syscall
+pub fn dirDeleteFileWork(work: *Work) void {
+    const internal: *@FieldType(DirDeleteFile, "internal") = @fieldParentPtr("work", work);
+    const dir_delete_file: *DirDeleteFile = @fieldParentPtr("internal", internal);
+    handleDirDeleteFile(&dir_delete_file.c, dir_delete_file.internal.allocator);
+}
+
+/// Work function for DirDeleteDir - performs blocking unlinkat() syscall with AT_REMOVEDIR
+pub fn dirDeleteDirWork(work: *Work) void {
+    const internal: *@FieldType(DirDeleteDir, "internal") = @fieldParentPtr("work", work);
+    const dir_delete_dir: *DirDeleteDir = @fieldParentPtr("internal", internal);
+    handleDirDeleteDir(&dir_delete_dir.c, dir_delete_dir.internal.allocator);
 }
 
 /// Helper to handle file size operation
 pub fn handleFileSize(c: *Completion) void {
     const data = c.cast(FileSize);
-    if (fs.fsize(data.handle)) |size| {
+    if (fs.fileSize(data.handle)) |size| {
         c.setResult(.file_size, size);
     } else |err| {
         c.setError(err);

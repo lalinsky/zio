@@ -15,8 +15,10 @@ const FileClose = @import("completion.zig").FileClose;
 const FileRead = @import("completion.zig").FileRead;
 const FileWrite = @import("completion.zig").FileWrite;
 const FileSync = @import("completion.zig").FileSync;
-const FileRename = @import("completion.zig").FileRename;
-const FileDelete = @import("completion.zig").FileDelete;
+const DirCreateDir = @import("completion.zig").DirCreateDir;
+const DirRename = @import("completion.zig").DirRename;
+const DirDeleteFile = @import("completion.zig").DirDeleteFile;
+const DirDeleteDir = @import("completion.zig").DirDeleteDir;
 const FileSize = @import("completion.zig").FileSize;
 const FileStat = @import("completion.zig").FileStat;
 const DirOpen = @import("completion.zig").DirOpen;
@@ -353,7 +355,7 @@ pub const Loop = struct {
                 thread_pool.cancel(work);
             },
 
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat => |op| {
                 if (!@field(Backend.capabilities, @tagName(op))) {
                     const thread_pool = self.thread_pool orelse unreachable;
                     const op_data = completion.cast(op.toType());
@@ -477,7 +479,7 @@ pub const Loop = struct {
                 // Regular backend operation
                 // Route file operations to thread pool for backends without native support
                 switch (completion.op) {
-                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat, .dir_open, .dir_close => |op| {
+                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
                         if (!@field(Backend.capabilities, @tagName(op))) {
                             self.submitFileOpToThreadPool(completion);
                             return;
@@ -615,7 +617,7 @@ pub const Loop = struct {
         self.state.active += 1;
 
         switch (completion.op) {
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_rename, .file_delete, .file_size, .file_stat, .dir_open, .dir_close => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close => |op| {
                 if (@field(Backend.capabilities, @tagName(op))) {
                     unreachable;
                 }
@@ -627,8 +629,14 @@ pub const Loop = struct {
                     .file_read => common.fileReadWork,
                     .file_write => common.fileWriteWork,
                     .file_sync => common.fileSyncWork,
-                    .file_rename => common.fileRenameWork,
-                    .file_delete => common.fileDeleteWork,
+                    .file_set_size => common.fileSetSizeWork,
+                    .file_set_permissions => common.fileSetPermissionsWork,
+                    .file_set_owner => common.fileSetOwnerWork,
+                    .file_set_timestamps => common.fileSetTimestampsWork,
+                    .dir_create_dir => common.dirCreateDirWork,
+                    .dir_rename => common.dirRenameWork,
+                    .dir_delete_file => common.dirDeleteFileWork,
+                    .dir_delete_dir => common.dirDeleteDirWork,
                     .file_size => common.fileSizeWork,
                     .file_stat => common.fileStatWork,
                     .dir_open => common.dirOpenWork,

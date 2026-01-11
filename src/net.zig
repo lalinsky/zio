@@ -8,9 +8,9 @@ const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
 
-const waitForIo = @import("io.zig").waitForIo;
-const genericCallback = @import("io.zig").genericCallback;
-const fillBuf = @import("io.zig").fillBuf;
+const zio_io = @import("io.zig");
+const runIo = zio_io.runIo;
+const fillBuf = zio_io.fillBuf;
 
 const Handle = ev.Backend.NetHandle;
 
@@ -515,33 +515,19 @@ pub const Socket = struct {
 
     /// Bind the socket to an address
     pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         // Copy addr to self.address so NetBind can update it with actual bound address
         self.address = addr;
         var addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&self.address.any));
 
         var op = ev.NetBind.init(self.handle, &self.address.any, &addr_len);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
+        try runIo(rt, &op.c);
         try op.getResult();
     }
 
     /// Mark the socket as a listening socket
     pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.NetListen.init(self.handle, backlog);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
+        try runIo(rt, &op.c);
         try op.getResult();
     }
 
@@ -572,22 +558,13 @@ pub const Socket = struct {
     }
 
     fn receiveFromRecvfrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var storage: [1]os.iovec = undefined;
         var result: ReceiveFromResult = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
 
         var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         result.len = try op.getResult();
-
         return result;
     }
 
@@ -604,18 +581,10 @@ pub const Socket = struct {
     }
 
     fn sendToSendto(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var storage: [1]os.iovec_const = undefined;
         const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return try op.getResult();
     }
 
@@ -664,16 +633,8 @@ pub const Stream = struct {
     /// Returns the number of bytes read, which may be less than requested.
     /// A return value of 0 indicates end-of-stream.
     pub fn readBuf(self: Stream, rt: *Runtime, buffers: []ev.ReadBuf) !usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.NetRecv.init(self.socket.handle, buffers, .{});
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return op.getResult() catch |err| switch (err) {
             error.EOF => 0, // EOF is not an error for streams
             else => err,
@@ -701,16 +662,8 @@ pub const Stream = struct {
     /// Low-level write function that accepts ev.WriteBuf slice directly.
     /// Returns the number of bytes written, which may be less than requested.
     pub fn writeBuf(self: Stream, rt: *Runtime, buffers: []const ev.WriteBuf) !usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.NetSend.init(self.socket.handle, buffers, .{});
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return try op.getResult();
     }
 
@@ -828,30 +781,14 @@ pub const Stream = struct {
 };
 
 fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var op = ev.NetOpen.init(@enumFromInt(family), .stream, .{});
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
+    try runIo(rt, &op.c);
     return try op.getResult();
 }
 
 fn createDatagramSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var op = ev.NetOpen.init(@enumFromInt(family), .dgram, .{});
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
+    try runIo(rt, &op.c);
     return try op.getResult();
 }
 
@@ -948,106 +885,56 @@ pub fn netBindUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.BindOpt
 }
 
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: [][]u8) !usize {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     // Convert [][]u8 to ReadBuf
     var storage: [16]os.iovec = undefined;
     const read_bufs = ev.ReadBuf.fromSlices(bufs, &storage);
 
     var op = ev.NetRecv.init(fd, read_bufs, .{});
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
+    try runIo(rt, &op.c);
     return try op.getResult();
 }
 
 pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []const u8, splat: usize) !usize {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var splat_buf: [64]u8 = undefined;
     var slices: [16][]const u8 = undefined;
     const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
 
     var storage: [16]os.iovec_const = undefined;
     var op = ev.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage), .{});
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
+    try runIo(rt, &op.c);
     return try op.getResult();
 }
 
 pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var peer_addr: Address = undefined;
     var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
 
     var op = ev.NetAccept.init(fd, &peer_addr.any, &peer_addr_len);
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
+    try runIo(rt, &op.c);
     const handle = try op.getResult();
-
     return .{ .socket = .{ .handle = handle, .address = peer_addr } };
 }
 
 pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var addr_copy = addr;
     const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
 
     var op = ev.NetConnect.init(fd, &addr_copy.any, addr_len);
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
-    return try op.getResult();
+    try runIo(rt, &op.c);
+    try op.getResult();
 }
 
 pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var op = ev.NetShutdown.init(fd, how);
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
-    return try op.getResult();
+    try runIo(rt, &op.c);
+    try op.getResult();
 }
 
 pub fn netClose(rt: *Runtime, fd: Handle) void {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var op = ev.NetClose.init(fd);
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
     rt.beginShield();
     defer rt.endShield();
-
-    executor.loop.add(&op.c);
-    waitForIo(rt, &op.c) catch {};
-
+    runIo(rt, &op.c) catch {};
     _ = op.getResult() catch {};
 }
 
@@ -1426,7 +1313,7 @@ test "UnixAddress: init" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     const addr = try UnixAddress.init(path);
     try std.testing.expectEqual(os.net.AF.UNIX, addr.any.family);
@@ -1578,7 +1465,7 @@ test "UnixAddress: listen/accept/connect/read/write" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     var write_buffer: [32]u8 = undefined;
     const addr = try UnixAddress.init(path);
@@ -1604,7 +1491,7 @@ test "UnixAddress: listen/accept/connect/read/write unbuffered" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     const addr = try UnixAddress.init(path);
     try checkListen(addr, UnixAddress.ListenOptions{}, &.{});
@@ -1642,10 +1529,10 @@ test "UnixAddress: bind/sendTo/receiveFrom" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const server_path = "zio-test-udp-server.sock";
-    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), server_path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), server_path) catch {};
 
     const client_path = "zio-test-udp-client.sock";
-    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), client_path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), client_path) catch {};
 
     const server_addr = try UnixAddress.init(server_path);
     const client_addr = try UnixAddress.init(client_path);
@@ -1656,7 +1543,7 @@ test "UnixAddress: listen/accept/connect/read/EOF" {
     if (!has_unix_sockets) return error.SkipZigTest;
 
     const path = "zio-test-socket.sock";
-    defer os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
 
     const addr = try UnixAddress.init(path);
     try checkShutdown(addr, UnixAddress.ListenOptions{});

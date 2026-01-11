@@ -171,8 +171,7 @@ pub const ShutdownHow = enum {
 };
 
 pub const ShutdownError = error{
-    SocketNotConnected,
-    FileDescriptorNotASocket,
+    SocketUnconnected,
     ConnectionAborted,
     ConnectionResetByPeer,
     NetworkDown,
@@ -785,8 +784,8 @@ pub fn errnoToShutdownError(err: E) ShutdownError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .ENOTCONN => error.SocketNotConnected,
-                .ENOTSOCK => error.FileDescriptorNotASocket,
+                .ENOTCONN => error.SocketUnconnected,
+                .ENOTSOCK => error.Unexpected,
                 .ECONNABORTED => error.ConnectionAborted,
                 .ECONNRESET => error.ConnectionResetByPeer,
                 .ENETDOWN => error.NetworkDown,
@@ -797,8 +796,8 @@ pub fn errnoToShutdownError(err: E) ShutdownError {
         else => {
             return switch (err) {
                 .SUCCESS => unreachable,
-                .NOTCONN => error.SocketNotConnected,
-                .NOTSOCK => error.FileDescriptorNotASocket,
+                .NOTCONN => error.SocketUnconnected,
+                .NOTSOCK => error.Unexpected,
                 .CONNABORTED => error.ConnectionAborted,
                 .CONNRESET => error.ConnectionResetByPeer,
                 .NETDOWN => error.NetworkDown,

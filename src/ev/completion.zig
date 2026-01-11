@@ -15,8 +15,14 @@ pub const BackendCapabilities = struct {
     file_create: bool = false,
     file_close: bool = false,
     file_sync: bool = false,
-    file_rename: bool = false,
-    file_delete: bool = false,
+    file_set_size: bool = false,
+    file_set_permissions: bool = false,
+    file_set_owner: bool = false,
+    file_set_timestamps: bool = false,
+    dir_create_dir: bool = false,
+    dir_rename: bool = false,
+    dir_delete_file: bool = false,
+    dir_delete_dir: bool = false,
     file_size: bool = false,
     file_stat: bool = false,
     dir_open: bool = false,
@@ -53,8 +59,14 @@ pub const Op = enum {
     file_read,
     file_write,
     file_sync,
-    file_rename,
-    file_delete,
+    file_set_size,
+    file_set_permissions,
+    file_set_owner,
+    file_set_timestamps,
+    dir_create_dir,
+    dir_rename,
+    dir_delete_file,
+    dir_delete_dir,
     file_size,
     file_stat,
     dir_open,
@@ -88,8 +100,14 @@ pub const Op = enum {
             .file_read => FileRead,
             .file_write => FileWrite,
             .file_sync => FileSync,
-            .file_rename => FileRename,
-            .file_delete => FileDelete,
+            .file_set_size => FileSetSize,
+            .file_set_permissions => FileSetPermissions,
+            .file_set_owner => FileSetOwner,
+            .file_set_timestamps => FileSetTimestamps,
+            .dir_create_dir => DirCreateDir,
+            .dir_rename => DirRename,
+            .dir_delete_file => DirDeleteFile,
+            .dir_delete_dir => DirDeleteDir,
             .file_size => FileSize,
             .file_stat => FileStat,
             .dir_open => DirOpen,
@@ -125,8 +143,14 @@ pub const Op = enum {
             FileRead => .file_read,
             FileWrite => .file_write,
             FileSync => .file_sync,
-            FileRename => .file_rename,
-            FileDelete => .file_delete,
+            FileSetSize => .file_set_size,
+            FileSetPermissions => .file_set_permissions,
+            FileSetOwner => .file_set_owner,
+            FileSetTimestamps => .file_set_timestamps,
+            DirCreateDir => .dir_create_dir,
+            DirRename => .dir_rename,
+            DirDeleteFile => .dir_delete_file,
+            DirDeleteDir => .dir_delete_dir,
             FileSize => .file_size,
             FileStat => .file_stat,
             DirOpen => .dir_open,
@@ -192,7 +216,7 @@ pub const Completion = struct {
 
     pub fn cast(c: *Completion, comptime T: type) *T {
         std.debug.assert(c.op == Op.fromType(T));
-        return @fieldParentPtr("c", c);
+        return @alignCast(@fieldParentPtr("c", c));
     }
 
     pub fn getResult(c: *const Completion, comptime op: Op) (op.toType().Error)!@FieldType(op.toType(), "result_private_do_not_touch") {
@@ -200,7 +224,7 @@ pub const Completion = struct {
         std.debug.assert(c.op == op);
         if (c.err) |err| return @errorCast(err);
         const T = op.toType();
-        const parent: *const T = @fieldParentPtr("c", c);
+        const parent: *const T = @alignCast(@fieldParentPtr("c", c));
         return parent.result_private_do_not_touch;
     }
 
@@ -782,11 +806,140 @@ pub const FileSync = struct {
     }
 };
 
-pub const FileRename = struct {
+pub const FileSetSize = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    internal: switch (Backend.capabilities.file_rename) {
-        true => if (@hasDecl(Backend, "FileRenameData")) Backend.FileRenameData else struct {},
+    internal: switch (Backend.capabilities.file_set_size) {
+        true => if (@hasDecl(Backend, "FileSetSizeData")) Backend.FileSetSizeData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    length: u64,
+
+    pub const Error = fs.FileSetSizeError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, length: u64) FileSetSize {
+        return .{
+            .c = .init(.file_set_size),
+            .handle = handle,
+            .length = length,
+        };
+    }
+
+    pub fn getResult(self: *const FileSetSize) Error!void {
+        return self.c.getResult(.file_set_size);
+    }
+};
+
+pub const FileSetPermissions = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.file_set_permissions) {
+        true => if (@hasDecl(Backend, "FileSetPermissionsData")) Backend.FileSetPermissionsData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    mode: fs.mode_t,
+
+    pub const Error = fs.FileSetPermissionsError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, mode: fs.mode_t) FileSetPermissions {
+        return .{
+            .c = .init(.file_set_permissions),
+            .handle = handle,
+            .mode = mode,
+        };
+    }
+
+    pub fn getResult(self: *const FileSetPermissions) Error!void {
+        return self.c.getResult(.file_set_permissions);
+    }
+};
+
+pub const FileSetOwner = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.file_set_owner) {
+        true => if (@hasDecl(Backend, "FileSetOwnerData")) Backend.FileSetOwnerData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    uid: ?fs.uid_t,
+    gid: ?fs.gid_t,
+
+    pub const Error = fs.FileSetOwnerError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, uid: ?fs.uid_t, gid: ?fs.gid_t) FileSetOwner {
+        return .{
+            .c = .init(.file_set_owner),
+            .handle = handle,
+            .uid = uid,
+            .gid = gid,
+        };
+    }
+
+    pub fn getResult(self: *const FileSetOwner) Error!void {
+        return self.c.getResult(.file_set_owner);
+    }
+};
+
+pub const FileSetTimestamps = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.file_set_timestamps) {
+        true => if (@hasDecl(Backend, "FileSetTimestampsData")) Backend.FileSetTimestampsData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    timestamps: fs.FileTimestamps,
+
+    pub const Error = fs.FileSetTimestampsError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, timestamps: fs.FileTimestamps) FileSetTimestamps {
+        return .{
+            .c = .init(.file_set_timestamps),
+            .handle = handle,
+            .timestamps = timestamps,
+        };
+    }
+
+    pub fn getResult(self: *const FileSetTimestamps) Error!void {
+        return self.c.getResult(.file_set_timestamps);
+    }
+};
+
+pub const DirCreateDir = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_create_dir) {
+        true => if (@hasDecl(Backend, "DirCreateDirData")) Backend.DirCreateDirData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+    mode: fs.mode_t,
+
+    pub const Error = fs.DirCreateDirError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8, mode: fs.mode_t) DirCreateDir {
+        return .{
+            .c = .init(.dir_create_dir),
+            .dir = dir,
+            .path = path,
+            .mode = mode,
+        };
+    }
+
+    pub fn getResult(self: *const DirCreateDir) Error!void {
+        return self.c.getResult(.dir_create_dir);
+    }
+};
+
+pub const DirRename = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_rename) {
+        true => if (@hasDecl(Backend, "DirRenameData")) Backend.DirRenameData else struct {},
         false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     old_dir: fs.fd_t,
@@ -794,11 +947,11 @@ pub const FileRename = struct {
     new_dir: fs.fd_t,
     new_path: []const u8,
 
-    pub const Error = fs.FileRenameError || Cancelable;
+    pub const Error = fs.DirRenameError || Cancelable;
 
-    pub fn init(old_dir: fs.fd_t, old_path: []const u8, new_dir: fs.fd_t, new_path: []const u8) FileRename {
+    pub fn init(old_dir: fs.fd_t, old_path: []const u8, new_dir: fs.fd_t, new_path: []const u8) DirRename {
         return .{
-            .c = .init(.file_rename),
+            .c = .init(.dir_rename),
             .old_dir = old_dir,
             .old_path = old_path,
             .new_dir = new_dir,
@@ -806,33 +959,58 @@ pub const FileRename = struct {
         };
     }
 
-    pub fn getResult(self: *const FileRename) Error!void {
-        return self.c.getResult(.file_rename);
+    pub fn getResult(self: *const DirRename) Error!void {
+        return self.c.getResult(.dir_rename);
     }
 };
 
-pub const FileDelete = struct {
+pub const DirDeleteFile = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    internal: switch (Backend.capabilities.file_delete) {
-        true => if (@hasDecl(Backend, "FileDeleteData")) Backend.FileDeleteData else struct {},
+    internal: switch (Backend.capabilities.dir_delete_file) {
+        true => if (@hasDecl(Backend, "DirDeleteFileData")) Backend.DirDeleteFileData else struct {},
         false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
 
-    pub const Error = fs.FileDeleteError || Cancelable;
+    pub const Error = fs.DirDeleteFileError || Cancelable;
 
-    pub fn init(dir: fs.fd_t, path: []const u8) FileDelete {
+    pub fn init(dir: fs.fd_t, path: []const u8) DirDeleteFile {
         return .{
-            .c = .init(.file_delete),
+            .c = .init(.dir_delete_file),
             .dir = dir,
             .path = path,
         };
     }
 
-    pub fn getResult(self: *const FileDelete) Error!void {
-        return self.c.getResult(.file_delete);
+    pub fn getResult(self: *const DirDeleteFile) Error!void {
+        return self.c.getResult(.dir_delete_file);
+    }
+};
+
+pub const DirDeleteDir = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_delete_dir) {
+        true => if (@hasDecl(Backend, "DirDeleteDirData")) Backend.DirDeleteDirData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    dir: fs.fd_t,
+    path: []const u8,
+
+    pub const Error = fs.DirDeleteDirError || Cancelable;
+
+    pub fn init(dir: fs.fd_t, path: []const u8) DirDeleteDir {
+        return .{
+            .c = .init(.dir_delete_dir),
+            .dir = dir,
+            .path = path,
+        };
+    }
+
+    pub fn getResult(self: *const DirDeleteDir) Error!void {
+        return self.c.getResult(.dir_delete_dir);
     }
 };
 

@@ -460,7 +460,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     defer {
         if (domain == .unix) {
             const path = std.mem.sliceTo(&server.server_addr.path, 0);
-            os.fs.unlinkat(std.testing.allocator, os.fs.cwd(), path) catch {};
+            os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
         }
     }
     server.start();

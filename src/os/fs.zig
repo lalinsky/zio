@@ -146,15 +146,15 @@ pub const FileSyncError = error{
     InputOutput,
     NoSpaceLeft,
     DiskQuota,
-    ReadOnlyFileSystem,
-    InvalidFileDescriptor,
-    NotOpenForWriting,
+    AccessDenied,
     Canceled,
     Unexpected,
 };
 
-pub const FileRenameError = error{
+pub const DirRenameError = error{
     AccessDenied,
+    PermissionDenied,
+    BadPathName,
     FileBusy,
     DiskQuota,
     IsDir,
@@ -164,17 +164,15 @@ pub const FileRenameError = error{
     FileNotFound,
     SystemResources,
     NotDir,
-    PathAlreadyExists,
     NoSpaceLeft,
     ReadOnlyFileSystem,
-    NotSameFileSystem,
+    CrossDevice,
     DirNotEmpty,
-    InvalidUtf8,
     Canceled,
     Unexpected,
 };
 
-pub const FileDeleteError = error{
+pub const DirDeleteFileError = error{
     AccessDenied,
     FileBusy,
     FileNotFound,
@@ -184,15 +182,44 @@ pub const FileDeleteError = error{
     NotDir,
     SystemResources,
     ReadOnlyFileSystem,
+    Canceled,
+    Unexpected,
+};
+
+pub const DirDeleteDirError = error{
+    AccessDenied,
+    FileBusy,
+    FileNotFound,
+    SymLinkLoop,
+    NameTooLong,
+    NotDir,
+    SystemResources,
+    ReadOnlyFileSystem,
     DirNotEmpty,
-    InvalidUtf8,
+    Canceled,
+    Unexpected,
+};
+
+pub const DirCreateDirError = error{
+    AccessDenied,
+    PermissionDenied,
+    DiskQuota,
+    PathAlreadyExists,
+    SymLinkLoop,
+    LinkQuotaExceeded,
+    NameTooLong,
+    FileNotFound,
+    SystemResources,
+    NoSpaceLeft,
+    NotDir,
+    ReadOnlyFileSystem,
     Canceled,
     Unexpected,
 };
 
 pub const FileSizeError = error{
     AccessDenied,
-    InvalidFileDescriptor,
+    PermissionDenied,
     Canceled,
     Unexpected,
 };
@@ -205,6 +232,40 @@ pub const FileStatError = error{
     NotDir,
     SymLinkLoop,
     SystemResources,
+    Canceled,
+    Unexpected,
+};
+
+pub const FileSetSizeError = error{
+    AccessDenied,
+    FileTooBig,
+    InputOutput,
+    FileBusy,
+    PermissionDenied,
+    Canceled,
+    Unexpected,
+};
+
+pub const FileSetPermissionsError = error{
+    AccessDenied,
+    PermissionDenied,
+    ReadOnlyFileSystem,
+    Canceled,
+    Unexpected,
+};
+
+pub const FileSetOwnerError = error{
+    AccessDenied,
+    PermissionDenied,
+    ReadOnlyFileSystem,
+    Canceled,
+    Unexpected,
+};
+
+pub const FileSetTimestampsError = error{
+    AccessDenied,
+    PermissionDenied,
+    ReadOnlyFileSystem,
     Canceled,
     Unexpected,
 };
@@ -649,13 +710,12 @@ pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
 }
 
 /// Sync file data to disk
-pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
+pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
     if (builtin.os.tag == .windows) {
         const success = w.FlushFileBuffers(fd);
         if (success == w.FALSE) {
             switch (w.GetLastError()) {
-                .ACCESS_DENIED => return error.NotOpenForWriting,
-                .INVALID_HANDLE => return error.InvalidFileDescriptor,
+                .ACCESS_DENIED => return error.AccessDenied,
                 else => |err| return unexpectedError(err),
             }
         }
@@ -677,7 +737,7 @@ pub fn sync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 }
 
 /// Rename a file using renameat() syscall
-pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) FileRenameError!void {
+pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
     if (builtin.os.tag == .windows) {
         // Convert paths to UTF-16 with proper prefixing and directory handling
         const old_path_w = w.sliceToPrefixedFileW(old_dir, old_path) catch |err| return switch (err) {
@@ -706,7 +766,7 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
                 .FILE_NOT_FOUND => return error.FileNotFound,
                 .PATH_NOT_FOUND => return error.FileNotFound,
                 .ACCESS_DENIED => return error.AccessDenied,
-                .ALREADY_EXISTS => return error.PathAlreadyExists,
+                .ALREADY_EXISTS => return error.Unexpected,
                 .SHARING_VIOLATION => return error.FileBusy,
                 else => |err| return unexpectedError(err),
             }
@@ -725,15 +785,14 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
-            else => |err| return errnoToFileRenameError(err),
+            else => |err| return errnoToDirRenameError(err),
         }
     }
 }
 
 /// Delete a file using unlinkat() syscall
-pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileDeleteError!void {
+pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) DirDeleteFileError!void {
     if (builtin.os.tag == .windows) {
-        // Convert path to UTF-16 with proper prefixing and directory handling
         const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
             error.AccessDenied => error.AccessDenied,
             error.BadPathName => error.FileNotFound,
@@ -751,7 +810,6 @@ pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileD
                 else => |err| return unexpectedError(err),
             };
         }
-
         return;
     }
 
@@ -763,7 +821,83 @@ pub fn unlinkat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileD
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
-            else => |err| return errnoToFileDeleteError(err),
+            else => |err| return errnoToDirDeleteFileError(err),
+        }
+    }
+}
+
+/// Delete a directory using unlinkat() syscall with AT_REMOVEDIR
+pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) DirDeleteDirError!void {
+    if (builtin.os.tag == .windows) {
+        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.FileNotFound,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            else => error.Unexpected,
+        };
+
+        if (w.RemoveDirectoryW(path_w.span().ptr) == w.FALSE) {
+            return switch (w.GetLastError()) {
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .PATH_NOT_FOUND => error.FileNotFound,
+                .ACCESS_DENIED => error.AccessDenied,
+                .SHARING_VIOLATION => error.FileBusy,
+                .DIR_NOT_EMPTY => error.DirNotEmpty,
+                else => |err| return unexpectedError(err),
+            };
+        }
+        return;
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    while (true) {
+        const rc = posix.system.unlinkat(dir, path_z.ptr, posix.system.AT.REMOVEDIR);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToDirDeleteDirError(err),
+        }
+    }
+}
+
+/// Create a directory using mkdirat() syscall
+pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: mode_t) DirCreateDirError!void {
+    if (builtin.os.tag == .windows) {
+        // Convert path to UTF-16 with proper prefixing and directory handling
+        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
+            error.AccessDenied => error.AccessDenied,
+            error.BadPathName => error.FileNotFound,
+            error.FileNotFound => error.FileNotFound,
+            error.NameTooLong => error.NameTooLong,
+            else => error.Unexpected,
+        };
+
+        if (w.CreateDirectoryW(path_w.span().ptr, null) == w.FALSE) {
+            return switch (w.GetLastError()) {
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .PATH_NOT_FOUND => error.FileNotFound,
+                .ACCESS_DENIED => error.AccessDenied,
+                .ALREADY_EXISTS => error.PathAlreadyExists,
+                .FILE_EXISTS => error.PathAlreadyExists,
+                else => |err| return unexpectedError(err),
+            };
+        }
+
+        return;
+    }
+
+    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    while (true) {
+        const rc = posix.system.mkdirat(dir, path_z.ptr, mode);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToDirCreateDirError(err),
         }
     }
 }
@@ -871,19 +1005,17 @@ pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
         .IO => error.InputOutput,
         .NOSPC => error.NoSpaceLeft,
         .DQUOT => error.DiskQuota,
-        .ROFS => error.ReadOnlyFileSystem,
-        .BADF => error.InvalidFileDescriptor,
-        .INVAL => error.NotOpenForWriting,
+        .ACCES, .PERM, .ROFS => error.AccessDenied,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
-pub fn errnoToFileRenameError(errno: posix.system.E) FileRenameError {
+pub fn errnoToDirRenameError(errno: posix.system.E) DirRenameError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
-        .PERM => error.AccessDenied,
+        .PERM => error.PermissionDenied,
         .BUSY => error.FileBusy,
         .DQUOT => error.DiskQuota,
         .ISDIR => error.IsDir,
@@ -893,17 +1025,17 @@ pub fn errnoToFileRenameError(errno: posix.system.E) FileRenameError {
         .NOENT => error.FileNotFound,
         .NOMEM => error.SystemResources,
         .NOTDIR => error.NotDir,
-        .EXIST => error.PathAlreadyExists,
+        .EXIST => error.Unexpected, // PathAlreadyExists mapped to Unexpected for RenameError (use RenamePreserve for non-overwriting)
         .NOSPC => error.NoSpaceLeft,
         .ROFS => error.ReadOnlyFileSystem,
-        .XDEV => error.NotSameFileSystem,
+        .XDEV => error.CrossDevice,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
-pub fn errnoToFileDeleteError(errno: posix.system.E) FileDeleteError {
+pub fn errnoToDirDeleteFileError(errno: posix.system.E) DirDeleteFileError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
@@ -916,21 +1048,57 @@ pub fn errnoToFileDeleteError(errno: posix.system.E) FileDeleteError {
         .NOTDIR => error.NotDir,
         .NOMEM => error.SystemResources,
         .ROFS => error.ReadOnlyFileSystem,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub fn errnoToDirDeleteDirError(errno: posix.system.E) DirDeleteDirError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.AccessDenied,
+        .BUSY => error.FileBusy,
+        .NOENT => error.FileNotFound,
+        .LOOP => error.SymLinkLoop,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOTDIR => error.NotDir,
+        .NOMEM => error.SystemResources,
+        .ROFS => error.ReadOnlyFileSystem,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
+pub fn errnoToDirCreateDirError(errno: posix.system.E) DirCreateDirError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .DQUOT => error.DiskQuota,
+        .EXIST => error.PathAlreadyExists,
+        .LOOP => error.SymLinkLoop,
+        .MLINK => error.LinkQuotaExceeded,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOENT => error.FileNotFound,
+        .NOMEM => error.SystemResources,
+        .NOSPC => error.NoSpaceLeft,
+        .NOTDIR => error.NotDir,
+        .ROFS => error.ReadOnlyFileSystem,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
 /// Get the size of a file
-pub fn fsize(fd: fd_t) FileSizeError!u64 {
+pub fn fileSize(fd: fd_t) FileSizeError!u64 {
     if (builtin.os.tag == .windows) {
         var file_size: w.LARGE_INTEGER = undefined;
         const success = w.GetFileSizeEx(fd, &file_size);
 
         if (success == w.FALSE) {
             switch (w.GetLastError()) {
-                .INVALID_HANDLE => return error.InvalidFileDescriptor,
                 .ACCESS_DENIED => return error.AccessDenied,
                 else => |err| return unexpectedError(err) catch error.Unexpected,
             }
@@ -967,7 +1135,7 @@ pub fn errnoToFileSizeError(errno: posix.system.E) FileSizeError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
-        .BADF => error.InvalidFileDescriptor,
+        .PERM => error.PermissionDenied,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
@@ -1167,6 +1335,189 @@ pub fn errnoToFileStatError(errno: posix.system.E) FileStatError {
         .NOTDIR => error.NotDir,
         .LOOP => error.SymLinkLoop,
         .NOMEM => error.SystemResources,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+/// Set file size (truncate or extend)
+pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
+    if (builtin.os.tag == .windows) {
+        // Save current position
+        var current_pos: w.LARGE_INTEGER = undefined;
+        if (w.SetFilePointerEx(fd, 0, &current_pos, w.FILE_CURRENT) == w.FALSE) {
+            return switch (w.GetLastError()) {
+                .INVALID_HANDLE => error.Unexpected,
+                .ACCESS_DENIED => error.AccessDenied,
+                else => |err| unexpectedError(err) catch error.Unexpected,
+            };
+        }
+
+        // Seek to desired length
+        const len_signed: w.LARGE_INTEGER = @bitCast(length);
+        if (w.SetFilePointerEx(fd, len_signed, null, w.FILE_BEGIN) == w.FALSE) {
+            return switch (w.GetLastError()) {
+                .INVALID_HANDLE => error.Unexpected,
+                .ACCESS_DENIED => error.AccessDenied,
+                else => |err| unexpectedError(err) catch error.Unexpected,
+            };
+        }
+
+        // Set end of file at current position
+        if (w.SetEndOfFile(fd) == w.FALSE) {
+            // Try to restore position before returning error
+            _ = w.SetFilePointerEx(fd, current_pos, null, w.FILE_BEGIN);
+            return switch (w.GetLastError()) {
+                .ACCESS_DENIED => error.AccessDenied,
+                else => |err| unexpectedError(err) catch error.Unexpected,
+            };
+        }
+
+        // Restore original position
+        _ = w.SetFilePointerEx(fd, current_pos, null, w.FILE_BEGIN);
+        return;
+    }
+
+    while (true) {
+        const rc = posix.system.ftruncate(fd, @intCast(length));
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSetSizeError(err),
+        }
+    }
+}
+
+pub fn errnoToFileSetSizeError(errno: posix.system.E) FileSetSizeError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .FBIG => error.FileTooBig,
+        .IO => error.InputOutput,
+        .TXTBSY => error.FileBusy,
+        .PERM => error.PermissionDenied,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub const uid_t = if (builtin.os.tag == .windows) u32 else posix.system.uid_t;
+pub const gid_t = if (builtin.os.tag == .windows) u32 else posix.system.gid_t;
+
+/// Set file permissions (mode)
+pub fn fileSetPermissions(fd: fd_t, mode: mode_t) FileSetPermissionsError!void {
+    // Windows doesn't have POSIX-style permissions
+    if (builtin.os.tag == .windows) return;
+
+    while (true) {
+        const rc = posix.system.fchmod(fd, mode);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSetPermissionsError(err),
+        }
+    }
+}
+
+pub fn errnoToFileSetPermissionsError(errno: posix.system.E) FileSetPermissionsError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .ROFS => error.ReadOnlyFileSystem,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+/// Set file owner (uid/gid)
+pub fn fileSetOwner(fd: fd_t, uid: ?uid_t, gid: ?gid_t) FileSetOwnerError!void {
+    // Windows doesn't have POSIX-style ownership
+    if (builtin.os.tag == .windows) return;
+
+    // -1 means "don't change"
+    const uid_arg: uid_t = uid orelse @bitCast(@as(i32, -1));
+    const gid_arg: gid_t = gid orelse @bitCast(@as(i32, -1));
+
+    while (true) {
+        const rc = posix.system.fchown(fd, uid_arg, gid_arg);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSetOwnerError(err),
+        }
+    }
+}
+
+pub fn errnoToFileSetOwnerError(errno: posix.system.E) FileSetOwnerError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .ROFS => error.ReadOnlyFileSystem,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+/// Timestamps for fileSetTimestamps
+pub const FileTimestamps = struct {
+    /// Access time in nanoseconds since Unix epoch, or null to keep unchanged
+    atime: ?i96 = null,
+    /// Modification time in nanoseconds since Unix epoch, or null to keep unchanged
+    mtime: ?i96 = null,
+};
+
+/// Set file timestamps
+pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestampsError!void {
+    if (builtin.os.tag == .windows) {
+        const atime: ?w.FILETIME = if (timestamps.atime) |ns| w.nanosToFileTime(ns) else null;
+        const mtime: ?w.FILETIME = if (timestamps.mtime) |ns| w.nanosToFileTime(ns) else null;
+
+        if (w.SetFileTime(
+            fd,
+            null, // creation time - don't change
+            if (atime) |*a| a else null,
+            if (mtime) |*m| m else null,
+        ) == w.FALSE) {
+            return switch (w.GetLastError()) {
+                .INVALID_HANDLE => error.Unexpected,
+                .ACCESS_DENIED => error.AccessDenied,
+                else => |err| unexpectedError(err) catch error.Unexpected,
+            };
+        }
+        return;
+    }
+
+    const UTIME_OMIT = 0x3ffffffe;
+
+    const times: [2]posix.system.timespec = .{
+        if (timestamps.atime) |ns|
+            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
+        else
+            .{ .sec = 0, .nsec = UTIME_OMIT },
+        if (timestamps.mtime) |ns|
+            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
+        else
+            .{ .sec = 0, .nsec = UTIME_OMIT },
+    };
+
+    while (true) {
+        const rc = posix.system.futimens(fd, &times);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return errnoToFileSetTimestampsError(err),
+        }
+    }
+}
+
+pub fn errnoToFileSetTimestampsError(errno: posix.system.E) FileSetTimestampsError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };

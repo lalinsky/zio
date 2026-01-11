@@ -70,6 +70,69 @@ pub fn waitForIo(rt: *Runtime, completion: *ev.Completion) Cancelable!void {
     std.debug.assert(completion.state == .dead);
 }
 
+/// Runs an I/O operation to completion.
+/// Sets up the callback, submits to the event loop, and waits for completion.
+pub fn runIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
+    const task = rt.getCurrentTask();
+    const executor = task.getExecutor();
+
+    c.userdata = task;
+    c.callback = genericCallback;
+
+    executor.loop.add(c);
+    try waitForIo(rt, c);
+}
+
+/// Context for tracking multiple I/O operations
+const MultiIoContext = struct {
+    task: *AnyTask,
+    remaining: std.atomic.Value(usize),
+};
+
+/// Callback for multi I/O that only resumes when all operations complete
+fn multiIoCallback(loop: *ev.Loop, completion: *ev.Completion) void {
+    _ = loop;
+    const ctx: *MultiIoContext = @ptrCast(@alignCast(completion.userdata.?));
+    if (ctx.remaining.fetchSub(1, .release) == 1) {
+        resumeTask(ctx.task, .maybe_remote);
+    }
+}
+
+/// Runs multiple I/O operations to completion.
+/// Submits all operations and waits for all to complete.
+pub fn runIoMulti(rt: *Runtime, completions: []const *ev.Completion) Cancelable!void {
+    if (completions.len == 0) return;
+
+    const task = rt.getCurrentTask();
+    const executor = task.getExecutor();
+
+    var ctx = MultiIoContext{
+        .task = task,
+        .remaining = .init(completions.len),
+    };
+
+    for (completions) |c| {
+        c.userdata = &ctx;
+        c.callback = multiIoCallback;
+    }
+
+    task.state.store(.preparing_to_wait, .release);
+
+    for (completions) |c| {
+        executor.loop.add(c);
+    }
+
+    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+        // Cancel all remaining operations
+        for (completions) |c| {
+            if (c.state != .dead) {
+                cancelIo(rt, c);
+            }
+        }
+        return err;
+    };
+}
+
 pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
     const task = rt.getCurrentTask();
     var executor = task.getExecutor();

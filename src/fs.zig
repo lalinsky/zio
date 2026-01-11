@@ -8,8 +8,7 @@ const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
-const waitForIo = @import("io.zig").waitForIo;
-const genericCallback = @import("io.zig").genericCallback;
+const runIo = @import("io.zig").runIo;
 const fillBuf = @import("io.zig").fillBuf;
 
 pub const Dir = struct {
@@ -20,90 +19,52 @@ pub const Dir = struct {
     }
 
     pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileOpenFlags) !File {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileOpen.init(self.fd, path, flags);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        const fd = try op.getResult();
-        return .fromFd(fd);
+        try runIo(rt, &op.c);
+        return .fromFd(try op.getResult());
     }
 
     pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) !File {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileCreate.init(self.fd, path, flags);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
-        const fd = try op.getResult();
-        return .fromFd(fd);
+        try runIo(rt, &op.c);
+        return .fromFd(try op.getResult());
     }
 
     pub fn rename(self: Dir, rt: *Runtime, old_path: []const u8, new_path: []const u8) !void {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
-        var op = ev.FileRename.init(self.fd, old_path, new_path);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        var op = ev.DirRename.init(self.fd, old_path, self.fd, new_path);
+        try runIo(rt, &op.c);
         try op.getResult();
     }
 
     pub fn deleteFile(self: Dir, rt: *Runtime, path: []const u8) !void {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
+        var op = ev.DirDeleteFile.init(self.fd, path);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
 
-        var op = ev.FileDelete.init(self.fd, path);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
+    pub fn deleteDir(self: Dir, rt: *Runtime, path: []const u8) !void {
+        var op = ev.DirDeleteDir.init(self.fd, path);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
 
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+    pub fn createDir(self: Dir, rt: *Runtime, path: []const u8, mode: os.fs.mode_t) !void {
+        var op = ev.DirCreateDir.init(self.fd, path, mode);
+        try runIo(rt, &op.c);
         try op.getResult();
     }
 
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: Dir, rt: *Runtime) StatError!os.fs.FileStatInfo {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileStat.init(self.fd, null);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return try op.getResult();
     }
 
     pub fn statPath(self: Dir, rt: *Runtime, path: []const u8) StatError!os.fs.FileStatInfo {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileStat.init(self.fd, path);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return try op.getResult();
     }
 };
@@ -140,65 +101,31 @@ pub const File = struct {
 
     /// Read from file using ReadBuf (direct iovec access).
     pub fn readBuf(self: File, rt: *Runtime, buf: ev.ReadBuf, offset: u64) ReadError!usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileRead.init(self.fd, buf, offset);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return try op.getResult();
     }
 
     /// Write to file using WriteBuf (direct iovec access).
     pub fn writeBuf(self: File, rt: *Runtime, buf: ev.WriteBuf, offset: u64) WriteError!usize {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileWrite.init(self.fd, buf, offset);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return try op.getResult();
     }
 
     pub fn close(self: File, rt: *Runtime) void {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileClose.init(self.fd);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
         rt.beginShield();
         defer rt.endShield();
-
-        executor.loop.add(&op.c);
-        waitForIo(rt, &op.c) catch unreachable;
-
-        // Ignore close errors, following Zig std lib pattern
+        runIo(rt, &op.c) catch unreachable;
         _ = op.getResult() catch {};
     }
 
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: File, rt: *Runtime) StatError!os.fs.FileStatInfo {
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         var op = ev.FileStat.init(self.fd, null);
-        op.c.userdata = task;
-        op.c.callback = genericCallback;
-
-        executor.loop.add(&op.c);
-        try waitForIo(rt, &op.c);
-
+        try runIo(rt, &op.c);
         return try op.getResult();
     }
 
@@ -505,9 +432,6 @@ test "File: reader and writer interface" {
 /// Positional write from vectored buffers (for std.Io compatibility).
 /// Does not update any file position.
 pub fn fileWritePositional(rt: *Runtime, fd: Handle, header: []const u8, data: []const []const u8, splat: usize, offset: u64) !usize {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     const max_vecs = switch (builtin.os.tag) {
         .windows => 1,
         else => 16,
@@ -521,28 +445,15 @@ pub fn fileWritePositional(rt: *Runtime, fd: Handle, header: []const u8, data: [
 
     var storage: [max_vecs]os.iovec_const = undefined;
     var op = ev.FileWrite.init(fd, ev.WriteBuf.fromSlices(slices[0..buf_len], &storage), offset);
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
+    try runIo(rt, &op.c);
     return try op.getResult();
 }
 
 /// Positional read into vectored buffers (for std.Io compatibility).
 /// Does not update any file position.
 pub fn fileReadPositional(rt: *Runtime, fd: Handle, buffers: []const []u8, offset: u64) !usize {
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
     var storage: [16]os.iovec = undefined;
     var op = ev.FileRead.init(fd, ev.ReadBuf.fromSlices(buffers, &storage), offset);
-    op.c.userdata = task;
-    op.c.callback = genericCallback;
-
-    executor.loop.add(&op.c);
-    try waitForIo(rt, &op.c);
-
+    try runIo(rt, &op.c);
     return try op.getResult();
 }

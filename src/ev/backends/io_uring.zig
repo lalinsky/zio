@@ -30,14 +30,17 @@ const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
 const FileOpen = @import("../completion.zig").FileOpen;
 const FileCreate = @import("../completion.zig").FileCreate;
-const FileRename = @import("../completion.zig").FileRename;
-const FileDelete = @import("../completion.zig").FileDelete;
+const DirCreateDir = @import("../completion.zig").DirCreateDir;
+const DirRename = @import("../completion.zig").DirRename;
+const DirDeleteFile = @import("../completion.zig").DirDeleteFile;
+const DirDeleteDir = @import("../completion.zig").DirDeleteDir;
 const FileSize = @import("../completion.zig").FileSize;
 const FileStat = @import("../completion.zig").FileStat;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
+const FileSetSize = @import("../completion.zig").FileSetSize;
 const DirOpen = @import("../completion.zig").DirOpen;
 const DirClose = @import("../completion.zig").DirClose;
 const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
@@ -55,8 +58,11 @@ pub const capabilities: BackendCapabilities = .{
     .file_create = true,
     .file_close = true,
     .file_sync = true,
-    .file_rename = true,
-    .file_delete = true,
+    .file_set_size = true,
+    .dir_create_dir = true,
+    .dir_rename = true,
+    .dir_delete_file = true,
+    .dir_delete_dir = true,
     .file_size = true,
     .file_stat = true,
     .dir_open = true,
@@ -89,12 +95,20 @@ pub const FileCreateData = struct {
     path: [:0]const u8 = "",
 };
 
-pub const FileRenameData = struct {
+pub const DirCreateDirData = struct {
+    path: [:0]const u8 = "",
+};
+
+pub const DirRenameData = struct {
     old_path: [:0]const u8 = "",
     new_path: [:0]const u8 = "",
 };
 
-pub const FileDeleteData = struct {
+pub const DirDeleteFileData = struct {
+    path: [:0]const u8 = "",
+};
+
+pub const DirDeleteDirData = struct {
     path: [:0]const u8 = "",
 };
 
@@ -422,8 +436,40 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_fsync(data.handle, flags);
             sqe.user_data = @intFromPtr(c);
         },
-        .file_rename => {
-            const data = c.cast(FileRename);
+        .file_set_size => {
+            const data = c.cast(FileSetSize);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_set_size", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_rw(.FTRUNCATE, data.handle, 0, @intCast(data.length), 0);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_set_permissions => unreachable, // Handled by thread pool
+        .file_set_owner => unreachable, // Handled by thread pool
+        .file_set_timestamps => unreachable, // Handled by thread pool
+        .dir_create_dir => {
+            const data = c.cast(DirCreateDir);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for dir_create_dir", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_mkdirat(@intCast(data.dir), path.ptr, data.mode);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+        .dir_rename => {
+            const data = c.cast(DirRename);
             const old_path = self.allocator.dupeZ(u8, data.old_path) catch {
                 c.setError(error.SystemResources);
                 state.markCompleted(c);
@@ -438,7 +484,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(old_path);
                 self.allocator.free(new_path);
-                log.err("Failed to get io_uring SQE for file_rename", .{});
+                log.err("Failed to get io_uring SQE for dir_rename", .{});
                 c.setError(error.Unexpected);
                 state.markCompleted(c);
                 return;
@@ -448,8 +494,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             data.internal.old_path = old_path;
             data.internal.new_path = new_path;
         },
-        .file_delete => {
-            const data = c.cast(FileDelete);
+        .dir_delete_file => {
+            const data = c.cast(DirDeleteFile);
             const path = self.allocator.dupeZ(u8, data.path) catch {
                 c.setError(error.SystemResources);
                 state.markCompleted(c);
@@ -457,12 +503,30 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             };
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(path);
-                log.err("Failed to get io_uring SQE for file_delete", .{});
+                log.err("Failed to get io_uring SQE for dir_delete_file", .{});
                 c.setError(error.Unexpected);
                 state.markCompleted(c);
                 return;
             };
             sqe.prep_unlinkat(@intCast(data.dir), path.ptr, 0);
+            sqe.user_data = @intFromPtr(c);
+            data.internal.path = path;
+        },
+        .dir_delete_dir => {
+            const data = c.cast(DirDeleteDir);
+            const path = self.allocator.dupeZ(u8, data.path) catch {
+                c.setError(error.SystemResources);
+                state.markCompleted(c);
+                return;
+            };
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(path);
+                log.err("Failed to get io_uring SQE for dir_delete_dir", .{});
+                c.setError(error.Unexpected);
+                state.markCompleted(c);
+                return;
+            };
+            sqe.prep_unlinkat(@intCast(data.dir), path.ptr, linux.AT.REMOVEDIR);
             sqe.user_data = @intFromPtr(c);
             data.internal.path = path;
         },
@@ -862,24 +926,56 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             }
         },
 
-        .file_rename => {
-            const data = c.cast(FileRename);
-            self.allocator.free(data.internal.old_path);
-            self.allocator.free(data.internal.new_path);
+        .file_set_size => {
             if (res < 0) {
-                c.setError(fs.errnoToFileRenameError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileSetSizeError(@enumFromInt(-res)));
             } else {
-                c.setResult(.file_rename, {});
+                c.setResult(.file_set_size, {});
             }
         },
 
-        .file_delete => {
-            const data = c.cast(FileDelete);
+        .file_set_permissions => unreachable, // Handled synchronously
+        .file_set_owner => unreachable, // Handled synchronously
+        .file_set_timestamps => unreachable, // Handled synchronously
+
+        .dir_create_dir => {
+            const data = c.cast(DirCreateDir);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToFileDeleteError(@enumFromInt(-res)));
+                c.setError(fs.errnoToDirCreateDirError(@enumFromInt(-res)));
             } else {
-                c.setResult(.file_delete, {});
+                c.setResult(.dir_create_dir, {});
+            }
+        },
+
+        .dir_rename => {
+            const data = c.cast(DirRename);
+            self.allocator.free(data.internal.old_path);
+            self.allocator.free(data.internal.new_path);
+            if (res < 0) {
+                c.setError(fs.errnoToDirRenameError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.dir_rename, {});
+            }
+        },
+
+        .dir_delete_file => {
+            const data = c.cast(DirDeleteFile);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToDirDeleteFileError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.dir_delete_file, {});
+            }
+        },
+
+        .dir_delete_dir => {
+            const data = c.cast(DirDeleteDir);
+            self.allocator.free(data.internal.path);
+            if (res < 0) {
+                c.setError(fs.errnoToDirDeleteDirError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.dir_delete_dir, {});
             }
         },
 

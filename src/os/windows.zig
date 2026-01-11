@@ -75,6 +75,15 @@ pub extern "kernel32" fn MoveFileExW(
     dwFlags: DWORD,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn CreateDirectoryW(
+    lpPathName: LPCWSTR,
+    lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn RemoveDirectoryW(
+    lpPathName: LPCWSTR,
+) callconv(.winapi) BOOL;
+
 pub extern "kernel32" fn CreateFileW(
     lpFileName: LPCWSTR,
     dwDesiredAccess: DWORD,
@@ -115,6 +124,28 @@ pub extern "kernel32" fn GetFileInformationByHandle(
     lpFileInformation: *BY_HANDLE_FILE_INFORMATION,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn SetFilePointerEx(
+    hFile: HANDLE,
+    liDistanceToMove: LARGE_INTEGER,
+    lpNewFilePointer: ?*LARGE_INTEGER,
+    dwMoveMethod: DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn SetEndOfFile(
+    hFile: HANDLE,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn SetFileTime(
+    hFile: HANDLE,
+    lpCreationTime: ?*const FILETIME,
+    lpLastAccessTime: ?*const FILETIME,
+    lpLastWriteTime: ?*const FILETIME,
+) callconv(.winapi) BOOL;
+
+pub const FILE_BEGIN: DWORD = 0;
+pub const FILE_CURRENT: DWORD = 1;
+pub const FILE_END: DWORD = 2;
+
 // File time structures
 pub const FILETIME = extern struct {
     dwLowDateTime: DWORD,
@@ -134,14 +165,24 @@ pub const BY_HANDLE_FILE_INFORMATION = extern struct {
     nFileIndexLow: DWORD,
 };
 
+/// 100-nanosecond intervals between 1601 and 1970
+const EPOCH_DIFF: i64 = 116444736000000000;
+
 /// Convert Windows FILETIME to nanoseconds since Unix epoch.
 /// FILETIME is 100-nanosecond intervals since January 1, 1601.
 /// Unix epoch is January 1, 1970.
 pub fn fileTimeToNanos(ft: FILETIME) i64 {
-    // 100-nanosecond intervals between 1601 and 1970
-    const EPOCH_DIFF: i64 = 116444736000000000;
     const ticks: i64 = (@as(i64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
     return (ticks - EPOCH_DIFF) * 100;
+}
+
+/// Convert nanoseconds since Unix epoch to Windows FILETIME.
+pub fn nanosToFileTime(nanos: i96) FILETIME {
+    const ticks: u64 = @intCast(@divFloor(nanos, 100) + EPOCH_DIFF);
+    return .{
+        .dwLowDateTime = @truncate(ticks),
+        .dwHighDateTime = @truncate(ticks >> 32),
+    };
 }
 
 // IOCP functions

@@ -112,7 +112,7 @@ test "File: rename/delete" {
     try std.testing.expectEqual(.dead, file_close.c.state);
 
     // Rename the file
-    var file_rename = ev.FileRename.init(cwd, "test-rename-src", cwd, "test-rename-dst");
+    var file_rename = ev.DirRename.init(cwd, "test-rename-src", cwd, "test-rename-dst");
     loop.add(&file_rename.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_rename.c.state);
@@ -144,7 +144,7 @@ test "File: rename/delete" {
     try std.testing.expectEqual(.dead, file_close2.c.state);
 
     // Delete the file
-    var file_delete = ev.FileDelete.init(cwd, "test-rename-dst");
+    var file_delete = ev.DirDeleteFile.init(cwd, "test-rename-dst");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_delete.c.state);
@@ -210,7 +210,7 @@ test "File: read EOF" {
     try loop.run(.until_done);
     try file_close.getResult();
 
-    var file_delete = ev.FileDelete.init(cwd, "test-eof");
+    var file_delete = ev.DirDeleteFile.init(cwd, "test-eof");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();
@@ -280,7 +280,7 @@ test "File: size" {
     try loop.run(.until_done);
     try file_close.getResult();
 
-    var file_delete = ev.FileDelete.init(cwd, "test-size");
+    var file_delete = ev.DirDeleteFile.init(cwd, "test-size");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();
@@ -338,7 +338,7 @@ test "File: stat" {
     try loop.run(.until_done);
     try file_close.getResult();
 
-    var file_delete = ev.FileDelete.init(cwd, "test-stat");
+    var file_delete = ev.DirDeleteFile.init(cwd, "test-stat");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();
@@ -387,7 +387,7 @@ test "File: stat_path" {
     try std.testing.expect(stat.inode != 0);
 
     // Delete the file
-    var file_delete = ev.FileDelete.init(cwd, "test-stat-path");
+    var file_delete = ev.DirDeleteFile.init(cwd, "test-stat-path");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
     try file_delete.getResult();

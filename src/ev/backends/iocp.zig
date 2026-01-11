@@ -26,8 +26,9 @@ const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
-const FileRename = @import("../completion.zig").FileRename;
-const FileDelete = @import("../completion.zig").FileDelete;
+const DirCreateDir = @import("../completion.zig").DirCreateDir;
+const DirRename = @import("../completion.zig").DirRename;
+const DirDelete = @import("../completion.zig").DirDelete;
 const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
 const FileStreamRead = @import("../completion.zig").FileStreamRead;
 const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
@@ -448,8 +449,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_create,
         .file_close,
         .file_sync,
-        .file_rename,
-        .file_delete,
+        .file_set_size,
+        .file_set_permissions,
+        .file_set_owner,
+        .file_set_timestamps,
+        .dir_create_dir,
+        .dir_rename,
+        .dir_delete_file,
+        .dir_delete_dir,
         .file_size,
         .file_stat,
         .dir_open,
