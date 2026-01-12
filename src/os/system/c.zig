@@ -14,6 +14,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 const c = std.c;
+const linux = @import("linux.zig");
 
 pub const timespec = c.timespec;
 
@@ -51,16 +52,14 @@ pub const SIGSTKSZ: usize = switch (native_os) {
 };
 
 /// Alternate signal stack structure
+/// Linux: sp, flags, size (from asm-generic/signal.h)
+/// BSD/macOS: sp, size, flags (from sys/signal.h, sys/_types/_sigaltstack.h)
 pub const stack_t = switch (native_os) {
-    .freebsd, .openbsd => extern struct {
-        sp: ?[*]u8,
-        size: usize,
-        flags: u32,
-    },
+    .linux => linux.stack_t,
     else => extern struct {
         sp: ?[*]u8,
-        flags: u32,
         size: usize,
+        flags: c_int,
     },
 };
 
