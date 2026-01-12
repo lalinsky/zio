@@ -11,6 +11,7 @@ pub const system = switch (builtin.os.tag) {
 
 pub const O = system.O;
 pub const AT = system.AT;
+pub const PATH_MAX = std.posix.PATH_MAX;
 
 pub fn errno(rc: anytype) system.E {
     switch (system) {
