@@ -60,8 +60,9 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     const prot_flags = posix.PROT.NONE | posix.PROT.MAX(posix.PROT.READ | posix.PROT.WRITE);
 
     // MAP_STACK is supported on Linux and NetBSD, but not on macOS/FreeBSD
+    // (FreeBSD has the flag but it's incompatible with PROT_NONE)
     var map_flags = posix.MAP.PRIVATE | posix.MAP.ANONYMOUS;
-    if (@hasDecl(posix.MAP, "STACK")) {
+    if (builtin.os.tag == .linux or builtin.os.tag == .netbsd) {
         map_flags |= posix.MAP.STACK;
     }
 
