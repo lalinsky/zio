@@ -8,6 +8,76 @@ pub const mode_t = linux.mode_t;
 pub const uid_t = linux.uid_t;
 pub const gid_t = linux.gid_t;
 
+/// Memory mapping flags for mmap
+/// Values from asm-generic/mman-common.h
+pub const MAP = struct {
+    pub const SHARED: u32 = 0x01;
+    pub const PRIVATE: u32 = 0x02;
+    pub const SHARED_VALIDATE: u32 = 0x03;
+    pub const FIXED: u32 = 0x10;
+    pub const ANONYMOUS: u32 = 0x20;
+    pub const GROWSDOWN: u32 = 0x0100;
+    pub const DENYWRITE: u32 = 0x0800;
+    pub const EXECUTABLE: u32 = 0x1000;
+    pub const LOCKED: u32 = 0x2000;
+    pub const NORESERVE: u32 = 0x4000;
+    pub const POPULATE: u32 = 0x8000;
+    pub const NONBLOCK: u32 = 0x10000;
+    pub const STACK: u32 = 0x20000;
+    pub const HUGETLB: u32 = 0x40000;
+    pub const SYNC: u32 = 0x80000;
+    pub const FIXED_NOREPLACE: u32 = 0x100000;
+};
+
+/// Memory advice flags for madvise
+/// Values from asm-generic/mman-common.h
+pub const MADV = struct {
+    pub const NORMAL: u32 = 0;
+    pub const RANDOM: u32 = 1;
+    pub const SEQUENTIAL: u32 = 2;
+    pub const WILLNEED: u32 = 3;
+    pub const DONTNEED: u32 = 4;
+    pub const FREE: u32 = 8;
+    pub const REMOVE: u32 = 9;
+    pub const DONTFORK: u32 = 10;
+    pub const DOFORK: u32 = 11;
+    pub const MERGEABLE: u32 = 12;
+    pub const UNMERGEABLE: u32 = 13;
+    pub const HUGEPAGE: u32 = 14;
+    pub const NOHUGEPAGE: u32 = 15;
+    pub const DONTDUMP: u32 = 16;
+    pub const DODUMP: u32 = 17;
+    pub const WIPEONFORK: u32 = 18;
+    pub const KEEPONFORK: u32 = 19;
+    pub const COLD: u32 = 20;
+    pub const PAGEOUT: u32 = 21;
+    pub const POPULATE_READ: u32 = 22;
+    pub const POPULATE_WRITE: u32 = 23;
+};
+
+/// Memory protection flags for mmap/mprotect
+/// Values from asm-generic/mman-common.h
+pub const PROT = struct {
+    /// Page cannot be accessed
+    pub const NONE: u32 = 0x0;
+    /// Page can be read
+    pub const READ: u32 = 0x1;
+    /// Page can be written
+    pub const WRITE: u32 = 0x2;
+    /// Page can be executed
+    pub const EXEC: u32 = 0x4;
+    /// Page may be used for atomic ops
+    pub const SEM: u32 = 0x8;
+    /// Extend change to start of growsdown vma (mprotect only)
+    pub const GROWSDOWN: u32 = 0x01000000;
+    /// Extend change to end of growsup vma (mprotect only)
+    pub const GROWSUP: u32 = 0x02000000;
+    /// Declare future mprotect permissions (no-op on Linux)
+    pub fn MAX(_: u32) u32 {
+        return 0;
+    }
+};
+
 /// Flags for *at syscalls (openat, fstatat, linkat, etc.)
 /// Values from linux/fcntl.h
 pub const AT = struct {
@@ -95,5 +165,29 @@ pub fn linkat(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0]co
         @as(usize, @bitCast(@as(isize, newfd))),
         @intFromPtr(newpath),
         flags,
+    );
+}
+
+pub fn mprotect(addr: [*]const u8, len: usize, prot: u32) usize {
+    return linux.syscall3(.mprotect, @intFromPtr(addr), len, prot);
+}
+
+pub fn madvise(addr: [*]const u8, len: usize, advice: u32) usize {
+    return linux.syscall3(.madvise, @intFromPtr(addr), len, advice);
+}
+
+pub fn munmap(addr: [*]const u8, len: usize) usize {
+    return linux.syscall2(.munmap, @intFromPtr(addr), len);
+}
+
+pub fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: i32, offset: i64) usize {
+    return linux.syscall6(
+        .mmap,
+        @intFromPtr(addr),
+        len,
+        prot,
+        flags,
+        @as(usize, @bitCast(@as(isize, fd))),
+        @as(usize, @bitCast(offset)),
     );
 }

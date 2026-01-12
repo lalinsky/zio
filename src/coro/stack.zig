@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = std.posix;
+const posix = @import("../os/posix.zig");
 const fs = @import("../os/fs.zig");
 const w = @import("../os/windows.zig");
 const coroutines = @import("coroutines.zig");
@@ -12,32 +12,16 @@ pub const page_size = std.heap.page_size_min;
 
 // Signal type changed from c_int to enum in Zig 0.16
 const is_pre_016 = builtin.zig_version.major == 0 and builtin.zig_version.minor < 16;
-const SigInt = if (is_pre_016) c_int else posix.SIG;
+const SigInt = if (is_pre_016) c_int else std.posix.SIG;
 
 // Stack growth signal handler state (POSIX only)
 threadlocal var altstack_installed: bool = false;
 threadlocal var altstack_mem: ?[]u8 = null;
 var signal_handler_refcount: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
-var old_sigsegv_action: posix.Sigaction = undefined;
-var old_sigbus_action: posix.Sigaction = undefined;
+var old_sigsegv_action: std.posix.Sigaction = undefined;
+var old_sigbus_action: std.posix.Sigaction = undefined;
 
-// Platform-specific macros for declaring future mprotect permissions
-// NetBSD PROT_MPROTECT: Required when PaX MPROTECT is enabled to allow permission escalation
-// FreeBSD PROT_MAX: Optional security feature to restrict maximum permissions
-// See: https://man.netbsd.org/mmap.2 and https://man.freebsd.org/mmap.2
-inline fn PROT_MAX_FUTURE(prot: u32) u32 {
-    return switch (builtin.os.tag) {
-        .netbsd => prot << 3, // PROT_MPROTECT
-        .freebsd => prot << 16, // PROT_MAX
-        else => 0,
-    };
-}
 
-// https://github.com/ziglang/zig/pull/25927
-const MADV_FREE = switch (builtin.os.tag) {
-    .netbsd => 6,
-    else => std.c.MADV.FREE,
-};
 
 pub const StackInfo = extern struct {
     allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
@@ -73,12 +57,12 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
 
     // Reserve address space with PROT_NONE
     // On NetBSD/FreeBSD, we must declare future permissions upfront for security policies
-    const prot_flags = posix.PROT.NONE | PROT_MAX_FUTURE(posix.PROT.READ | posix.PROT.WRITE);
+    const prot_flags = posix.PROT.NONE | posix.PROT.MAX(posix.PROT.READ | posix.PROT.WRITE);
 
     // MAP_STACK is supported on Linux and NetBSD, but not on macOS/FreeBSD
-    var map_flags = posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true };
-    if (builtin.os.tag == .linux or builtin.os.tag == .netbsd) {
-        map_flags.STACK = true;
+    var map_flags = posix.MAP.PRIVATE | posix.MAP.ANONYMOUS;
+    if (@hasDecl(posix.MAP, "STACK")) {
+        map_flags |= posix.MAP.STACK;
     }
 
     const allocation = posix.mmap(
@@ -92,12 +76,12 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
         std.log.err("Failed to allocate stack memory: {}", .{err});
         return error.OutOfMemory;
     };
-    errdefer posix.munmap(allocation);
+    errdefer posix.munmap(allocation) catch {};
 
     // Advise kernel not to use transparent huge pages (Linux-specific optimization)
     // THP can cause memory bloat for small/sparse stack allocations
-    if (builtin.os.tag == .linux) {
-        _ = posix.madvise(allocation.ptr, allocation.len, posix.MADV.NOHUGEPAGE) catch {};
+    if (@hasDecl(posix.MADV, "NOHUGEPAGE")) {
+        posix.madvise(allocation, posix.MADV.NOHUGEPAGE) catch {};
     }
 
     // Guard page stays as PROT_NONE (first page)
@@ -147,8 +131,7 @@ pub fn stackFree(info: StackInfo) void {
 }
 
 fn stackFreePosix(info: StackInfo) void {
-    const allocation: []align(page_size) u8 = info.allocation_ptr[0..info.allocation_len];
-    posix.munmap(allocation);
+    posix.munmap(info.allocation_ptr[0..info.allocation_len]) catch {};
 }
 
 /// Recycle stack memory for reuse by marking committed pages as available for kernel reclamation.
@@ -172,7 +155,7 @@ pub fn stackRecycle(info: StackInfo) void {
 
     // MADV_FREE is available on Linux 4.5+, macOS, FreeBSD, NetBSD
     // It allows lazy reclamation - physical pages are freed when system needs memory
-    _ = posix.madvise(addr, committed_size, MADV_FREE) catch {};
+    posix.madvise(addr[0..committed_size], posix.MADV.FREE) catch {};
 }
 
 pub fn stackExtend(info: *StackInfo) error{StackOverflow}!void {
@@ -306,13 +289,13 @@ pub fn setupStackGrowth() !void {
         const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
         errdefer std.heap.page_allocator.free(mem);
 
-        var stack = posix.stack_t{
+        var stack = std.posix.stack_t{
             .flags = 0,
             .sp = mem.ptr,
             .size = altstack_size,
         };
 
-        try posix.sigaltstack(&stack, null);
+        try std.posix.sigaltstack(&stack, null);
 
         altstack_mem = mem;
         altstack_installed = true;
@@ -324,15 +307,15 @@ pub fn setupStackGrowth() !void {
     if (prev_refcount == 0) {
         var sa = posix.Sigaction{
             .handler = .{ .sigaction = stackFaultHandler },
-            .mask = posix.sigemptyset(),
-            .flags = posix.SA.SIGINFO | posix.SA.ONSTACK,
+            .mask = std.posix.sigemptyset(),
+            .flags = std.posix.SA.SIGINFO | std.posix.SA.ONSTACK,
         };
 
-        posix.sigaction(posix.SIG.SEGV, &sa, &old_sigsegv_action);
+        std.posix.sigaction(std.posix.SIG.SEGV, &sa, &old_sigsegv_action);
 
         // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
         if (builtin.os.tag.isDarwin()) {
-            posix.sigaction(posix.SIG.BUS, &sa, &old_sigbus_action);
+            std.posix.sigaction(std.posix.SIG.BUS, &sa, &old_sigbus_action);
         }
     }
 }
@@ -349,12 +332,12 @@ pub fn cleanupStackGrowth() void {
 
     if (altstack_installed) {
         // Disable alternate stack
-        var disable_stack = posix.stack_t{
+        var disable_stack = std.posix.stack_t{
             .flags = std.posix.system.SS.DISABLE,
             .sp = undefined,
             .size = 0,
         };
-        posix.sigaltstack(&disable_stack, null) catch {
+        std.posix.sigaltstack(&disable_stack, null) catch {
             // Best effort - can't do much if this fails
         };
 
@@ -371,15 +354,15 @@ pub fn cleanupStackGrowth() void {
     const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
     if (prev_refcount == 1) {
         // We were the last thread - restore the old signal handlers
-        posix.sigaction(posix.SIG.SEGV, &old_sigsegv_action, null);
+        std.posix.sigaction(std.posix.SIG.SEGV, &old_sigsegv_action, null);
         if (builtin.os.tag.isDarwin()) {
-            posix.sigaction(posix.SIG.BUS, &old_sigbus_action, null);
+            std.posix.sigaction(std.posix.SIG.BUS, &old_sigbus_action, null);
         }
     }
 }
 
 /// Extract fault address from siginfo_t in a platform-agnostic way
-inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
+inline fn getFaultAddress(info: *const std.posix.siginfo_t) usize {
     return @intFromPtr(switch (builtin.os.tag) {
         .linux => info.fields.sigfault.addr,
         .macos, .ios, .tvos, .watchos, .visionos => info.addr,
@@ -392,12 +375,12 @@ inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
 
 /// Invoke the previous signal handler or use default behavior.
 /// This allows proper signal handler chaining instead of unconditionally aborting.
-fn invokePreviousHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque) noreturn {
+fn invokePreviousHandler(sig: SigInt, info: *const std.posix.siginfo_t, ctx: ?*anyopaque) noreturn {
     // Get the appropriate old sigaction based on signal number
-    const old_sa = if (sig == posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
+    const old_sa = if (sig == std.posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
 
     // Check if the old handler had SA_SIGINFO flag set
-    if ((old_sa.flags & posix.SA.SIGINFO) != 0) {
+    if ((old_sa.flags & std.posix.SA.SIGINFO) != 0) {
         // Previous handler was a sigaction-style handler
         if (old_sa.handler.sigaction) |sa| {
             sa(sig, info, ctx);
@@ -405,15 +388,15 @@ fn invokePreviousHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyop
     } else {
         // Previous handler was a simple handler (or SIG_DFL/SIG_IGN)
         if (old_sa.handler.handler) |h| {
-            if (h == posix.SIG.DFL or h == posix.SIG.IGN) {
+            if (h == std.posix.SIG.DFL or h == std.posix.SIG.IGN) {
                 // Restore the previous handler and re-raise the signal
                 // We must restore the handler first, otherwise the signal comes back to us
                 if (is_pre_016) {
-                    posix.sigaction(@intCast(sig), old_sa, null);
-                    _ = posix.raise(@intCast(sig)) catch {};
+                    std.posix.sigaction(@intCast(sig), old_sa, null);
+                    _ = std.posix.raise(@intCast(sig)) catch {};
                 } else {
-                    posix.sigaction(sig, old_sa, null);
-                    _ = posix.raise(sig) catch {};
+                    std.posix.sigaction(sig, old_sa, null);
+                    _ = std.posix.raise(sig) catch {};
                 }
             } else {
                 // Call the previous simple handler
@@ -425,7 +408,7 @@ fn invokePreviousHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyop
     // If we reach here, either raise failed or the handler returned
     // In either case, abort
     if (is_pre_016) {
-        posix.abort();
+        std.posix.abort();
     } else {
         std.process.abort();
     }
@@ -434,7 +417,7 @@ fn invokePreviousHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyop
 /// Signal handler for automatic stack growth (SIGSEGV on Linux/BSD, SIGBUS on macOS).
 /// This handler checks if the fault is within a coroutine's uncommitted stack region
 /// and extends the stack if so. Real faults are propagated to the previous handler.
-fn stackFaultHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
+fn stackFaultHandler(sig: SigInt, info: *const std.posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
     const fault_addr = getFaultAddress(info);
 
     // Get current_context from coroutines module
@@ -503,9 +486,9 @@ fn abortOnStackOverflow(fault_addr: usize, stack_info: *const StackInfo) noretur
         },
     ) catch "Coroutine stack overflow (error formatting message)\n";
 
-    _ = fs.write(posix.STDERR_FILENO, msg) catch {};
+    _ = fs.write(std.posix.STDERR_FILENO, msg) catch {};
     if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-        posix.abort();
+        std.posix.abort();
     } else {
         std.process.abort();
     }
