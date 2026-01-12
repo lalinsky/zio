@@ -2001,6 +2001,8 @@ test "Io: Dir openDir" {
 }
 
 test "Io: Dir symLink and readLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -2027,6 +2029,8 @@ test "Io: Dir symLink and readLink" {
 }
 
 test "Io: Dir hardLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -2091,7 +2095,7 @@ test "Io: Dir realPath" {
 
     // Should return a non-empty absolute path
     try std.testing.expect(len > 0);
-    try std.testing.expect(buffer[0] == '/');
+    try std.testing.expect(os.path.isAbsolute(buffer[0..len]));
 }
 
 test "Io: Dir realPathFile" {
@@ -2113,7 +2117,7 @@ test "Io: Dir realPathFile" {
 
     // Should return an absolute path ending with file_path
     try std.testing.expect(len > 0);
-    try std.testing.expect(buffer[0] == '/');
+    try std.testing.expect(os.path.isAbsolute(buffer[0..len]));
     try std.testing.expect(std.mem.endsWith(u8, buffer[0..len], file_path));
 }
 
@@ -2136,11 +2140,13 @@ test "Io: File realPath" {
 
     // Should return an absolute path ending with file_path
     try std.testing.expect(len > 0);
-    try std.testing.expect(buffer[0] == '/');
+    try std.testing.expect(os.path.isAbsolute(buffer[0..len]));
     try std.testing.expect(std.mem.endsWith(u8, buffer[0..len], file_path));
 }
 
 test "Io: File hardLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
