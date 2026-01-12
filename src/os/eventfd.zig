@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
-const linux = @import("linux.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 
@@ -39,7 +38,7 @@ pub fn eventfd(initval: u32, flags: u32) !i32 {
         .linux => {
             while (true) {
                 const rc = std.os.linux.eventfd(initval, flags);
-                switch (linux.errno(rc)) {
+                switch (posix.errno(rc)) {
                     .SUCCESS => return @intCast(rc),
                     .INTR => continue,
                     .INVAL => return error.InvalidFlags,
@@ -78,7 +77,7 @@ pub fn eventfd_read(fd: i32) !u64 {
             const bytes = std.mem.asBytes(&value);
             while (true) {
                 const rc = std.os.linux.read(fd, bytes.ptr, bytes.len);
-                switch (linux.errno(rc)) {
+                switch (posix.errno(rc)) {
                     .SUCCESS => {
                         std.debug.assert(rc == 8);
                         return value;
@@ -111,7 +110,7 @@ pub fn eventfd_write(fd: i32, value: u64) !void {
         .linux => {
             while (true) {
                 const rc = std.os.linux.write(fd, bytes.ptr, bytes.len);
-                switch (linux.errno(rc)) {
+                switch (posix.errno(rc)) {
                     .SUCCESS => {
                         std.debug.assert(rc == 8);
                         break;
