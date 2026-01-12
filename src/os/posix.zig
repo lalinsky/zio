@@ -19,6 +19,10 @@ pub const AT = sys.AT;
 pub const MAP = sys.MAP;
 pub const PROT = sys.PROT;
 pub const MADV = sys.MADV;
+pub const SS = sys.SS;
+pub const MINSIGSTKSZ = sys.MINSIGSTKSZ;
+pub const SIGSTKSZ = sys.SIGSTKSZ;
+pub const stack_t = sys.stack_t;
 pub const PATH_MAX = std.posix.PATH_MAX;
 
 pub const errno = sys.errno;
@@ -121,6 +125,19 @@ pub fn mmap(
             .EXIST => return error.MappingAlreadyExists,
             else => return unexpectedError(err),
         }
+    }
+}
+
+pub const SigaltstackError = error{
+    OutOfMemory,
+    Unexpected,
+};
+
+pub fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) SigaltstackError!void {
+    switch (errno(sys.sigaltstack(ss, old_ss))) {
+        .SUCCESS => return,
+        .NOMEM => return error.OutOfMemory,
+        else => |err| return unexpectedError(err),
     }
 }
 

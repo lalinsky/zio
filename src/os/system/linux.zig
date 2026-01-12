@@ -1,3 +1,14 @@
+//! Linux system definitions for syscall wrappers.
+//!
+//! Values were extracted from:
+//! - Zig standard library (lib/std/os/linux.zig, lib/std/os/linux/syscalls.zig)
+//! - Linux kernel headers in Zig's bundled libc (lib/libc/include/any-linux-any/)
+//!   - asm-generic/signal-defs.h (SS_*, MINSIGSTKSZ, SIGSTKSZ)
+//!   - asm-generic/mman-common.h (MAP_*, MADV_*, PROT_*)
+//!   - linux/fcntl.h (AT_*)
+//!
+//! Cross-checked against headers for consistency.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
@@ -7,6 +18,26 @@ pub const fd_t = linux.fd_t;
 pub const mode_t = linux.mode_t;
 pub const uid_t = linux.uid_t;
 pub const gid_t = linux.gid_t;
+
+/// Alternate signal stack flags
+/// Values from asm-generic/signal-defs.h
+pub const SS = struct {
+    pub const ONSTACK: u32 = 1;
+    pub const DISABLE: u32 = 2;
+    pub const AUTODISARM: u32 = 1 << 31;
+};
+
+/// Minimum alternate signal stack size
+pub const MINSIGSTKSZ: usize = 2048;
+/// Recommended alternate signal stack size
+pub const SIGSTKSZ: usize = 8192;
+
+/// Alternate signal stack structure
+pub const stack_t = extern struct {
+    sp: ?[*]u8,
+    flags: u32,
+    size: usize,
+};
 
 /// Memory mapping flags for mmap
 /// Values from asm-generic/mman-common.h
@@ -190,4 +221,8 @@ pub fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: i32, offset: i6
         @as(usize, @bitCast(@as(isize, fd))),
         @as(usize, @bitCast(offset)),
     );
+}
+
+pub fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) usize {
+    return linux.syscall2(.sigaltstack, @intFromPtr(ss), @intFromPtr(old_ss));
 }

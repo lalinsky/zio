@@ -279,23 +279,20 @@ pub fn setupStackGrowth() !void {
     // Windows handles stack growth automatically
     if (builtin.os.tag == .windows) return;
 
-    const altstack_size = switch (builtin.os.tag) {
-        .linux => std.os.linux.SIGSTKSZ,
-        else => std.c.SIGSTKSZ,
-    };
+    const altstack_size = posix.SIGSTKSZ;
 
     // Setup alternate stack for this thread if not already done
     if (!altstack_installed) {
         const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
         errdefer std.heap.page_allocator.free(mem);
 
-        var stack = std.posix.stack_t{
+        var stack = posix.stack_t{
             .flags = 0,
             .sp = mem.ptr,
             .size = altstack_size,
         };
 
-        try std.posix.sigaltstack(&stack, null);
+        try posix.sigaltstack(&stack, null);
 
         altstack_mem = mem;
         altstack_installed = true;
@@ -305,7 +302,7 @@ pub fn setupStackGrowth() !void {
     // Increment refcount; if this is the first caller, install the handler
     const prev_refcount = signal_handler_refcount.fetchAdd(1, .acquire);
     if (prev_refcount == 0) {
-        var sa = posix.Sigaction{
+        var sa = std.posix.Sigaction{
             .handler = .{ .sigaction = stackFaultHandler },
             .mask = std.posix.sigemptyset(),
             .flags = std.posix.SA.SIGINFO | std.posix.SA.ONSTACK,
@@ -332,12 +329,12 @@ pub fn cleanupStackGrowth() void {
 
     if (altstack_installed) {
         // Disable alternate stack
-        var disable_stack = std.posix.stack_t{
-            .flags = std.posix.system.SS.DISABLE,
-            .sp = undefined,
+        var disable_stack = posix.stack_t{
+            .flags = posix.SS.DISABLE,
+            .sp = null,
             .size = 0,
         };
-        std.posix.sigaltstack(&disable_stack, null) catch {
+        posix.sigaltstack(&disable_stack, null) catch {
             // Best effort - can't do much if this fails
         };
 
