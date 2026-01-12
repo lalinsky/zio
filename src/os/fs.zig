@@ -2190,8 +2190,8 @@ fn dirAccessWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, f
     };
     var attr: w.OBJECT_ATTRIBUTES = .{
         .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
-        .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(sub_path_w)) null else dir,
-        .Attributes = .{},
+        .RootDirectory = if (w.PathIsRelativeW(sub_path_w.ptr) == w.FALSE) null else dir,
+        .Attributes = 0,
         .ObjectName = &nt_name,
         .SecurityDescriptor = null,
         .SecurityQualityOfService = null,
@@ -2269,7 +2269,7 @@ fn dirReadWindows(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize 
             &io_status_block,
             buffer.ptr,
             @intCast(buffer.len),
-            .BothDirectory,
+            .FileBothDirectoryInformation,
             0, // ReturnSingleEntry
             null, // FileName filter
             @intFromBool(restart),
