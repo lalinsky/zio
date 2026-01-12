@@ -25,11 +25,14 @@ pub const SIGSTKSZ = sys.SIGSTKSZ;
 pub const stack_t = sys.stack_t;
 pub const PATH_MAX = std.posix.PATH_MAX;
 
+pub const timespec = sys.timespec;
+
 pub const errno = sys.errno;
 pub const fchmodat = sys.fchmodat;
 pub const fchownat = sys.fchownat;
 pub const faccessat = sys.faccessat;
 pub const linkat = sys.linkat;
+pub const utimensat = sys.utimensat;
 
 pub const MprotectError = error{
     AccessDenied,
