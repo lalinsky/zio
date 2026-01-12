@@ -2109,8 +2109,7 @@ pub const AccessFlags = struct {
 /// Check file accessibility using faccessat() syscall
 pub fn dirAccess(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
     if (builtin.os.tag == .windows) {
-        // TODO: Implement Windows access check
-        return error.Unexpected;
+        return dirAccessWindows(allocator, dir, path, flags);
     }
 
     const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
@@ -2149,6 +2148,43 @@ pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
+}
+
+fn dirAccessWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
+    _ = allocator;
+    _ = flags; // Windows access check doesn't distinguish read/write/execute
+
+    const path_w = w.sliceToPrefixedFileW(dir, path) catch return error.BadPathName;
+    const sub_path_w = path_w.span();
+
+    // Handle "." and ".." specially
+    if (sub_path_w.len >= 1 and sub_path_w[0] == '.' and (sub_path_w.len == 1 or sub_path_w[1] == 0)) return;
+    if (sub_path_w.len >= 2 and sub_path_w[0] == '.' and sub_path_w[1] == '.' and (sub_path_w.len == 2 or sub_path_w[2] == 0)) return;
+
+    const path_len_bytes: u16 = std.math.cast(u16, std.mem.sliceTo(sub_path_w, 0).len * 2) orelse
+        return error.NameTooLong;
+    var nt_name: w.UNICODE_STRING = .{
+        .Length = path_len_bytes,
+        .MaximumLength = path_len_bytes,
+        .Buffer = @constCast(sub_path_w.ptr),
+    };
+    var attr: w.OBJECT_ATTRIBUTES = .{
+        .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
+        .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(sub_path_w)) null else dir,
+        .Attributes = .{},
+        .ObjectName = &nt_name,
+        .SecurityDescriptor = null,
+        .SecurityQualityOfService = null,
+    };
+    var basic_info: w.FILE_BASIC_INFORMATION = undefined;
+
+    switch (w.NtQueryAttributesFile(&attr, &basic_info)) {
+        .SUCCESS => return,
+        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+        .ACCESS_DENIED => return error.AccessDenied,
+        .OBJECT_NAME_INVALID, .INVALID_PARAMETER, .OBJECT_PATH_SYNTAX_BAD => return error.BadPathName,
+        else => return error.Unexpected,
+    }
 }
 
 /// Read directory entries into buffer.
@@ -2265,7 +2301,7 @@ pub const DirRealPathFileError = DirRealPathError || error{
 /// Get the real path of a directory fd using /proc/self/fd on Linux or F_GETPATH on macOS/BSD
 pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
     if (builtin.os.tag == .windows) {
-        return error.OperationUnsupported;
+        return dirRealPathWindows(fd, buffer);
     }
 
     if (builtin.os.tag == .linux) {
@@ -2322,7 +2358,7 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
 /// Get the real path of a file relative to a directory
 pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
     if (builtin.os.tag == .windows) {
-        return error.OperationUnsupported;
+        return dirRealPathFileWindows(allocator, dir, path, buffer);
     }
 
     const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
@@ -2401,4 +2437,87 @@ pub fn errnoToDirRealPathError(errno: posix.system.E) DirRealPathError {
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
+}
+
+fn dirRealPathWindows(handle: fd_t, buffer: []u8) DirRealPathError!usize {
+    // For cwd handle, we need to get a real handle first
+    const is_cwd = (handle == cwd());
+    const actual_handle = if (is_cwd) blk: {
+        // Open "." to get a real handle
+        const h = w.CreateFileW(
+            &[_:0]u16{ '.', 0 },
+            0, // No access needed, just query
+            w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
+            null,
+            w.OPEN_EXISTING,
+            w.FILE_FLAG_BACKUP_SEMANTICS, // Required for directories
+            null,
+        );
+        if (h == w.INVALID_HANDLE_VALUE) return error.FileNotFound;
+        break :blk h;
+    } else handle;
+    defer if (is_cwd) {
+        _ = w.CloseHandle(actual_handle);
+    };
+
+    // Use a wide char buffer for the Windows API
+    var wide_buf: [std.os.windows.PATH_MAX_WIDE]w.WCHAR = undefined;
+
+    const result = w.GetFinalPathNameByHandleW(
+        actual_handle,
+        &wide_buf,
+        wide_buf.len,
+        w.FILE_NAME_NORMALIZED | w.VOLUME_NAME_DOS,
+    );
+
+    if (result == 0) {
+        return switch (w.GetLastError()) {
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+            .ACCESS_DENIED => error.AccessDenied,
+            .NOT_ENOUGH_MEMORY => error.SystemResources,
+            else => error.Unexpected,
+        };
+    }
+
+    if (result > wide_buf.len) return error.NameTooLong;
+
+    // Convert UTF-16 to UTF-8
+    const wide_slice = wide_buf[0..result];
+
+    // Skip the \\?\ prefix if present
+    const skip: usize = if (result >= 4 and wide_slice[0] == '\\' and wide_slice[1] == '\\' and wide_slice[2] == '?' and wide_slice[3] == '\\') 4 else 0;
+
+    const len = std.unicode.calcWtf8Len(wide_slice[skip..]);
+    if (len > buffer.len) return error.NameTooLong;
+
+    return std.unicode.wtf16LeToWtf8(buffer, wide_slice[skip..]);
+}
+
+fn dirRealPathFileWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
+    _ = allocator;
+
+    // Open the file to get its handle
+    const path_w = w.sliceToPrefixedFileW(dir, path) catch return error.BadPathName;
+
+    const handle = w.CreateFileW(
+        path_w.span().ptr,
+        0, // No access needed, just query
+        w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
+        null,
+        w.OPEN_EXISTING,
+        w.FILE_FLAG_BACKUP_SEMANTICS, // Required for directories
+        null,
+    );
+
+    if (handle == w.INVALID_HANDLE_VALUE) {
+        return switch (w.GetLastError()) {
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+            .ACCESS_DENIED => error.AccessDenied,
+            .NOT_ENOUGH_MEMORY => error.SystemResources,
+            else => error.Unexpected,
+        };
+    }
+    defer _ = w.CloseHandle(handle);
+
+    return dirRealPathWindows(handle, buffer);
 }
