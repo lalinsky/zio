@@ -2061,25 +2061,38 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
         return error.OperationUnsupported;
     }
 
-    // AT_EMPTY_PATH is Linux-specific
-    if (!@hasDecl(posix.AT, "EMPTY_PATH")) {
-        return error.OperationUnsupported;
-    }
-
     const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
     defer allocator.free(new_path_z);
 
-    // AT_EMPTY_PATH allows linking from an fd with empty path
-    var at_flags: u32 = posix.AT.EMPTY_PATH;
-    if (flags.follow_symlinks) at_flags |= posix.AT.SYMLINK_FOLLOW;
+    const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
-    while (true) {
-        const rc = posix.system.linkat(fd, "", new_dir, new_path_z.ptr, at_flags);
-        switch (posix.errno(rc)) {
-            .SUCCESS => return,
-            .INTR => continue,
-            .INVAL, .OPNOTSUPP => return error.OperationUnsupported,
-            else => |err| return errnoToHardLinkError(err),
+    if (@hasDecl(posix.AT, "EMPTY_PATH")) {
+        // Linux: use AT_EMPTY_PATH to link from fd with empty path
+        while (true) {
+            const rc = posix.system.linkat(fd, "", new_dir, new_path_z.ptr, at_flags | posix.AT.EMPTY_PATH);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return,
+                .INTR => continue,
+                .INVAL, .OPNOTSUPP => return error.OperationUnsupported,
+                else => |err| return errnoToHardLinkError(err),
+            }
+        }
+    } else {
+        // macOS/BSD: get real path from fd, then use dirHardLink
+        var path_buf: [posix.PATH_MAX]u8 = undefined;
+        const len = dirRealPath(fd, &path_buf) catch return error.OperationUnsupported;
+
+        const old_path_z = allocator.dupeZ(u8, path_buf[0..len]) catch return error.SystemResources;
+        defer allocator.free(old_path_z);
+
+        while (true) {
+            const rc = posix.system.linkat(posix.AT.FDCWD, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return,
+                .INTR => continue,
+                .INVAL, .OPNOTSUPP => return error.OperationUnsupported,
+                else => |err| return errnoToHardLinkError(err),
+            }
         }
     }
 }
@@ -2328,7 +2341,7 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
         }
     } else {
         // macOS/BSD: use fcntl F_GETPATH
-        var sufficient_buffer: [std.posix.PATH_MAX]u8 = undefined;
+        var sufficient_buffer: [posix.PATH_MAX]u8 = undefined;
         @memset(&sufficient_buffer, 0);
 
         // Handle AT_FDCWD specially
@@ -2366,7 +2379,7 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
 
     // On non-Linux with libc, we can use realpath() directly for AT_FDCWD
     if (builtin.os.tag != .linux and builtin.link_libc and dir == posix.system.AT.FDCWD) {
-        if (buffer.len < std.posix.PATH_MAX) return error.NameTooLong;
+        if (buffer.len < posix.PATH_MAX) return error.NameTooLong;
         while (true) {
             if (std.c.realpath(path_z, buffer.ptr)) |_| {
                 return std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
