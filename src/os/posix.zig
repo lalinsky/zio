@@ -113,8 +113,8 @@ pub fn mmap(
             break :blk e;
         } else blk: {
             const result = sys.mmap(ptr, len, prot, flags, fd, @intCast(offset));
-            if (result) |addr| {
-                return @as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(addr)))[0..len];
+            if (result != sys.MAP_FAILED) {
+                return @as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(result)))[0..len];
             }
             break :blk errno(-1);
         };
