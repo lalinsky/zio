@@ -15,13 +15,14 @@ pub const sys = switch (builtin.os.tag) {
 };
 
 pub const O = system.O;
-pub const AT = system.AT;
+pub const AT = sys.AT;
 pub const PATH_MAX = std.posix.PATH_MAX;
 
 pub const errno = sys.errno;
 pub const fchmodat = sys.fchmodat;
 pub const fchownat = sys.fchownat;
 pub const faccessat = sys.faccessat;
+pub const linkat = sys.linkat;
 
 pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
     const fl_flags = system.fcntl(fd, system.F.GETFL, @as(c_int, 0));

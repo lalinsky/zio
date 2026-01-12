@@ -1793,11 +1793,11 @@ pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []co
     const path_z = allocator.dupeZ(u8, path) catch return error.Unexpected;
     defer allocator.free(path_z);
 
-    // Note: AT_SYMLINK_NOFOLLOW for fchmodat is not supported on Linux
-    _ = flags;
+    // Note: AT_SYMLINK_NOFOLLOW for fchmodat requires Linux 6.6+ (fchmodat2)
+    const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
     while (true) {
-        const rc = posix.fchmodat(dir, path_z.ptr, mode);
+        const rc = posix.fchmodat(dir, path_z.ptr, mode, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -2016,7 +2016,7 @@ pub fn dirHardLink(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []cons
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
     while (true) {
-        const rc = posix.system.linkat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
+        const rc = posix.linkat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -2063,7 +2063,7 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
     if (@hasDecl(posix.AT, "EMPTY_PATH")) {
         // Linux: try AT_EMPTY_PATH first, fall back to /proc/self/fd/{fd}
         while (true) {
-            const rc = posix.system.linkat(fd, "", new_dir, new_path_z.ptr, at_flags | posix.AT.EMPTY_PATH);
+            const rc = posix.linkat(fd, "", new_dir, new_path_z.ptr, at_flags | posix.AT.EMPTY_PATH);
             switch (posix.errno(rc)) {
                 .SUCCESS => return,
                 .INTR => continue,
@@ -2073,7 +2073,7 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
                     var proc_buf: ["/proc/self/fd/-2147483648\x00".len]u8 = undefined;
                     const proc_path = std.fmt.bufPrintZ(&proc_buf, "/proc/self/fd/{d}", .{fd}) catch unreachable;
                     while (true) {
-                        const rc2 = posix.system.linkat(posix.AT.FDCWD, proc_path.ptr, new_dir, new_path_z.ptr, posix.AT.SYMLINK_FOLLOW);
+                        const rc2 = posix.linkat(posix.AT.FDCWD, proc_path.ptr, new_dir, new_path_z.ptr, posix.AT.SYMLINK_FOLLOW);
                         switch (posix.errno(rc2)) {
                             .SUCCESS => return,
                             .INTR => continue,
@@ -2093,7 +2093,7 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
         defer allocator.free(old_path_z);
 
         while (true) {
-            const rc = posix.system.linkat(posix.AT.FDCWD, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
+            const rc = posix.linkat(posix.AT.FDCWD, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
             switch (posix.errno(rc)) {
                 .SUCCESS => return,
                 .INTR => continue,
