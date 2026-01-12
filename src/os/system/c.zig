@@ -301,6 +301,9 @@ pub const AT = switch (native_os) {
     else => struct {},
 };
 
+/// Sentinel value returned by mmap on failure
+pub const MAP_FAILED: *anyopaque = @ptrFromInt(std.math.maxInt(usize));
+
 pub fn errno(rc: anytype) E {
     return if (rc == -1) @enumFromInt(c._errno().*) else .SUCCESS;
 }
@@ -316,7 +319,7 @@ const libc = struct {
     extern "c" fn mprotect(addr: [*]const u8, len: usize, prot: u32) c_int;
     extern "c" fn madvise(addr: [*]const u8, len: usize, advice: u32) c_int;
     extern "c" fn munmap(addr: [*]const u8, len: usize) c_int;
-    extern "c" fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: fd_t, offset: c.off_t) ?[*]u8;
+    extern "c" fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: fd_t, offset: c.off_t) *anyopaque;
     extern "c" fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
     extern "c" fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, flags: u32) c_int;
 };
