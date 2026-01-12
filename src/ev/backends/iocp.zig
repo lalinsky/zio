@@ -28,7 +28,6 @@ const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
 const DirCreateDir = @import("../completion.zig").DirCreateDir;
 const DirRename = @import("../completion.zig").DirRename;
-const DirDelete = @import("../completion.zig").DirDelete;
 const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
 const FileStreamRead = @import("../completion.zig").FileStreamRead;
 const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
