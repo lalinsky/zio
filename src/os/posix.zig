@@ -14,12 +14,12 @@ pub const AT = system.AT;
 pub const PATH_MAX = std.posix.PATH_MAX;
 
 pub fn errno(rc: anytype) system.E {
+    const signed: isize = @bitCast(rc);
     switch (system) {
         std.c => {
-            return if (rc == -1) @enumFromInt(system._errno().*) else .SUCCESS;
+            return if (signed == -1) @enumFromInt(system._errno().*) else .SUCCESS;
         },
         std.os.linux => {
-            const signed: isize = @bitCast(rc);
             const int = if (signed > -4096 and signed < 0) -signed else 0;
             return @enumFromInt(int);
         },
