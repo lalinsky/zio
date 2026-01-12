@@ -9,23 +9,19 @@ pub const system = switch (builtin.os.tag) {
     else => std.c,
 };
 
+pub const zio_system = switch (builtin.os.tag) {
+    .linux => @import("system/linux.zig"),
+    else => @import("system/c.zig"),
+};
+
 pub const O = system.O;
 pub const AT = system.AT;
 pub const PATH_MAX = std.posix.PATH_MAX;
 
-pub fn errno(rc: anytype) system.E {
-    const signed: isize = @bitCast(rc);
-    switch (system) {
-        std.c => {
-            return if (signed == -1) @enumFromInt(system._errno().*) else .SUCCESS;
-        },
-        std.os.linux => {
-            const int = if (signed > -4096 and signed < 0) -signed else 0;
-            return @enumFromInt(int);
-        },
-        else => @compileError("unsupported OS"),
-    }
-}
+pub const errno = zio_system.errno;
+pub const fchmodat = zio_system.fchmodat;
+pub const fchownat = zio_system.fchownat;
+pub const faccessat = zio_system.faccessat;
 
 pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
     const fl_flags = system.fcntl(fd, system.F.GETFL, @as(c_int, 0));
@@ -113,51 +109,6 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
         },
         else => @compileError("unsupported OS"),
     }
-}
-
-pub fn fchownat(dirfd: std.posix.fd_t, path: [*:0]const u8, owner: std.posix.uid_t, group: std.posix.gid_t, flags: u32) usize {
-    if (builtin.os.tag == .linux) {
-        return std.os.linux.syscall5(
-            .fchownat,
-            @as(usize, @bitCast(@as(isize, dirfd))),
-            @intFromPtr(path),
-            owner,
-            group,
-            flags,
-        );
-    }
-    const libc_fchownat = struct {
-        extern "c" fn fchownat(fd: system.fd_t, path: [*:0]const u8, owner: system.uid_t, group: system.gid_t, flag: c_int) c_int;
-    }.fchownat;
-    const rc = libc_fchownat(dirfd, path, owner, group, @intCast(flags));
-    return @bitCast(@as(isize, rc));
-}
-
-pub fn fchmodat(dirfd: std.posix.fd_t, path: [*:0]const u8, mode: std.posix.mode_t) usize {
-    if (builtin.os.tag == .linux) {
-        return system.fchmodat(dirfd, path, mode);
-    } else {
-        // BSD/macOS: fchmodat takes 4 arguments, pass 0 for flags
-        const rc = system.fchmodat(dirfd, path, mode, 0);
-        return @bitCast(@as(isize, rc));
-    }
-}
-
-pub fn faccessat(dirfd: std.posix.fd_t, path: [*:0]const u8, mode: u32, flags: u32) usize {
-    if (builtin.os.tag == .linux) {
-        return std.os.linux.syscall4(
-            .faccessat2,
-            @as(usize, @bitCast(@as(isize, dirfd))),
-            @intFromPtr(path),
-            mode,
-            flags,
-        );
-    }
-    const libc_faccessat = struct {
-        extern "c" fn faccessat(fd: system.fd_t, path: [*:0]const u8, mode: c_int, flag: c_int) c_int;
-    }.faccessat;
-    const rc = libc_faccessat(dirfd, path, @intCast(mode), @intCast(flags));
-    return @bitCast(@as(isize, rc));
 }
 
 pub const EFD = @import("eventfd.zig").EFD;
