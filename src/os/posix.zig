@@ -16,6 +16,9 @@ pub const sys = switch (builtin.os.tag) {
 
 pub const O = system.O;
 pub const AT = sys.AT;
+pub const MAP = sys.MAP;
+pub const PROT = sys.PROT;
+pub const MADV = sys.MADV;
 pub const PATH_MAX = std.posix.PATH_MAX;
 
 pub const errno = sys.errno;
@@ -23,6 +26,103 @@ pub const fchmodat = sys.fchmodat;
 pub const fchownat = sys.fchownat;
 pub const faccessat = sys.faccessat;
 pub const linkat = sys.linkat;
+
+pub const MprotectError = error{
+    AccessDenied,
+    OutOfMemory,
+    Unexpected,
+};
+
+pub fn mprotect(memory: []align(std.heap.page_size_min) u8, prot: u32) MprotectError!void {
+    while (true) {
+        switch (errno(sys.mprotect(memory.ptr, memory.len, prot))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .ACCES => return error.AccessDenied,
+            .NOMEM => return error.OutOfMemory,
+            else => |err| return unexpectedError(err),
+        }
+    }
+}
+
+pub const MadviseError = error{
+    OutOfMemory,
+    Unexpected,
+};
+
+pub fn madvise(memory: []align(std.heap.page_size_min) u8, advice: u32) MadviseError!void {
+    while (true) {
+        switch (errno(sys.madvise(memory.ptr, memory.len, advice))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .NOMEM => return error.OutOfMemory,
+            else => |err| return unexpectedError(err),
+        }
+    }
+}
+
+pub const MunmapError = error{
+    Unexpected,
+};
+
+pub fn munmap(memory: []align(std.heap.page_size_min) u8) MunmapError!void {
+    while (true) {
+        switch (errno(sys.munmap(memory.ptr, memory.len))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return unexpectedError(err),
+        }
+    }
+}
+
+pub const MmapError = error{
+    AccessDenied,
+    PermissionDenied,
+    LockedMemoryLimitExceeded,
+    MemoryMappingNotSupported,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    OutOfMemory,
+    MappingAlreadyExists,
+    Unexpected,
+};
+
+pub fn mmap(
+    ptr: ?[*]align(std.heap.page_size_min) u8,
+    len: usize,
+    prot: u32,
+    flags: u32,
+    fd: std.posix.fd_t,
+    offset: u64,
+) MmapError![]align(std.heap.page_size_min) u8 {
+    while (true) {
+        const err = if (builtin.os.tag == .linux) blk: {
+            const rc = sys.mmap(ptr, len, prot, flags, fd, @bitCast(offset));
+            const e = errno(rc);
+            if (e == .SUCCESS) return @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(rc))[0..len];
+            break :blk e;
+        } else blk: {
+            const result = sys.mmap(ptr, len, prot, flags, fd, @intCast(offset));
+            if (result) |addr| {
+                return @as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(addr)))[0..len];
+            }
+            break :blk errno(-1);
+        };
+        switch (err) {
+            .INTR => continue,
+            .TXTBSY => return error.AccessDenied,
+            .ACCES => return error.AccessDenied,
+            .PERM => return error.PermissionDenied,
+            .AGAIN => return error.LockedMemoryLimitExceeded,
+            .NODEV => return error.MemoryMappingNotSupported,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOMEM => return error.OutOfMemory,
+            .EXIST => return error.MappingAlreadyExists,
+            else => return unexpectedError(err),
+        }
+    }
+}
 
 pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
     const fl_flags = system.fcntl(fd, system.F.GETFL, @as(c_int, 0));
