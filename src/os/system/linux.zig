@@ -180,6 +180,14 @@ pub fn fchownat(dirfd: fd_t, path: [*:0]const u8, owner: uid_t, group: gid_t, fl
 }
 
 pub fn faccessat(dirfd: fd_t, path: [*:0]const u8, mode: u32, flags: u32) usize {
+    if (flags == 0) {
+        return linux.syscall3(
+            .faccessat,
+            @as(usize, @bitCast(@as(isize, dirfd))),
+            @intFromPtr(path),
+            mode,
+        );
+    }
     return linux.syscall4(
         .faccessat2,
         @as(usize, @bitCast(@as(isize, dirfd))),
