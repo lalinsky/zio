@@ -345,12 +345,13 @@ pub const DirEntryIterator = struct {
 
         // Advance to next entry
         self.index += switch (builtin.os.tag) {
-            .linux, .macos, .ios, .tvos, .watchos, .visionos => entry.reclen,
+            .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd => entry.reclen,
+            .dragonfly => entry.reclen(),
             .windows => if (entry.NextEntryOffset != 0)
                 entry.NextEntryOffset
             else
                 self.end - self.index,
-            else => entry.d_reclen,
+            else => @compileError("unsupported OS"),
         };
 
         return entry;
@@ -359,12 +360,13 @@ pub const DirEntryIterator = struct {
     fn backtrack(self: *DirEntryIterator, entry: *align(1) const RawEntry) void {
         // Revert to where this entry started
         self.index -= switch (builtin.os.tag) {
-            .linux, .macos, .ios, .tvos, .watchos, .visionos => entry.reclen,
+            .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd => entry.reclen,
+            .dragonfly => entry.reclen(),
             .windows => if (entry.NextEntryOffset != 0)
                 entry.NextEntryOffset
             else
                 0, // Was last entry, index is already at end
-            else => entry.d_reclen,
+            else => @compileError("unsupported OS"),
         };
     }
 
@@ -375,7 +377,7 @@ pub const DirEntryIterator = struct {
                 const max_len = entry.reclen - @offsetOf(std.os.linux.dirent64, "name");
                 break :blk std.mem.sliceTo(name_ptr[0..max_len], 0);
             },
-            .macos, .ios, .tvos, .watchos, .visionos => entry.name[0..entry.namlen],
+            .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => entry.name[0..entry.namlen],
             .windows => blk: {
                 const name_ptr: [*]const u16 = @alignCast(@as([*]align(1) const u16, @ptrCast(&entry.FileName)));
                 const name_utf16 = name_ptr[0 .. entry.FileNameLength / 2];
@@ -389,13 +391,13 @@ pub const DirEntryIterator = struct {
                 self.name_index += utf8_len;
                 break :blk name_buf;
             },
-            else => entry.d_name[0..entry.d_namlen],
+            else => @compileError("unsupported OS"),
         };
     }
 
     fn extractKind(_: *DirEntryIterator, entry: *align(1) const RawEntry) FileKind {
         return switch (builtin.os.tag) {
-            .linux, .macos, .ios, .tvos, .watchos, .visionos => switch (entry.type) {
+            .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => switch (entry.type) {
                 std.posix.DT.BLK => .block_device,
                 std.posix.DT.CHR => .character_device,
                 std.posix.DT.DIR => .directory,
@@ -412,25 +414,16 @@ pub const DirEntryIterator = struct {
                 if (attrs.DIRECTORY) break :blk .directory;
                 break :blk .file;
             },
-            else => switch (entry.d_type) {
-                std.posix.DT.BLK => .block_device,
-                std.posix.DT.CHR => .character_device,
-                std.posix.DT.DIR => .directory,
-                std.posix.DT.FIFO => .named_pipe,
-                std.posix.DT.LNK => .sym_link,
-                std.posix.DT.REG => .file,
-                std.posix.DT.SOCK => .unix_domain_socket,
-                std.posix.DT.WHT => .whiteout,
-                else => .unknown,
-            },
+            else => @compileError("unsupported OS"),
         };
     }
 
     fn extractInode(_: *DirEntryIterator, entry: *align(1) const RawEntry) ino_t {
         return switch (builtin.os.tag) {
             .linux, .macos, .ios, .tvos, .watchos, .visionos => entry.ino,
+            .freebsd, .netbsd, .openbsd, .dragonfly => entry.fileno,
             .windows => entry.FileIndex,
-            else => entry.d_ino,
+            else => @compileError("unsupported OS"),
         };
     }
 
@@ -449,14 +442,11 @@ pub const DirEntryIterator = struct {
                 const name = std.mem.sliceTo(name_ptr[0..max_len], 0);
                 break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
             },
-            .macos, .ios, .tvos, .watchos, .visionos => blk: {
+            .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => blk: {
                 const name = entry.name[0..entry.namlen];
                 break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
             },
-            else => blk: {
-                const name = entry.d_name[0..entry.d_namlen];
-                break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
-            },
+            else => @compileError("unsupported OS"),
         };
     }
 };
