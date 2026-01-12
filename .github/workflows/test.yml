@@ -26,12 +26,8 @@ jobs:
       with:
         version: 0.15.2
 
-    - name: Build
-      run: zig build
-      timeout-minutes: 5
-
     - name: Build tests
-      run: zig build test -Demit-test-bin -Doptimize=ReleaseSafe
+      run: zig build test --summary all
       timeout-minutes: 5
 
     - name: Build examples
@@ -40,8 +36,4 @@ jobs:
 
     - name: Build benchmarks
       run: zig build benchmarks
-      timeout-minutes: 5
-
-    - name: Run tests (native)
-      run: ./zig-out/bin/test
       timeout-minutes: 5
