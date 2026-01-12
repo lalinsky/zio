@@ -9,7 +9,7 @@ pub const system = switch (builtin.os.tag) {
     else => std.c,
 };
 
-pub const zio_system = switch (builtin.os.tag) {
+pub const sys = switch (builtin.os.tag) {
     .linux => @import("system/linux.zig"),
     else => @import("system/c.zig"),
 };
@@ -18,10 +18,10 @@ pub const O = system.O;
 pub const AT = system.AT;
 pub const PATH_MAX = std.posix.PATH_MAX;
 
-pub const errno = zio_system.errno;
-pub const fchmodat = zio_system.fchmodat;
-pub const fchownat = zio_system.fchownat;
-pub const faccessat = zio_system.faccessat;
+pub const errno = sys.errno;
+pub const fchmodat = sys.fchmodat;
+pub const fchownat = sys.fchownat;
+pub const faccessat = sys.faccessat;
 
 pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
     const fl_flags = system.fcntl(fd, system.F.GETFL, @as(c_int, 0));
