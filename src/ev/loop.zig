@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Backend = @import("backend.zig").Backend;
+const BackendCapabilities = @import("completion.zig").BackendCapabilities;
 const Completion = @import("completion.zig").Completion;
 const Cancel = @import("completion.zig").Cancel;
 const NetClose = @import("completion.zig").NetClose;
@@ -355,19 +356,20 @@ pub const Loop = struct {
                 thread_pool.cancel(work);
             },
 
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link => |op| {
-                if (!@field(Backend.capabilities, @tagName(op))) {
-                    const thread_pool = self.thread_pool orelse unreachable;
-                    const op_data = completion.cast(op.toType());
-                    thread_pool.cancel(&op_data.internal.work);
+            inline else => |op| {
+                // File/dir ops that can fallback to thread pool
+                if (@hasField(BackendCapabilities, @tagName(op))) {
+                    if (!@field(Backend.capabilities, @tagName(op))) {
+                        const thread_pool = self.thread_pool orelse unreachable;
+                        const op_data = completion.cast(op.toType());
+                        thread_pool.cancel(&op_data.internal.work);
+                    } else {
+                        self.backend.cancel(&self.state, completion);
+                    }
                 } else {
+                    // Backend operations (net_*, etc)
                     self.backend.cancel(&self.state, completion);
                 }
-            },
-
-            else => {
-                // Backend operations (net_*, etc)
-                self.backend.cancel(&self.state, completion);
             },
         }
     }
@@ -477,15 +479,16 @@ pub const Loop = struct {
                 }
 
                 // Regular backend operation
-                // Route file operations to thread pool for backends without native support
+                // Route file/dir ops to thread pool for backends without native support
                 switch (completion.op) {
-                    inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_read, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link => |op| {
-                        if (!@field(Backend.capabilities, @tagName(op))) {
-                            self.submitFileOpToThreadPool(completion);
-                            return;
+                    inline else => |op| {
+                        if (@hasField(BackendCapabilities, @tagName(op))) {
+                            if (!@field(Backend.capabilities, @tagName(op))) {
+                                self.submitFileOpToThreadPool(completion);
+                                return;
+                            }
                         }
                     },
-                    else => {},
                 }
 
                 self.backend.submit(&self.state, completion);
