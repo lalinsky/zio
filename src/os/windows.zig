@@ -19,6 +19,10 @@ pub const BOOLEAN = std.os.windows.BOOLEAN;
 pub const IO_STATUS_BLOCK = std.os.windows.IO_STATUS_BLOCK;
 pub const FILE_BOTH_DIR_INFORMATION = std.os.windows.FILE_BOTH_DIR_INFORMATION;
 pub const FILE = std.os.windows.FILE;
+pub const UNICODE_STRING = std.os.windows.UNICODE_STRING;
+pub const OBJECT_ATTRIBUTES = std.os.windows.OBJECT_ATTRIBUTES;
+pub const FILE_BASIC_INFORMATION = std.os.windows.FILE.BASIC_INFORMATION;
+pub const WCHAR = std.os.windows.WCHAR;
 pub const PAPCFUNC = *const fn (ULONG_PTR) callconv(.winapi) void;
 pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(.winapi) BOOL;
 
@@ -255,6 +259,12 @@ pub extern "kernel32" fn SetConsoleCtrlHandler(
     Add: BOOL,
 ) callconv(.winapi) BOOL;
 
+// File attribute query (ntdll)
+pub extern "ntdll" fn NtQueryAttributesFile(
+    ObjectAttributes: *OBJECT_ATTRIBUTES,
+    FileInformation: *FILE_BASIC_INFORMATION,
+) callconv(.winapi) NTSTATUS;
+
 // Directory functions (ntdll)
 pub extern "ntdll" fn NtQueryDirectoryFile(
     FileHandle: HANDLE,
@@ -302,6 +312,18 @@ pub extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
 
 // File deletion
 pub extern "kernel32" fn DeleteFileW(lpFileName: LPCWSTR) callconv(.winapi) BOOL;
+
+// File path resolution
+pub extern "kernel32" fn GetFinalPathNameByHandleW(
+    hFile: HANDLE,
+    lpszFilePath: [*]WCHAR,
+    cchFilePath: DWORD,
+    dwFlags: DWORD,
+) callconv(.winapi) DWORD;
+
+// GetFinalPathNameByHandle flags
+pub const FILE_NAME_NORMALIZED: DWORD = 0x0;
+pub const VOLUME_NAME_DOS: DWORD = 0x0;
 
 // Re-export helper functions from std.os.windows
 pub const sliceToPrefixedFileW = std.os.windows.sliceToPrefixedFileW;
