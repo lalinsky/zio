@@ -237,3 +237,31 @@ pub fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, 
         flags,
     );
 }
+
+pub fn unlinkat(dirfd: fd_t, path: [*:0]const u8, flags: u32) usize {
+    return linux.syscall3(
+        .unlinkat,
+        @as(usize, @bitCast(@as(isize, dirfd))),
+        @intFromPtr(path),
+        flags,
+    );
+}
+
+pub fn renameat(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0]const u8) usize {
+    return linux.syscall4(
+        .renameat,
+        @as(usize, @bitCast(@as(isize, oldfd))),
+        @intFromPtr(oldpath),
+        @as(usize, @bitCast(@as(isize, newfd))),
+        @intFromPtr(newpath),
+    );
+}
+
+pub fn mkdirat(dirfd: fd_t, path: [*:0]const u8, mode: mode_t) usize {
+    return linux.syscall3(
+        .mkdirat,
+        @as(usize, @bitCast(@as(isize, dirfd))),
+        @intFromPtr(path),
+        mode,
+    );
+}

@@ -32,6 +32,9 @@ pub const fchmodat = sys.fchmodat;
 pub const fchownat = sys.fchownat;
 pub const faccessat = sys.faccessat;
 pub const linkat = sys.linkat;
+pub const unlinkat = sys.unlinkat;
+pub const renameat = sys.renameat;
+pub const mkdirat = sys.mkdirat;
 pub const utimensat = sys.utimensat;
 
 pub const MprotectError = error{

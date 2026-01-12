@@ -16,7 +16,7 @@ pub fn cwd() fd_t {
     if (builtin.os.tag == .windows) {
         return w.peb().ProcessParameters.CurrentDirectory.Handle;
     } else {
-        return posix.system.AT.FDCWD;
+        return posix.AT.FDCWD;
     }
 }
 
@@ -1015,7 +1015,7 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
     defer allocator.free(new_path_z);
 
     while (true) {
-        const rc = posix.system.renameat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr);
+        const rc = posix.renameat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -1051,7 +1051,7 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
     defer allocator.free(path_z);
 
     while (true) {
-        const rc = posix.system.unlinkat(dir, path_z.ptr, 0);
+        const rc = posix.unlinkat(dir, path_z.ptr, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -1088,7 +1088,7 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
     defer allocator.free(path_z);
 
     while (true) {
-        const rc = posix.system.unlinkat(dir, path_z.ptr, posix.system.AT.REMOVEDIR);
+        const rc = posix.unlinkat(dir, path_z.ptr, posix.AT.REMOVEDIR);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -1127,7 +1127,7 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
     defer allocator.free(path_z);
 
     while (true) {
-        const rc = posix.system.mkdirat(dir, path_z.ptr, mode);
+        const rc = posix.mkdirat(dir, path_z.ptr, mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -2320,13 +2320,13 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
     }
 
     // Handle AT_FDCWD specially - it's not a real fd
-    const actual_fd: std.posix.fd_t = if (fd == posix.system.AT.FDCWD) blk: {
+    const actual_fd: std.posix.fd_t = if (fd == posix.AT.FDCWD) blk: {
         // Open "." to get a real fd for cwd
         const rc = posix.system.openat(fd, ".", .{ .CLOEXEC = true }, @as(mode_t, 0));
         if (posix.errno(rc) != .SUCCESS) return error.FileNotFound;
         break :blk @intCast(rc);
     } else fd;
-    defer if (fd == posix.system.AT.FDCWD) std.posix.close(actual_fd);
+    defer if (fd == posix.AT.FDCWD) std.posix.close(actual_fd);
 
     if (builtin.os.tag == .linux) {
         // Use /proc/self/fd/{fd} with readlink
@@ -2394,7 +2394,7 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
     defer allocator.free(path_z);
 
     // On non-Linux with libc, we can use realpath() directly for AT_FDCWD
-    if (builtin.os.tag != .linux and builtin.link_libc and dir == posix.system.AT.FDCWD) {
+    if (builtin.os.tag != .linux and builtin.link_libc and dir == posix.AT.FDCWD) {
         if (buffer.len < posix.PATH_MAX) return error.NameTooLong;
         while (true) {
             if (std.c.realpath(path_z, buffer.ptr)) |_| {
