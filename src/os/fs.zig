@@ -2300,22 +2300,22 @@ pub const DirRealPathFileError = DirRealPathError || error{
     PathAlreadyExists,
 };
 
-/// Get the real path of a directory fd using /proc/self/fd on Linux or F_GETPATH on macOS/BSD
+/// Get the real path of a directory fd using /proc/self/fd on Linux or F_GETPATH on macOS
 pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
     if (builtin.os.tag == .windows) {
         return dirRealPathWindows(fd, buffer);
     }
 
-    if (builtin.os.tag == .linux) {
-        // Handle AT_FDCWD specially - it's not a real fd
-        const actual_fd: std.posix.fd_t = if (fd == posix.system.AT.FDCWD) blk: {
-            // Open "." to get a real fd for cwd
-            const rc = posix.system.openat(fd, ".", .{ .CLOEXEC = true }, @as(mode_t, 0));
-            if (posix.errno(rc) != .SUCCESS) return error.FileNotFound;
-            break :blk @intCast(rc);
-        } else fd;
-        defer if (fd == posix.system.AT.FDCWD) std.posix.close(actual_fd);
+    // Handle AT_FDCWD specially - it's not a real fd
+    const actual_fd: std.posix.fd_t = if (fd == posix.system.AT.FDCWD) blk: {
+        // Open "." to get a real fd for cwd
+        const rc = posix.system.openat(fd, ".", .{ .CLOEXEC = true }, @as(mode_t, 0));
+        if (posix.errno(rc) != .SUCCESS) return error.FileNotFound;
+        break :blk @intCast(rc);
+    } else fd;
+    defer if (fd == posix.system.AT.FDCWD) std.posix.close(actual_fd);
 
+    if (builtin.os.tag == .linux) {
         // Use /proc/self/fd/{fd} with readlink
         var proc_path_buf: [32:0]u8 = undefined;
         const proc_path = std.fmt.bufPrintZ(&proc_path_buf, "/proc/self/fd/{d}", .{actual_fd}) catch unreachable;
@@ -2328,18 +2328,10 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
                 else => |err| return errnoToDirRealPathError(err),
             }
         }
-    } else {
-        // macOS/BSD: use fcntl F_GETPATH
+    } else if (comptime builtin.os.tag.isDarwin() or builtin.os.tag == .netbsd) {
+        // macOS/iOS/NetBSD: use fcntl F_GETPATH
         var sufficient_buffer: [posix.PATH_MAX]u8 = undefined;
         @memset(&sufficient_buffer, 0);
-
-        // Handle AT_FDCWD specially
-        const actual_fd: std.posix.fd_t = if (fd == posix.system.AT.FDCWD) blk: {
-            const rc = posix.system.openat(fd, ".", .{ .CLOEXEC = true }, @as(mode_t, 0));
-            if (posix.errno(rc) != .SUCCESS) return error.FileNotFound;
-            break :blk @intCast(rc);
-        } else fd;
-        defer if (fd == posix.system.AT.FDCWD) std.posix.close(actual_fd);
 
         while (true) {
             const rc = posix.system.fcntl(actual_fd, posix.system.F.GETPATH, &sufficient_buffer);
@@ -2354,6 +2346,28 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
                 else => |err| return errnoToDirRealPathError(err),
             }
         }
+    } else if (comptime builtin.os.tag == .freebsd) {
+        // FreeBSD: use fcntl F_KINFO
+        var kf: posix.sys.kinfo_file = undefined;
+        kf.structsize = @sizeOf(posix.sys.kinfo_file);
+
+        while (true) {
+            const rc = posix.system.fcntl(actual_fd, posix.system.F.KINFO, &kf);
+            switch (posix.errno(rc)) {
+                .SUCCESS => {
+                    const n = std.mem.indexOfScalar(u8, &kf.path, 0) orelse kf.path.len;
+                    if (n == 0) return error.Unexpected; // F_KINFO cache miss
+                    if (n > buffer.len) return error.NameTooLong;
+                    @memcpy(buffer[0..n], kf.path[0..n]);
+                    return n;
+                },
+                .INTR => continue,
+                else => |err| return errnoToDirRealPathError(err),
+            }
+        }
+    } else {
+        // Other BSDs: not supported
+        return error.Unexpected;
     }
 }
 

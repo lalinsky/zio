@@ -7,6 +7,9 @@ pub const mode_t = c.mode_t;
 pub const uid_t = c.uid_t;
 pub const gid_t = c.gid_t;
 
+pub const kinfo_file = c.kinfo_file;
+pub const KINFO_FILE_SIZE = c.KINFO_FILE_SIZE;
+
 pub fn errno(rc: anytype) E {
     return if (rc == -1) @enumFromInt(c._errno().*) else .SUCCESS;
 }
