@@ -18,10 +18,10 @@ pub const NTSTATUS = std.os.windows.NTSTATUS;
 pub const BOOLEAN = std.os.windows.BOOLEAN;
 pub const IO_STATUS_BLOCK = std.os.windows.IO_STATUS_BLOCK;
 pub const FILE_BOTH_DIR_INFORMATION = std.os.windows.FILE_BOTH_DIR_INFORMATION;
-pub const FILE = std.os.windows.FILE;
+pub const FILE_BASIC_INFORMATION = std.os.windows.FILE_BASIC_INFORMATION;
+pub const FILE_INFORMATION_CLASS = std.os.windows.FILE_INFORMATION_CLASS;
 pub const UNICODE_STRING = std.os.windows.UNICODE_STRING;
 pub const OBJECT_ATTRIBUTES = std.os.windows.OBJECT_ATTRIBUTES;
-pub const FILE_BASIC_INFORMATION = std.os.windows.FILE.BASIC_INFORMATION;
 pub const WCHAR = std.os.windows.WCHAR;
 pub const PAPCFUNC = *const fn (ULONG_PTR) callconv(.winapi) void;
 pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(.winapi) BOOL;
@@ -274,7 +274,7 @@ pub extern "ntdll" fn NtQueryDirectoryFile(
     IoStatusBlock: *IO_STATUS_BLOCK,
     FileInformation: [*]u8,
     Length: ULONG,
-    FileInformationClass: FILE.INFORMATION_CLASS,
+    FileInformationClass: FILE_INFORMATION_CLASS,
     ReturnSingleEntry: BOOLEAN,
     FileName: ?*anyopaque,
     RestartScan: BOOLEAN,
@@ -312,6 +312,9 @@ pub extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
 
 // File deletion
 pub extern "kernel32" fn DeleteFileW(lpFileName: LPCWSTR) callconv(.winapi) BOOL;
+
+// Path utilities (shlwapi)
+pub extern "shlwapi" fn PathIsRelativeW(pszPath: LPCWSTR) callconv(.winapi) BOOL;
 
 // File path resolution
 pub extern "kernel32" fn GetFinalPathNameByHandleW(

@@ -21,8 +21,6 @@ var signal_handler_refcount: std.atomic.Value(usize) = std.atomic.Value(usize).i
 var old_sigsegv_action: std.posix.Sigaction = undefined;
 var old_sigbus_action: std.posix.Sigaction = undefined;
 
-
-
 pub const StackInfo = extern struct {
     allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
     base: usize, // stack_base on Windows (TEB offset 0x08)
