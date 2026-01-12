@@ -1,3 +1,15 @@
+//! BSD/macOS system definitions for libc wrappers.
+//!
+//! Values were extracted from:
+//! - Zig standard library (lib/std/c.zig)
+//! - System headers in Zig's bundled libc (lib/libc/include/)
+//!   - any-darwin-any/sys/signal.h, sys/mman.h, sys/fcntl.h
+//!   - generic-freebsd/sys/signal.h, sys/mman.h, fcntl.h
+//!   - generic-netbsd/sys/signal.h, sys/mman.h, fcntl.h
+//!   - generic-openbsd/sys/signal.h, sys/mman.h, fcntl.h
+//!
+//! Cross-checked against headers for consistency. Values vary by OS.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
@@ -11,6 +23,44 @@ pub const gid_t = c.gid_t;
 
 pub const kinfo_file = c.kinfo_file;
 pub const KINFO_FILE_SIZE = c.KINFO_FILE_SIZE;
+
+/// Alternate signal stack flags
+/// Values from sys/signal.h
+pub const SS = struct {
+    pub const ONSTACK: u32 = 0x0001;
+    pub const DISABLE: u32 = 0x0004;
+};
+
+/// Minimum and recommended alternate signal stack sizes
+/// Values from sys/signal.h
+pub const MINSIGSTKSZ: usize = switch (native_os) {
+    .macos, .ios, .tvos, .watchos, .visionos => 32768,
+    .netbsd => 8192,
+    .freebsd => 2048, // x86, may vary by arch
+    .openbsd => 12288, // 3 * 4096
+    else => 2048,
+};
+pub const SIGSTKSZ: usize = switch (native_os) {
+    .macos, .ios, .tvos, .watchos, .visionos => 131072,
+    .netbsd => MINSIGSTKSZ + 32768,
+    .freebsd => MINSIGSTKSZ + 32768,
+    .openbsd => MINSIGSTKSZ + 8192,
+    else => 8192,
+};
+
+/// Alternate signal stack structure
+pub const stack_t = switch (native_os) {
+    .freebsd, .openbsd => extern struct {
+        sp: ?[*]u8,
+        size: usize,
+        flags: u32,
+    },
+    else => extern struct {
+        sp: ?[*]u8,
+        flags: u32,
+        size: usize,
+    },
+};
 
 /// Memory mapping flags for mmap
 /// Values from sys/mman.h
@@ -262,6 +312,7 @@ const libc = struct {
     extern "c" fn madvise(addr: [*]const u8, len: usize, advice: u32) c_int;
     extern "c" fn munmap(addr: [*]const u8, len: usize) c_int;
     extern "c" fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: fd_t, offset: c.off_t) ?[*]u8;
+    extern "c" fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
 };
 
 pub const fchmodat = libc.fchmodat;
@@ -272,3 +323,4 @@ pub const mprotect = libc.mprotect;
 pub const madvise = libc.madvise;
 pub const munmap = libc.munmap;
 pub const mmap = libc.mmap;
+pub const sigaltstack = libc.sigaltstack;
