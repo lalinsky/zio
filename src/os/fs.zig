@@ -2237,12 +2237,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
             else => @compileError("dirRead not implemented for this OS"),
         };
 
-        const errno = if (builtin.os.tag == .linux)
-            std.os.linux.errno(rc)
-        else
-            posix.errno(rc);
-
-        switch (errno) {
+        switch (posix.errno(rc)) {
             .SUCCESS => return if (builtin.os.tag == .linux) rc else @intCast(rc),
             .INTR => continue,
             .BADF, .FAULT, .NOTDIR => return error.Unexpected,
