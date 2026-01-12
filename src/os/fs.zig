@@ -2061,13 +2061,26 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
     if (@hasDecl(posix.AT, "EMPTY_PATH")) {
-        // Linux: use AT_EMPTY_PATH to link from fd with empty path
+        // Linux: try AT_EMPTY_PATH first, fall back to /proc/self/fd/{fd}
         while (true) {
             const rc = posix.system.linkat(fd, "", new_dir, new_path_z.ptr, at_flags | posix.AT.EMPTY_PATH);
             switch (posix.errno(rc)) {
                 .SUCCESS => return,
                 .INTR => continue,
                 .INVAL, .OPNOTSUPP => return error.OperationUnsupported,
+                .NOENT => {
+                    // AT_EMPTY_PATH requires CAP_DAC_READ_SEARCH, fall back to /proc/self/fd
+                    var proc_buf: ["/proc/self/fd/-2147483648\x00".len]u8 = undefined;
+                    const proc_path = std.fmt.bufPrintZ(&proc_buf, "/proc/self/fd/{d}", .{fd}) catch unreachable;
+                    while (true) {
+                        const rc2 = posix.system.linkat(posix.AT.FDCWD, proc_path.ptr, new_dir, new_path_z.ptr, posix.AT.SYMLINK_FOLLOW);
+                        switch (posix.errno(rc2)) {
+                            .SUCCESS => return,
+                            .INTR => continue,
+                            else => |err2| return errnoToHardLinkError(err2),
+                        }
+                    }
+                },
                 else => |err| return errnoToHardLinkError(err),
             }
         }
