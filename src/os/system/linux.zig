@@ -18,6 +18,7 @@ pub const fd_t = linux.fd_t;
 pub const mode_t = linux.mode_t;
 pub const uid_t = linux.uid_t;
 pub const gid_t = linux.gid_t;
+pub const timespec = linux.timespec;
 
 /// Alternate signal stack flags
 /// Values from asm-generic/signal-defs.h
@@ -225,4 +226,14 @@ pub fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: i32, offset: i6
 
 pub fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) usize {
     return linux.syscall2(.sigaltstack, @intFromPtr(ss), @intFromPtr(old_ss));
+}
+
+pub fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, flags: u32) usize {
+    return linux.syscall4(
+        .utimensat,
+        @as(usize, @bitCast(@as(isize, dirfd))),
+        @intFromPtr(path),
+        @intFromPtr(times),
+        flags,
+    );
 }

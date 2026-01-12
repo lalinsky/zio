@@ -15,6 +15,8 @@ const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 const c = std.c;
 
+pub const timespec = c.timespec;
+
 pub const E = c.E;
 pub const fd_t = c.fd_t;
 pub const mode_t = c.mode_t;
@@ -313,6 +315,7 @@ const libc = struct {
     extern "c" fn munmap(addr: [*]const u8, len: usize) c_int;
     extern "c" fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: fd_t, offset: c.off_t) ?[*]u8;
     extern "c" fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
+    extern "c" fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, flags: u32) c_int;
 };
 
 pub const fchmodat = libc.fchmodat;
@@ -324,3 +327,4 @@ pub const madvise = libc.madvise;
 pub const munmap = libc.munmap;
 pub const mmap = libc.mmap;
 pub const sigaltstack = libc.sigaltstack;
+pub const utimensat = libc.utimensat;

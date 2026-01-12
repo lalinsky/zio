@@ -1857,7 +1857,7 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
 
     while (true) {
-        const rc = posix.system.utimensat(dir, path_z.ptr, &times, at_flags);
+        const rc = posix.utimensat(dir, path_z.ptr, &times, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
