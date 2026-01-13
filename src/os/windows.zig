@@ -32,6 +32,11 @@ pub const FALSE: BOOL = 0;
 pub const NAME_MAX = std.os.windows.NAME_MAX;
 pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
 
+/// Sentinel value representing the current working directory.
+/// Similar to POSIX AT_FDCWD. This is not a real handle - it must be
+/// detected and handled specially in path resolution functions.
+pub const FDCWD: HANDLE = @ptrFromInt(@as(usize, @bitCast(@as(isize, -100))));
+
 // DuplicateHandle options
 pub const DUPLICATE_SAME_ACCESS: DWORD = 2;
 
@@ -328,8 +333,19 @@ pub extern "kernel32" fn GetFinalPathNameByHandleW(
 pub const FILE_NAME_NORMALIZED: DWORD = 0x0;
 pub const VOLUME_NAME_DOS: DWORD = 0x0;
 
+// Code page constants
+pub const CP_UTF8: DWORD = 65001;
+
+pub extern "kernel32" fn MultiByteToWideChar(
+    CodePage: DWORD,
+    dwFlags: DWORD,
+    lpMultiByteStr: [*]const u8,
+    cbMultiByte: c_int,
+    lpWideCharStr: ?[*]WCHAR,
+    cchWideChar: c_int,
+) callconv(.winapi) c_int;
+
 // Re-export helper functions from std.os.windows
-pub const sliceToPrefixedFileW = std.os.windows.sliceToPrefixedFileW;
 pub const peb = std.os.windows.peb;
 
 // Win32 error codes (copied from Zig std)
@@ -757,3 +773,98 @@ pub const SO_UPDATE_CONNECT_CONTEXT: i32 = 0x7010;
 
 // WSAIoctl codes
 pub const SIO_GET_EXTENSION_FUNCTION_POINTER: DWORD = 0xc8000006;
+
+/// Errors that can occur when converting a path to wide string.
+pub const PathToWideError = error{
+    SystemResources,
+    NameTooLong,
+    Unexpected,
+};
+
+/// Converts a (dir_handle, UTF-8 path) pair to an absolute null-terminated wide string.
+/// If dir is FDCWD, the path is converted directly (kernel32 APIs resolve against CWD).
+/// Otherwise, resolves the path relative to the directory handle.
+/// Caller must free the returned slice with the same allocator.
+pub fn pathToWide(allocator: std.mem.Allocator, dir: HANDLE, path: []const u8) PathToWideError![:0]WCHAR {
+    if (dir == FDCWD) {
+        // CWD case: just convert UTF-8 to UTF-16
+        return utf8ToWide(allocator, path);
+    }
+
+    // Non-CWD: get directory path, then join with relative path
+
+    // First, get the directory's absolute path
+    // Start with a reasonable buffer, grow if needed
+    var dir_buf: [512]WCHAR = undefined;
+    var dir_path: []const WCHAR = undefined;
+    var heap_dir_buf: ?[]WCHAR = null;
+    defer if (heap_dir_buf) |buf| allocator.free(buf);
+
+    var result = GetFinalPathNameByHandleW(dir, &dir_buf, dir_buf.len, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (result == 0) {
+        return error.NameTooLong;
+    } else if (result > dir_buf.len) {
+        // Buffer too small, allocate on heap
+        heap_dir_buf = allocator.alloc(WCHAR, result) catch return error.SystemResources;
+        result = GetFinalPathNameByHandleW(dir, heap_dir_buf.?.ptr, @intCast(heap_dir_buf.?.len), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (result == 0 or result > heap_dir_buf.?.len) {
+            return error.NameTooLong;
+        }
+        dir_path = heap_dir_buf.?[0..result];
+    } else {
+        dir_path = dir_buf[0..result];
+    }
+
+    // Convert relative path to wide
+    const rel_wide = try utf8ToWide(allocator, path);
+    defer allocator.free(rel_wide);
+
+    // Join: dir_path + '\' + rel_wide + null
+    // dir_path from GetFinalPathNameByHandleW has \\?\ prefix and no trailing slash
+    const total_len = dir_path.len + 1 + rel_wide.len;
+    const joined = allocator.allocSentinel(WCHAR, total_len, 0) catch return error.SystemResources;
+
+    @memcpy(joined[0..dir_path.len], dir_path);
+    joined[dir_path.len] = '\\';
+    @memcpy(joined[dir_path.len + 1 ..][0..rel_wide.len], rel_wide);
+
+    return joined;
+}
+
+/// Converts UTF-8 string to null-terminated wide string.
+/// Caller must free the returned slice with the same allocator.
+fn utf8ToWide(allocator: std.mem.Allocator, utf8: []const u8) PathToWideError![:0]WCHAR {
+    if (utf8.len == 0) {
+        return allocator.allocSentinel(WCHAR, 0, 0) catch return error.SystemResources;
+    }
+
+    // Get required buffer size
+    const len = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        utf8.ptr,
+        @intCast(utf8.len),
+        null,
+        0,
+    );
+    if (len <= 0) {
+        return error.NameTooLong;
+    }
+
+    // Allocate and convert
+    const wide = allocator.allocSentinel(WCHAR, @intCast(len), 0) catch return error.SystemResources;
+    const result = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        utf8.ptr,
+        @intCast(utf8.len),
+        wide.ptr,
+        len,
+    );
+    if (result <= 0) {
+        allocator.free(wide);
+        return error.NameTooLong;
+    }
+
+    return wide;
+}
