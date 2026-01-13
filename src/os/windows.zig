@@ -18,10 +18,7 @@ pub const NTSTATUS = std.os.windows.NTSTATUS;
 pub const BOOLEAN = std.os.windows.BOOLEAN;
 pub const IO_STATUS_BLOCK = std.os.windows.IO_STATUS_BLOCK;
 pub const FILE_BOTH_DIR_INFORMATION = std.os.windows.FILE_BOTH_DIR_INFORMATION;
-pub const FILE_BASIC_INFORMATION = std.os.windows.FILE_BASIC_INFORMATION;
 pub const FILE_INFORMATION_CLASS = std.os.windows.FILE_INFORMATION_CLASS;
-pub const UNICODE_STRING = std.os.windows.UNICODE_STRING;
-pub const OBJECT_ATTRIBUTES = std.os.windows.OBJECT_ATTRIBUTES;
 pub const WCHAR = std.os.windows.WCHAR;
 pub const PAPCFUNC = *const fn (ULONG_PTR) callconv(.winapi) void;
 pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(.winapi) BOOL;
@@ -137,6 +134,12 @@ pub extern "kernel32" fn GetFileInformationByHandle(
     hFile: HANDLE,
     lpFileInformation: *BY_HANDLE_FILE_INFORMATION,
 ) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn GetFileAttributesW(
+    lpFileName: LPCWSTR,
+) callconv(.winapi) DWORD;
+
+pub const INVALID_FILE_ATTRIBUTES: DWORD = 0xFFFFFFFF;
 
 pub extern "kernel32" fn SetFilePointerEx(
     hFile: HANDLE,
@@ -263,12 +266,6 @@ pub extern "kernel32" fn SetConsoleCtrlHandler(
     HandlerRoutine: ?HANDLER_ROUTINE,
     Add: BOOL,
 ) callconv(.winapi) BOOL;
-
-// File attribute query (ntdll)
-pub extern "ntdll" fn NtQueryAttributesFile(
-    ObjectAttributes: *OBJECT_ATTRIBUTES,
-    FileInformation: *FILE_BASIC_INFORMATION,
-) callconv(.winapi) NTSTATUS;
 
 // Directory functions (ntdll)
 pub extern "ntdll" fn NtQueryDirectoryFile(

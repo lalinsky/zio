@@ -2129,28 +2129,14 @@ fn dirAccessWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, f
     const path_w = try w.pathToWide(allocator, dir, path);
     defer allocator.free(path_w);
 
-    const path_len_bytes: u16 = std.math.cast(u16, path_w.len * 2) orelse
-        return error.NameTooLong;
-    var nt_name: w.UNICODE_STRING = .{
-        .Length = path_len_bytes,
-        .MaximumLength = path_len_bytes,
-        .Buffer = @constCast(path_w.ptr),
-    };
-    var attr: w.OBJECT_ATTRIBUTES = .{
-        .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
-        .RootDirectory = if (w.PathIsRelativeW(path_w.ptr) == w.FALSE) null else w.peb().ProcessParameters.CurrentDirectory.Handle,
-        .Attributes = 0,
-        .ObjectName = &nt_name,
-        .SecurityDescriptor = null,
-        .SecurityQualityOfService = null,
-    };
-    var basic_info: w.FILE_BASIC_INFORMATION = undefined;
+    if (w.GetFileAttributesW(path_w) != w.INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
 
-    switch (w.NtQueryAttributesFile(&attr, &basic_info)) {
-        .SUCCESS => return,
-        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+    switch (w.GetLastError()) {
+        .FILE_NOT_FOUND, .PATH_NOT_FOUND => return error.FileNotFound,
         .ACCESS_DENIED => return error.AccessDenied,
-        .OBJECT_NAME_INVALID, .INVALID_PARAMETER, .OBJECT_PATH_SYNTAX_BAD => return error.BadPathName,
+        .INVALID_NAME => return error.BadPathName,
         else => return error.Unexpected,
     }
 }
