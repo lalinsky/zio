@@ -786,14 +786,18 @@ pub const PathToWideError = error{
 /// Otherwise, resolves the path relative to the directory handle.
 /// Caller must free the returned slice with the same allocator.
 pub fn pathToWide(allocator: std.mem.Allocator, dir: HANDLE, path: []const u8) PathToWideError![:0]WCHAR {
-    if (dir == FDCWD) {
-        // CWD case: just convert UTF-8 to UTF-16
-        return utf8ToWide(allocator, path);
+    // Convert path to wide first - we need this in all cases
+    const path_wide = try utf8ToWide(allocator, path);
+
+    // If CWD or path is absolute, just return the converted path
+    if (dir == FDCWD or PathIsRelativeW(path_wide) == FALSE) {
+        return path_wide;
     }
+    defer allocator.free(path_wide);
 
-    // Non-CWD: get directory path, then join with relative path
+    // Non-CWD with relative path: get directory path, then join
 
-    // First, get the directory's absolute path
+    // Get the directory's absolute path
     // Start with a reasonable buffer, grow if needed
     var dir_buf: [512]WCHAR = undefined;
     var dir_path: []const WCHAR = undefined;
@@ -815,18 +819,14 @@ pub fn pathToWide(allocator: std.mem.Allocator, dir: HANDLE, path: []const u8) P
         dir_path = dir_buf[0..result];
     }
 
-    // Convert relative path to wide
-    const rel_wide = try utf8ToWide(allocator, path);
-    defer allocator.free(rel_wide);
-
-    // Join: dir_path + '\' + rel_wide + null
+    // Join: dir_path + '\' + path_wide + null
     // dir_path from GetFinalPathNameByHandleW has \\?\ prefix and no trailing slash
-    const total_len = dir_path.len + 1 + rel_wide.len;
+    const total_len = dir_path.len + 1 + path_wide.len;
     const joined = allocator.allocSentinel(WCHAR, total_len, 0) catch return error.SystemResources;
 
     @memcpy(joined[0..dir_path.len], dir_path);
     joined[dir_path.len] = '\\';
-    @memcpy(joined[dir_path.len + 1 ..][0..rel_wide.len], rel_wide);
+    @memcpy(joined[dir_path.len + 1 ..][0..path_wide.len], path_wide);
 
     return joined;
 }
