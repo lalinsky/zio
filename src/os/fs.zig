@@ -14,7 +14,7 @@ pub const fd_t = switch (builtin.os.tag) {
 /// Used with *at() functions like openat(), unlinkat(), etc.
 pub fn cwd() fd_t {
     if (builtin.os.tag == .windows) {
-        return w.peb().ProcessParameters.CurrentDirectory.Handle;
+        return w.FDCWD;
     } else {
         return posix.AT.FDCWD;
     }
@@ -507,14 +507,8 @@ pub const FileSetTimestampsError = error{
 /// Open an existing file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        // Convert path to UTF-16 with proper prefixing and directory handling
-        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.BadPathName,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const path_w = try w.pathToWide(allocator, dir, path);
+        defer allocator.free(path_w);
 
         const access_mask: w.DWORD = switch (flags.mode) {
             .read_only => w.GENERIC_READ,
@@ -528,7 +522,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             w.FILE_ATTRIBUTE_NORMAL;
 
         const handle = w.CreateFileW(
-            path_w.span().ptr,
+            path_w.ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
             null,
@@ -574,14 +568,8 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
 /// Open a directory using openat() syscall
 pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        // Convert path to UTF-16 with proper prefixing and directory handling
-        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.BadPathName,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const path_w = try w.pathToWide(allocator, dir, path);
+        defer allocator.free(path_w);
 
         const access_mask: w.DWORD = w.GENERIC_READ;
 
@@ -589,7 +577,7 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         const file_flags: w.DWORD = w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS;
 
         const handle = w.CreateFileW(
-            path_w.span().ptr,
+            path_w.ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
             null,
@@ -639,14 +627,8 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
 /// Create a file using openat() syscall
 pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        // Convert path to UTF-16 with proper prefixing and directory handling
-        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.BadPathName,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const path_w = try w.pathToWide(allocator, dir, path);
+        defer allocator.free(path_w);
 
         const access_mask: w.DWORD = if (flags.read)
             w.GENERIC_READ | w.GENERIC_WRITE
@@ -666,7 +648,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
             w.FILE_ATTRIBUTE_NORMAL;
 
         const handle = w.CreateFileW(
-            path_w.span().ptr,
+            path_w.ptr,
             access_mask,
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
             null,
@@ -973,25 +955,14 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 /// Rename a file using renameat() syscall
 pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
     if (builtin.os.tag == .windows) {
-        // Convert paths to UTF-16 with proper prefixing and directory handling
-        const old_path_w = w.sliceToPrefixedFileW(old_dir, old_path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.FileNotFound,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
-        const new_path_w = w.sliceToPrefixedFileW(new_dir, new_path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.FileNotFound,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const old_path_w = try w.pathToWide(allocator, old_dir, old_path);
+        defer allocator.free(old_path_w);
+        const new_path_w = try w.pathToWide(allocator, new_dir, new_path);
+        defer allocator.free(new_path_w);
 
         const success = w.MoveFileExW(
-            old_path_w.span().ptr,
-            new_path_w.span().ptr,
+            old_path_w.ptr,
+            new_path_w.ptr,
             w.MOVEFILE_REPLACE_EXISTING,
         );
 
@@ -1027,15 +998,10 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
 /// Delete a file using unlinkat() syscall
 pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) DirDeleteFileError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.FileNotFound,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const path_w = try w.pathToWide(allocator, dir, path);
+        defer allocator.free(path_w);
 
-        if (w.DeleteFileW(path_w.span().ptr) == w.FALSE) {
+        if (w.DeleteFileW(path_w.ptr) == w.FALSE) {
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
@@ -1063,15 +1029,10 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
 /// Delete a directory using unlinkat() syscall with AT_REMOVEDIR
 pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) DirDeleteDirError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.FileNotFound,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const path_w = try w.pathToWide(allocator, dir, path);
+        defer allocator.free(path_w);
 
-        if (w.RemoveDirectoryW(path_w.span().ptr) == w.FALSE) {
+        if (w.RemoveDirectoryW(path_w.ptr) == w.FALSE) {
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
@@ -1100,16 +1061,10 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
 /// Create a directory using mkdirat() syscall
 pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: mode_t) DirCreateDirError!void {
     if (builtin.os.tag == .windows) {
-        // Convert path to UTF-16 with proper prefixing and directory handling
-        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.FileNotFound,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const path_w = try w.pathToWide(allocator, dir, path);
+        defer allocator.free(path_w);
 
-        if (w.CreateDirectoryW(path_w.span().ptr, null) == w.FALSE) {
+        if (w.CreateDirectoryW(path_w.ptr, null) == w.FALSE) {
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
@@ -1458,18 +1413,12 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 /// Get file metadata by path relative to directory
 pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileStatError!FileStatInfo {
     if (builtin.os.tag == .windows) {
-        // On Windows, we need to open the file first, then stat it
-        const path_w = w.sliceToPrefixedFileW(dir, path) catch |err| return switch (err) {
-            error.AccessDenied => error.AccessDenied,
-            error.BadPathName => error.FileNotFound,
-            error.FileNotFound => error.FileNotFound,
-            error.NameTooLong => error.NameTooLong,
-            else => error.Unexpected,
-        };
+        const path_w = try w.pathToWide(allocator, dir, path);
+        defer allocator.free(path_w);
 
         // Open with minimal access just to query attributes
         const handle = w.CreateFileW(
-            path_w.span().ptr,
+            path_w.ptr,
             0, // No access needed, just want to query attributes
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
             null,
@@ -2171,26 +2120,25 @@ pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
 }
 
 fn dirAccessWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
-    _ = allocator;
     _ = flags; // Windows access check doesn't distinguish read/write/execute
 
-    const path_w = w.sliceToPrefixedFileW(dir, path) catch return error.BadPathName;
-    const sub_path_w = path_w.span();
-
     // Handle "." and ".." specially
-    if (sub_path_w.len >= 1 and sub_path_w[0] == '.' and (sub_path_w.len == 1 or sub_path_w[1] == 0)) return;
-    if (sub_path_w.len >= 2 and sub_path_w[0] == '.' and sub_path_w[1] == '.' and (sub_path_w.len == 2 or sub_path_w[2] == 0)) return;
+    if (path.len == 1 and path[0] == '.') return;
+    if (path.len == 2 and path[0] == '.' and path[1] == '.') return;
 
-    const path_len_bytes: u16 = std.math.cast(u16, std.mem.sliceTo(sub_path_w, 0).len * 2) orelse
+    const path_w = try w.pathToWide(allocator, dir, path);
+    defer allocator.free(path_w);
+
+    const path_len_bytes: u16 = std.math.cast(u16, path_w.len * 2) orelse
         return error.NameTooLong;
     var nt_name: w.UNICODE_STRING = .{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @constCast(sub_path_w.ptr),
+        .Buffer = @constCast(path_w.ptr),
     };
     var attr: w.OBJECT_ATTRIBUTES = .{
         .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
-        .RootDirectory = if (w.PathIsRelativeW(sub_path_w.ptr) == w.FALSE) null else dir,
+        .RootDirectory = if (w.PathIsRelativeW(path_w.ptr) == w.FALSE) null else w.peb().ProcessParameters.CurrentDirectory.Handle,
         .Attributes = 0,
         .ObjectName = &nt_name,
         .SecurityDescriptor = null,
@@ -2523,13 +2471,11 @@ fn dirRealPathWindows(handle: fd_t, buffer: []u8) DirRealPathError!usize {
 }
 
 fn dirRealPathFileWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
-    _ = allocator;
-
-    // Open the file to get its handle
-    const path_w = w.sliceToPrefixedFileW(dir, path) catch return error.BadPathName;
+    const path_w = try w.pathToWide(allocator, dir, path);
+    defer allocator.free(path_w);
 
     const handle = w.CreateFileW(
-        path_w.span().ptr,
+        path_w.ptr,
         0, // No access needed, just query
         w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
         null,
