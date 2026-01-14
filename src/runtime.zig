@@ -331,6 +331,10 @@ pub const Executor = struct {
     // by setting state to .ready without queuing.
     main_task: AnyTask = undefined,
 
+    // Shutdown event - keeps the event loop active and provides cross-thread shutdown.
+    // When notified, it calls loop.stop() to exit the event loop.
+    shutdown: ev.Async = ev.Async.init(),
+
     // Executor dedicated to this thread
     pub threadlocal var current: ?*Executor = null;
 
@@ -349,6 +353,7 @@ pub const Executor = struct {
             .loop = undefined,
             .lifo_slot_enabled = runtime.options.lifo_slot_enabled,
             .runtime = runtime,
+            .shutdown = ev.Async.init(),
         };
 
         // Initialize main_task - this serves as both the scheduler context and
@@ -378,6 +383,10 @@ pub const Executor = struct {
         });
         errdefer self.loop.deinit();
 
+        // Register shutdown handle to keep loop active and enable cross-thread shutdown
+        self.shutdown.c.callback = shutdownCallback;
+        self.loop.add(&self.shutdown.c);
+
         try registerExecutor(self.runtime, self);
         errdefer unregisterExecutor(self.runtime, self);
 
@@ -394,6 +403,10 @@ pub const Executor = struct {
         self.loop.deinit();
 
         cleanupStackGrowth();
+    }
+
+    fn shutdownCallback(loop: *ev.Loop, _: *ev.Completion) void {
+        loop.stop();
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
@@ -1097,8 +1110,7 @@ pub const Runtime = struct {
         self.executors_lock.lock();
         for (self.executors.items) |executor| {
             if (executor != &self.main_executor) {
-                executor.loop.stop();
-                executor.loop.wake();
+                executor.shutdown.notify();
             }
         }
         while (self.executors.items.len > 1) {
