@@ -34,6 +34,7 @@ const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
 
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
+const runIo = @import("io.zig").runIo;
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -610,22 +611,8 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        // Set up timeout
-        var timeout = Timeout.init;
-        defer timeout.clear(self.runtime);
-        timeout.set(self.runtime, milliseconds * std.time.ns_per_ms);
-
-        // Yield with atomic state transition (.ready -> .waiting)
-        self.yield(.ready, .waiting, .allow_cancel) catch |err| {
-            // Check if this timeout triggered (expected for sleep), otherwise it was user cancellation
-            self.runtime.checkTimeout(&timeout, err) catch |check_err| switch (check_err) {
-                error.Timeout => return, // Timeout is expected for sleep - return successfully
-                error.Canceled => return error.Canceled, // User cancellation - propagate
-            };
-            unreachable;
-        };
-
-        unreachable; // Should always be canceled (by timeout or user)
+        var timer = ev.Timer.init(milliseconds);
+        try runIo(self.runtime, &timer.c);
     }
 
     /// Run the executor event loop until all tasks complete.
