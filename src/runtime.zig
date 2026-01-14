@@ -1427,3 +1427,30 @@ test "runtime: sleep from main allows tasks to run" {
 
     try std.testing.expectEqual(10, counter);
 }
+
+test "runtime: multi-threaded execution with num_executors = 2" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .num_executors = 2 });
+    defer runtime.deinit();
+
+    const TestContext = struct {
+        var counter: usize = 0;
+
+        fn task(rt: *Runtime) !void {
+            try rt.sleep(.fromMilliseconds(10));
+            _ = @atomicRmw(usize, &counter, .Add, 1, .monotonic);
+        }
+    };
+
+    TestContext.counter = 0;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    for (0..4) |_| {
+        try group.spawn(runtime, TestContext.task, .{runtime});
+    }
+
+    try group.wait(runtime);
+
+    try std.testing.expectEqual(4, TestContext.counter);
+}
