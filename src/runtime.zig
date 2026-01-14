@@ -286,6 +286,7 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
         return error.RuntimeShutdown;
     }
 
+    assert(rt.executors.items.len > 0);
     const executor = rt.executors.items[rt.next_executor_index % rt.executors.items.len];
     rt.next_executor_index += 1;
     return executor;
@@ -993,7 +994,7 @@ pub const Runtime = struct {
         var backoff_ms: i32 = 10;
         const max_backoff_ms: i32 = 1000;
 
-        while (true) {
+        while (!self.shutting_down.load(.acquire)) {
             std.log.debug("Running executor", .{});
             executor.run(.until_stopped) catch |e| {
                 std.log.err("Worker executor error: {}, retrying in {}ms", .{ e, backoff_ms });
