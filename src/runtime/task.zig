@@ -16,6 +16,8 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("timeout.zig").Timeout;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
+const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
+
 /// Options for creating a task
 pub const CreateOptions = struct {
     pinned: bool = false,
@@ -420,9 +422,15 @@ const SpawnOptions = @import("../runtime.zig").SpawnOptions;
 /// Register a task with the runtime and schedule it for execution.
 /// Increments its reference count, adds the task to the runtime's task list,
 /// and schedules it on its executor.
-pub fn registerTask(rt: *Runtime, task: *AnyTask) void {
+/// Returns error.RuntimeShutdown if the runtime is shutting down.
+pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     task.awaitable.ref_count.incr();
-    rt.tasks.add(&task.awaitable);
+    _ = rt.task_count.fetchAdd(1, .acq_rel);
+    if (!rt.tasks.pushUnless(.sentinel1, &task.awaitable)) {
+        _ = rt.task_count.fetchSub(1, .acq_rel);
+        _ = task.awaitable.ref_count.decr();
+        return error.RuntimeShutdown;
+    }
     const executor = Executor.fromCoroutine(&task.coro);
     executor.scheduleTask(task, .maybe_remote);
 }
@@ -451,11 +459,10 @@ pub fn spawnTask(
     );
     errdefer task.destroy(rt);
 
-    if (group) |g| {
-        try registerGroupTask(g, &task.awaitable);
-    }
+    if (group) |g| try registerGroupTask(g, &task.awaitable);
+    errdefer if (group) |g| unregisterGroupTask(rt, g, &task.awaitable);
 
-    registerTask(rt, task);
+    try registerTask(rt, task);
 
     return task;
 }
