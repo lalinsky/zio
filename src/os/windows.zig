@@ -803,13 +803,21 @@ pub fn pathToWide(allocator: std.mem.Allocator, dir: HANDLE, path: []const u8) P
 
     var result = GetFinalPathNameByHandleW(dir, &dir_buf, dir_buf.len, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (result == 0) {
-        return error.NameTooLong;
+        return switch (GetLastError()) {
+            .NOT_ENOUGH_MEMORY => error.SystemResources,
+            else => error.Unexpected,
+        };
     } else if (result > dir_buf.len) {
         // Buffer too small, allocate on heap
         heap_dir_buf = allocator.alloc(WCHAR, result) catch return error.SystemResources;
         result = GetFinalPathNameByHandleW(dir, heap_dir_buf.?.ptr, @intCast(heap_dir_buf.?.len), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-        if (result == 0 or result > heap_dir_buf.?.len) {
-            return error.NameTooLong;
+        if (result == 0) {
+            return switch (GetLastError()) {
+                .NOT_ENOUGH_MEMORY => error.SystemResources,
+                else => error.Unexpected,
+            };
+        } else if (result > heap_dir_buf.?.len) {
+            return error.Unexpected; // Buffer size changed between calls
         }
         dir_path = heap_dir_buf.?[0..result];
     } else {
@@ -845,7 +853,10 @@ fn utf8ToWide(allocator: std.mem.Allocator, utf8: []const u8) PathToWideError![:
         0,
     );
     if (len <= 0) {
-        return error.NameTooLong;
+        return switch (GetLastError()) {
+            .INSUFFICIENT_BUFFER => error.NameTooLong,
+            else => error.Unexpected,
+        };
     }
 
     // Allocate and convert
@@ -860,7 +871,10 @@ fn utf8ToWide(allocator: std.mem.Allocator, utf8: []const u8) PathToWideError![:
     );
     if (result <= 0) {
         allocator.free(wide);
-        return error.NameTooLong;
+        return switch (GetLastError()) {
+            .INSUFFICIENT_BUFFER => error.NameTooLong,
+            else => error.Unexpected,
+        };
     }
 
     return wide;
