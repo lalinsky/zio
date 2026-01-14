@@ -393,7 +393,7 @@ test "ResetEvent: cancel waiting task" {
     defer waiter_task.cancel(runtime);
 
     // Wait until waiter has actually started and is blocked
-    try runtime.sleep(100);
+    try runtime.sleep(.fromMilliseconds(100));
     while (!started.load(.acquire)) {
         try runtime.yield();
     }
@@ -410,9 +410,9 @@ test "ResetEvent: select" {
 
     const TestContext = struct {
         fn setterTask(rt: *Runtime, event: *ResetEvent) !void {
-            try rt.sleep(5);
+            try rt.sleep(.fromMilliseconds(5));
             event.set();
-            try rt.sleep(5);
+            try rt.sleep(.fromMilliseconds(5));
         }
 
         fn asyncTask(rt: *Runtime) !void {

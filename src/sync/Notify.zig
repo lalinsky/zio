@@ -420,7 +420,7 @@ test "Notify: select" {
 
     const TestContext = struct {
         fn signalerTask(rt: *Runtime, notify: *Notify) !void {
-            try rt.sleep(5);
+            try rt.sleep(.fromMilliseconds(5));
             notify.signal();
         }
 

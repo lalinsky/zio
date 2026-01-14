@@ -18,7 +18,7 @@ fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelabl
             },
         };
         std.log.info("Produced: {}", .{item});
-        try rt.sleep(100); // Small delay between productions
+        try rt.sleep(.fromMilliseconds(100)); // Small delay between productions
     }
     std.log.info("Producer {} finished", .{id});
 }
@@ -36,7 +36,7 @@ fn consumer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelabl
             },
         };
         std.log.info("Consumed: {}", .{item});
-        try rt.sleep(150); // Small delay between consumptions
+        try rt.sleep(.fromMilliseconds(150)); // Small delay between consumptions
     }
     std.log.info("Consumer {} finished", .{id});
 }

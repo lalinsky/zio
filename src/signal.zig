@@ -410,7 +410,7 @@ test "Signal: basic signal handling" {
         }
 
         fn sendSignal(r: *Runtime) !void {
-            try r.sleep(10);
+            try r.sleep(.fromMilliseconds(10));
             try std.posix.raise(@intFromEnum(SignalKind.interrupt));
         }
     };
@@ -456,7 +456,7 @@ test "Signal: multiple handlers for same signal" {
         }
 
         fn sendSignal(r: *Runtime) !void {
-            try r.sleep(10);
+            try r.sleep(.fromMilliseconds(10));
             try std.posix.raise(@intFromEnum(SignalKind.interrupt));
         }
     };
@@ -526,7 +526,7 @@ test "Signal: timedWait receives signal before timeout" {
         }
 
         fn sendSignal(r: *Runtime) !void {
-            try r.sleep(10);
+            try r.sleep(.fromMilliseconds(10));
             try std.posix.raise(@intFromEnum(SignalKind.interrupt));
         }
     };
@@ -573,7 +573,7 @@ test "Signal: select on multiple signals" {
         }
 
         fn sendSignal(r: *Runtime) !void {
-            try r.sleep(10);
+            try r.sleep(.fromMilliseconds(10));
             try std.posix.raise(@intFromEnum(SignalKind.user2));
         }
     };
@@ -604,7 +604,7 @@ test "Signal: select with signal already received (fast path)" {
             try std.posix.raise(@intFromEnum(SignalKind.user1));
 
             // Small delay to ensure signal is processed
-            try r.sleep(10);
+            try r.sleep(.fromMilliseconds(10));
 
             // Now select should return immediately (fast path)
             const result = try select(r, .{ .sig = &sig });
@@ -633,7 +633,7 @@ test "Signal: select with signal and task" {
         winner: enum { signal, task } = .task,
 
         fn slowTask(r: *Runtime) !u32 {
-            try r.sleep(100);
+            try r.sleep(.fromMilliseconds(100));
             return 42;
         }
 
@@ -661,7 +661,7 @@ test "Signal: select with signal and task" {
         }
 
         fn sendSignal(r: *Runtime) !void {
-            try r.sleep(10);
+            try r.sleep(.fromMilliseconds(10));
             try std.posix.raise(@intFromEnum(SignalKind.user1));
         }
     };

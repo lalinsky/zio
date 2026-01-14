@@ -101,7 +101,7 @@ test "Timeout: fires and returns error.Timeout" {
     timeout.set(rt, 10 * std.time.ns_per_ms);
 
     // Sleep longer than timeout
-    rt.sleep(50) catch |err| {
+    rt.sleep(.fromMilliseconds(50)) catch |err| {
         // Should return error.Timeout, not error.Canceled
         rt.checkTimeout(&timeout, err) catch |check_err| {
             try std.testing.expectEqual(error.Timeout, check_err);
@@ -128,7 +128,7 @@ test "Timeout: nested timeouts - earliest fires first" {
     timeout2.set(rt, 10 * std.time.ns_per_ms);
 
     // Sleep - should be interrupted by timeout2 (earliest)
-    rt.sleep(100) catch |err| {
+    rt.sleep(.fromMilliseconds(100)) catch |err| {
         // Should return error.Timeout for timeout2
         rt.checkTimeout(&timeout2, err) catch |check_err| {
             try std.testing.expectEqual(error.Timeout, check_err);
@@ -151,7 +151,7 @@ test "Timeout: cleared before firing" {
     timeout.clear(rt);
 
     // Sleep should complete without timeout
-    try rt.sleep(10);
+    try rt.sleep(.fromMilliseconds(10));
 }
 
 test "Timeout: user cancel has priority over timeout" {
@@ -163,7 +163,7 @@ test "Timeout: user cancel has priority over timeout" {
             timeout.set(rt, 50 * std.time.ns_per_ms);
 
             // Sleep - will be canceled by user
-            rt.sleep(100) catch |err| {
+            rt.sleep(.fromMilliseconds(100)) catch |err| {
                 // Should return error.Canceled (user has priority)
                 try rt.checkTimeout(&timeout, err);
                 return; // Expected
@@ -176,7 +176,7 @@ test "Timeout: user cancel has priority over timeout" {
             var handle = try rt.spawn(worker, .{rt}, .{});
 
             // Let worker start and set timeout
-            try rt.sleep(5);
+            try rt.sleep(.fromMilliseconds(5));
 
             // User cancel before timeout fires
             handle.cancel(rt);
@@ -214,7 +214,7 @@ test "Timeout: multiple timeouts with different deadlines" {
     timeout3.set(rt, 100 * std.time.ns_per_ms);
 
     // Sleep - should be interrupted by timeout2 (earliest at 10ms)
-    rt.sleep(1000) catch |err| {
+    rt.sleep(.fromMilliseconds(1000)) catch |err| {
         // timeout2 should have triggered
         try std.testing.expect(timeout2.triggered);
         try std.testing.expect(!timeout1.triggered);
@@ -248,7 +248,7 @@ test "Timeout: set, clear, and re-set" {
     timeout.set(rt, 10 * std.time.ns_per_ms);
 
     // Sleep - should be interrupted by new timeout
-    rt.sleep(50) catch |err| {
+    rt.sleep(.fromMilliseconds(50)) catch |err| {
         rt.checkTimeout(&timeout, err) catch |check_err| {
             try std.testing.expectEqual(error.Timeout, check_err);
             return; // Expected - timeout fired
@@ -263,7 +263,7 @@ test "Timeout: cancels spawned task via join" {
     const Test = struct {
         fn blocker(rt: *Runtime) !void {
             // Block forever
-            try rt.sleep(1000000);
+            try rt.sleep(.fromMilliseconds(1000000));
         }
 
         fn main(rt: *Runtime) !void {

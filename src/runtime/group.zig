@@ -326,14 +326,14 @@ test "Group: cancellation while waiting" {
 
         fn slowTask(runtime: *Runtime) void {
             _ = @atomicRmw(usize, &started, .Add, 1, .monotonic);
-            runtime.sleep(1000) catch {
+            runtime.sleep(.fromMilliseconds(1000)) catch {
                 _ = @atomicRmw(usize, &canceled, .Add, 1, .monotonic);
             };
         }
 
         fn cancellerTask(runtime: *Runtime, group_handle: *JoinHandle(anyerror!void)) !void {
             // Wait a bit for tasks to start
-            try runtime.sleep(10);
+            try runtime.sleep(.fromMilliseconds(10));
             // Cancel the group waiter
             group_handle.awaitable.?.cancel();
         }
