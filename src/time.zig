@@ -169,6 +169,7 @@ pub const Duration = struct {
     pub fn parse(s: []const u8) ParseError!Duration {
         if (s.len == 0) return error.InvalidDuration;
 
+        const max_val = std.math.maxInt(u64);
         var ns: u64 = 0;
         var i: usize = 0;
 
@@ -180,22 +181,28 @@ pub const Duration = struct {
 
             var int_part: u64 = 0;
             for (s[int_start..i]) |c| {
-                int_part = int_part * 10 + (c - '0');
+                if (int_part > max_val / 10) return error.InvalidDuration;
+                int_part *= 10;
+                const digit: u64 = c - '0';
+                if (int_part > max_val - digit) return error.InvalidDuration;
+                int_part += digit;
             }
 
-            // Parse optional fractional part
-            var frac_ns: u64 = 0;
-            var frac_digits: usize = 0;
+            // Parse optional fractional part using float64 (like Go does for precision)
+            var frac: f64 = 0;
+            var frac_scale: f64 = 1;
             if (i < s.len and s[i] == '.') {
                 i += 1;
                 const frac_start = i;
                 while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
-                frac_digits = i - frac_start;
-                if (frac_digits == 0) return error.InvalidDuration;
+                if (i == frac_start) return error.InvalidDuration;
 
-                // Parse fraction and scale to nanoseconds (will be adjusted by unit)
+                // Parse fraction digits, stopping accumulation on overflow (like Go's leadingFraction)
                 for (s[frac_start..i]) |c| {
-                    frac_ns = frac_ns * 10 + (c - '0');
+                    if (frac < @as(f64, @floatFromInt(max_val / 10))) {
+                        frac = frac * 10 + @as(f64, @floatFromInt(c - '0'));
+                        frac_scale *= 10;
+                    }
                 }
             }
 
@@ -220,15 +227,18 @@ pub const Duration = struct {
             else
                 return error.InvalidDuration;
 
-            ns += int_part * multiplier;
+            // Check for overflow before multiplying
+            if (int_part > max_val / multiplier) return error.InvalidDuration;
+            var v = int_part * multiplier;
 
-            // Add fractional part scaled appropriately
-            if (frac_digits > 0) {
-                // Scale fraction: frac_ns represents 0.frac_ns, multiply by unit and divide by 10^frac_digits
-                var scale: u64 = 1;
-                for (0..frac_digits) |_| scale *= 10;
-                ns += (frac_ns * multiplier) / scale;
+            // Add fractional part (float64 handles the precision, like Go)
+            if (frac > 0) {
+                v +|= @intFromFloat(frac * (@as(f64, @floatFromInt(multiplier)) / frac_scale));
             }
+
+            // Check for overflow before adding to total
+            if (ns > max_val - v) return error.InvalidDuration;
+            ns += v;
         }
 
         return .{ .ns = ns };
@@ -297,6 +307,23 @@ test "Duration: parse" {
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1"));
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1."));
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1x"));
+
+    // Integer part overflow: number too large for u64
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("99999999999999999999999999999s"));
+
+    // Overflow when multiplying by unit multiplier
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("18446744073709551616ns")); // u64_max + 1
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("18446744073709552us")); // overflow when * 1000
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("18446744073710ms")); // overflow when * 1_000_000
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("18446744074s")); // overflow when * 1_000_000_000
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("307445735m")); // overflow when * 60_000_000_000
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("5124096h")); // overflow when * 3_600_000_000_000
+
+    // Accumulation overflow: multiple units that sum over u64
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("5124095h1h"));
+
+    // Valid edge case: max u64 in nanoseconds
+    try std.testing.expectEqual(std.math.maxInt(u64), (try Duration.parse("18446744073709551615ns")).ns);
 }
 
 test "Duration: overflow saturation" {
