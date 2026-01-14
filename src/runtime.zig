@@ -347,11 +347,11 @@ pub const Executor = struct {
         return @fieldParentPtr("main_task", main_task);
     }
 
-    pub fn init(self: *Executor, allocator: Allocator, options: RuntimeOptions, runtime: *Runtime) !void {
+    pub fn init(self: *Executor, runtime: *Runtime) !void {
         self.* = .{
-            .allocator = allocator,
+            .allocator = runtime.allocator,
             .loop = undefined,
-            .lifo_slot_enabled = options.lifo_slot_enabled,
+            .lifo_slot_enabled = runtime.options.lifo_slot_enabled,
             .runtime = runtime,
         };
 
@@ -839,7 +839,7 @@ pub const Runtime = struct {
         try self.executors.ensureTotalCapacity(allocator, 16);
         errdefer self.executors.deinit(allocator);
 
-        try self.main_executor.init(allocator, options, self);
+        try self.main_executor.init(self);
         errdefer self.main_executor.deinit();
 
         return self;
@@ -960,7 +960,7 @@ pub const Runtime = struct {
 
         // Create a new executor for this thread
         var executor: Executor = undefined;
-        try executor.init(self.allocator, self.options, self);
+        try executor.init(self);
         defer executor.deinit();
 
         try executor.run();
