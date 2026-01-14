@@ -255,7 +255,7 @@ pub const GroupNode = struct {
 
     next: ?*GroupNode = null,
     prev: ?*GroupNode = null,
-    in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+    in_list: bool = false,
 
     userdata: usize = undefined,
 };
