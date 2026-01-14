@@ -166,6 +166,77 @@ pub const Duration = struct {
         }
         return w;
     }
+
+    pub const ParseError = error{InvalidDuration};
+
+    /// Parses a duration string in Go-style format (e.g., "1h30m45s", "500ms", "1.5us").
+    pub fn parse(s: []const u8) ParseError!Duration {
+        if (s.len == 0) return error.InvalidDuration;
+
+        var ns: u64 = 0;
+        var i: usize = 0;
+
+        while (i < s.len) {
+            // Parse integer part
+            const int_start = i;
+            while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+            if (i == int_start) return error.InvalidDuration;
+
+            var int_part: u64 = 0;
+            for (s[int_start..i]) |c| {
+                int_part = int_part * 10 + (c - '0');
+            }
+
+            // Parse optional fractional part
+            var frac_ns: u64 = 0;
+            var frac_digits: usize = 0;
+            if (i < s.len and s[i] == '.') {
+                i += 1;
+                const frac_start = i;
+                while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+                frac_digits = i - frac_start;
+                if (frac_digits == 0) return error.InvalidDuration;
+
+                // Parse fraction and scale to nanoseconds (will be adjusted by unit)
+                for (s[frac_start..i]) |c| {
+                    frac_ns = frac_ns * 10 + (c - '0');
+                }
+            }
+
+            // Parse unit
+            if (i >= s.len) return error.InvalidDuration;
+            const unit_start = i;
+            while (i < s.len and s[i] >= 'a' and s[i] <= 'z') : (i += 1) {}
+            const unit = s[unit_start..i];
+
+            const multiplier: u64 = if (std.mem.eql(u8, unit, "ns"))
+                1
+            else if (std.mem.eql(u8, unit, "us"))
+                std.time.ns_per_us
+            else if (std.mem.eql(u8, unit, "ms"))
+                std.time.ns_per_ms
+            else if (std.mem.eql(u8, unit, "s"))
+                std.time.ns_per_s
+            else if (std.mem.eql(u8, unit, "m"))
+                std.time.ns_per_min
+            else if (std.mem.eql(u8, unit, "h"))
+                std.time.ns_per_hour
+            else
+                return error.InvalidDuration;
+
+            ns += int_part * multiplier;
+
+            // Add fractional part scaled appropriately
+            if (frac_digits > 0) {
+                // Scale fraction: frac_ns represents 0.frac_ns, multiply by unit and divide by 10^frac_digits
+                var scale: u64 = 1;
+                for (0..frac_digits) |_| scale *= 10;
+                ns += (frac_ns * multiplier) / scale;
+            }
+        }
+
+        return .{ .ns = ns };
+    }
 };
 
 test "Duration: format" {
@@ -194,4 +265,40 @@ test "Duration: format" {
         const result = std.fmt.bufPrint(&buf, "{f}", .{d}) catch unreachable;
         try std.testing.expectEqualStrings(case.expected, result);
     }
+}
+
+test "Duration: parse" {
+    const cases = [_]struct { input: []const u8, expected: u64 }{
+        .{ .input = "0s", .expected = 0 },
+        .{ .input = "1ns", .expected = 1 },
+        .{ .input = "500ns", .expected = 500 },
+        .{ .input = "1us", .expected = 1_000 },
+        .{ .input = "1.5us", .expected = 1_500 },
+        .{ .input = "1ms", .expected = 1_000_000 },
+        .{ .input = "1.5ms", .expected = 1_500_000 },
+        .{ .input = "1s", .expected = 1_000_000_000 },
+        .{ .input = "1.5s", .expected = 1_500_000_000 },
+        .{ .input = "1m0s", .expected = 60_000_000_000 },
+        .{ .input = "1m30s", .expected = 90_000_000_000 },
+        .{ .input = "1h0m0s", .expected = 3_600_000_000_000 },
+        .{ .input = "1h1m1s", .expected = 3_661_000_000_000 },
+        .{ .input = "1h23m45s", .expected = 5_025_000_000_000 },
+        .{ .input = "1h23m45.123456789s", .expected = 5_025_123_456_789 },
+        // Additional cases
+        .{ .input = "100ms", .expected = 100_000_000 },
+        .{ .input = "2h", .expected = 7_200_000_000_000 },
+        .{ .input = "30m", .expected = 1_800_000_000_000 },
+    };
+
+    for (cases) |case| {
+        const d = try Duration.parse(case.input);
+        try std.testing.expectEqual(case.expected, d.ns);
+    }
+
+    // Error cases
+    try std.testing.expectError(error.InvalidDuration, Duration.parse(""));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("abc"));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("1"));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("1."));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("1x"));
 }
