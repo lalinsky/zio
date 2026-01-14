@@ -31,19 +31,19 @@ pub const Duration = struct {
     }
 
     pub fn fromMicroseconds(us: u64) Duration {
-        return .{ .ns = us * std.time.ns_per_us };
+        return .{ .ns = us *| std.time.ns_per_us };
     }
 
     pub fn fromMilliseconds(ms: u64) Duration {
-        return .{ .ns = ms * std.time.ns_per_ms };
+        return .{ .ns = ms *| std.time.ns_per_ms };
     }
 
     pub fn fromSeconds(s: u64) Duration {
-        return .{ .ns = s * std.time.ns_per_s };
+        return .{ .ns = s *| std.time.ns_per_s };
     }
 
     pub fn fromMinutes(m: u64) Duration {
-        return .{ .ns = m * std.time.ns_per_min };
+        return .{ .ns = m *| std.time.ns_per_min };
     }
 
     pub fn toNanoseconds(self: Duration) u64 {
@@ -307,4 +307,25 @@ test "Duration: parse" {
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1"));
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1."));
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1x"));
+}
+
+test "Duration: overflow saturation" {
+    // Values that would overflow if multiplied normally should saturate to Duration.max
+    const max_u64 = std.math.maxInt(u64);
+
+    // fromMicroseconds: max_u64 * 1000 would overflow
+    try std.testing.expectEqual(Duration.max, Duration.fromMicroseconds(max_u64));
+
+    // fromMilliseconds: max_u64 * 1_000_000 would overflow
+    try std.testing.expectEqual(Duration.max, Duration.fromMilliseconds(max_u64));
+
+    // fromSeconds: max_u64 * 1_000_000_000 would overflow
+    try std.testing.expectEqual(Duration.max, Duration.fromSeconds(max_u64));
+
+    // fromMinutes: max_u64 * 60_000_000_000 would overflow
+    try std.testing.expectEqual(Duration.max, Duration.fromMinutes(max_u64));
+
+    // Verify non-overflowing values still work correctly
+    try std.testing.expectEqual(1_000_000_000, Duration.fromSeconds(1).ns);
+    try std.testing.expectEqual(60_000_000_000, Duration.fromMinutes(1).ns);
 }
