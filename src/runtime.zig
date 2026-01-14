@@ -571,11 +571,15 @@ pub const Executor = struct {
         switch (mode) {
             .until_ready => {},
             .until_idle => {
-                // If no tasks, nothing to do
+                // Set state to .new first to avoid race with onTaskComplete.
+                // If the last task completes between our check and state change,
+                // its CAS(.new, .ready) will succeed and wake us.
+                self.main_task.state.store(.new, .release);
+                // If no tasks, restore state and return
                 if (self.runtime.task_count.load(.acquire) == 0) {
+                    self.main_task.state.store(.ready, .release);
                     return;
                 }
-                self.main_task.state.store(.new, .release);
             },
             .until_stopped => {},
         }
