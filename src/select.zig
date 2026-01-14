@@ -519,12 +519,12 @@ test "select: basic - first completes" {
 
     const TestContext = struct {
         fn slowTask(rt: *Runtime) !i32 {
-            try rt.sleep(100);
+            try rt.sleep(.fromMilliseconds(100));
             return 42;
         }
 
         fn fastTask(rt: *Runtime) !i32 {
-            try rt.sleep(10);
+            try rt.sleep(.fromMilliseconds(10));
             return 99;
         }
 
@@ -560,7 +560,7 @@ test "select: already complete - fast path" {
         }
 
         fn slowTask(rt: *Runtime) !i32 {
-            try rt.sleep(100);
+            try rt.sleep(.fromMilliseconds(100));
             return 456;
         }
 
@@ -596,17 +596,17 @@ test "select: heterogeneous types" {
 
     const TestContext = struct {
         fn intTask(rt: *Runtime) Cancelable!i32 {
-            try rt.sleep(100);
+            try rt.sleep(.fromMilliseconds(100));
             return 42;
         }
 
         fn stringTask(rt: *Runtime) Cancelable![]const u8 {
-            try rt.sleep(10);
+            try rt.sleep(.fromMilliseconds(10));
             return "hello";
         }
 
         fn boolTask(rt: *Runtime) Cancelable!bool {
-            try rt.sleep(150);
+            try rt.sleep(.fromMilliseconds(150));
             return true;
         }
 
@@ -653,12 +653,12 @@ test "select: with cancellation" {
 
     const TestContext = struct {
         fn slowTask1(rt: *Runtime) !i32 {
-            try rt.sleep(1000);
+            try rt.sleep(.fromMilliseconds(1000));
             return 1;
         }
 
         fn slowTask2(rt: *Runtime) !i32 {
-            try rt.sleep(1000);
+            try rt.sleep(.fromMilliseconds(1000));
             return 2;
         }
 
@@ -707,12 +707,12 @@ test "select: with error unions - success case" {
         const ValidationError = error{ TooShort, TooLong };
 
         fn parseTask(rt: *Runtime) (ParseError || Cancelable)!i32 {
-            try rt.sleep(100);
+            try rt.sleep(.fromMilliseconds(100));
             return 42;
         }
 
         fn validateTask(rt: *Runtime) (ValidationError || Cancelable)![]const u8 {
-            try rt.sleep(10);
+            try rt.sleep(.fromMilliseconds(10));
             return "valid";
         }
 
@@ -765,12 +765,12 @@ test "select: with error unions - error case" {
         const ParseError = error{ InvalidFormat, OutOfRange };
 
         fn failingTask(rt: *Runtime) (ParseError || Cancelable)!i32 {
-            try rt.sleep(10);
+            try rt.sleep(.fromMilliseconds(10));
             return error.OutOfRange;
         }
 
         fn slowTask(rt: *Runtime) !i32 {
-            try rt.sleep(100);
+            try rt.sleep(.fromMilliseconds(100));
             return 99;
         }
 
@@ -815,17 +815,17 @@ test "select: with mixed error types" {
         const IOError = error{ FileNotFound, PermissionDenied };
 
         fn task1(rt: *Runtime) (ParseError || Cancelable)!i32 {
-            try rt.sleep(100);
+            try rt.sleep(.fromMilliseconds(100));
             return 100;
         }
 
         fn task2(rt: *Runtime) (IOError || Cancelable)![]const u8 {
-            try rt.sleep(10);
+            try rt.sleep(.fromMilliseconds(10));
             return error.FileNotFound;
         }
 
         fn task3(rt: *Runtime) !bool {
-            try rt.sleep(150);
+            try rt.sleep(.fromMilliseconds(150));
             return true;
         }
 
@@ -989,7 +989,7 @@ test "select: wait on JoinHandle from spawned task" {
 
     const TestContext = struct {
         fn workerTask(rt: *Runtime, value: i32) !i32 {
-            try rt.sleep(10);
+            try rt.sleep(.fromMilliseconds(10));
             return value * 2;
         }
 

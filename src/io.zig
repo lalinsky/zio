@@ -11,6 +11,7 @@ const AnyTask = @import("runtime/task.zig").AnyTask;
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
+const Duration = @import("time.zig").Duration;
 const Timeout = @import("runtime/timeout.zig").Timeout;
 
 /// Generic callback that resumes the task stored in userdata
@@ -151,14 +152,14 @@ pub fn runIoMulti(rt: *Runtime, completions: []const *ev.Completion) Cancelable!
     }
 }
 
-pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout: Duration) (Timeoutable || Cancelable)!void {
     const task = rt.getCurrentTask();
     var executor = task.getExecutor();
 
-    // Set up timeout
-    var timeout = Timeout.init;
-    defer timeout.clear(rt);
-    timeout.set(rt, timeout_ns);
+    // Set up timeout timer
+    var timer = Timeout.init;
+    defer timer.clear(rt);
+    timer.set(rt, timeout);
 
     // Transition to preparing_to_wait state before yielding
     task.state.store(.preparing_to_wait, .release);
@@ -176,8 +177,8 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout_ns: u64)
     // If IO completes before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
         // Classify the error before clearing timeout state
-        const classified_err = rt.checkTimeout(&timeout, err);
-        timeout.clear(rt);
+        const classified_err = rt.checkTimeout(&timer, err);
+        timer.clear(rt);
         cancelIo(rt, completion);
         return classified_err;
     };

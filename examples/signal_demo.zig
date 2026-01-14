@@ -23,7 +23,7 @@ fn serverTask(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
             std.log.info("Server is running... processed {d} items", .{counter});
         }
 
-        try rt.sleep(100); // Sleep for 100ms
+        try rt.sleep(.fromMilliseconds(100)); // Sleep for 100ms
     }
 
     std.log.info("Server stopped. Total items processed: {d}", .{counter});

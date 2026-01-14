@@ -51,6 +51,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
+const Duration = @import("../time.zig").Duration;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Timeout = @import("../runtime/timeout.zig").Timeout;
@@ -147,7 +148,7 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a signal is received.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
     // Add to wait queue and wait with timeout
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
@@ -155,10 +156,10 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init(&task.awaitable);
 
-    // Set up timeout
-    var timeout = Timeout.init;
-    defer timeout.clear(runtime);
-    timeout.set(runtime, timeout_ns);
+    // Set up timeout timer
+    var timer = Timeout.init;
+    defer timer.clear(runtime);
+    timer.set(runtime, timeout);
 
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
@@ -181,7 +182,7 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
         }
 
         // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timeout, err);
+        return runtime.checkTimeout(&timer, err);
     };
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
@@ -189,7 +190,7 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout_ns: u64) (Timeoutable
     _ = self.wait_queue.getState();
 
     // If timeout fired, we should have received error.Canceled from yield
-    std.debug.assert(!timeout.triggered);
+    std.debug.assert(!timer.triggered);
 }
 
 // Future protocol implementation for use with select()
@@ -362,7 +363,7 @@ test "Notify timedWait timeout" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, n: *Notify, timeout_flag: *bool) !void {
             // Should timeout after 10ms
-            n.timedWait(rt, 10_000_000) catch |err| {
+            n.timedWait(rt, .fromMilliseconds(10)) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -388,7 +389,7 @@ test "Notify timedWait success" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, n: *Notify, success_flag: *bool) !void {
             // Should be signaled before timeout
-            try n.timedWait(rt, 1_000_000_000); // 1 second timeout
+            try n.timedWait(rt, .fromSeconds(1));
             success_flag.* = true;
         }
 
@@ -420,7 +421,7 @@ test "Notify: select" {
 
     const TestContext = struct {
         fn signalerTask(rt: *Runtime, notify: *Notify) !void {
-            try rt.sleep(5);
+            try rt.sleep(.fromMilliseconds(5));
             notify.signal();
         }
 

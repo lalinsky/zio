@@ -11,6 +11,7 @@ const ev = @import("ev/root.zig");
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
+const Duration = @import("time.zig").Duration;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const Context = @import("coro/coroutines.zig").Context;
@@ -34,6 +35,7 @@ const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
 
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
+const runIo = @import("io.zig").runIo;
 
 /// Executor selection for spawning a coroutine
 pub const ExecutorId = enum(usize) {
@@ -609,23 +611,9 @@ pub const Executor = struct {
         return &task.awaitable;
     }
 
-    pub fn sleep(self: *Executor, milliseconds: u64) Cancelable!void {
-        // Set up timeout
-        var timeout = Timeout.init;
-        defer timeout.clear(self.runtime);
-        timeout.set(self.runtime, milliseconds * std.time.ns_per_ms);
-
-        // Yield with atomic state transition (.ready -> .waiting)
-        self.yield(.ready, .waiting, .allow_cancel) catch |err| {
-            // Check if this timeout triggered (expected for sleep), otherwise it was user cancellation
-            self.runtime.checkTimeout(&timeout, err) catch |check_err| switch (check_err) {
-                error.Timeout => return, // Timeout is expected for sleep - return successfully
-                error.Canceled => return error.Canceled, // User cancellation - propagate
-            };
-            unreachable;
-        };
-
-        unreachable; // Should always be canceled (by timeout or user)
+    pub fn sleep(self: *Executor, duration: Duration) Cancelable!void {
+        var timer = ev.Timer.init(duration.toMilliseconds());
+        try runIo(self.runtime, &timer.c);
     }
 
     /// Run the executor event loop until all tasks complete.
@@ -982,8 +970,8 @@ pub const Runtime = struct {
 
     /// Sleep for the specified number of milliseconds.
     /// Returns error.Canceled if the task was canceled during sleep.
-    pub fn sleep(self: *Runtime, milliseconds: u64) Cancelable!void {
-        return self.getCurrentExecutor().sleep(milliseconds);
+    pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
+        return self.getCurrentExecutor().sleep(duration);
     }
 
     /// Begin a cancellation shield to prevent cancellation during critical sections.
@@ -1219,7 +1207,7 @@ test "Runtime: implicit run" {
             try testing.expect(start > 0);
 
             // Sleep to ensure time advances
-            try rt.sleep(10);
+            try rt.sleep(.fromMilliseconds(10));
 
             const end = rt.now();
             try testing.expect(end > start);
@@ -1239,7 +1227,7 @@ test "Runtime: sleep from main" {
 
     // Call sleep directly from main thread - no spawn needed
     const start = runtime.now();
-    try runtime.sleep(10);
+    try runtime.sleep(.fromMilliseconds(10));
     const end = runtime.now();
 
     try testing.expect(end > start);
@@ -1252,7 +1240,7 @@ test "runtime: basic sleep" {
 
     const Sleeper = struct {
         fn run(rt: *Runtime) !void {
-            try rt.sleep(1);
+            try rt.sleep(.fromMilliseconds(1));
         }
     };
 
@@ -1272,7 +1260,7 @@ test "runtime: now() returns monotonic time" {
     try testing.expect(start > 0);
 
     // Sleep to ensure time advances
-    try runtime.sleep(10);
+    try runtime.sleep(.fromMilliseconds(10));
 
     const end = runtime.now();
     try testing.expect(end > start);
@@ -1288,7 +1276,7 @@ test "runtime: sleep is cancelable" {
     const sleepingTask = struct {
         fn call(rt: *Runtime) !void {
             // This will sleep for 1 second but should be canceled before completion
-            try rt.sleep(1000);
+            try rt.sleep(.fromMilliseconds(1000));
             // Should not reach here
             return error.TestUnexpectedResult;
         }
@@ -1367,7 +1355,7 @@ test "runtime: sleep from main allows tasks to run" {
             std.debug.print("sleep from main not working: counter={}, iterations={}\n", .{ counter, iterations });
             return error.TestExpectedEqual;
         }
-        try runtime.sleep(1);
+        try runtime.sleep(.fromMilliseconds(1));
     }
 
     try std.testing.expectEqual(10, counter);

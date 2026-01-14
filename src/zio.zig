@@ -17,6 +17,8 @@ const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
 pub const Timeoutable = common.Timeoutable;
 
+pub const Duration = @import("time.zig").Duration;
+
 const fs = @import("fs.zig");
 pub const File = fs.File;
 pub const Dir = fs.Dir;
