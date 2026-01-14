@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 
 const ev = @import("ev/root.zig");
+const os = @import("os/root.zig");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
@@ -73,11 +74,11 @@ pub const RuntimeOptions = struct {
         .max_unused_stacks = 16,
         .max_age_ms = 60 * std.time.ms_per_s, // 60 seconds
     },
-    /// Number of executor threads to run.
-    /// - null: auto-detect CPU count (multi-threaded)
-    /// - 1: single-threaded mode (default)
-    /// - N > 1: use N executor threads (multi-threaded)
-    num_executors: ?usize = 1,
+    /// Number of executor threads to run (including main).
+    /// - 0: auto-detect CPU count
+    /// - 1: single-threaded mode, no worker threads (default)
+    /// - N > 1: use N executor threads (1 main + N-1 workers)
+    num_executors: usize = 1,
     /// Enable LIFO slot optimization for cache locality.
     /// When enabled, tasks woken by other tasks are placed in a LIFO slot
     /// for immediate execution, improving cache locality.
@@ -801,18 +802,23 @@ pub const Runtime = struct {
     executors: std.ArrayList(*Executor) = .empty,
     main_executor: Executor,
     next_executor_index: usize = 0,
-
+    workers: std.ArrayList(Worker) = .empty,
     tasks: WaitQueue(Awaitable) = .empty, // Global awaitable registry
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
     futex_table: Futex.Table, // Global futex wait table
+
+    const Worker = struct {
+        thread: std.Thread = undefined,
+        ready: std.Thread.ResetEvent = .{},
+        err: ?anyerror = null,
+    };
 
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
-        const num_executors = options.num_executors orelse (std.Thread.getCpuCount() catch 1);
+        const num_executors = if (options.num_executors == 0) (std.Thread.getCpuCount() catch 1) else options.num_executors;
         var futex_table = try Futex.Table.init(allocator, num_executors);
         errdefer futex_table.deinit(allocator);
 
@@ -825,6 +831,7 @@ pub const Runtime = struct {
             .task_pool = .init(allocator),
             .futex_table = futex_table,
         };
+        errdefer self.shutdown();
 
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
@@ -835,6 +842,24 @@ pub const Runtime = struct {
         try self.main_executor.init(self);
         errdefer self.main_executor.deinit();
 
+        const num_workers = num_executors - 1;
+        try self.workers.ensureTotalCapacity(allocator, num_workers);
+
+        for (0..num_workers) |i| {
+            std.log.debug("Spawning worker thread {}", .{i + 1});
+            const worker = self.workers.addOneAssumeCapacity();
+            worker.* = .{};
+            worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker });
+        }
+
+        for (self.workers.items, 0..) |*worker, i| {
+            std.log.debug("Waiting for worker thread {}", .{i + 1});
+            worker.ready.wait();
+            if (worker.err) |e| {
+                return e;
+            }
+        }
+
         return self;
     }
 
@@ -842,9 +867,7 @@ pub const Runtime = struct {
         const allocator = self.allocator;
 
         // Gracefully shutdown - cancel tasks, stop executors, stop thread pool
-        self.shutdown() catch |err| {
-            std.log.err("Runtime shutdown error: {}", .{err});
-        };
+        self.shutdown();
 
         // After shutdown(), tasks should be in sentinel1 (closed) state
         std.debug.assert(self.tasks.getState() == .sentinel1);
@@ -951,6 +974,35 @@ pub const Runtime = struct {
         defer executor.deinit();
 
         try executor.run(.until_stopped);
+    }
+
+    /// Worker thread entry point. Creates an executor and runs until stopped.
+    /// Signals worker.ready after initialization (success or failure).
+    /// Retries with exponential backoff on errors.
+    fn runWorker(self: *Runtime, worker: *Worker) void {
+        var executor: Executor = undefined;
+        executor.init(self) catch |e| {
+            worker.err = e;
+            worker.ready.set();
+            return;
+        };
+        defer executor.deinit();
+
+        worker.ready.set();
+
+        var backoff_ms: i32 = 10;
+        const max_backoff_ms: i32 = 1000;
+
+        while (true) {
+            std.log.debug("Running executor", .{});
+            executor.run(.until_stopped) catch |e| {
+                std.log.err("Worker executor error: {}, retrying in {}ms", .{ e, backoff_ms });
+                os.time.sleep(backoff_ms);
+                backoff_ms = @min(backoff_ms * 2, max_backoff_ms);
+                continue;
+            };
+            break;
+        }
     }
 
     // Convenience methods that operate on the current coroutine context
@@ -1084,14 +1136,14 @@ pub const Runtime = struct {
     }
 
     /// Gracefully shutdown the runtime.
-    /// Cancels all remaining tasks, stops all executors, and stops the thread pool.
+    /// Cancels all remaining tasks, stops all executors, joins worker threads,
+    /// and stops the thread pool.
     ///
     /// Synchronization invariant: After shutdown() returns:
-    /// - All non-main executors have called unregisterExecutor() and exited run()
+    /// - All worker threads have been joined and destroyed
     /// - Only main_executor remains in the executors list
-    /// - Worker executors clean themselves up via defer in Runtime.run()
     /// - It's safe for deinit() to call main_executor.deinit() without races
-    pub fn shutdown(self: *Runtime) !void {
+    pub fn shutdown(self: *Runtime) void {
         // Set shutting_down flag to prevent new spawns and new executor selection
         self.shutting_down.store(true, .release);
 
@@ -1104,7 +1156,9 @@ pub const Runtime = struct {
         }
 
         // Run until all tasks complete
-        try self.main_executor.run(.until_idle);
+        self.main_executor.run(.until_idle) catch |err| {
+            std.log.err("Error running main executor during shutdown: {}", .{err});
+        };
 
         // Stop all non-main executor event loops and wait for them to exit
         self.executors_lock.lock();
@@ -1114,9 +1168,17 @@ pub const Runtime = struct {
             }
         }
         while (self.executors.items.len > 1) {
+            std.log.debug("Waiting for executors to stop", .{});
             self.executors_cond.wait(&self.executors_lock);
         }
         self.executors_lock.unlock();
+
+        // Join and destroy worker threads
+        for (self.workers.items, 0..) |*worker, i| {
+            std.log.debug("Waiting for worker thread {}", .{i});
+            worker.thread.join();
+        }
+        self.workers.deinit(self.allocator);
 
         // Shutdown thread pool
         self.thread_pool.stop();
