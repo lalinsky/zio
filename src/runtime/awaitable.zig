@@ -189,26 +189,3 @@ pub const Awaitable = struct {
         }
     }
 };
-
-/// Registry of all awaitables (tasks and blocking tasks) in the runtime.
-/// Used for lifecycle management.
-pub const AwaitableList = struct {
-    queue: WaitQueue(Awaitable) = .empty,
-
-    /// Add an awaitable to the registry.
-    pub fn add(self: *AwaitableList, awaitable: *Awaitable) void {
-        self.queue.push(awaitable);
-    }
-
-    /// Remove an awaitable from the registry.
-    /// Returns true if the awaitable was found and removed.
-    pub fn remove(self: *AwaitableList, awaitable: *Awaitable) bool {
-        return self.queue.remove(awaitable);
-    }
-
-    /// Returns true if the registry has no awaitables.
-    pub fn isEmpty(self: *const AwaitableList) bool {
-        const state = self.queue.getState();
-        return !state.isPointer();
-    }
-};

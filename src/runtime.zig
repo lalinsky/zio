@@ -31,7 +31,7 @@ const AnyBlockingTask = @import("runtime/blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
 const Timeout = @import("runtime/timeout.zig").Timeout;
 const Group = @import("runtime/group.zig").Group;
-const onGroupTaskComplete = @import("runtime/group.zig").onGroupTaskComplete;
+const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
@@ -86,19 +86,7 @@ pub const RuntimeOptions = struct {
     lifo_slot_enabled: bool = true,
 };
 
-// Noop callback for async timer cancellation
-fn noopTimerCancelCallback(
-    l: *ev.Loop,
-    c: *ev.Completion,
-) void {
-    _ = l;
-    _ = c;
-}
-
-const awaitable_module = @import("runtime/awaitable.zig");
-const Awaitable = awaitable_module.Awaitable;
-const AwaitableKind = awaitable_module.AwaitableKind;
-const AwaitableList = awaitable_module.AwaitableList;
+const Awaitable = @import("runtime/awaitable.zig").Awaitable;
 
 // Public handle for spawned tasks and futures
 pub fn JoinHandle(comptime T: type) type {
@@ -112,7 +100,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// Helper to get result from awaitable and release it
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
             self.result = awaitable.getTypedResult(T);
-            rt.releaseAwaitable(awaitable, false);
+            rt.releaseAwaitable(awaitable);
             self.awaitable = null;
         }
 
@@ -218,7 +206,7 @@ pub fn JoinHandle(comptime T: type) type {
             // If awaitable is null, already detached - no-op
             const awaitable = self.awaitable orelse return;
 
-            rt.releaseAwaitable(awaitable, false);
+            rt.releaseAwaitable(awaitable);
             self.awaitable = null;
             self.result = undefined;
         }
@@ -512,16 +500,7 @@ pub const Executor = struct {
                             current_coro.context.stack_info.allocation_len = 0;
                         }
 
-                        // Mark awaitable as complete and wake all waiters
-                        current_awaitable.markComplete();
-
-                        // For group tasks, decrement counter and release group's reference
-                        if (current_awaitable.group_node.group) |group| {
-                            onGroupTaskComplete(group, self.runtime, current_awaitable);
-                        }
-
-                        // Release runtime's reference and check for shutdown
-                        self.runtime.releaseAwaitable(current_awaitable, true);
+                        self.runtime.onTaskComplete(current_awaitable);
                     }
                 }
 
@@ -617,10 +596,10 @@ pub const Executor = struct {
     }
 
     /// Run the executor event loop until all tasks complete.
-    /// Exits when the task list becomes empty (releaseAwaitable wakes main_task).
+    /// Exits when task_count reaches 0 (onTaskComplete wakes main_task).
     pub fn run(self: *Executor) !void {
         // If no tasks, nothing to do
-        if (self.runtime.tasks.isEmpty()) {
+        if (self.runtime.task_count.load(.acquire) == 0) {
             return;
         }
         // Use .new state to indicate we're waiting for all tasks to complete
@@ -797,9 +776,9 @@ pub const Runtime = struct {
     main_executor: Executor,
     next_executor_index: usize = 0,
 
-    tasks: AwaitableList = .{}, // Global awaitable registry
+    tasks: WaitQueue(Awaitable) = .empty, // Global awaitable registry
+    task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    shutdown_mutex: std.Thread.Mutex = .{}, // Protects task list iteration during shutdown
 
     futex_table: Futex.Table, // Global futex wait table
 
@@ -841,8 +820,8 @@ pub const Runtime = struct {
             std.log.err("Runtime shutdown error: {}", .{err});
         };
 
-        // After shutdown(), tasks should be empty
-        std.debug.assert(self.tasks.isEmpty());
+        // After shutdown(), tasks should be in sentinel1 (closed) state
+        std.debug.assert(self.tasks.getState() == .sentinel1);
 
         while (true) {
             var executor: ?*Executor = null;
@@ -903,6 +882,7 @@ pub const Runtime = struct {
             null,
         );
 
+        task.awaitable.ref_count.incr(); // +1 for JoinHandle
         return JoinHandle(Result){
             .awaitable = &task.awaitable,
             .result = undefined,
@@ -931,6 +911,7 @@ pub const Runtime = struct {
             null,
         );
 
+        task.awaitable.ref_count.incr(); // +1 for JoinHandle
         return JoinHandle(Result){
             .awaitable = &task.awaitable,
             .result = undefined,
@@ -1054,26 +1035,31 @@ pub const Runtime = struct {
         return self.getCurrentExecutor().loop.now();
     }
 
-    pub fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable, comptime done: bool) void {
-        if (done) {
-            // Lock during shutdown to prevent race with task list iteration
-            if (self.shutting_down.load(.acquire)) {
-                self.shutdown_mutex.lock();
-                defer self.shutdown_mutex.unlock();
-                _ = self.tasks.remove(awaitable);
-            } else {
-                _ = self.tasks.remove(awaitable);
-            }
+    pub fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
+        if (awaitable.ref_count.decr()) awaitable.destroy(self);
+    }
+
+    pub fn onTaskComplete(self: *Runtime, awaitable: *Awaitable) void {
+        // Mark awaitable as complete and wake all waiters
+        awaitable.markComplete();
+
+        // For group tasks, decrement counter and release group's reference
+        if (awaitable.group_node.group) |group| {
+            unregisterGroupTask(self, group, awaitable);
         }
-        if (awaitable.ref_count.decr()) {
-            awaitable.destroy(self);
+
+        // Decref for list membership (if we successfully remove)
+        if (self.tasks.remove(awaitable)) {
+            self.releaseAwaitable(awaitable);
         }
-        // Wake main executor when all tasks complete (for run() to exit)
-        // Only wake if main_task is in .new state (waiting in run() mode)
-        // Use CAS to atomically check and transition to .ready
-        if (done and self.tasks.isEmpty()) {
+        // Decref for task completion
+        self.releaseAwaitable(awaitable);
+
+        // Decrement task count
+        const prev_count = self.task_count.fetchSub(1, .acq_rel);
+        if (prev_count == 1) {
+            // Last task completed - wake main executor if it's waiting in run() mode
             if (self.main_executor.main_task.state.cmpxchgStrong(.new, .ready, .release, .acquire) == null) {
-                // CAS succeeded - main_task was in .new state, now transitioned to .ready
                 self.main_executor.loop.wake();
             }
         }
@@ -1086,33 +1072,28 @@ pub const Runtime = struct {
         // Set shutting_down flag to prevent new spawns
         self.shutting_down.store(true, .release);
 
-        // Cancel all tasks by walking the linked list
-        // Lock prevents concurrent removes from invalidating our iteration
-        {
-            self.shutdown_mutex.lock();
-            defer self.shutdown_mutex.unlock();
-
-            var awaitable = self.tasks.queue.getState().getPtr();
-            while (awaitable) |a| {
-                a.cancel();
-                awaitable = a.next;
-            }
+        // Pop all tasks, cancel them, and decref for list membership.
+        // popOrTransition transitions to sentinel1 (closed) when empty,
+        // preventing new tasks from being added.
+        while (self.tasks.popOrTransition(.sentinel0, .sentinel1)) |awaitable| {
+            awaitable.cancel();
+            self.releaseAwaitable(awaitable);
         }
 
         // Run until all tasks complete
         try self.main_executor.run();
 
         // Stop all non-main executor event loops
-        {
-            self.executors_lock.lock();
-            defer self.executors_lock.unlock();
-            for (self.executors.items) |executor| {
-                if (executor != &self.main_executor) {
-                    executor.loop.stop();
-                    executor.loop.wake();
-                }
+        self.executors_lock.lock();
+        for (self.executors.items) |executor| {
+            if (executor != &self.main_executor) {
+                executor.loop.stop();
+                executor.loop.wake();
             }
         }
+        self.executors_lock.unlock();
+
+        // TODO: wait for all executors to die
 
         // Shutdown thread pool
         self.thread_pool.stop();

@@ -12,7 +12,7 @@ const meta = @import("../meta.zig");
 const Closure = @import("task.zig").Closure;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
-const onGroupTaskComplete = @import("group.zig").onGroupTaskComplete;
+const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
 
 const assert = std.debug.assert;
 
@@ -115,25 +115,21 @@ fn threadPoolCompletion(ctx: ?*anyopaque, work: *ev.Work) void {
     // TODO: Handle error case (work.c.err) when task was canceled
     _ = work;
 
-    // Mark awaitable as complete and wake all waiters (thread-safe)
-    // Even if canceled, we still mark as complete so waiters wake up
-    task.awaitable.markComplete();
-
-    // For group tasks, decrement counter and release group's reference
-    if (task.awaitable.group_node.group) |group| {
-        onGroupTaskComplete(group, task.runtime, &task.awaitable);
-    }
-
-    // Release the blocking task's reference and check for shutdown
-    task.runtime.releaseAwaitable(&task.awaitable, true);
+    task.runtime.onTaskComplete(&task.awaitable);
 }
 
 /// Register a blocking task with the runtime and submit it for execution.
 /// Increments its reference count, adds the task to the runtime's task list,
 /// and submits it directly to the thread pool.
-fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) void {
+/// Returns error.RuntimeShutdown if the runtime is shutting down.
+fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) error{RuntimeShutdown}!void {
     task.awaitable.ref_count.incr();
-    rt.tasks.add(&task.awaitable);
+    _ = rt.task_count.fetchAdd(1, .acq_rel);
+    if (!rt.tasks.pushUnless(.sentinel1, &task.awaitable)) {
+        _ = rt.task_count.fetchSub(1, .acq_rel);
+        _ = task.awaitable.ref_count.decr();
+        return error.RuntimeShutdown;
+    }
     rt.thread_pool.submit(&task.work);
 }
 
@@ -159,11 +155,10 @@ pub fn spawnBlockingTask(
     );
     errdefer task.destroy(rt);
 
-    if (group) |g| {
-        try registerGroupTask(g, &task.awaitable);
-    }
+    if (group) |g| try registerGroupTask(g, &task.awaitable);
+    errdefer if (group) |g| unregisterGroupTask(rt, g, &task.awaitable);
 
-    registerBlockingTask(rt, task);
+    try registerBlockingTask(rt, task);
 
     return task;
 }
