@@ -245,9 +245,13 @@ comptime {
     std.debug.assert(@alignOf(WaitNode) == 8);
 }
 
-pub fn registerExecutor(rt: *Runtime, executor: *Executor) !void {
+pub fn registerExecutor(rt: *Runtime, executor: *Executor) error{ RuntimeShutdown, OutOfMemory }!void {
     rt.executors_lock.lock();
     defer rt.executors_lock.unlock();
+
+    if (rt.shutting_down.load(.acquire)) {
+        return error.RuntimeShutdown;
+    }
 
     if (builtin.mode == .Debug) {
         for (rt.executors.items) |other_executor| {
@@ -269,15 +273,17 @@ pub fn unregisterExecutor(rt: *Runtime, executor: *Executor) void {
             break;
         }
     }
+
+    rt.executors_cond.broadcast();
 }
 
 pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
+    rt.executors_lock.lock();
+    defer rt.executors_lock.unlock();
+
     if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
     }
-
-    rt.executors_lock.lock();
-    defer rt.executors_lock.unlock();
 
     const executor = rt.executors.items[rt.next_executor_index % rt.executors.items.len];
     rt.next_executor_index += 1;
@@ -782,6 +788,7 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors_lock: std.Thread.Mutex = .{},
+    executors_cond: std.Thread.Condition = .{},
     executors: std.ArrayList(*Executor) = .empty,
     main_executor: Executor,
     next_executor_index: usize = 0,
@@ -833,24 +840,15 @@ pub const Runtime = struct {
         // After shutdown(), tasks should be in sentinel1 (closed) state
         std.debug.assert(self.tasks.getState() == .sentinel1);
 
-        while (true) {
-            var executor: ?*Executor = null;
+        // Worker executors clean themselves up via defer in Runtime.run().
+        // We only need to deinit the main executor here.
+        self.main_executor.deinit();
 
-            self.executors_lock.lock();
-            if (self.executors.items.len > 0) {
-                executor = self.executors.items[0];
-            }
-            self.executors_lock.unlock();
-
-            const exec = executor orelse break;
-            exec.deinit();
-        }
-
-        {
-            self.executors_lock.lock();
-            self.executors.deinit(allocator);
-            self.executors_lock.unlock();
-        }
+        // All executors should have unregistered themselves by now.
+        self.executors_lock.lock();
+        std.debug.assert(self.executors.items.len == 0);
+        self.executors.deinit(allocator);
+        self.executors_lock.unlock();
 
         // Clean up ThreadPool after executors
         self.thread_pool.deinit();
@@ -1078,9 +1076,14 @@ pub const Runtime = struct {
 
     /// Gracefully shutdown the runtime.
     /// Cancels all remaining tasks, stops all executors, and stops the thread pool.
-    /// This allows errors to be propagated to the caller.
+    ///
+    /// Synchronization invariant: After shutdown() returns:
+    /// - All non-main executors have called unregisterExecutor() and exited run()
+    /// - Only main_executor remains in the executors list
+    /// - Worker executors clean themselves up via defer in Runtime.run()
+    /// - It's safe for deinit() to call main_executor.deinit() without races
     pub fn shutdown(self: *Runtime) !void {
-        // Set shutting_down flag to prevent new spawns
+        // Set shutting_down flag to prevent new spawns and new executor selection
         self.shutting_down.store(true, .release);
 
         // Pop all tasks, cancel them, and decref for list membership.
@@ -1094,7 +1097,7 @@ pub const Runtime = struct {
         // Run until all tasks complete
         try self.main_executor.run(.until_idle);
 
-        // Stop all non-main executor event loops
+        // Stop all non-main executor event loops and wait for them to exit
         self.executors_lock.lock();
         for (self.executors.items) |executor| {
             if (executor != &self.main_executor) {
@@ -1102,9 +1105,10 @@ pub const Runtime = struct {
                 executor.loop.wake();
             }
         }
+        while (self.executors.items.len > 1) {
+            self.executors_cond.wait(&self.executors_lock);
+        }
         self.executors_lock.unlock();
-
-        // TODO: wait for all executors to die
 
         // Shutdown thread pool
         self.thread_pool.stop();
