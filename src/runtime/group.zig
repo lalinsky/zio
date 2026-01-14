@@ -166,11 +166,10 @@ pub const Group = struct {
             try Futex.wait(rt, counter_ptr, counter);
         }
 
-        // Pop remaining tasks and release refs
-        while (group.getTasks().pop()) |node| {
-            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
-            rt.releaseAwaitable(awaitable, false);
-        }
+        // All tasks completed - transition to closed state
+        // List must be empty (tasks remove themselves in onGroupTaskComplete)
+        const transitioned = group.getTasks().tryTransition(.sentinel0, .sentinel1);
+        std.debug.assert(transitioned);
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
