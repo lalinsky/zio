@@ -832,7 +832,6 @@ pub const Runtime = struct {
             .task_pool = .init(allocator),
             .futex_table = futex_table,
         };
-        errdefer self.shutdown();
 
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
@@ -842,6 +841,10 @@ pub const Runtime = struct {
 
         try self.main_executor.init(self);
         errdefer self.main_executor.deinit();
+
+        // errdefer shutdown() must come after main_executor.init() because
+        // shutdown() operates on main_executor (runs it until idle)
+        errdefer self.shutdown();
 
         const num_workers = num_executors - 1;
         try self.workers.ensureTotalCapacity(allocator, num_workers);
