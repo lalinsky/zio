@@ -32,7 +32,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("../runtime/task.zig").AnyTask;
 const Timeout = @import("../runtime/timeout.zig").Timeout;
 const Cancelable = @import("../common.zig").Cancelable;
-const Duration = @import("../common.zig").Duration;
+const Duration = @import("../time.zig").Duration;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 
 const Futex = @This();

@@ -11,7 +11,7 @@ const AnyTask = @import("runtime/task.zig").AnyTask;
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
-const Duration = @import("common.zig").Duration;
+const Duration = @import("time.zig").Duration;
 const Timeout = @import("runtime/timeout.zig").Timeout;
 
 /// Generic callback that resumes the task stored in userdata

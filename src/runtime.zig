@@ -11,7 +11,7 @@ const ev = @import("ev/root.zig");
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
-const Duration = @import("common.zig").Duration;
+const Duration = @import("time.zig").Duration;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const Context = @import("coro/coroutines.zig").Context;
