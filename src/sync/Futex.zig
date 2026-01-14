@@ -32,6 +32,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("../runtime/task.zig").AnyTask;
 const Timeout = @import("../runtime/timeout.zig").Timeout;
 const Cancelable = @import("../common.zig").Cancelable;
+const Duration = @import("../common.zig").Duration;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 
 const Futex = @This();
@@ -78,8 +79,8 @@ fn getBucket(table: *Table, address: usize) *Bucket {
 /// - The caller is unblocked spuriously.
 /// - The caller's task is cancelled, in which case `error.Canceled` is returned.
 pub fn wait(runtime: *Runtime, ptr: *const u32, expect: u32) Cancelable!void {
-    return timedWait(runtime, ptr, expect, 0) catch |err| switch (err) {
-        error.Timeout => unreachable, // 0 timeout means wait forever
+    return timedWait(runtime, ptr, expect, Duration.max) catch |err| switch (err) {
+        error.Timeout => unreachable,
         error.Canceled => error.Canceled,
     };
 }
@@ -97,9 +98,8 @@ const FutexWaiter = struct {
     _: void align(std.atomic.cache_line) = {},
 };
 
-/// Like `wait`, but also returns `error.Timeout` if `timeout_ns` nanoseconds elapse.
-/// A `timeout_ns` of 0 means wait forever.
-pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout_ns: u64) (Cancelable || error{Timeout})!void {
+/// Like `wait`, but also returns `error.Timeout` if the timeout elapses.
+pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Duration) (Cancelable || error{Timeout})!void {
     // Fast path: check if value already changed
     if (@atomicLoad(u32, ptr, .acquire) != expect) {
         return;
@@ -110,12 +110,10 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout_ns: u6
     const address = @intFromPtr(ptr);
     const bucket = getBucket(&runtime.futex_table, address);
 
-    // Set up timeout if specified
-    var timeout: Timeout = .{};
-    if (timeout_ns > 0) {
-        timeout.set(runtime, timeout_ns);
-    }
-    defer timeout.clear(runtime);
+    // Set up timeout timer
+    var timer: Timeout = .{};
+    defer timer.clear(runtime);
+    timer.set(runtime, timeout);
 
     // Use a stack-allocated waiter with its own WaitNode
     var waiter = FutexWaiter{
@@ -146,11 +144,11 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout_ns: u6
         removeFromBucket(bucket, &waiter);
 
         // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timeout, err);
+        return runtime.checkTimeout(&timer, err);
     };
 
     // If timeout fired, we should have received error.Canceled from yield
-    std.debug.assert(!timeout.triggered);
+    std.debug.assert(!timer.triggered);
 }
 
 /// Remove a waiter from its bucket (for cancellation/timeout).
@@ -233,7 +231,7 @@ test "Futex: basic wait/wake" {
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
-            timeout.set(io, 10 * std.time.ns_per_ms);
+            timeout.set(io, .fromMilliseconds(10));
 
             try waiter.join(io);
             try std.testing.expect(woken);
@@ -302,7 +300,7 @@ test "Futex: multiple waiters same address" {
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
-            timeout.set(io, 10 * std.time.ns_per_ms);
+            timeout.set(io, .fromMilliseconds(10));
 
             try waiter1.join(io);
             try waiter2.join(io);
@@ -346,7 +344,7 @@ test "Futex: multiple waiters different addresses" {
 
             var timeout: Timeout = .init;
             defer timeout.clear(io);
-            timeout.set(io, 10 * std.time.ns_per_ms);
+            timeout.set(io, .fromMilliseconds(10));
 
             try waiter1.join(io);
             waiter2.join(io) catch |err| {

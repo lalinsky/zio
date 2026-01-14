@@ -53,6 +53,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
+const Duration = @import("../common.zig").Duration;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime/task.zig").resumeTask;
@@ -161,7 +162,7 @@ pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void
 /// Returns `error.Canceled` if the task is cancelled while waiting. Cancellation
 /// takes priority over timeout - if both occur, `error.Canceled` is returned.
 /// The mutex will be held when returning with any error.
-pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Duration) (Timeoutable || Cancelable)!void {
     const task = runtime.getCurrentTask();
     const executor = task.getExecutor();
 
@@ -173,10 +174,10 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
 
     self.wait_queue.push(&waiter.wait_node);
 
-    // Set up timeout
-    var timeout = Timeout.init;
-    defer timeout.clear(runtime);
-    timeout.set(runtime, timeout_ns);
+    // Set up timeout timer
+    var timer = Timeout.init;
+    defer timer.clear(runtime);
+    timer.set(runtime, timeout);
 
     // Atomically release mutex
     mutex.unlock(runtime);
@@ -196,7 +197,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         }
 
         // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait
-        timeout.clear(runtime);
+        timer.clear(runtime);
 
         // Must reacquire mutex before returning
         mutex.lockUncancelable(runtime);
@@ -204,18 +205,18 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout_ns:
         try runtime.checkCanceled();
 
         // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timeout, err);
+        return runtime.checkTimeout(&timer, err);
     };
 
     // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait
-    timeout.clear(runtime);
+    timer.clear(runtime);
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable(runtime);
     try runtime.checkCanceled();
 
     // If timeout fired, we should have received error.Canceled from yield or checkCanceled
-    std.debug.assert(!timeout.triggered);
+    std.debug.assert(!timer.triggered);
 }
 
 /// Wakes one task waiting on this condition variable.
@@ -319,7 +320,7 @@ test "Condition timedWait timeout" {
             defer mtx.unlock(rt);
 
             // Should timeout after 10ms
-            cond.timedWait(rt, mtx, 10_000_000) catch |err| {
+            cond.timedWait(rt, mtx, .fromMilliseconds(10)) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }

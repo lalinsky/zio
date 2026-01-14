@@ -4,6 +4,7 @@
 const std = @import("std");
 const ev = @import("../ev/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
+const Duration = @import("../common.zig").Duration;
 const AnyTask = @import("task.zig").AnyTask;
 const resumeTask = @import("task.zig").resumeTask;
 const waitForIo = @import("../io.zig").waitForIo;
@@ -33,7 +34,10 @@ pub const Timeout = struct {
         self.loop = null;
     }
 
-    pub fn set(self: *Timeout, rt: *Runtime, timeout_ns: u64) void {
+    pub fn set(self: *Timeout, rt: *Runtime, timeout: Duration) void {
+        // Skip setting timer if waiting forever
+        if (timeout.ns == Duration.max.ns) return;
+
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
         std.debug.assert(executor.runtime == rt);
@@ -43,8 +47,8 @@ pub const Timeout = struct {
         self.triggered = false;
         self.loop = &executor.loop;
 
-        // Convert nanoseconds to milliseconds
-        const timeout_ms: u64 = (timeout_ns + std.time.ns_per_ms / 2) / std.time.ns_per_ms;
+        // Convert to milliseconds (saturating to avoid overflow)
+        const timeout_ms: u64 = (timeout.ns +| std.time.ns_per_ms / 2) / std.time.ns_per_ms;
 
         // Initialize ev.Timer
         self.timer.c.userdata = self;
@@ -88,7 +92,7 @@ test "Timeout: smoke test" {
     var timeout = Timeout.init;
     defer timeout.clear(rt);
 
-    timeout.set(rt, 100 * std.time.ns_per_ms);
+    timeout.set(rt, .fromMilliseconds(100));
 }
 
 test "Timeout: fires and returns error.Timeout" {
@@ -98,7 +102,7 @@ test "Timeout: fires and returns error.Timeout" {
     var timeout = Timeout.init;
     defer timeout.clear(rt);
 
-    timeout.set(rt, 10 * std.time.ns_per_ms);
+    timeout.set(rt, .fromMilliseconds(10));
 
     // Sleep longer than timeout
     rt.sleep(.fromMilliseconds(50)) catch |err| {
@@ -123,9 +127,9 @@ test "Timeout: nested timeouts - earliest fires first" {
     defer timeout2.clear(rt);
 
     // Set longer timeout first
-    timeout1.set(rt, 50 * std.time.ns_per_ms);
+    timeout1.set(rt, .fromMilliseconds(50));
     // Then shorter timeout
-    timeout2.set(rt, 10 * std.time.ns_per_ms);
+    timeout2.set(rt, .fromMilliseconds(10));
 
     // Sleep - should be interrupted by timeout2 (earliest)
     rt.sleep(.fromMilliseconds(100)) catch |err| {
@@ -145,7 +149,7 @@ test "Timeout: cleared before firing" {
     defer rt.deinit();
 
     var timeout = Timeout.init;
-    timeout.set(rt, 50 * std.time.ns_per_ms);
+    timeout.set(rt, .fromMilliseconds(50));
 
     // Clear timeout before it fires
     timeout.clear(rt);
@@ -160,7 +164,7 @@ test "Timeout: user cancel has priority over timeout" {
             var timeout = Timeout.init;
             defer timeout.clear(rt);
 
-            timeout.set(rt, 50 * std.time.ns_per_ms);
+            timeout.set(rt, .fromMilliseconds(50));
 
             // Sleep - will be canceled by user
             rt.sleep(.fromMilliseconds(100)) catch |err| {
@@ -209,9 +213,9 @@ test "Timeout: multiple timeouts with different deadlines" {
     var timeout3 = Timeout.init;
     defer timeout3.clear(rt);
 
-    timeout1.set(rt, 200 * std.time.ns_per_ms);
-    timeout2.set(rt, 10 * std.time.ns_per_ms); // This should fire
-    timeout3.set(rt, 100 * std.time.ns_per_ms);
+    timeout1.set(rt, .fromMilliseconds(200));
+    timeout2.set(rt, .fromMilliseconds(10)); // This should fire
+    timeout3.set(rt, .fromMilliseconds(100));
 
     // Sleep - should be interrupted by timeout2 (earliest at 10ms)
     rt.sleep(.fromMilliseconds(1000)) catch |err| {
@@ -239,13 +243,13 @@ test "Timeout: set, clear, and re-set" {
     defer timeout.clear(rt);
 
     // Set timeout
-    timeout.set(rt, 20 * std.time.ns_per_ms);
+    timeout.set(rt, .fromMilliseconds(20));
 
     // Clear it
     timeout.clear(rt);
 
     // Re-set with shorter duration
-    timeout.set(rt, 10 * std.time.ns_per_ms);
+    timeout.set(rt, .fromMilliseconds(10));
 
     // Sleep - should be interrupted by new timeout
     rt.sleep(.fromMilliseconds(50)) catch |err| {
@@ -272,7 +276,7 @@ test "Timeout: cancels spawned task via join" {
 
             var timeout = Timeout.init;
             defer timeout.clear(rt);
-            timeout.set(rt, 10 * std.time.ns_per_ms);
+            timeout.set(rt, .fromMilliseconds(10));
 
             // Join should be canceled by timeout
             handle.join(rt) catch |err| {

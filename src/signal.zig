@@ -7,6 +7,7 @@ const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
+const Duration = @import("common.zig").Duration;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");
 const Timeout = @import("runtime/timeout.zig").Timeout;
@@ -315,8 +316,8 @@ pub const Signal = struct {
     ///
     /// Arguments:
     /// - rt: Runtime context
-    /// - timeout_ns: Timeout duration in nanoseconds
-    pub fn timedWait(self: *Signal, rt: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+    /// - timeout: Timeout duration
+    pub fn timedWait(self: *Signal, rt: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
@@ -334,10 +335,10 @@ pub const Signal = struct {
         // Add to wait queue
         self.entry.waiters.push(&waiter.wait_node);
 
-        // Set up timeout
-        var timeout = Timeout.init;
-        defer timeout.clear(rt);
-        timeout.set(rt, timeout_ns);
+        // Set up timeout timer
+        var timer = Timeout.init;
+        defer timer.clear(rt);
+        timer.set(rt, timeout);
 
         // Yield with atomic state transition (.preparing_to_wait -> .waiting)
         // If signal arrives before the yield, the CAS inside yield() will fail and we won't suspend
@@ -346,7 +347,7 @@ pub const Signal = struct {
             _ = self.entry.waiters.remove(&waiter.wait_node);
 
             // Check if this timeout triggered, otherwise it was user cancellation
-            return rt.checkTimeout(&timeout, err);
+            return rt.checkTimeout(&timer, err);
         };
 
         // Consume the counter
@@ -481,7 +482,7 @@ test "Signal: timedWait timeout" {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            sig.timedWait(r, 50 * std.time.ns_per_ms) catch |err| {
+            sig.timedWait(r, .fromMilliseconds(50)) catch |err| {
                 if (err == error.Timeout) {
                     self.timed_out = true;
                     return;
@@ -521,7 +522,7 @@ test "Signal: timedWait receives signal before timeout" {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.timedWait(r, 1000 * std.time.ns_per_ms);
+            try sig.timedWait(r, .fromSeconds(1));
             self.signal_received = true;
         }
 

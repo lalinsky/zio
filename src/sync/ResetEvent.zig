@@ -49,6 +49,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
+const Duration = @import("../common.zig").Duration;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime/task.zig").resumeTask;
@@ -161,7 +162,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -187,10 +188,10 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
         return;
     }
 
-    // Set up timeout
-    var timeout = Timeout.init;
-    defer timeout.clear(runtime);
-    timeout.set(runtime, timeout_ns);
+    // Set up timeout timer
+    var timer = Timeout.init;
+    defer timer.clear(runtime);
+    timer.set(runtime, timeout);
 
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
@@ -199,7 +200,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
         _ = self.wait_queue.remove(&waiter.wait_node);
 
         // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timeout, err);
+        return runtime.checkTimeout(&timer, err);
     };
 
     // Acquire fence: synchronize-with set()'s .release in popAll
@@ -207,7 +208,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout_ns: u64) (Timeout
     _ = self.wait_queue.getState();
 
     // If timeout fired, we should have received error.Canceled from yield
-    std.debug.assert(!timeout.triggered);
+    std.debug.assert(!timer.triggered);
 }
 
 // Future protocol implementation for use with select()
@@ -306,7 +307,7 @@ test "ResetEvent timedWait timeout" {
     var reset_event = ResetEvent.init;
 
     // Should timeout after 10ms
-    try testing.expectError(error.Timeout, reset_event.timedWait(rt, 10_000_000));
+    try testing.expectError(error.Timeout, reset_event.timedWait(rt, .fromMilliseconds(10)));
     try testing.expect(!reset_event.isSet());
 }
 
