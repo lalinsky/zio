@@ -436,14 +436,14 @@ pub const Executor = struct {
         }
         // If yielding with .ready state (cooperative yield), schedule for later execution
         // This bypasses LIFO slot for fairness - yields always go to back of queue
-        // main_task is never queued - it just checks state in runSchedulerLoop
+        // main_task is never queued - it just checks state in run()
         if (desired_state == .ready and !is_main) {
             self.scheduleTaskLocal(current_task, true); // is_yield = true
         }
 
         if (is_main) {
             // Main: always use scheduler loop (no direct scheduling)
-            self.runSchedulerLoop() catch |err| {
+            self.run(.until_ready) catch |err| {
                 std.debug.panic("Event loop error during yield: {}", .{err});
             };
         } else {
@@ -468,70 +468,6 @@ pub const Executor = struct {
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
             try current_task.checkCanceled(self.runtime);
-        }
-    }
-
-    /// Run the scheduler loop until main_task is ready.
-    /// This is called from yield() when yielding from the main thread (non-coroutine context),
-    /// and also from run() which sets main_task to waiting until shutdown.
-    fn runSchedulerLoop(self: *Executor) !void {
-        std.debug.assert(Executor.current == self);
-        const is_main = self == &self.runtime.main_executor;
-
-        while (true) {
-            // Process ready coroutines
-            while (self.getNextTask()) |wait_node| {
-                const task = AnyTask.fromWaitNode(wait_node);
-
-                self.current_coroutine = &task.coro;
-                defer self.current_coroutine = null;
-
-                task.coro.step();
-
-                // Handle finished coroutines
-                if (self.current_coroutine) |current_coro| {
-                    if (current_coro.finished) {
-                        const current_task = AnyTask.fromCoroutine(current_coro);
-                        const current_awaitable = &current_task.awaitable;
-
-                        // Release stack immediately
-                        if (current_coro.context.stack_info.allocation_len > 0) {
-                            self.runtime.stack_pool.release(current_coro.context.stack_info, self.loop.now());
-                            current_coro.context.stack_info.allocation_len = 0;
-                        }
-
-                        self.runtime.onTaskComplete(current_awaitable);
-                    }
-                }
-
-                // Early exit for main executor - woken by task completion (e.g., join)
-                if (is_main and self.main_task.state.load(.acquire) == .ready) {
-                    return;
-                }
-            }
-
-            // Exit if loop is stopped (from deinit)
-            if (self.loop.stopped()) {
-                return;
-            }
-
-            // Drain remote ready queue (cross-thread tasks) after processing current queue
-            var drained = self.next_ready_queue_remote.popAll();
-            while (drained.pop()) |task| {
-                self.ready_queue.push(task);
-            }
-
-            // Move yielded coroutines back to ready queue
-            self.ready_queue.concatByMoving(&self.next_ready_queue);
-
-            // Run event loop - non-blocking if there's work, otherwise wait for I/O
-            const has_work = self.ready_queue.head != null or self.lifo_slot != null;
-            try self.loop.run(if (has_work) .no_wait else .once);
-
-            // Main executor: exit when main_task is ready (woken by I/O, timer, etc.)
-            if (is_main and self.main_task.state.load(.acquire) == .ready) {
-                return;
-            }
         }
     }
 
@@ -595,17 +531,91 @@ pub const Executor = struct {
         try runIo(self.runtime, &timer.c);
     }
 
-    /// Run the executor event loop until all tasks complete.
-    /// Exits when task_count reaches 0 (onTaskComplete wakes main_task).
-    pub fn run(self: *Executor) !void {
-        // If no tasks, nothing to do
-        if (self.runtime.task_count.load(.acquire) == 0) {
-            return;
+    pub const RunMode = enum {
+        /// Run until main_task.state becomes .ready.
+        /// Caller must set up the state before calling (e.g., .waiting for I/O).
+        until_ready,
+        /// Run until all tasks complete (task_count reaches 0).
+        /// Sets main_task.state to .new, which is transitioned to .ready by onTaskComplete.
+        until_idle,
+        /// Run until explicitly stopped via loop.stop().
+        /// Used for worker executor threads.
+        until_stopped,
+    };
+
+    /// Run the executor event loop.
+    pub fn run(self: *Executor, mode: RunMode) !void {
+        std.debug.assert(Executor.current == self);
+
+        switch (mode) {
+            .until_ready => {},
+            .until_idle => {
+                // If no tasks, nothing to do
+                if (self.runtime.task_count.load(.acquire) == 0) {
+                    return;
+                }
+                self.main_task.state.store(.new, .release);
+            },
+            .until_stopped => {},
         }
-        // Use .new state to indicate we're waiting for all tasks to complete
-        // This distinguishes from .waiting state used by I/O operations
-        self.main_task.state.store(.new, .release);
-        try self.runSchedulerLoop();
+
+        const check_ready = mode != .until_stopped;
+
+        while (true) {
+            // Process ready coroutines
+            while (self.getNextTask()) |wait_node| {
+                const task = AnyTask.fromWaitNode(wait_node);
+
+                self.current_coroutine = &task.coro;
+                defer self.current_coroutine = null;
+
+                task.coro.step();
+
+                // Handle finished coroutines
+                if (self.current_coroutine) |current_coro| {
+                    if (current_coro.finished) {
+                        const current_task = AnyTask.fromCoroutine(current_coro);
+                        const current_awaitable = &current_task.awaitable;
+
+                        // Release stack immediately
+                        if (current_coro.context.stack_info.allocation_len > 0) {
+                            self.runtime.stack_pool.release(current_coro.context.stack_info, self.loop.now());
+                            current_coro.context.stack_info.allocation_len = 0;
+                        }
+
+                        self.runtime.onTaskComplete(current_awaitable);
+                    }
+                }
+
+                // Early exit when main_task is ready (woken by task completion, I/O, etc.)
+                if (check_ready and self.main_task.state.load(.acquire) == .ready) {
+                    return;
+                }
+            }
+
+            // Exit if loop is stopped
+            if (self.loop.stopped()) {
+                return;
+            }
+
+            // Drain remote ready queue (cross-thread tasks) after processing current queue
+            var drained = self.next_ready_queue_remote.popAll();
+            while (drained.pop()) |task| {
+                self.ready_queue.push(task);
+            }
+
+            // Move yielded coroutines back to ready queue
+            self.ready_queue.concatByMoving(&self.next_ready_queue);
+
+            // Run event loop - non-blocking if there's work, otherwise wait for I/O
+            const has_work = self.ready_queue.head != null or self.lifo_slot != null;
+            try self.loop.run(if (has_work) .no_wait else .once);
+
+            // Check again after I/O
+            if (check_ready and self.main_task.state.load(.acquire) == .ready) {
+                return;
+            }
+        }
     }
 
     /// Get the next task to run, checking LIFO slot first for cache locality.
@@ -717,7 +727,7 @@ pub const Executor = struct {
             std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
         }
 
-        // main_task is never queued - it just checks state in runSchedulerLoop
+        // main_task is never queued - it just checks state in run()
         if (task == &self.main_task) {
             // Wake the loop if called from another thread
             if (Executor.current != self) {
@@ -919,11 +929,12 @@ pub const Runtime = struct {
     }
 
     /// Run the executor event loop on the current thread.
-    /// If the thread already has an executor (e.g., main thread), uses that.
-    /// Otherwise, creates a new executor for this thread (e.g., worker threads).
+    /// If the thread already has an executor (e.g., main thread), runs until idle.
+    /// Otherwise, creates a new executor for this thread (e.g., worker threads)
+    /// and runs until stopped.
     pub fn run(self: *Runtime) !void {
         if (Executor.current) |executor| {
-            try executor.run();
+            try executor.run(.until_idle);
             return;
         }
 
@@ -932,7 +943,7 @@ pub const Runtime = struct {
         try executor.init(self);
         defer executor.deinit();
 
-        try executor.run();
+        try executor.run(.until_stopped);
     }
 
     // Convenience methods that operate on the current coroutine context
@@ -1081,7 +1092,7 @@ pub const Runtime = struct {
         }
 
         // Run until all tasks complete
-        try self.main_executor.run();
+        try self.main_executor.run(.until_idle);
 
         // Stop all non-main executor event loops
         self.executors_lock.lock();
