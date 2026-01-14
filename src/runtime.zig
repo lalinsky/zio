@@ -592,11 +592,6 @@ pub const Executor = struct {
                         self.runtime.onTaskComplete(current_awaitable);
                     }
                 }
-
-                // Early exit when main_task is ready (woken by task completion, I/O, etc.)
-                if (check_ready and self.main_task.state.load(.acquire) == .ready) {
-                    return;
-                }
             }
 
             // Exit if loop is stopped
@@ -614,7 +609,8 @@ pub const Executor = struct {
             self.ready_queue.concatByMoving(&self.next_ready_queue);
 
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
-            const has_work = self.ready_queue.head != null or self.lifo_slot != null;
+            const main_ready = check_ready and self.main_task.state.load(.acquire) == .ready;
+            const has_work = self.ready_queue.head != null or self.lifo_slot != null or main_ready;
             try self.loop.run(if (has_work) .no_wait else .once);
 
             // Check again after I/O
