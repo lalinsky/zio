@@ -1,5 +1,11 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
 // SPDX-License-Identifier: MIT
+//
+// Parts of the file are based on https://github.com/golang/go/blob/master/src/time/format.go
+//
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 const std = @import("std");
 
