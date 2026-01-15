@@ -377,14 +377,27 @@ pub const IpAddress = extern union {
         };
     }
 
+    /// Returns true if the IP is a broadcast address.
+    /// IPv4: 255.255.255.255
+    /// IPv6: (no broadcast concept, always returns false)
+    pub fn isBroadcast(self: IpAddress) bool {
+        return switch (self.any.family) {
+            os.net.AF.INET => self.in.addr == 0xFFFFFFFF,
+            os.net.AF.INET6 => false,
+            else => unreachable,
+        };
+    }
+
     /// Returns true if the IP is a global unicast address.
-    /// This is the complement of private, loopback, link-local, multicast, and unspecified.
+    /// Per RFC 4291 (IPv6) and following Go's net.IP semantics, this is
+    /// the complement of loopback, link-local, multicast, unspecified, and broadcast.
+    /// Note: Private addresses (RFC 1918, RFC 4193) ARE included as global unicast.
     pub fn isGlobalUnicast(self: IpAddress) bool {
-        return !self.isPrivate() and
-            !self.isLoopback() and
+        return !self.isLoopback() and
             !self.isLinkLocalUnicast() and
             !self.isMulticast() and
-            !self.isUnspecified();
+            !self.isUnspecified() and
+            !self.isBroadcast();
     }
 
     pub const ListenOptions = struct {
@@ -1547,27 +1560,48 @@ test "IpAddress: isMulticast IPv6" {
     try std.testing.expect(!(try IpAddress.parseIp6("::1", 0)).isMulticast());
 }
 
+test "IpAddress: isBroadcast IPv4" {
+    // Broadcast
+    try std.testing.expect((try IpAddress.parseIp4("255.255.255.255", 0)).isBroadcast());
+
+    // Not broadcast
+    try std.testing.expect(!(try IpAddress.parseIp4("255.255.255.254", 0)).isBroadcast());
+    try std.testing.expect(!(try IpAddress.parseIp4("8.8.8.8", 0)).isBroadcast());
+    try std.testing.expect(!(try IpAddress.parseIp4("0.0.0.0", 0)).isBroadcast());
+}
+
+test "IpAddress: isBroadcast IPv6" {
+    // IPv6 has no broadcast concept
+    try std.testing.expect(!(try IpAddress.parseIp6("::", 0)).isBroadcast());
+    try std.testing.expect(!(try IpAddress.parseIp6("ff02::1", 0)).isBroadcast());
+    try std.testing.expect(!(try IpAddress.parseIp6("2001:db8::1", 0)).isBroadcast());
+}
+
 test "IpAddress: isGlobalUnicast IPv4" {
-    // Public addresses
+    // Global unicast addresses (including private per RFC)
     try std.testing.expect((try IpAddress.parseIp4("8.8.8.8", 0)).isGlobalUnicast());
     try std.testing.expect((try IpAddress.parseIp4("1.1.1.1", 0)).isGlobalUnicast());
     try std.testing.expect((try IpAddress.parseIp4("93.184.216.34", 0)).isGlobalUnicast());
+    try std.testing.expect((try IpAddress.parseIp4("10.0.0.1", 0)).isGlobalUnicast()); // private but still global unicast
+    try std.testing.expect((try IpAddress.parseIp4("172.16.0.1", 0)).isGlobalUnicast()); // private but still global unicast
+    try std.testing.expect((try IpAddress.parseIp4("192.168.1.1", 0)).isGlobalUnicast()); // private but still global unicast
 
     // Not global unicast
-    try std.testing.expect(!(try IpAddress.parseIp4("10.0.0.1", 0)).isGlobalUnicast()); // private
     try std.testing.expect(!(try IpAddress.parseIp4("127.0.0.1", 0)).isGlobalUnicast()); // loopback
     try std.testing.expect(!(try IpAddress.parseIp4("169.254.1.1", 0)).isGlobalUnicast()); // link-local
     try std.testing.expect(!(try IpAddress.parseIp4("224.0.0.1", 0)).isGlobalUnicast()); // multicast
     try std.testing.expect(!(try IpAddress.parseIp4("0.0.0.0", 0)).isGlobalUnicast()); // unspecified
+    try std.testing.expect(!(try IpAddress.parseIp4("255.255.255.255", 0)).isGlobalUnicast()); // broadcast
 }
 
 test "IpAddress: isGlobalUnicast IPv6" {
-    // Public addresses
+    // Global unicast addresses (including private per RFC)
     try std.testing.expect((try IpAddress.parseIp6("2001:db8::1", 0)).isGlobalUnicast());
     try std.testing.expect((try IpAddress.parseIp6("2606:4700:4700::1111", 0)).isGlobalUnicast());
+    try std.testing.expect((try IpAddress.parseIp6("fc00::1", 0)).isGlobalUnicast()); // private but still global unicast
+    try std.testing.expect((try IpAddress.parseIp6("fd00::1", 0)).isGlobalUnicast()); // private but still global unicast
 
     // Not global unicast
-    try std.testing.expect(!(try IpAddress.parseIp6("fc00::1", 0)).isGlobalUnicast()); // private
     try std.testing.expect(!(try IpAddress.parseIp6("::1", 0)).isGlobalUnicast()); // loopback
     try std.testing.expect(!(try IpAddress.parseIp6("fe80::1", 0)).isGlobalUnicast()); // link-local
     try std.testing.expect(!(try IpAddress.parseIp6("ff02::1", 0)).isGlobalUnicast()); // multicast
