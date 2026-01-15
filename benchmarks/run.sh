@@ -10,6 +10,7 @@ echo "Building benchmarks..."
 zig build benchmarks --release=fast
 go build -o benchmarks/ping_pong_go benchmarks/ping_pong.go
 go build -o benchmarks/echo_server_go benchmarks/echo_server.go
+go build -o benchmarks/spawn_throughput_go benchmarks/spawn_throughput.go
 (cd benchmarks && cargo build --release --quiet)
 
 echo ""
@@ -69,5 +70,35 @@ echo ""
 echo "--- Rust (may) ---"
 for i in $(seq 1 $RUNS); do
     ./benchmarks/target/release/echo_server_may 2>&1 | grep "Messages/sec"
+    sleep $SLEEP
+done
+
+echo ""
+echo "=== Spawn Throughput Benchmark ==="
+echo ""
+echo "--- Zig (zio) ---"
+for i in $(seq 1 $RUNS); do
+    ./zig-out/bin/spawn_throughput_benchmark 2>&1 | grep "Spawns/sec"
+    sleep $SLEEP
+done
+
+echo ""
+echo "--- Go ---"
+for i in $(seq 1 $RUNS); do
+    ./benchmarks/spawn_throughput_go 2>&1 | grep "Spawns/sec"
+    sleep $SLEEP
+done
+
+echo ""
+echo "--- Rust (tokio) ---"
+for i in $(seq 1 $RUNS); do
+    ./benchmarks/target/release/spawn_throughput_tokio 2>&1 | grep "Spawns/sec"
+    sleep $SLEEP
+done
+
+echo ""
+echo "--- Rust (may) ---"
+for i in $(seq 1 $RUNS); do
+    ./benchmarks/target/release/spawn_throughput_may 2>&1 | grep "Spawns/sec"
     sleep $SLEEP
 done
