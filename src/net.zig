@@ -356,7 +356,7 @@ pub const IpAddress = extern union {
             os.net.AF.INET => self.in.addr == 0,
             os.net.AF.INET6 => blk: {
                 const addr = self.in6.addr;
-                const zeros = [16]u8{0} ** 16;
+                const zeros = [_]u8{0} ** 16;
                 break :blk std.mem.eql(u8, &addr, &zeros);
             },
             else => unreachable,
