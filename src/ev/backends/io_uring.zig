@@ -188,15 +188,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             } else |err| {
                 c.setError(err);
             }
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_bind => {
             common.handleNetBind(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_listen => {
             common.handleNetListen(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         // Async operations through io_uring
@@ -205,7 +205,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for connect", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_connect(data.handle, data.addr, data.addr_len);
@@ -216,7 +216,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for accept", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_accept(data.handle, data.addr, data.addr_len, 0);
@@ -236,7 +236,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for recvmsg", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
@@ -256,7 +256,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for sendmsg", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
@@ -276,7 +276,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for recvmsg", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
@@ -296,7 +296,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for sendmsg", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
@@ -307,7 +307,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for poll_add", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const poll_mask: u32 = switch (data.event) {
@@ -322,7 +322,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for shutdown", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_shutdown(data.handle, @intFromEnum(data.how));
@@ -333,7 +333,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for close", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_close(data.handle);
@@ -344,14 +344,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(FileOpen);
             const path = self.allocator.dupeZ(u8, data.path) catch {
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(path);
                 log.err("Failed to get io_uring SQE for file_open", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const flags = linux.O{
@@ -370,14 +370,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(FileCreate);
             const path = self.allocator.dupeZ(u8, data.path) catch {
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(path);
                 log.err("Failed to get io_uring SQE for file_create", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const flags = linux.O{
@@ -396,7 +396,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_close", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_close(data.handle);
@@ -407,7 +407,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_read", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_readv(data.handle, data.buffer.iovecs, data.offset);
@@ -418,7 +418,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_write", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_writev(data.handle, data.buffer.iovecs, data.offset);
@@ -429,7 +429,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_sync", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const flags: u32 = if (data.flags.only_data) linux.IORING_FSYNC_DATASYNC else 0;
@@ -441,7 +441,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_set_size", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_rw(.FTRUNCATE, data.handle, 0, 0, @intCast(data.length));
@@ -454,14 +454,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(DirCreateDir);
             const path = self.allocator.dupeZ(u8, data.path) catch {
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(path);
                 log.err("Failed to get io_uring SQE for dir_create_dir", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_mkdirat(@intCast(data.dir), path.ptr, data.mode);
@@ -472,13 +472,13 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(DirRename);
             const old_path = self.allocator.dupeZ(u8, data.old_path) catch {
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const new_path = self.allocator.dupeZ(u8, data.new_path) catch {
                 self.allocator.free(old_path);
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const sqe = self.getSqe(state) catch {
@@ -486,7 +486,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 self.allocator.free(new_path);
                 log.err("Failed to get io_uring SQE for dir_rename", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_renameat(@intCast(data.old_dir), old_path.ptr, @intCast(data.new_dir), new_path.ptr, 0);
@@ -498,14 +498,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(DirDeleteFile);
             const path = self.allocator.dupeZ(u8, data.path) catch {
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(path);
                 log.err("Failed to get io_uring SQE for dir_delete_file", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_unlinkat(@intCast(data.dir), path.ptr, 0);
@@ -516,14 +516,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(DirDeleteDir);
             const path = self.allocator.dupeZ(u8, data.path) catch {
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(path);
                 log.err("Failed to get io_uring SQE for dir_delete_dir", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_unlinkat(@intCast(data.dir), path.ptr, linux.AT.REMOVEDIR);
@@ -536,7 +536,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_size", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             // Use statx with empty pathname to get stats for the fd itself
@@ -556,14 +556,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 // Path provided - stat relative to handle
                 const path = self.allocator.dupeZ(u8, user_path) catch {
                     c.setError(error.SystemResources);
-                    state.markCompleted(c);
+                    state.markCompletedFromBackend(c);
                     return;
                 };
                 const sqe = self.getSqe(state) catch {
                     self.allocator.free(path);
                     log.err("Failed to get io_uring SQE for file_stat", .{});
                     c.setError(error.Unexpected);
-                    state.markCompleted(c);
+                    state.markCompletedFromBackend(c);
                     return;
                 };
                 sqe.prep_statx(@intCast(data.handle), path.ptr, 0, mask, &data.internal.statx);
@@ -574,7 +574,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 const sqe = self.getSqe(state) catch {
                     log.err("Failed to get io_uring SQE for file_stat", .{});
                     c.setError(error.Unexpected);
-                    state.markCompleted(c);
+                    state.markCompletedFromBackend(c);
                     return;
                 };
                 sqe.prep_statx(data.handle, "", linux.AT.EMPTY_PATH, mask, &data.internal.statx);
@@ -586,14 +586,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(DirOpen);
             const path = self.allocator.dupeZ(u8, data.path) catch {
                 c.setError(error.SystemResources);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const sqe = self.getSqe(state) catch {
                 self.allocator.free(path);
                 log.err("Failed to get io_uring SQE for dir_open", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             var flags = linux.O{
@@ -617,7 +617,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for dir_close", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_close(data.handle);
@@ -642,7 +642,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_stream_poll", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             const poll_mask: u32 = switch (data.event) {
@@ -657,7 +657,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_stream_read", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_readv(data.handle, data.buffer.iovecs, 0);
@@ -668,7 +668,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for file_stream_write", .{});
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             };
             sqe.prep_writev(data.handle, data.buffer.iovecs, 0);
@@ -806,8 +806,8 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         // Store the result in the completion
         self.storeResult(completion, cqe.res);
 
-        // Mark as completed, which invokes the callback
-        state.markCompleted(completion);
+        // Mark as completed (also decrements inflight_io)
+        state.markCompletedFromBackend(completion);
     }
 
     return false; // Did not timeout, woke up due to events

@@ -354,7 +354,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     // Failed to associate - close socket and fail
                     net.close(handle);
                     c.setError(error.Unexpected);
-                    state.markCompleted(c);
+                    state.markCompletedFromBackend(c);
                     return;
                 };
 
@@ -369,30 +369,30 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             } else |err| {
                 c.setError(err);
             }
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_bind => {
             common.handleNetBind(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_listen => {
             common.handleNetListen(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_close => {
             common.handleNetClose(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_shutdown => {
             common.handleNetShutdown(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .net_connect => {
             const data = c.cast(NetConnect);
             self.submitConnect(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -400,7 +400,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetAccept);
             self.submitAccept(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -408,7 +408,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetRecv);
             self.submitRecv(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -416,7 +416,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetSend);
             self.submitSend(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -424,7 +424,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetRecvFrom);
             self.submitRecvFrom(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -432,7 +432,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetSendTo);
             self.submitSendTo(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -440,7 +440,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetPoll);
             self.submitPoll(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -479,14 +479,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_stream_poll => {
             // Windows IOCP doesn't support poll-style waiting on file handles
             c.setError(error.Unexpected);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .file_stream_read => {
             const data = c.cast(FileStreamRead);
             self.submitFileStreamRead(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -494,7 +494,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(FileStreamWrite);
             self.submitFileStreamWrite(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -502,7 +502,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(FileRead);
             self.submitFileRead(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
 
@@ -510,7 +510,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(FileWrite);
             self.submitFileWrite(state, data) catch |err| {
                 c.setError(err);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             };
         },
     }
@@ -595,7 +595,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
             net.close(accept_socket);
             log.err("AcceptEx failed: {}", .{err});
             data.c.setError(net.errnoToAcceptError(err));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -645,7 +645,7 @@ fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
             // Real error - complete immediately with error
             log.err("WSARecv/WSASend (poll) failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -683,7 +683,7 @@ fn submitRecv(self: *Self, state: *LoopState, data: *NetRecv) !void {
             // Real error - complete immediately with error
             log.err("WSARecv failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -720,7 +720,7 @@ fn submitSend(self: *Self, state: *LoopState, data: *NetSend) !void {
             // Real error - complete immediately with error
             log.err("WSASend failed: {}", .{err});
             data.c.setError(net.errnoToSendError(err));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -759,7 +759,7 @@ fn submitRecvFrom(self: *Self, state: *LoopState, data: *NetRecvFrom) !void {
             // Real error - complete immediately with error
             log.err("WSARecvFrom failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -798,7 +798,7 @@ fn submitSendTo(self: *Self, state: *LoopState, data: *NetSendTo) !void {
             // Real error - complete immediately with error
             log.err("WSASendTo failed: {}", .{err});
             data.c.setError(net.errnoToSendError(err));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -866,7 +866,7 @@ fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
             // Real error - complete immediately with error
             log.err("ConnectEx failed: {}", .{err});
             data.c.setError(net.errnoToConnectError(err));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -902,7 +902,7 @@ fn submitFileRead(self: *Self, state: *LoopState, data: *FileRead) !void {
             // Real error - complete immediately with error
             log.err("ReadFile failed: {}", .{err});
             data.c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -938,7 +938,7 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
             // Real error - complete immediately with error
             log.err("WriteFile failed: {}", .{err});
             data.c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -972,7 +972,7 @@ fn submitFileStreamRead(self: *Self, state: *LoopState, data: *FileStreamRead) !
             // Real error - complete immediately with error
             log.err("ReadFile (stream) failed: {}", .{err});
             data.c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -1006,7 +1006,7 @@ fn submitFileStreamWrite(self: *Self, state: *LoopState, data: *FileStreamWrite)
             // Real error - complete immediately with error
             log.err("WriteFile (stream) failed: {}", .{err});
             data.c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
-            state.markCompleted(&data.c);
+            state.markCompletedFromBackend(&data.c);
             return;
         }
     }
@@ -1153,7 +1153,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 }
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .net_accept => {
@@ -1199,7 +1199,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                         const exts = self.shared_state.getExtensions(self.allocator, data.internal.family) catch |err| {
                             net.close(data.result_private_do_not_touch);
                             c.setError(err);
-                            state.markCompleted(c);
+                            state.markCompletedFromBackend(c);
                             return;
                         };
 
@@ -1240,7 +1240,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 }
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .net_recv => {
@@ -1263,7 +1263,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.net_recv, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .net_send => {
@@ -1286,7 +1286,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.net_send, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .net_recvfrom => {
@@ -1310,7 +1310,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.net_recvfrom, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .net_sendto => {
@@ -1333,7 +1333,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.net_sendto, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .net_poll => {
@@ -1357,7 +1357,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.net_poll, {});
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .file_read => {
@@ -1383,7 +1383,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.file_read, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .file_write => {
@@ -1404,7 +1404,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.file_write, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .file_stream_read => {
@@ -1430,7 +1430,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.file_stream_read, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         .file_stream_write => {
@@ -1451,13 +1451,13 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.file_stream_write, @intCast(bytes_transferred));
             }
 
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         else => {
             log.err("Unexpected completion for operation: {}", .{c.op});
             c.setError(error.Unexpected);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
     }
 }

@@ -211,8 +211,7 @@ pub const AnyTask = struct {
     pub inline fn canMigrate(self: *const AnyTask) bool {
         if (self.pin_count > 0) return false;
         if (self.awaitable.canceled_status.load(.acquire) != 0) return false;
-        // TODO: Enable migration once we have work-stealing
-        return false;
+        return true;
     }
 
     /// Check if the given timeout triggered the cancellation.

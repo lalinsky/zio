@@ -1,7 +1,7 @@
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-const NUM_ROUNDS: u32 = 1_000_000_0;
+const NUM_ROUNDS: u32 = 10_000_000;
 
 async fn pinger(
     ping_tx: mpsc::Sender<u32>,
@@ -25,13 +25,13 @@ async fn ponger(
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     // Create buffered channels with capacity 1 for ping-pong communication
     let (ping_tx, ping_rx) = mpsc::channel(1);
     let (pong_tx, pong_rx) = mpsc::channel(1);
 
-    println!("Running ping-pong benchmark with {} rounds (current_thread runtime)...", NUM_ROUNDS);
+    println!("Running ping-pong benchmark with {} rounds...", NUM_ROUNDS);
 
     let start = Instant::now();
 

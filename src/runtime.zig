@@ -315,6 +315,12 @@ pub const Executor = struct {
     // Reset when we poll from ready_queue instead.
     lifo_slot_used: u8 = 0,
 
+    // Tracks tasks run since last event loop tick.
+    // After EVENT_INTERVAL tasks, getNextTask() returns null to force I/O processing.
+    // TODO: Also add time-based limit (10ms) like Go's sysmon for I/O responsiveness
+    // when tasks yield frequently but don't hit the task count limit.
+    tick_task_count: u8 = 0,
+
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
 
@@ -632,6 +638,9 @@ pub const Executor = struct {
             const has_work = self.ready_queue.head != null or self.lifo_slot != null or main_ready;
             try self.loop.run(if (has_work) .no_wait else .once);
 
+            // Reset task counter after event loop tick
+            self.tick_task_count = 0;
+
             // Check again after I/O
             if (check_ready and self.main_task.state.load(.acquire) == .ready) {
                 return;
@@ -645,11 +654,19 @@ pub const Executor = struct {
     /// are likely cache-hot. However, we limit consecutive LIFO polls to prevent
     /// starvation of tasks in ready_queue.
     ///
-    /// Returns null if no tasks are available.
+    /// Returns null if no tasks are available, or if EVENT_INTERVAL tasks have
+    /// been run since the last event loop tick (to ensure I/O responsiveness).
     fn getNextTask(self: *Executor) ?*WaitNode {
+        // Maximum tasks to run before forcing an event loop tick (from Go's scheduler)
+        const EVENT_INTERVAL = 61;
+
+        // Force event loop tick after running EVENT_INTERVAL tasks
+        if (self.tick_task_count >= EVENT_INTERVAL) {
+            return null;
+        }
+
         // LIFO slot optimization: check LIFO slot first for cache locality
         // But limit consecutive LIFO polls to prevent starvation of ready_queue tasks
-        // Value matches Tokio's MAX_LIFO_POLLS_PER_TICK
         const MAX_LIFO_POLLS_PER_TICK = 3;
 
         if (self.lifo_slot_enabled) {
@@ -658,6 +675,7 @@ pub const Executor = struct {
                 if (self.lifo_slot) |task| {
                     self.lifo_slot = null;
                     self.lifo_slot_used += 1;
+                    self.tick_task_count += 1;
                     return task;
                 }
             } else {
@@ -673,7 +691,8 @@ pub const Executor = struct {
 
         // Take from ready_queue
         if (self.ready_queue.pop()) |task| {
-            self.lifo_slot_used = 0; // Reset starvation counter
+            self.lifo_slot_used = 0; // Reset LIFO starvation counter
+            self.tick_task_count += 1;
             return task;
         }
 
