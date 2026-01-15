@@ -365,14 +365,12 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     for (self.events[0..n]) |event| {
         // Check if this is the async wakeup user event
         if (event.filter == EVFILT_USER and event.ident == self.user_event_waker.ident) {
-            state.loop.processAsyncHandles();
             self.user_event_waker.drain();
             continue;
         }
 
         // Check if this is the async-signal-safe wakeup fd event
         if (event.filter == std.c.EVFILT.READ and event.ident == self.fd_waker.read_fd) {
-            state.loop.processAsyncHandles();
             self.fd_waker.drain();
             continue;
         }

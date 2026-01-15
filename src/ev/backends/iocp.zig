@@ -1484,8 +1484,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
             },
             WAIT_IO_COMPLETION => {
                 log.debug("poll() woken by APC", .{});
-                // Process async handles that triggered the wake
-                state.loop.processAsyncHandles();
                 return false; // Woken by APC (wake() call)
             },
             else => {

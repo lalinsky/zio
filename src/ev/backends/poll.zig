@@ -397,7 +397,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
         // Check if this is the async wakeup fd
         if (fd == self.waker.read_fd) {
-            state.loop.processAsyncHandles();
             self.waker.drain();
             i += 1;
             continue;

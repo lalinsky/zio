@@ -776,7 +776,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         if (cqe.user_data == USER_DATA_WAKER) {
             // Wake-up POLL_ADD completion
             self.waker.drain();
-            state.loop.processAsyncHandles();
             continue;
         }
 

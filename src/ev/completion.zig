@@ -380,7 +380,7 @@ pub const Async = struct {
             // Only notify loop if transitioning from not-pending to pending
             // If loop is not set (not actively waiting), this is a no-op
             if (self.loop) |loop| {
-                loop.wake();
+                loop.wakeAsync();
             }
         }
     }
