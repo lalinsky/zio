@@ -69,17 +69,19 @@ pub const StackPool = struct {
     /// Acquires a stack from the pool, or allocates a new one if the pool is empty.
     /// All stacks from this pool have the configured maximum_size and committed_size.
     pub fn acquire(self: *StackPool) error{OutOfMemory}!StackInfo {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // Try to get from pool under lock
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        // Try to reuse a stack from the pool
-        if (self.head) |node| {
-            const stack_info = node.stack_info;
-            self.removeNode(node);
-            return stack_info;
+            if (self.head) |node| {
+                const stack_info = node.stack_info;
+                self.removeNode(node);
+                return stack_info;
+            }
         }
 
-        // Pool is empty, allocate a new stack
+        // Pool was empty, allocate new stack outside the lock
         var stack_info: StackInfo = undefined;
         try stack.stackAlloc(&stack_info, self.config.maximum_size, self.config.committed_size);
         return stack_info;
@@ -91,9 +93,6 @@ pub const StackPool = struct {
     /// If the stack's committed region is too small to store the FreeNode, the stack is freed instead.
     /// The timestamp_ms parameter is the current time in milliseconds (monotonic).
     pub fn release(self: *StackPool, stack_info: StackInfo, timestamp_ms: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
         // Check if the stack has enough committed space to store the FreeNode
         // The FreeNode is stored at the base of the stack (aligned backward)
         const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
@@ -105,31 +104,7 @@ pub const StackPool = struct {
             return;
         }
 
-        // Remove expired stacks from the front of the list
-        // Do this before adding the new stack to avoid the situation where we'd
-        // remove all stacks (including the one we're about to add) and end up with an empty pool
-        if (self.config.max_age_ms > 0) {
-            while (self.head) |node| {
-                const age_ms = timestamp_ms -| node.timestamp_ms;
-                if (age_ms > self.config.max_age_ms) {
-                    self.removeNode(node);
-                    stack.stackFree(node.stack_info);
-                } else {
-                    // List is ordered by timestamp, so we can stop
-                    break;
-                }
-            }
-        }
-
-        // If pool is at capacity, free the oldest stack
-        if (self.pool_size >= self.config.max_unused_stacks) {
-            if (self.head) |oldest| {
-                self.removeNode(oldest);
-                stack.stackFree(oldest.stack_info);
-            }
-        }
-
-        // Recycle the stack memory (MADV_FREE on POSIX)
+        // Recycle the stack memory (MADV_FREE on POSIX) - no lock needed
         stack.stackRecycle(stack_info);
 
         // Store the FreeNode at the base of the stack
@@ -141,8 +116,54 @@ pub const StackPool = struct {
             .timestamp_ms = timestamp_ms,
         };
 
-        // Add to the tail of the list (most recently released)
-        self.addNode(node);
+        // Collect stacks to free in a temporary singly-linked list
+        // Limit how many we free per call to bound latency
+        const max_free_per_release = 4;
+        var to_free_head: ?*FreeNode = null;
+        var to_free_count: usize = 0;
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Remove expired stacks from the front of the list (up to limit)
+            // Do this before adding the new stack to avoid the situation where we'd
+            // remove all stacks (including the one we're about to add) and end up with an empty pool
+            if (self.config.max_age_ms > 0) {
+                while (self.head) |expired| {
+                    if (to_free_count >= max_free_per_release) break;
+                    const age_ms = timestamp_ms -| expired.timestamp_ms;
+                    if (age_ms > self.config.max_age_ms) {
+                        self.removeNode(expired);
+                        expired.next = to_free_head;
+                        to_free_head = expired;
+                        to_free_count += 1;
+                    } else {
+                        // List is ordered by timestamp, so we can stop
+                        break;
+                    }
+                }
+            }
+
+            // If pool is at capacity and under limit, remove the oldest stack
+            if (self.pool_size >= self.config.max_unused_stacks and to_free_count < max_free_per_release) {
+                if (self.head) |oldest| {
+                    self.removeNode(oldest);
+                    oldest.next = to_free_head;
+                    to_free_head = oldest;
+                }
+            }
+
+            // Add to the tail of the list (most recently released)
+            self.addNode(node);
+        }
+
+        // Free collected stacks - no lock held
+        while (to_free_head) |free_node| {
+            const next = free_node.next;
+            stack.stackFree(free_node.stack_info);
+            to_free_head = next;
+        }
     }
 
     /// Removes a node from the doubly linked list and updates pool_size.
