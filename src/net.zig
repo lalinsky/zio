@@ -470,6 +470,16 @@ pub const Address = extern union {
     ip: IpAddress,
     unix: UnixAddress,
 
+    pub const Type = enum { ip, unix };
+
+    pub fn getType(self: Address) Type {
+        return switch (self.any.family) {
+            os.net.AF.INET, os.net.AF.INET6 => .ip,
+            os.net.AF.UNIX => .unix,
+            else => unreachable,
+        };
+    }
+
     /// Convert to std.net.Address
     pub fn toStd(self: *const Address) std.net.Address {
         return switch (self.any.family) {
@@ -527,18 +537,16 @@ pub const Address = extern union {
     }
 
     pub fn format(self: Address, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (self.any.family) {
-            os.net.AF.INET, os.net.AF.INET6 => return self.ip.format(w),
-            os.net.AF.UNIX => return self.unix.format(w),
-            else => unreachable,
+        switch (self.getType()) {
+            .ip => return self.ip.format(w),
+            .unix => return self.unix.format(w),
         }
     }
 
     pub fn connect(self: Address, rt: *Runtime) !Stream {
-        switch (self.any.family) {
-            os.net.AF.INET, os.net.AF.INET6 => return self.ip.connect(rt),
-            os.net.AF.UNIX => return self.unix.connect(rt),
-            else => unreachable,
+        switch (self.getType()) {
+            .ip => return self.ip.connect(rt),
+            .unix => return self.unix.connect(rt),
         }
     }
 
