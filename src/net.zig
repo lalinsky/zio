@@ -8,9 +8,8 @@ const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
 
-const zio_io = @import("io.zig");
-const runIo = zio_io.runIo;
-const fillBuf = zio_io.fillBuf;
+const runIo = @import("io.zig").runIo;
+const fillBuf = @import("io.zig").fillBuf;
 
 const Handle = ev.Backend.NetHandle;
 
