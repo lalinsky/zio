@@ -163,7 +163,7 @@ fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Co
     const gop = self.poll_queue.getOrPut(self.allocator, fd) catch {
         log.err("Failed to add to poll queue: OutOfMemory", .{});
         completion.setError(error.Unexpected);
-        state.markCompleted(completion);
+        state.markCompletedFromBackend(completion);
         return;
     };
 
@@ -175,7 +175,7 @@ fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Co
             log.err("Failed to append to poll_fds: OutOfMemory", .{});
             _ = self.poll_queue.remove(fd);
             completion.setError(error.Unexpected);
-            state.markCompleted(completion);
+            state.markCompletedFromBackend(completion);
             return;
         };
         entry.* = .{
@@ -257,23 +257,23 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         // Synchronous operations - complete immediately
         .net_open => {
             common.handleNetOpen(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_bind => {
             common.handleNetBind(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_listen => {
             common.handleNetListen(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_close => {
             common.handleNetClose(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
         .net_shutdown => {
             common.handleNetShutdown(c);
-            state.markCompleted(c);
+            state.markCompletedFromBackend(c);
         },
 
         // Connect - must call connect() first
@@ -282,7 +282,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
                 // Connected immediately (e.g., localhost)
                 c.setResult(.net_connect, {});
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
             } else |err| switch (err) {
                 error.WouldBlock, error.ConnectionPending => {
                     // Queue for completion - addToPollQueue handles errors
@@ -290,7 +290,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 },
                 else => {
                     c.setError(err);
-                    state.markCompleted(c);
+                    state.markCompletedFromBackend(c);
                 },
             }
         },
@@ -325,7 +325,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_stream_read => {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             }
             const data = c.cast(FileStreamRead);
@@ -334,7 +334,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_stream_write => {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             }
             const data = c.cast(FileStreamWrite);
@@ -343,7 +343,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_stream_poll => {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
-                state.markCompleted(c);
+                state.markCompletedFromBackend(c);
                 return;
             }
             const data = c.cast(FileStreamPoll);
@@ -370,7 +370,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Successfully removed - complete target with error.Canceled
     // markCompleted(target) will recursively complete the Cancel operation if canceled_by is set
     target.setError(error.Canceled);
-    state.markCompleted(target);
+    state.markCompletedFromBackend(target);
 }
 
 pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
@@ -411,7 +411,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
             switch (checkCompletion(completion, item)) {
                 .completed => {
                     try self.removeFromPollQueue(fd, completion);
-                    state.markCompleted(completion);
+                    state.markCompletedFromBackend(completion);
                 },
                 .requeue => {
                     // Spurious wakeup - keep in poll queue

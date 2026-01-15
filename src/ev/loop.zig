@@ -106,6 +106,8 @@ pub const LoopState = struct {
     stopped: bool = false,
 
     active: usize = 0,
+    /// I/O operations submitted to backend awaiting completion
+    inflight_io: usize = 0,
 
     now_ms: u64 = 0,
     timers: TimerHeap = .{ .context = {} },
@@ -116,6 +118,13 @@ pub const LoopState = struct {
 
     completions: Queue(Completion) = .{},
     work_completions: AtomicStack(Completion) = .{},
+
+    /// Called by backends when an I/O operation completes.
+    /// Decrements inflight_io counter and marks the completion done.
+    pub fn markCompletedFromBackend(self: *LoopState, completion: *Completion) void {
+        self.inflight_io -= 1;
+        self.markCompleted(completion);
+    }
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
         std.debug.assert(completion.state == .running);
@@ -491,6 +500,7 @@ pub const Loop = struct {
                     },
                 }
 
+                self.state.inflight_io += 1;
                 self.backend.submit(&self.state, completion);
                 return;
             },
@@ -697,7 +707,10 @@ pub const Loop = struct {
             }
         }
 
-        const timed_out = try self.backend.poll(&self.state, timeout_ms);
+        // Skip backend poll in no_wait mode if there's nothing to retrieve.
+        // This avoids syscall overhead for pure CPU-bound workloads.
+        const should_poll = wait or self.state.inflight_io > 0;
+        const timed_out = if (should_poll) try self.backend.poll(&self.state, timeout_ms) else false;
 
         // Process any work completions from thread pool
         self.processCompletions();
