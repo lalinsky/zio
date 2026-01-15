@@ -290,6 +290,103 @@ pub const IpAddress = extern union {
         }
     }
 
+    /// Returns true if the IP address is a private address according to
+    /// RFC 1918 (IPv4) or RFC 4193 (IPv6).
+    /// IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+    /// IPv6: fc00::/7
+    pub fn isPrivate(self: IpAddress) bool {
+        return switch (self.any.family) {
+            os.net.AF.INET => blk: {
+                const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
+                break :blk bytes[0] == 10 or
+                    (bytes[0] == 172 and (bytes[1] & 0xf0) == 16) or
+                    (bytes[0] == 192 and bytes[1] == 168);
+            },
+            os.net.AF.INET6 => blk: {
+                const addr = self.in6.addr;
+                // fc00::/7 check: first byte should be 0xfc or 0xfd
+                break :blk (addr[0] & 0xfe) == 0xfc;
+            },
+            else => unreachable,
+        };
+    }
+
+    /// Returns true if the IP is a loopback address.
+    /// IPv4: 127.0.0.0/8
+    /// IPv6: ::1
+    pub fn isLoopback(self: IpAddress) bool {
+        return switch (self.any.family) {
+            os.net.AF.INET => blk: {
+                const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
+                break :blk bytes[0] == 127;
+            },
+            os.net.AF.INET6 => blk: {
+                const addr = self.in6.addr;
+                // ::1 check - compare all 16 bytes
+                const loopback = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+                break :blk std.mem.eql(u8, &addr, &loopback);
+            },
+            else => unreachable,
+        };
+    }
+
+    /// Returns true if the IP is a link-local unicast address.
+    /// IPv4: 169.254.0.0/16
+    /// IPv6: fe80::/10
+    pub fn isLinkLocalUnicast(self: IpAddress) bool {
+        return switch (self.any.family) {
+            os.net.AF.INET => blk: {
+                const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
+                break :blk bytes[0] == 169 and bytes[1] == 254;
+            },
+            os.net.AF.INET6 => blk: {
+                const addr = self.in6.addr;
+                // fe80::/10 check
+                break :blk addr[0] == 0xfe and (addr[1] & 0xc0) == 0x80;
+            },
+            else => unreachable,
+        };
+    }
+
+    /// Returns true if the IP is an unspecified address.
+    /// IPv4: 0.0.0.0
+    /// IPv6: ::
+    pub fn isUnspecified(self: IpAddress) bool {
+        return switch (self.any.family) {
+            os.net.AF.INET => self.in.addr == 0,
+            os.net.AF.INET6 => blk: {
+                const addr = self.in6.addr;
+                const zeros = [16]u8{0} ** 16;
+                break :blk std.mem.eql(u8, &addr, &zeros);
+            },
+            else => unreachable,
+        };
+    }
+
+    /// Returns true if the IP is a multicast address.
+    /// IPv4: 224.0.0.0/4
+    /// IPv6: ff00::/8
+    pub fn isMulticast(self: IpAddress) bool {
+        return switch (self.any.family) {
+            os.net.AF.INET => blk: {
+                const bytes: *const [4]u8 = @ptrCast(&self.in.addr);
+                break :blk (bytes[0] & 0xf0) == 224;
+            },
+            os.net.AF.INET6 => self.in6.addr[0] == 0xff,
+            else => unreachable,
+        };
+    }
+
+    /// Returns true if the IP is a global unicast address.
+    /// This is the complement of private, loopback, link-local, multicast, and unspecified.
+    pub fn isGlobalUnicast(self: IpAddress) bool {
+        return !self.isPrivate() and
+            !self.isLoopback() and
+            !self.isLinkLocalUnicast() and
+            !self.isMulticast() and
+            !self.isUnspecified();
+    }
+
     pub const ListenOptions = struct {
         kernel_backlog: u31 = default_kernel_backlog,
         reuse_address: bool = false,
@@ -1307,6 +1404,174 @@ test "Address: parseIpAndHost" {
     var buf2: [64]u8 = undefined;
     const formatted2 = try std.fmt.bufPrint(&buf2, "{f}", .{addr2});
     try std.testing.expectEqualStrings("[::1]:8080", formatted2);
+}
+
+test "IpAddress: isPrivate IPv4" {
+    // RFC 1918 private ranges
+    try std.testing.expect((try IpAddress.parseIp4("10.0.0.0", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp4("10.0.0.1", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp4("10.255.255.255", 0)).isPrivate());
+
+    try std.testing.expect((try IpAddress.parseIp4("172.16.0.0", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp4("172.16.0.1", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp4("172.31.255.255", 0)).isPrivate());
+
+    try std.testing.expect((try IpAddress.parseIp4("192.168.0.0", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp4("192.168.1.1", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp4("192.168.255.255", 0)).isPrivate());
+
+    // Public addresses
+    try std.testing.expect(!(try IpAddress.parseIp4("8.8.8.8", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp4("1.1.1.1", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp4("9.255.255.255", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp4("11.0.0.0", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp4("172.15.255.255", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp4("172.32.0.0", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp4("192.167.255.255", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp4("192.169.0.0", 0)).isPrivate());
+
+    // Loopback is not private
+    try std.testing.expect(!(try IpAddress.parseIp4("127.0.0.1", 0)).isPrivate());
+}
+
+test "IpAddress: isPrivate IPv6" {
+    // RFC 4193 Unique Local Addresses (fc00::/7)
+    try std.testing.expect((try IpAddress.parseIp6("fc00::", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp6("fc00::1", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp6("fd00::", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp6("fd00::1", 0)).isPrivate());
+    try std.testing.expect((try IpAddress.parseIp6("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 0)).isPrivate());
+
+    // Public addresses
+    try std.testing.expect(!(try IpAddress.parseIp6("2001:db8::1", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp6("2606:4700:4700::1111", 0)).isPrivate());
+    try std.testing.expect(!(try IpAddress.parseIp6("fe00::", 0)).isPrivate());
+
+    // Loopback is not private
+    try std.testing.expect(!(try IpAddress.parseIp6("::1", 0)).isPrivate());
+}
+
+test "IpAddress: isLoopback IPv4" {
+    // Entire 127.0.0.0/8 range
+    try std.testing.expect((try IpAddress.parseIp4("127.0.0.0", 0)).isLoopback());
+    try std.testing.expect((try IpAddress.parseIp4("127.0.0.1", 0)).isLoopback());
+    try std.testing.expect((try IpAddress.parseIp4("127.255.255.255", 0)).isLoopback());
+    try std.testing.expect((try IpAddress.parseIp4("127.1.2.3", 0)).isLoopback());
+
+    // Not loopback
+    try std.testing.expect(!(try IpAddress.parseIp4("126.255.255.255", 0)).isLoopback());
+    try std.testing.expect(!(try IpAddress.parseIp4("128.0.0.0", 0)).isLoopback());
+    try std.testing.expect(!(try IpAddress.parseIp4("8.8.8.8", 0)).isLoopback());
+}
+
+test "IpAddress: isLoopback IPv6" {
+    // Only ::1 is loopback for IPv6
+    try std.testing.expect((try IpAddress.parseIp6("::1", 0)).isLoopback());
+
+    // Not loopback
+    try std.testing.expect(!(try IpAddress.parseIp6("::", 0)).isLoopback());
+    try std.testing.expect(!(try IpAddress.parseIp6("::2", 0)).isLoopback());
+    try std.testing.expect(!(try IpAddress.parseIp6("fe80::1", 0)).isLoopback());
+    try std.testing.expect(!(try IpAddress.parseIp6("2001:db8::1", 0)).isLoopback());
+}
+
+test "IpAddress: isLinkLocalUnicast IPv4" {
+    // 169.254.0.0/16 range
+    try std.testing.expect((try IpAddress.parseIp4("169.254.0.0", 0)).isLinkLocalUnicast());
+    try std.testing.expect((try IpAddress.parseIp4("169.254.0.1", 0)).isLinkLocalUnicast());
+    try std.testing.expect((try IpAddress.parseIp4("169.254.255.255", 0)).isLinkLocalUnicast());
+    try std.testing.expect((try IpAddress.parseIp4("169.254.123.45", 0)).isLinkLocalUnicast());
+
+    // Not link-local
+    try std.testing.expect(!(try IpAddress.parseIp4("169.253.255.255", 0)).isLinkLocalUnicast());
+    try std.testing.expect(!(try IpAddress.parseIp4("169.255.0.0", 0)).isLinkLocalUnicast());
+    try std.testing.expect(!(try IpAddress.parseIp4("8.8.8.8", 0)).isLinkLocalUnicast());
+}
+
+test "IpAddress: isLinkLocalUnicast IPv6" {
+    // fe80::/10 range
+    try std.testing.expect((try IpAddress.parseIp6("fe80::", 0)).isLinkLocalUnicast());
+    try std.testing.expect((try IpAddress.parseIp6("fe80::1", 0)).isLinkLocalUnicast());
+    try std.testing.expect((try IpAddress.parseIp6("fe80::1234:5678", 0)).isLinkLocalUnicast());
+    try std.testing.expect((try IpAddress.parseIp6("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 0)).isLinkLocalUnicast());
+
+    // Not link-local
+    try std.testing.expect(!(try IpAddress.parseIp6("fec0::", 0)).isLinkLocalUnicast());
+    try std.testing.expect(!(try IpAddress.parseIp6("fe7f::", 0)).isLinkLocalUnicast());
+    try std.testing.expect(!(try IpAddress.parseIp6("2001:db8::1", 0)).isLinkLocalUnicast());
+    try std.testing.expect(!(try IpAddress.parseIp6("::1", 0)).isLinkLocalUnicast());
+}
+
+test "IpAddress: isUnspecified IPv4" {
+    // 0.0.0.0
+    try std.testing.expect((try IpAddress.parseIp4("0.0.0.0", 0)).isUnspecified());
+
+    // Not unspecified
+    try std.testing.expect(!(try IpAddress.parseIp4("0.0.0.1", 0)).isUnspecified());
+    try std.testing.expect(!(try IpAddress.parseIp4("8.8.8.8", 0)).isUnspecified());
+}
+
+test "IpAddress: isUnspecified IPv6" {
+    // ::
+    try std.testing.expect((try IpAddress.parseIp6("::", 0)).isUnspecified());
+
+    // Not unspecified
+    try std.testing.expect(!(try IpAddress.parseIp6("::1", 0)).isUnspecified());
+    try std.testing.expect(!(try IpAddress.parseIp6("::2", 0)).isUnspecified());
+    try std.testing.expect(!(try IpAddress.parseIp6("2001:db8::1", 0)).isUnspecified());
+}
+
+test "IpAddress: isMulticast IPv4" {
+    // 224.0.0.0/4 range (224.0.0.0 - 239.255.255.255)
+    try std.testing.expect((try IpAddress.parseIp4("224.0.0.0", 0)).isMulticast());
+    try std.testing.expect((try IpAddress.parseIp4("224.0.0.1", 0)).isMulticast());
+    try std.testing.expect((try IpAddress.parseIp4("239.255.255.255", 0)).isMulticast());
+    try std.testing.expect((try IpAddress.parseIp4("230.1.2.3", 0)).isMulticast());
+
+    // Not multicast
+    try std.testing.expect(!(try IpAddress.parseIp4("223.255.255.255", 0)).isMulticast());
+    try std.testing.expect(!(try IpAddress.parseIp4("240.0.0.0", 0)).isMulticast());
+    try std.testing.expect(!(try IpAddress.parseIp4("8.8.8.8", 0)).isMulticast());
+}
+
+test "IpAddress: isMulticast IPv6" {
+    // ff00::/8 range
+    try std.testing.expect((try IpAddress.parseIp6("ff00::", 0)).isMulticast());
+    try std.testing.expect((try IpAddress.parseIp6("ff01::1", 0)).isMulticast());
+    try std.testing.expect((try IpAddress.parseIp6("ff02::1", 0)).isMulticast());
+    try std.testing.expect((try IpAddress.parseIp6("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 0)).isMulticast());
+
+    // Not multicast
+    try std.testing.expect(!(try IpAddress.parseIp6("fe00::", 0)).isMulticast());
+    try std.testing.expect(!(try IpAddress.parseIp6("2001:db8::1", 0)).isMulticast());
+    try std.testing.expect(!(try IpAddress.parseIp6("::1", 0)).isMulticast());
+}
+
+test "IpAddress: isGlobalUnicast IPv4" {
+    // Public addresses
+    try std.testing.expect((try IpAddress.parseIp4("8.8.8.8", 0)).isGlobalUnicast());
+    try std.testing.expect((try IpAddress.parseIp4("1.1.1.1", 0)).isGlobalUnicast());
+    try std.testing.expect((try IpAddress.parseIp4("93.184.216.34", 0)).isGlobalUnicast());
+
+    // Not global unicast
+    try std.testing.expect(!(try IpAddress.parseIp4("10.0.0.1", 0)).isGlobalUnicast()); // private
+    try std.testing.expect(!(try IpAddress.parseIp4("127.0.0.1", 0)).isGlobalUnicast()); // loopback
+    try std.testing.expect(!(try IpAddress.parseIp4("169.254.1.1", 0)).isGlobalUnicast()); // link-local
+    try std.testing.expect(!(try IpAddress.parseIp4("224.0.0.1", 0)).isGlobalUnicast()); // multicast
+    try std.testing.expect(!(try IpAddress.parseIp4("0.0.0.0", 0)).isGlobalUnicast()); // unspecified
+}
+
+test "IpAddress: isGlobalUnicast IPv6" {
+    // Public addresses
+    try std.testing.expect((try IpAddress.parseIp6("2001:db8::1", 0)).isGlobalUnicast());
+    try std.testing.expect((try IpAddress.parseIp6("2606:4700:4700::1111", 0)).isGlobalUnicast());
+
+    // Not global unicast
+    try std.testing.expect(!(try IpAddress.parseIp6("fc00::1", 0)).isGlobalUnicast()); // private
+    try std.testing.expect(!(try IpAddress.parseIp6("::1", 0)).isGlobalUnicast()); // loopback
+    try std.testing.expect(!(try IpAddress.parseIp6("fe80::1", 0)).isGlobalUnicast()); // link-local
+    try std.testing.expect(!(try IpAddress.parseIp6("ff02::1", 0)).isGlobalUnicast()); // multicast
+    try std.testing.expect(!(try IpAddress.parseIp6("::", 0)).isGlobalUnicast()); // unspecified
 }
 
 test "UnixAddress: init" {
