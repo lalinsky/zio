@@ -7,3 +7,4 @@
 /benchmarks/target/
 /benchmarks/echo_server_go
 /benchmarks/ping_pong_go
+/benchmarks/spawn_throughput_go

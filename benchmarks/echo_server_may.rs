@@ -1,9 +1,8 @@
 use std::time::Instant;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use may::go;
 use may::coroutine;
+use may::sync::mpsc;
 use may::net::{TcpListener, TcpStream};
 
 const NUM_CLIENTS: usize = 10;
@@ -36,7 +35,7 @@ fn main() {
     println!("  Total messages: {}\n", NUM_CLIENTS * MESSAGES_PER_CLIENT);
 
     let total_messages = NUM_CLIENTS * MESSAGES_PER_CLIENT;
-    let clients_done = Arc::new(AtomicUsize::new(0));
+    let (done_tx, done_rx) = mpsc::channel::<()>();
 
     coroutine::scope(|scope| {
         // Start server
@@ -60,7 +59,7 @@ fn main() {
 
         // Spawn all clients
         for _ in 0..NUM_CLIENTS {
-            let clients_done = clients_done.clone();
+            let done_tx = done_tx.clone();
             go!(scope, move || {
                 let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
                 stream.set_nodelay(true).unwrap();
@@ -77,13 +76,13 @@ fn main() {
                     stream.read_exact(&mut recv_buffer).unwrap();
                 }
 
-                clients_done.fetch_add(1, Ordering::Relaxed);
+                let _ = done_tx.send(());
             });
         }
 
         // Wait for all clients
-        while clients_done.load(Ordering::Relaxed) < NUM_CLIENTS {
-            coroutine::sleep(std::time::Duration::from_millis(1));
+        for _ in 0..NUM_CLIENTS {
+            done_rx.recv().unwrap();
         }
 
         let elapsed = start.elapsed();

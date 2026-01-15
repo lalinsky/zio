@@ -66,15 +66,7 @@ async fn client_task(ready: Arc<Barrier>) {
 
     for _ in 0..MESSAGES_PER_CLIENT {
         stream.write_all(&send_buffer).await.unwrap();
-
-        let mut bytes_received = 0;
-        while bytes_received < MESSAGE_SIZE {
-            let n = stream.read(&mut recv_buffer[bytes_received..]).await.unwrap();
-            if n == 0 {
-                panic!("Unexpected end of stream");
-            }
-            bytes_received += n;
-        }
+        stream.read_exact(&mut recv_buffer).await.unwrap();
     }
 }
 

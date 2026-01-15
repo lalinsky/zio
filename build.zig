@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) void {
     const benchmarks = [_]struct { name: []const u8, file: []const u8 }{
         .{ .name = "ping_pong_benchmark", .file = "benchmarks/ping_pong.zig" },
         .{ .name = "echo_server_benchmark", .file = "benchmarks/echo_server.zig" },
+        .{ .name = "spawn_throughput_benchmark", .file = "benchmarks/spawn_throughput.zig" },
     };
 
     // Create examples step

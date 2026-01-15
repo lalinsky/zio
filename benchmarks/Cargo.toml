@@ -23,3 +23,11 @@ path = "ping_pong_may.rs"
 [[bin]]
 name = "echo_server_may"
 path = "echo_server_may.rs"
+
+[[bin]]
+name = "spawn_throughput_tokio"
+path = "spawn_throughput_tokio.rs"
+
+[[bin]]
+name = "spawn_throughput_may"
+path = "spawn_throughput_may.rs"
