@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"sort"
 	"sync"
 	"time"
 )
@@ -66,7 +65,7 @@ func serverTask(ready chan struct{}, done chan struct{}) {
 	<-done
 }
 
-func clientTask(ready chan struct{}, latencies []int64, clientID int, wg *sync.WaitGroup) {
+func clientTask(ready chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	<-ready
@@ -77,6 +76,10 @@ func clientTask(ready chan struct{}, latencies []int64, clientID int, wg *sync.W
 	}
 	defer conn.Close()
 
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
 	sendBuffer := make([]byte, MESSAGE_SIZE)
 	recvBuffer := make([]byte, MESSAGE_SIZE)
 
@@ -85,10 +88,7 @@ func clientTask(ready chan struct{}, latencies []int64, clientID int, wg *sync.W
 		sendBuffer[i] = byte(i % 256)
 	}
 
-	startIdx := clientID * MESSAGES_PER_CLIENT
 	for i := 0; i < MESSAGES_PER_CLIENT; i++ {
-		msgStart := time.Now()
-
 		_, err := conn.Write(sendBuffer)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to write: %v", err))
@@ -105,18 +105,7 @@ func clientTask(ready chan struct{}, latencies []int64, clientID int, wg *sync.W
 			}
 			bytesReceived += n
 		}
-
-		msgEnd := time.Now()
-		latencies[startIdx+i] = msgEnd.Sub(msgStart).Nanoseconds()
 	}
-}
-
-func calculatePercentile(sortedLatencies []int64, percentile float64) int64 {
-	idx := int(float64(len(sortedLatencies)) * percentile)
-	if idx >= len(sortedLatencies) {
-		idx = len(sortedLatencies) - 1
-	}
-	return sortedLatencies[idx]
 }
 
 func main() {
@@ -129,9 +118,7 @@ func main() {
 	serverReady := make(chan struct{})
 	serverDone := make(chan struct{})
 
-	// Allocate latency tracking
 	totalMessages := NUM_CLIENTS * MESSAGES_PER_CLIENT
-	latencies := make([]int64, totalMessages)
 
 	// Start server
 	go serverTask(serverReady, serverDone)
@@ -145,7 +132,7 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 0; i < NUM_CLIENTS; i++ {
 		wg.Add(1)
-		go clientTask(serverReady, latencies, i, &wg)
+		go clientTask(serverReady, &wg)
 	}
 
 	// Wait for all clients to complete
@@ -165,28 +152,8 @@ func main() {
 	messagesPerSec := float64(totalMessages) / elapsedS
 	throughputMBps := (float64(totalMessages*MESSAGE_SIZE*2) / elapsedS) / (1024.0 * 1024.0)
 
-	// Sort latencies for percentile calculation
-	sort.Slice(latencies, func(i, j int) bool {
-		return latencies[i] < latencies[j]
-	})
-
-	p50 := calculatePercentile(latencies, 0.50)
-	p95 := calculatePercentile(latencies, 0.95)
-	p99 := calculatePercentile(latencies, 0.99)
-
-	var sum int64
-	for _, lat := range latencies {
-		sum += lat
-	}
-	avg := sum / int64(len(latencies))
-
 	fmt.Println("Results:")
 	fmt.Printf("  Total time: %.2f ms (%.3f s)\n", elapsedMs, elapsedS)
 	fmt.Printf("  Messages/sec: %.0f\n", messagesPerSec)
 	fmt.Printf("  Throughput: %.2f MB/s (rx+tx)\n", throughputMBps)
-	fmt.Println("\nLatency (round-trip):")
-	fmt.Printf("  Average: %.1f µs\n", float64(avg)/1000.0)
-	fmt.Printf("  p50: %.1f µs\n", float64(p50)/1000.0)
-	fmt.Printf("  p95: %.1f µs\n", float64(p95)/1000.0)
-	fmt.Printf("  p99: %.1f µs\n", float64(p99)/1000.0)
 }

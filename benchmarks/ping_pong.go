@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const NUM_ROUNDS = 1_000_000
+const NUM_ROUNDS = 10_000_000
 
 func pinger(pingCh chan<- uint32, pongCh <-chan uint32, rounds uint32, done chan<- bool) {
 	for i := uint32(0); i < rounds; i++ {

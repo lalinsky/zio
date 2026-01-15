@@ -4,7 +4,7 @@
 const std = @import("std");
 const zio = @import("zio");
 
-const NUM_ROUNDS = 1_000_0000;
+const NUM_ROUNDS = 10_000_000;
 
 fn pinger(rt: *zio.Runtime, ping_tx: *zio.Channel(u32), pong_rx: *zio.Channel(u32), rounds: u32) !void {
     var i: u32 = 0;
@@ -27,7 +27,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{ .num_executors = 1 });
+    var runtime = try zio.Runtime.init(allocator, .{ .num_executors = 0 });
     defer runtime.deinit();
 
     // Create channels for ping-pong communication

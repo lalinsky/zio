@@ -59,8 +59,8 @@ pub fn build(b: *std.Build) void {
 
     // Benchmarks configuration
     const benchmarks = [_]struct { name: []const u8, file: []const u8 }{
-        .{ .name = "ping-pong", .file = "benchmarks/ping_pong.zig" },
-        .{ .name = "echo-server", .file = "benchmarks/echo_server.zig" },
+        .{ .name = "ping_pong_benchmark", .file = "benchmarks/ping_pong.zig" },
+        .{ .name = "echo_server_benchmark", .file = "benchmarks/echo_server.zig" },
     };
 
     // Create examples step
