@@ -447,6 +447,7 @@ pub fn spawnTask(
     group: ?*Group,
 ) !*AnyTask {
     const executor = try getNextExecutor(rt);
+
     const task = try AnyTask.create(
         executor,
         result_len,
@@ -460,6 +461,11 @@ pub fn spawnTask(
 
     if (group) |g| try registerGroupTask(g, &task.awaitable);
     errdefer if (group) |g| unregisterGroupTask(rt, g, &task.awaitable);
+
+    // +1 ref for the caller (JoinHandle) before scheduling, to prevent
+    // race where task completes before caller can take ownership
+    task.awaitable.ref_count.incr();
+    errdefer _ = task.awaitable.ref_count.decr();
 
     try registerTask(rt, task);
 

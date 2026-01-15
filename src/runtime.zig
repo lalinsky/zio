@@ -949,7 +949,6 @@ pub const Runtime = struct {
             null,
         );
 
-        task.awaitable.ref_count.incr(); // +1 for JoinHandle
         return JoinHandle(Result){
             .awaitable = &task.awaitable,
             .result = undefined,
@@ -978,7 +977,6 @@ pub const Runtime = struct {
             null,
         );
 
-        task.awaitable.ref_count.incr(); // +1 for JoinHandle
         return JoinHandle(Result){
             .awaitable = &task.awaitable,
             .result = undefined,
