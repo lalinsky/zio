@@ -35,8 +35,11 @@ pub const AutoCancel = struct {
     }
 
     pub fn set(self: *AutoCancel, rt: *Runtime, timeout: Duration) void {
-        // Skip setting timer if waiting forever
-        if (timeout.ns == Duration.max.ns) return;
+        // Disable timer if waiting forever
+        if (timeout.ns == Duration.max.ns) {
+            self.clear(rt);
+            return;
+        }
 
         const task = rt.getCurrentTask();
         const executor = task.getExecutor();
@@ -252,6 +255,25 @@ test "AutoCancel: set, clear, and re-set" {
     };
 
     return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: set with Duration.max clears prior timer" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear(rt);
+
+    // Set a short timeout
+    timeout.set(rt, .fromMilliseconds(10));
+
+    // Disable it with .max
+    timeout.set(rt, .max);
+
+    // Sleep longer than the original timeout - should NOT be canceled
+    try rt.sleep(.fromMilliseconds(50));
+
+    // If we reach here, the timer was properly cleared
 }
 
 test "AutoCancel: cancels spawned task via join" {
