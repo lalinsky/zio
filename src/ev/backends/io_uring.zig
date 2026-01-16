@@ -14,8 +14,11 @@ const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
 
 // Special user_data values for internal operations
-const USER_DATA_WAKER: u64 = 0; // Waker eventfd POLL_ADD operations
+const USER_DATA_WAKER: u64 = 0; // Waker FUTEX_WAIT operations
 const USER_DATA_CANCEL: u64 = 1; // Cancel SQE operations (should be skipped)
+
+// Futex constants for io_uring FUTEX_WAIT/WAKE
+const FUTEX_BITSET_MATCH_ANY: u64 = 0xffffffff;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
 const NetListen = @import("../completion.zig").NetListen;
@@ -131,7 +134,6 @@ const log = std.log.scoped(.zio_uring);
 
 allocator: std.mem.Allocator,
 ring: linux.IoUring,
-waker_eventfd: i32,
 waker_needs_rearm: bool,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
@@ -144,37 +146,60 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     var ring = try linux.IoUring.init(queue_size, flags);
     errdefer ring.deinit();
 
-    const waker_eventfd = try posix_os.eventfd(0, posix_os.EFD.CLOEXEC | posix_os.EFD.NONBLOCK);
-    errdefer _ = linux.close(waker_eventfd);
-
     self.* = .{
         .allocator = allocator,
         .ring = ring,
-        .waker_eventfd = waker_eventfd,
         .waker_needs_rearm = true,
     };
 }
 
 pub fn deinit(self: *Self) void {
-    _ = linux.close(self.waker_eventfd);
     self.ring.deinit();
 }
 
-pub fn wake(self: *Self) void {
-    posix_os.eventfd_write(self.waker_eventfd, 1) catch {};
+pub fn wake(self: *Self, state: *LoopState) void {
+    _ = self;
+    // wake_requested is already set by Loop.wake() before calling us.
+    // Just do the futex wake syscall.
+    _ = linux.futex_3arg(
+        @ptrCast(&state.wake_requested.raw),
+        .{ .cmd = .WAKE, .private = true },
+        1, // wake 1 waiter
+    );
 }
 
-fn rearmWaker(self: *Self) !void {
+fn rearmWaker(self: *Self, state: *LoopState) !void {
     if (!self.waker_needs_rearm) return;
     const sqe = try self.ring.get_sqe();
-    sqe.prep_poll_add(self.waker_eventfd, linux.POLL.IN);
+    // Prep FUTEX_WAIT: wait while wake_requested == 0
+    prepFutexWait(sqe, &state.wake_requested.raw, 0);
     sqe.user_data = USER_DATA_WAKER;
     self.waker_needs_rearm = false;
 }
 
 fn drainWaker(self: *Self) void {
-    _ = posix_os.eventfd_read(self.waker_eventfd) catch {};
+    // wake_requested is reset by Loop after poll returns.
+    // Just mark that we need to rearm the FUTEX_WAIT.
     self.waker_needs_rearm = true;
+}
+
+fn prepFutexWait(sqe: *linux.io_uring_sqe, futex: *const u32, expected: u64) void {
+    sqe.* = .{
+        .opcode = .FUTEX_WAIT,
+        .flags = 0,
+        .ioprio = 0,
+        .fd = @bitCast(linux.FUTEX2_FLAGS{ .size = .U32, .private = true }),
+        .off = expected,
+        .addr = @intFromPtr(futex),
+        .len = 0,
+        .rw_flags = 0,
+        .user_data = 0,
+        .buf_index = 0,
+        .personality = 0,
+        .splice_fd_in = 0,
+        .addr3 = FUTEX_BITSET_MATCH_ANY,
+        .resv = 0,
+    };
 }
 
 /// Submit a completion to the backend - infallible.
@@ -740,7 +765,7 @@ fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
 pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const linux_os = @import("../../os/linux.zig");
 
-    try self.rearmWaker();
+    try self.rearmWaker(state);
 
     // Flush SQ to get number of pending submissions
     const to_submit = self.ring.flush_sq();

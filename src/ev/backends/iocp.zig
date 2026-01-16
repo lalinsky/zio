@@ -317,7 +317,8 @@ fn wakeAPC(dwParam: windows.ULONG_PTR) callconv(.winapi) void {
     // No-op - just waking up the thread
 }
 
-pub fn wake(self: *Self) void {
+pub fn wake(self: *Self, state: *LoopState) void {
+    _ = state;
     // Queue an APC to wake the thread
     const result = windows.QueueUserAPC(wakeAPC, self.thread_handle, 0);
     if (result == 0) {

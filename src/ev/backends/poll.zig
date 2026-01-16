@@ -117,7 +117,8 @@ pub fn deinit(self: *Self) void {
     self.poll_fds.deinit(self.allocator);
 }
 
-pub fn wake(self: *Self) void {
+pub fn wake(self: *Self, state: *LoopState) void {
+    _ = state;
     const byte: [1]u8 = .{1};
     switch (builtin.os.tag) {
         .windows => {
