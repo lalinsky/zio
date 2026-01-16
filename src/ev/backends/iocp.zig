@@ -2,6 +2,7 @@ const std = @import("std");
 const windows = @import("../../os/windows.zig");
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
+const Duration = @import("../../time.zig").Duration;
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
@@ -1458,8 +1459,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
     }
 }
 
-pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
-    const timeout: u32 = std.math.cast(u32, timeout_ms) orelse std.math.maxInt(u32);
+pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
+    const timeout_ms: u32 = std.math.cast(u32, timeout.toMilliseconds()) orelse std.math.maxInt(u32);
 
     var num_entries: u32 = 0;
     const result = windows.GetQueuedCompletionStatusEx(
@@ -1467,7 +1468,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         self.entries.ptr,
         @intCast(self.entries.len),
         &num_entries,
-        timeout,
+        timeout_ms,
         windows.TRUE, // Alertable - allows QueueUserAPC to wake us
     );
 

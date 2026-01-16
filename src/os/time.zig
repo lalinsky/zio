@@ -20,7 +20,8 @@ pub fn now(clock: Clock) Timestamp {
                     // Using fixed-point arithmetic to avoid overflow: (qpc * 1e9) / qpf
                     const common_qpf = 10_000_000; // 10MHz is common
                     if (qpf == common_qpf) {
-                        return .{ .ns = qpc * std.time.ns_per_s / common_qpf };
+                        // ns_per_s / 10_000_000 = 100
+                        return .{ .ns = qpc * 100 };
                     }
 
                     // General case: convert to ns using fixed point
@@ -33,10 +34,9 @@ pub fn now(clock: Clock) Timestamp {
                     // and uses the NTFS/Windows epoch, which is 1601-01-01.
                     // Convert to Unix epoch (1970-01-01) by subtracting the difference.
                     const ticks = w.RtlGetSystemTimePrecise();
-                    const ns_since_windows_epoch = ticks * 100;
-                    // Nanoseconds between Windows epoch (1601) and Unix epoch (1970)
-                    const epoch_diff_ns: i64 = 11644473600 * std.time.ns_per_s;
-                    return .{ .ns = @intCast(ns_since_windows_epoch - epoch_diff_ns) };
+                    // 100-nanosecond ticks between Windows epoch (1601) and Unix epoch (1970)
+                    const epoch_diff_ticks = 11644473600 * (std.time.ns_per_s / 100);
+                    return .{ .ns = @intCast((ticks - epoch_diff_ticks) * 100) };
                 },
             }
         },

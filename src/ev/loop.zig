@@ -222,7 +222,7 @@ pub const Loop = struct {
     loop_group: *LoopGroup,
     internal_loop_group: LoopGroup = .{},
 
-    max_wait_ms: u64 = 60 * std.time.ms_per_s,
+    max_wait: Duration = .fromSeconds(60),
     defer_callbacks: bool = true,
 
     in_add: if (in_safe_mode) bool else void = if (in_safe_mode) false else {},
@@ -521,13 +521,13 @@ pub const Loop = struct {
     }
 
     const TimerCheckResult = struct {
-        next_timeout_ms: ?u64,
+        next_timeout: ?Duration,
         fired: bool,
     };
 
     fn checkTimers(self: *Loop) TimerCheckResult {
         var fired = false;
-        var next_timeout_ms: ?u64 = null;
+        var next_timeout: ?Duration = null;
 
         // Process fired timers in batches to avoid holding the lock during callbacks.
         // This prevents deadlock when callbacks try to set/clear timers.
@@ -539,7 +539,7 @@ pub const Loop = struct {
             self.state.updateNow();
             while (self.state.timers.peek()) |timer| {
                 if (timer.deadline.ns > self.state.now.ns) {
-                    next_timeout_ms = self.state.now.durationTo(timer.deadline).toMilliseconds();
+                    next_timeout = self.state.now.durationTo(timer.deadline);
                     break;
                 }
                 timer.c.setResult(.timer, {});
@@ -560,7 +560,7 @@ pub const Loop = struct {
             if (batch_count < batch.len) break;
         }
 
-        return .{ .next_timeout_ms = next_timeout_ms, .fired = fired };
+        return .{ .next_timeout = next_timeout, .fired = fired };
     }
 
     /// Check if an async handle is pending and set its result if so.
@@ -706,17 +706,17 @@ pub const Loop = struct {
 
         const timer_result = self.checkTimers();
 
-        var timeout_ms: u64 = 0;
+        var timeout: Duration = .zero;
         if (wait) {
             // Don't block if we have completions waiting to be processed or timers fired
             if (!self.state.completions.empty() or !self.state.work_completions.empty() or timer_result.fired) {
-                timeout_ms = 0;
-            } else if (timer_result.next_timeout_ms) |t| {
-                // Use timer timeout, capped at max_wait_ms
-                timeout_ms = @min(t, self.max_wait_ms);
+                timeout = .zero;
+            } else if (timer_result.next_timeout) |t| {
+                // Use timer timeout, capped at max_wait
+                timeout = if (t.ns < self.max_wait.ns) t else self.max_wait;
             } else {
                 // No timers, wait for blocking I/O
-                timeout_ms = self.max_wait_ms;
+                timeout = self.max_wait;
             }
         }
 
@@ -724,7 +724,7 @@ pub const Loop = struct {
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.state.inflight_io > 0;
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
-        const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) 0 else timeout_ms) else false;
+        const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) .zero else timeout) else false;
 
         // Process async handles if the async bit was set
         if (wake_flags & LoopState.wake_async != 0) {
