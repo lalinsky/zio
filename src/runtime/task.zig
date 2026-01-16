@@ -13,7 +13,6 @@ const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
-const Timeout = @import("timeout.zig").Timeout;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
@@ -232,10 +231,10 @@ pub const AnyTask = struct {
                 triggered = false;
                 status.pending_errors += 1;
             } else {
-                // This timeout is causing the cancellation
-                // Increment timeout counter and pending_errors
+                // This auto-cancel is causing the cancellation
+                // Increment auto_canceled counter and pending_errors
                 triggered = true;
-                status.timeout += 1;
+                status.auto_canceled += 1;
                 status.pending_errors += 1;
             }
 
@@ -249,43 +248,6 @@ pub const AnyTask = struct {
         }
 
         return triggered;
-    }
-
-    /// User cancellation has priority - if user_canceled is set, returns error.Canceled.
-    /// Otherwise, if the timeout was triggered, decrements the timeout counter and returns error.Timeout.
-    /// Otherwise, returns the original error.
-    /// Note: user_canceled is NEVER cleared - once set, task is condemned.
-    /// Note: Does NOT decrement pending_errors - that counter is only consumed by checkCanceled.
-    pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout, err: anytype) !void {
-        // If not error.Canceled, just return the original error
-        if (err != error.Canceled) {
-            return err;
-        }
-
-        var current = self.awaitable.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-
-            // User cancellation has priority - once condemned (user_canceled set), always return error.Canceled
-            if (status.user_canceled) {
-                return error.Canceled;
-            }
-
-            // No user cancellation - check if this timeout triggered
-            if (timeout.triggered and status.timeout > 0) {
-                // Decrement timeout counter
-                status.timeout -= 1;
-                const new: u32 = @bitCast(status);
-                if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                    current = prev;
-                    continue;
-                }
-                return error.Timeout;
-            }
-
-            // Timeout didn't trigger or already consumed
-            return err;
-        }
     }
 
     /// Check if there are pending cancellation errors to consume.

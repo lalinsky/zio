@@ -60,7 +60,7 @@ const resumeTask = @import("../runtime/task.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
-const Timeout = @import("../runtime/timeout.zig").Timeout;
+const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 const Waiter = @import("common.zig").Waiter;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
@@ -175,7 +175,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
     self.wait_queue.push(&waiter.wait_node);
 
     // Set up timeout timer
-    var timer = Timeout.init;
+    var timer = AutoCancel.init;
     defer timer.clear(runtime);
     timer.set(runtime, timeout);
 
@@ -204,8 +204,9 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
         // Cancellation during lock has priority over timeout
         try runtime.checkCanceled();
 
-        // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timer, err);
+        // Check if this auto-cancel triggered, otherwise it was user cancellation
+        if (timer.check(runtime, err)) return error.Timeout;
+        return err;
     };
 
     // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait

@@ -10,7 +10,7 @@ const Timeoutable = @import("common.zig").Timeoutable;
 const Duration = @import("time.zig").Duration;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");
-const Timeout = @import("runtime/timeout.zig").Timeout;
+const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
 const Waiter = @import("sync/common.zig").Waiter;
 
@@ -336,7 +336,7 @@ pub const Signal = struct {
         self.entry.waiters.push(&waiter.wait_node);
 
         // Set up timeout timer
-        var timer = Timeout.init;
+        var timer = AutoCancel.init;
         defer timer.clear(rt);
         timer.set(rt, timeout);
 
@@ -346,8 +346,9 @@ pub const Signal = struct {
             // Try to remove from queue
             _ = self.entry.waiters.remove(&waiter.wait_node);
 
-            // Check if this timeout triggered, otherwise it was user cancellation
-            return rt.checkTimeout(&timer, err);
+            // Check if this auto-cancel triggered, otherwise it was user cancellation
+            if (timer.check(rt, err)) return error.Timeout;
+            return err;
         };
 
         // Consume the counter

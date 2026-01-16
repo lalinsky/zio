@@ -23,10 +23,10 @@ pub const AwaitableKind = enum {
     blocking_task,
 };
 
-// Cancellation status - tracks both user and timeout cancellation
+// Cancellation status - tracks both user and auto-cancellation
 pub const CanceledStatus = packed struct(u32) {
     user_canceled: bool = false,
-    timeout: u8 = 0,
+    auto_canceled: u8 = 0,
     pending_errors: u16 = 0,
     _padding: u7 = 0,
 };
@@ -120,6 +120,31 @@ pub const Awaitable = struct {
                 continue;
             }
             break;
+        }
+    }
+
+    /// Try to consume an auto-cancel. Returns true if an auto-cancel was consumed,
+    /// false if user-canceled or no auto-cancel pending.
+    pub fn consumeAutoCancel(self: *Awaitable) bool {
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+
+            // User cancellation has priority
+            if (status.user_canceled) return false;
+
+            // Check if there's an auto-cancel to consume
+            if (status.auto_canceled > 0) {
+                status.auto_canceled -= 1;
+                const new: u32 = @bitCast(status);
+                if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                    current = prev;
+                    continue;
+                }
+                return true;
+            }
+
+            return false;
         }
     }
 

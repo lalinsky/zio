@@ -10,21 +10,21 @@ const resumeTask = @import("task.zig").resumeTask;
 const waitForIo = @import("../io.zig").waitForIo;
 const genericCallback = @import("../io.zig").genericCallback;
 
-/// A timeout that applies to all I/O operations on the current task.
-/// Multiple Timeout instances can be nested - each has its own independent timer.
-/// Timeouts are stack-allocated and managed via defer pattern.
+/// Automatically cancels I/O operations on the current task after a timeout.
+/// Multiple AutoCancel instances can be nested - each has its own independent timer.
+/// AutoCancels are stack-allocated and managed via defer pattern.
 ///
-/// When a timeout expires, operations return error.Canceled and the `triggered` field is set to true,
+/// When the timeout expires, operations return error.Canceled and the `triggered` field is set to true,
 /// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
-pub const Timeout = struct {
+pub const AutoCancel = struct {
     timer: ev.Timer = .init(0),
     triggered: bool = false,
     task: ?*AnyTask = null,
     loop: ?*ev.Loop = null,
 
-    pub const init: Timeout = .{};
+    pub const init: AutoCancel = .{};
 
-    pub fn clear(self: *Timeout, rt: *Runtime) void {
+    pub fn clear(self: *AutoCancel, rt: *Runtime) void {
         _ = rt;
         const loop = self.loop orelse return;
         if (self.timer.c.state != .running) return;
@@ -34,7 +34,7 @@ pub const Timeout = struct {
         self.loop = null;
     }
 
-    pub fn set(self: *Timeout, rt: *Runtime, timeout: Duration) void {
+    pub fn set(self: *AutoCancel, rt: *Runtime, timeout: Duration) void {
         // Skip setting timer if waiting forever
         if (timeout.ns == Duration.max.ns) return;
 
@@ -52,25 +52,34 @@ pub const Timeout = struct {
 
         // Initialize ev.Timer
         self.timer.c.userdata = self;
-        self.timer.c.callback = timeoutCallback;
+        self.timer.c.callback = autoCancelCallback;
 
         // Activate the timer
         executor.loop.setTimer(&self.timer, timeout_ms);
     }
+
+    /// Check if this auto-cancel triggered the cancellation and consume it.
+    /// Returns true if this auto-cancel caused the cancellation, false otherwise.
+    /// User cancellation has priority - if the task was user-canceled, returns false.
+    pub fn check(self: *AutoCancel, rt: *Runtime, err: Cancelable) bool {
+        std.debug.assert(err == error.Canceled);
+        if (!self.triggered) return false;
+        return rt.getCurrentTask().awaitable.consumeAutoCancel();
+    }
 };
 
-/// Callback when timeout timer fires
-fn timeoutCallback(
+/// Callback when auto-cancel timer fires
+fn autoCancelCallback(
     _: *ev.Loop,
     completion: *ev.Completion,
 ) void {
-    const timeout: *Timeout = @ptrCast(@alignCast(completion.userdata.?));
-    const task = timeout.task orelse return;
+    const autocancel: *AutoCancel = @ptrCast(@alignCast(completion.userdata.?));
+    const task = autocancel.task orelse return;
 
     // If there's no error, mark timeout as triggered
     if (completion.err == null) {
         if (task.setTimeout()) {
-            timeout.triggered = true;
+            autocancel.triggered = true;
         }
     }
 
@@ -78,52 +87,49 @@ fn timeoutCallback(
     resumeTask(task, .local);
 
     // Clear the associated task and loop
-    timeout.task = null;
-    timeout.loop = null;
+    autocancel.task = null;
+    autocancel.loop = null;
 }
 
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 
-test "Timeout: smoke test" {
+test "AutoCancel: smoke test" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var timeout = Timeout.init;
+    var timeout = AutoCancel.init;
     defer timeout.clear(rt);
 
     timeout.set(rt, .fromMilliseconds(100));
 }
 
-test "Timeout: fires and returns error.Timeout" {
+test "AutoCancel: fires and returns error.Timeout" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var timeout = Timeout.init;
+    var timeout = AutoCancel.init;
     defer timeout.clear(rt);
 
     timeout.set(rt, .fromMilliseconds(10));
 
     // Sleep longer than timeout
     rt.sleep(.fromMilliseconds(50)) catch |err| {
-        // Should return error.Timeout, not error.Canceled
-        rt.checkTimeout(&timeout, err) catch |check_err| {
-            try std.testing.expectEqual(error.Timeout, check_err);
-            return; // Expected - timeout fired
-        };
-        return error.TestUnexpectedResult; // checkTimeout should have returned error
+        // Should return true (auto-cancel triggered)
+        try std.testing.expect(timeout.check(rt, err));
+        return; // Expected - timeout fired
     };
 
     return error.TestUnexpectedResult; // Should have timed out
 }
 
-test "Timeout: nested timeouts - earliest fires first" {
+test "AutoCancel: nested timeouts - earliest fires first" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var timeout1 = Timeout.init;
+    var timeout1 = AutoCancel.init;
     defer timeout1.clear(rt);
-    var timeout2 = Timeout.init;
+    var timeout2 = AutoCancel.init;
     defer timeout2.clear(rt);
 
     // Set longer timeout first
@@ -133,22 +139,19 @@ test "Timeout: nested timeouts - earliest fires first" {
 
     // Sleep - should be interrupted by timeout2 (earliest)
     rt.sleep(.fromMilliseconds(100)) catch |err| {
-        // Should return error.Timeout for timeout2
-        rt.checkTimeout(&timeout2, err) catch |check_err| {
-            try std.testing.expectEqual(error.Timeout, check_err);
-            return; // Expected - timeout2 fired
-        };
-        return error.TestUnexpectedResult; // checkTimeout should have returned error
+        // Should return true for timeout2 (it triggered)
+        try std.testing.expect(timeout2.check(rt, err));
+        return; // Expected - timeout2 fired
     };
 
     return error.TestUnexpectedResult; // Should have timed out
 }
 
-test "Timeout: cleared before firing" {
+test "AutoCancel: cleared before firing" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var timeout = Timeout.init;
+    var timeout = AutoCancel.init;
     timeout.set(rt, .fromMilliseconds(50));
 
     // Clear timeout before it fires
@@ -158,19 +161,19 @@ test "Timeout: cleared before firing" {
     try rt.sleep(.fromMilliseconds(10));
 }
 
-test "Timeout: user cancel has priority over timeout" {
+test "AutoCancel: user cancel has priority over timeout" {
     const Test = struct {
         fn worker(rt: *Runtime) !void {
-            var timeout = Timeout.init;
+            var timeout = AutoCancel.init;
             defer timeout.clear(rt);
 
             timeout.set(rt, .fromMilliseconds(50));
 
             // Sleep - will be canceled by user
             rt.sleep(.fromMilliseconds(100)) catch |err| {
-                // Should return error.Canceled (user has priority)
-                try rt.checkTimeout(&timeout, err);
-                return; // Expected
+                // Should return false (user cancel has priority)
+                try std.testing.expect(!timeout.check(rt, err));
+                return; // Expected - handled the cancellation
             };
 
             return error.TestUnexpectedResult;
@@ -185,13 +188,8 @@ test "Timeout: user cancel has priority over timeout" {
             // User cancel before timeout fires
             handle.cancel(rt);
 
-            // Should get error.Canceled (user priority)
-            handle.join(rt) catch |err| {
-                try std.testing.expectEqual(error.Canceled, err);
-                return;
-            };
-
-            return error.TestUnexpectedResult;
+            // Worker handles the cancellation gracefully, so join succeeds
+            try handle.join(rt);
         }
     };
 
@@ -202,15 +200,15 @@ test "Timeout: user cancel has priority over timeout" {
     try handle.join(rt);
 }
 
-test "Timeout: multiple timeouts with different deadlines" {
+test "AutoCancel: multiple timeouts with different deadlines" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var timeout1 = Timeout.init;
+    var timeout1 = AutoCancel.init;
     defer timeout1.clear(rt);
-    var timeout2 = Timeout.init;
+    var timeout2 = AutoCancel.init;
     defer timeout2.clear(rt);
-    var timeout3 = Timeout.init;
+    var timeout3 = AutoCancel.init;
     defer timeout3.clear(rt);
 
     timeout1.set(rt, .fromMilliseconds(200));
@@ -224,22 +222,19 @@ test "Timeout: multiple timeouts with different deadlines" {
         try std.testing.expect(!timeout1.triggered);
         try std.testing.expect(!timeout3.triggered);
 
-        // Should return error.Timeout for timeout2
-        rt.checkTimeout(&timeout2, err) catch |check_err| {
-            try std.testing.expectEqual(error.Timeout, check_err);
-            return; // Expected
-        };
-        return error.TestUnexpectedResult; // checkTimeout should have returned error
+        // Should return true for timeout2
+        try std.testing.expect(timeout2.check(rt, err));
+        return; // Expected
     };
 
     return error.TestUnexpectedResult;
 }
 
-test "Timeout: set, clear, and re-set" {
+test "AutoCancel: set, clear, and re-set" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var timeout = Timeout.init;
+    var timeout = AutoCancel.init;
     defer timeout.clear(rt);
 
     // Set timeout
@@ -253,17 +248,14 @@ test "Timeout: set, clear, and re-set" {
 
     // Sleep - should be interrupted by new timeout
     rt.sleep(.fromMilliseconds(50)) catch |err| {
-        rt.checkTimeout(&timeout, err) catch |check_err| {
-            try std.testing.expectEqual(error.Timeout, check_err);
-            return; // Expected - timeout fired
-        };
-        return error.TestUnexpectedResult; // checkTimeout should have returned error
+        try std.testing.expect(timeout.check(rt, err));
+        return; // Expected - timeout fired
     };
 
     return error.TestUnexpectedResult;
 }
 
-test "Timeout: cancels spawned task via join" {
+test "AutoCancel: cancels spawned task via join" {
     const Test = struct {
         fn blocker(rt: *Runtime) !void {
             // Block forever
@@ -274,17 +266,14 @@ test "Timeout: cancels spawned task via join" {
             var handle = try rt.spawn(blocker, .{rt}, .{});
             defer handle.cancel(rt);
 
-            var timeout = Timeout.init;
+            var timeout = AutoCancel.init;
             defer timeout.clear(rt);
             timeout.set(rt, .fromMilliseconds(10));
 
             // Join should be canceled by timeout
             handle.join(rt) catch |err| {
-                rt.checkTimeout(&timeout, err) catch |check_err| {
-                    try std.testing.expectEqual(error.Timeout, check_err);
-                    return; // Expected
-                };
-                return error.TestUnexpectedResult;
+                try std.testing.expect(timeout.check(rt, err));
+                return; // Expected
             };
 
             return error.TestUnexpectedResult;

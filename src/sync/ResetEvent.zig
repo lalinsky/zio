@@ -55,7 +55,7 @@ const AnyTask = @import("../runtime.zig").AnyTask;
 const resumeTask = @import("../runtime/task.zig").resumeTask;
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
-const Timeout = @import("../runtime/timeout.zig").Timeout;
+const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 const Waiter = @import("common.zig").Waiter;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
@@ -189,7 +189,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Duration) (Timeo
     }
 
     // Set up timeout timer
-    var timer = Timeout.init;
+    var timer = AutoCancel.init;
     defer timer.clear(runtime);
     timer.set(runtime, timeout);
 
@@ -199,8 +199,9 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Duration) (Timeo
         // Try to remove from queue
         _ = self.wait_queue.remove(&waiter.wait_node);
 
-        // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timer, err);
+        // Check if this auto-cancel triggered, otherwise it was user cancellation
+        if (timer.check(runtime, err)) return error.Timeout;
+        return err;
     };
 
     // Acquire fence: synchronize-with set()'s .release in popAll

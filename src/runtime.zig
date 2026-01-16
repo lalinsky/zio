@@ -30,7 +30,7 @@ const resumeTask = @import("runtime/task.zig").resumeTask;
 const spawnTask = @import("runtime/task.zig").spawnTask;
 const AnyBlockingTask = @import("runtime/blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
-const Timeout = @import("runtime/timeout.zig").Timeout;
+const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 const Group = @import("runtime/group.zig").Group;
 const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 
@@ -1084,16 +1084,6 @@ pub const Runtime = struct {
         _ = self;
         const executor = Executor.current orelse return;
         executor.endShield();
-    }
-
-    /// Check if the given timeout triggered the cancellation.
-    /// This should be called in a catch block after receiving an error.
-    /// If the error is not error.Canceled, returns the original error unchanged.
-    /// If the timeout was triggered, returns error.Timeout.
-    /// Otherwise, returns the original error (error.Canceled from user cancellation).
-    pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: anytype) !void {
-        const current_task = self.getCurrentTask();
-        try current_task.checkTimeout(self, timeout, err);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).
