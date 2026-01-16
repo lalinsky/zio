@@ -317,9 +317,14 @@ pub const Executor = struct {
 
     // Tracks tasks run since last event loop tick.
     // After EVENT_INTERVAL tasks, getNextTask() returns null to force I/O processing.
-    // TODO: Also add time-based limit (10ms) like Go's sysmon for I/O responsiveness
-    // when tasks yield frequently but don't hit the task count limit.
     tick_task_count: u8 = 0,
+
+    // Tracks tasks waiting in ready_queue + lifo_slot + next_ready_queue.
+    // Used by maybeYield to decide whether to yield based on pending work.
+    ready_count: u32 = 0,
+
+    // Timestamp of last event loop tick, used for time-based yield decisions.
+    last_tick_time: u64 = 0,
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
@@ -499,7 +504,9 @@ pub const Executor = struct {
     }
 
     pub fn maybeYield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        return self.yield(expected_state, desired_state, cancel_mode);
+        if (self.ready_count >= 13) {
+            return self.yield(expected_state, desired_state, cancel_mode);
+        }
     }
 
     /// Begin a cancellation shield.
@@ -551,10 +558,6 @@ pub const Executor = struct {
         } else {
             return &self.main_task;
         }
-    }
-
-    pub inline fn awaitablePtrFromTaskPtr(task: *AnyTask) *Awaitable {
-        return &task.awaitable;
     }
 
     pub fn sleep(self: *Executor, duration: Duration) Cancelable!void {
@@ -632,6 +635,7 @@ pub const Executor = struct {
             var drained = self.next_ready_queue_remote.popAll();
             while (drained.pop()) |task| {
                 self.ready_queue.push(task);
+                self.ready_count += 1;
             }
 
             // Move yielded coroutines back to ready queue
@@ -642,8 +646,9 @@ pub const Executor = struct {
             const has_work = self.ready_queue.head != null or self.lifo_slot != null or main_ready;
             try self.loop.run(if (has_work) .no_wait else .once);
 
-            // Reset task counter after event loop tick
+            // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
+            self.last_tick_time = self.loop.now();
 
             // Check again after I/O
             if (check_ready and self.main_task.state.load(.acquire) == .ready) {
@@ -680,6 +685,7 @@ pub const Executor = struct {
                     self.lifo_slot = null;
                     self.lifo_slot_used += 1;
                     self.tick_task_count += 1;
+                    self.ready_count -= 1;
                     return task;
                 }
             } else {
@@ -689,6 +695,7 @@ pub const Executor = struct {
                     self.lifo_slot = null;
                     self.ready_queue.push(task);
                     // Don't reset counter - only reset when we actually poll from ready_queue
+                    // Note: ready_count stays the same (moved from lifo_slot to ready_queue)
                 }
             }
         }
@@ -697,6 +704,7 @@ pub const Executor = struct {
         if (self.ready_queue.pop()) |task| {
             self.lifo_slot_used = 0; // Reset LIFO starvation counter
             self.tick_task_count += 1;
+            self.ready_count -= 1;
             return task;
         }
 
@@ -717,9 +725,11 @@ pub const Executor = struct {
         if (is_yield) {
             // Yields → next_ready_queue (runs next iteration for fairness)
             self.next_ready_queue.push(wait_node);
+            self.ready_count += 1;
         } else if (!self.lifo_slot_enabled) {
             // LIFO disabled - woken tasks go to ready_queue (FIFO, fair scheduling)
             self.ready_queue.push(wait_node);
+            self.ready_count += 1;
         } else {
             // LIFO enabled - try LIFO slot for cache locality
             if (self.lifo_slot) |old_task| {
@@ -728,6 +738,7 @@ pub const Executor = struct {
             }
             // New task takes the LIFO slot (runs immediately, cache-hot)
             self.lifo_slot = wait_node;
+            self.ready_count += 1;
         }
     }
 
