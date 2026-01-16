@@ -503,8 +503,11 @@ pub const Executor = struct {
         }
     }
 
+    /// Yield to other tasks only if many are waiting, to balance fairness vs. context-switch overhead.
+    const yield_ready_threshold = 13;
+
     pub fn maybeYield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        if (self.ready_count >= 13) {
+        if (self.ready_count >= yield_ready_threshold) {
             return self.yield(expected_state, desired_state, cancel_mode);
         }
     }

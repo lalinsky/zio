@@ -152,6 +152,7 @@ pub const StackPool = struct {
                     self.removeNode(oldest);
                     oldest.next = to_free_head;
                     to_free_head = oldest;
+                    to_free_count += 1;
                 }
             }
 
