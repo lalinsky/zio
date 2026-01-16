@@ -71,7 +71,6 @@ pending_changes: usize = 0,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
-    net.ensureWSAInitialized();
 
     const waker_fds = switch (builtin.os.tag) {
         .windows => try net.createLoopbackSocketPair(),
@@ -104,13 +103,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
 }
 
 pub fn deinit(self: *Self) void {
-    // Remove waker from poll_fds
-    for (self.poll_fds.items, 0..) |pfd, i| {
-        if (pfd.fd == self.waker_read_fd) {
-            _ = self.poll_fds.swapRemove(i);
-            break;
-        }
-    }
     net.close(self.waker_read_fd);
     net.close(self.waker_write_fd);
     self.poll_queue.deinit(self.allocator);
