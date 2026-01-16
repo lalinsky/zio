@@ -488,3 +488,50 @@ test "cancel: queued work via thread pool cancel" {
     try std.testing.expect(!queued_ctx.work_called);
     try std.testing.expectError(error.Canceled, queued_work.getResult());
 }
+
+test "cancel: cross-thread cancellation" {
+    // Test cancelling an operation from a different thread/loop
+    var loop1: Loop = undefined;
+    try loop1.init(.{});
+    defer loop1.deinit();
+
+    // Create a timer on loop1 that will be cancelled from another thread
+    var timer: Timer = .init(.fromMilliseconds(5000)); // Long timeout
+    var completed = std.atomic.Value(bool).init(false);
+    timer.c.userdata = &completed;
+    timer.c.callback = struct {
+        fn callback(_: *Loop, c: *ev.Completion) void {
+            const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(c.userdata.?));
+            flag.store(true, .release);
+        }
+    }.callback;
+    loop1.add(&timer.c);
+
+    // Spawn thread that will cancel from its own loop
+    const cancel_thread = std.Thread.spawn(.{}, struct {
+        fn run(target_timer: *Timer) void {
+            // Init loop on this thread
+            var loop2: Loop = undefined;
+            loop2.init(.{}) catch return;
+            defer loop2.deinit();
+
+            // Cancel from a different loop (cross-thread)
+            loop2.cancel(&target_timer.c) catch {};
+        }
+    }.run, .{&timer}) catch unreachable;
+
+    // Run loop1 until completion (should be cancelled quickly)
+    var wall_timer = try std.time.Timer.start();
+    while (!completed.load(.acquire)) {
+        try loop1.run(.no_wait);
+        if (wall_timer.read() > 1 * std.time.ns_per_s) {
+            return error.TestTimeout;
+        }
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+
+    cancel_thread.join();
+
+    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectError(error.Canceled, timer.getResult());
+}
