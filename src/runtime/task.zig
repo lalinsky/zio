@@ -208,7 +208,6 @@ pub const AnyTask = struct {
     /// Returns false if the task is pinned or canceled, true otherwise.
     pub inline fn canMigrate(self: *const AnyTask) bool {
         if (self.pin_count > 0) return false;
-        if (self.awaitable.canceled_status.load(.acquire) != 0) return false;
         return true;
     }
 
