@@ -109,6 +109,8 @@ pub const LoopState = struct {
     /// I/O operations submitted to backend awaiting completion
     inflight_io: usize = 0,
 
+    wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
     now_ms: u64 = 0,
     timers: TimerHeap = .{ .context = {} },
     timer_mutex: if (Backend.capabilities.is_multi_threaded) std.Thread.Mutex else void =
@@ -118,6 +120,9 @@ pub const LoopState = struct {
 
     completions: Queue(Completion) = .{},
     work_completions: AtomicStack(Completion) = .{},
+
+    pub const wake_loop: u32 = 1;
+    pub const wake_async: u32 = 2;
 
     /// Called by backends when an I/O operation completes.
     /// Decrements inflight_io counter and marks the completion done.
@@ -218,12 +223,8 @@ pub const Loop = struct {
     max_wait_ms: u64 = 60 * std.time.ms_per_s,
     defer_callbacks: bool = true,
 
-    wake_requested: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-
     in_add: if (in_safe_mode) bool else void = if (in_safe_mode) false else {},
 
-    const wake_loop: u8 = 1;
-    const wake_async: u8 = 2;
     const default_queue_size = 256;
 
     pub const Options = struct {
@@ -288,15 +289,15 @@ pub const Loop = struct {
     pub fn wake(self: *Loop) void {
         // If we're the first to request a wake since the last poll, do the syscall.
         // Subsequent wakers see true and skip - the syscall is already pending.
-        if (self.wake_requested.fetchOr(wake_loop, .acq_rel) == 0) {
-            self.backend.wake();
+        if (self.state.wake_requested.fetchOr(LoopState.wake_loop, .acq_rel) == 0) {
+            self.backend.wake(&self.state);
         }
     }
 
     /// Wake up the loop to process async handles (thread-safe)
     pub fn wakeAsync(self: *Loop) void {
-        if (self.wake_requested.fetchOr(wake_async, .acq_rel) == 0) {
-            self.backend.wake();
+        if (self.state.wake_requested.fetchOr(LoopState.wake_async, .acq_rel) == 0) {
+            self.backend.wake(&self.state);
         }
     }
 
@@ -720,11 +721,11 @@ pub const Loop = struct {
         // Skip backend poll in no_wait mode if there's nothing to retrieve.
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.state.inflight_io > 0;
-        const wake_flags = self.wake_requested.swap(0, .acq_rel);
+        const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
         const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) 0 else timeout_ms) else false;
 
         // Process async handles if the async bit was set
-        if (wake_flags & wake_async != 0) {
+        if (wake_flags & LoopState.wake_async != 0) {
             self.processAsyncHandles();
         }
 

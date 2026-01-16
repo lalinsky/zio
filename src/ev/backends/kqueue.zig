@@ -133,7 +133,8 @@ pub fn deinit(self: *Self) void {
     }
 }
 
-pub fn wake(self: *Self) void {
+pub fn wake(self: *Self, state: *LoopState) void {
+    _ = state;
     var changes: [1]std.c.Kevent = .{.{
         .ident = self.waker_ident,
         .filter = EVFILT_USER,

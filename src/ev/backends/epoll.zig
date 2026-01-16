@@ -118,7 +118,8 @@ pub fn deinit(self: *Self) void {
     }
 }
 
-pub fn wake(self: *Self) void {
+pub fn wake(self: *Self, state: *LoopState) void {
+    _ = state;
     posix.eventfd_write(self.waker_eventfd, 1) catch {};
 }
 
