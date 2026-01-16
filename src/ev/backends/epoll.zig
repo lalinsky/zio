@@ -65,7 +65,7 @@ const log = std.log.scoped(.zio_epoll);
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 epoll_fd: i32 = -1,
-waker: Waker,
+waker_eventfd: i32 = -1,
 events: []std.os.linux.epoll_event,
 queue_size: u16,
 pending_changes: usize = 0,
@@ -79,10 +79,23 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     };
     errdefer _ = std.os.linux.close(epoll_fd);
 
+    const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
+    errdefer _ = std.os.linux.close(waker_eventfd);
+
+    // Register eventfd with epoll
+    var event: std.os.linux.epoll_event = .{
+        .events = std.os.linux.EPOLL.IN,
+        .data = .{ .fd = waker_eventfd },
+    };
+    const ctl_rc = std.os.linux.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, waker_eventfd, &event);
+    if (posix.errno(ctl_rc) != .SUCCESS) {
+        return unexpectedError(posix.errno(ctl_rc));
+    }
+
     self.* = .{
         .allocator = allocator,
         .epoll_fd = epoll_fd,
-        .waker = undefined,
+        .waker_eventfd = waker_eventfd,
         .events = undefined,
         .queue_size = queue_size,
     };
@@ -91,14 +104,13 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     errdefer allocator.free(self.events);
 
     try self.poll_queue.ensureTotalCapacity(self.allocator, queue_size);
-    errdefer self.poll_queue.deinit(self.allocator);
-
-    // Initialize Waker
-    try self.waker.init(epoll_fd);
 }
 
 pub fn deinit(self: *Self) void {
-    self.waker.deinit();
+    if (self.waker_eventfd != -1) {
+        _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, self.waker_eventfd, null);
+        _ = std.os.linux.close(self.waker_eventfd);
+    }
     self.poll_queue.deinit(self.allocator);
     self.allocator.free(self.events);
     if (self.epoll_fd != -1) {
@@ -107,12 +119,11 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn wake(self: *Self) void {
-    self.waker.notify();
+    posix.eventfd_write(self.waker_eventfd, 1) catch {};
 }
 
-pub fn wakeFromAnywhere(self: *Self) void {
-    // eventfd is async-signal-safe, so we can use the same mechanism
-    self.waker.notify();
+fn drainWaker(self: *Self) void {
+    _ = posix.eventfd_read(self.waker_eventfd) catch {};
 }
 
 fn getEvents(completion: *Completion) u32 {
@@ -422,8 +433,8 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         const fd = event.data.fd;
 
         // Check if this is the async wakeup fd
-        if (fd == self.waker.eventfd_fd) {
-            self.waker.drain();
+        if (fd == self.waker_eventfd) {
+            self.drainWaker();
             continue;
         }
 
@@ -637,52 +648,3 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
         },
     }
 }
-
-/// Async notification implementation using eventfd
-pub const Waker = struct {
-    eventfd_fd: i32 = -1,
-    epoll_fd: i32,
-
-    pub fn init(self: *Waker, epoll_fd: i32) !void {
-        const efd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
-        errdefer _ = std.os.linux.close(efd);
-
-        // Register eventfd with epoll
-        var event: std.os.linux.epoll_event = .{
-            .events = std.os.linux.EPOLL.IN,
-            .data = .{ .fd = efd },
-        };
-        const rc = std.os.linux.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, efd, &event);
-        if (posix.errno(rc) != .SUCCESS) {
-            return unexpectedError(posix.errno(rc));
-        }
-
-        self.* = .{
-            .eventfd_fd = efd,
-            .epoll_fd = epoll_fd,
-        };
-    }
-
-    pub fn deinit(self: *Waker) void {
-        if (self.eventfd_fd != -1) {
-            // Remove from epoll
-            _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, self.eventfd_fd, null);
-            _ = std.os.linux.close(self.eventfd_fd);
-            self.eventfd_fd = -1;
-        }
-    }
-
-    /// Notify the event loop (thread-safe)
-    pub fn notify(self: *Waker) void {
-        posix.eventfd_write(self.eventfd_fd, 1) catch |err| {
-            log.err("Failed to write to eventfd: {}", .{err});
-        };
-    }
-
-    /// Drain the eventfd counter (called by event loop when EPOLLIN is ready)
-    pub fn drain(self: *Waker) void {
-        _ = posix.eventfd_read(self.eventfd_fd) catch |err| {
-            log.err("Failed to read from eventfd: {}", .{err});
-        };
-    }
-};

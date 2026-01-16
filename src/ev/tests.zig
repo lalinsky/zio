@@ -211,38 +211,6 @@ test "Loop: async notification - re-arm" {
     try std.testing.expectEqual(.dead, async_handle.c.state);
 }
 
-test "Loop: wakeFromAnywhere - cross-thread" {
-    const Context = struct {
-        loop: *Loop,
-    };
-
-    var loop: Loop = undefined;
-    try loop.init(.{});
-    defer loop.deinit();
-
-    var async_handle: Async = .init();
-    loop.add(&async_handle.c);
-
-    // Create thread that will use wakeFromAnywhere after a delay
-    var ctx = Context{ .loop = &loop };
-    const thread = try std.Thread.spawn(.{}, struct {
-        fn notifyThread(c: *Context) void {
-            time.sleep(10);
-            // Use wakeFromAnywhere instead of wake
-            c.loop.wakeFromAnywhere();
-        }
-    }.notifyThread, .{&ctx});
-
-    // Manually notify the async handle from main thread
-    async_handle.notify();
-
-    // Run loop - should wake up due to wakeFromAnywhere
-    try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, async_handle.c.state);
-
-    thread.join();
-}
-
 test "FileStream: write and read" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 

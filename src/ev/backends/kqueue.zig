@@ -66,8 +66,7 @@ const NOTE_TRIGGER: u32 = 0x01000000;
 
 allocator: std.mem.Allocator,
 kqueue_fd: i32 = -1,
-user_event_waker: UserEventWaker,
-fd_waker: FdWaker,
+waker_ident: usize = undefined,
 change_buffer: std.ArrayList(std.c.Kevent) = .{},
 events: []std.c.Kevent,
 queue_size: u16,
@@ -87,25 +86,46 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     var change_buffer = try std.ArrayList(std.c.Kevent).initCapacity(allocator, queue_size);
     errdefer change_buffer.deinit(allocator);
 
+    // Use address of self as unique waker ident
+    const waker_ident = @intFromPtr(self);
+
+    // Register EVFILT_USER for wakeups
+    var changes: [1]std.c.Kevent = .{.{
+        .ident = waker_ident,
+        .filter = EVFILT_USER,
+        .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.CLEAR,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    }};
+    const rc = std.c.kevent(kqueue_fd, &changes, 1, &.{}, 0, null);
+    switch (posix.errno(rc)) {
+        .SUCCESS => {},
+        else => |err| return unexpectedError(err),
+    }
+
     self.* = .{
         .allocator = allocator,
         .kqueue_fd = kqueue_fd,
-        .user_event_waker = undefined,
-        .fd_waker = undefined,
+        .waker_ident = waker_ident,
         .change_buffer = change_buffer,
         .events = events,
         .queue_size = queue_size,
     };
-
-    // Initialize both wakers
-    try self.user_event_waker.init(kqueue_fd);
-    errdefer self.user_event_waker.deinit();
-    try self.fd_waker.init(kqueue_fd);
 }
 
 pub fn deinit(self: *Self) void {
-    self.user_event_waker.deinit();
-    self.fd_waker.deinit();
+    // Remove waker from kqueue
+    var changes: [1]std.c.Kevent = .{.{
+        .ident = self.waker_ident,
+        .filter = EVFILT_USER,
+        .flags = std.c.EV.DELETE,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    }};
+    _ = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+
     self.change_buffer.deinit(self.allocator);
     self.allocator.free(self.events);
     if (self.kqueue_fd != -1) {
@@ -114,13 +134,15 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn wake(self: *Self) void {
-    // Use efficient EVFILT_USER mechanism for thread-safe wakeups
-    self.user_event_waker.notify();
-}
-
-pub fn wakeFromAnywhere(self: *Self) void {
-    // Use async-signal-safe fd-based mechanism (eventfd/pipe)
-    self.fd_waker.notify();
+    var changes: [1]std.c.Kevent = .{.{
+        .ident = self.waker_ident,
+        .filter = EVFILT_USER,
+        .flags = 0,
+        .fflags = NOTE_TRIGGER,
+        .data = 0,
+        .udata = 0,
+    }};
+    _ = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
 }
 
 fn getFilter(completion: *Completion) i16 {
@@ -364,14 +386,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
     for (self.events[0..n]) |event| {
         // Check if this is the async wakeup user event
-        if (event.filter == EVFILT_USER and event.ident == self.user_event_waker.ident) {
-            self.user_event_waker.drain();
-            continue;
-        }
-
-        // Check if this is the async-signal-safe wakeup fd event
-        if (event.filter == std.c.EVFILT.READ and event.ident == self.fd_waker.read_fd) {
-            self.fd_waker.drain();
+        if (event.filter == EVFILT_USER and event.ident == self.waker_ident) {
             continue;
         }
 
@@ -569,189 +584,3 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
         },
     }
 }
-
-/// Async notification implementation using EVFILT_USER (thread-safe, not async-signal-safe)
-pub const UserEventWaker = struct {
-    kqueue_fd: i32,
-    ident: usize,
-
-    pub fn init(self: *UserEventWaker, kqueue_fd: i32) !void {
-        var changes: [1]std.c.Kevent = .{.{
-            .ident = @intFromPtr(self),
-            .filter = EVFILT_USER,
-            .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.CLEAR,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        }};
-        const rc = std.c.kevent(kqueue_fd, &changes, 1, &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| {
-                log.err("Failed to add user kevent: {}", .{err});
-                return unexpectedError(err);
-            },
-        }
-
-        self.* = .{
-            .kqueue_fd = kqueue_fd,
-            .ident = changes[0].ident,
-        };
-    }
-
-    pub fn deinit(self: *UserEventWaker) void {
-        var changes: [1]std.c.Kevent = .{.{
-            .ident = self.ident,
-            .filter = EVFILT_USER,
-            .flags = std.c.EV.DELETE,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        }};
-        const rc = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| {
-                log.err("Failed to remove user kevent: {}", .{err});
-            },
-        }
-    }
-
-    /// Notify the event loop (thread-safe)
-    pub fn notify(self: *UserEventWaker) void {
-        var changes: [1]std.c.Kevent = .{.{
-            .ident = self.ident,
-            .filter = EVFILT_USER,
-            .flags = 0,
-            .fflags = NOTE_TRIGGER,
-            .data = 0,
-            .udata = 0,
-        }};
-        const rc = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| {
-                // Log error but don't panic - the loop may not wake up immediately,
-                // but it will wake up on the next timeout or event.
-                log.err("Failed to trigger user kevent: {}", .{err});
-            },
-        }
-    }
-
-    /// No draining needed for EVFILT_USER
-    pub fn drain(self: *UserEventWaker) void {
-        _ = self;
-    }
-};
-
-/// Async-signal-safe notification using eventfd (FreeBSD/NetBSD) or pipe (macOS)
-pub const FdWaker = struct {
-    kqueue_fd: i32,
-    read_fd: net.fd_t,
-    write_fd: net.fd_t,
-
-    pub fn init(self: *FdWaker, kqueue_fd: i32) !void {
-        const fds = switch (builtin.target.os.tag) {
-            .freebsd, .netbsd => blk: {
-                // Use eventfd for FreeBSD/NetBSD (async-signal-safe)
-                const efd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
-                break :blk .{ efd, efd };
-            },
-            .macos => blk: {
-                // Use pipe for macOS (write is async-signal-safe)
-                const pipe_fds = try posix.pipe(.{ .nonblocking = true, .cloexec = true });
-                break :blk .{ pipe_fds[0], pipe_fds[1] };
-            },
-            else => @compileError("Unsupported OS for kqueue backend"),
-        };
-        errdefer {
-            std.posix.close(fds[0]);
-            if (fds[0] != fds[1]) std.posix.close(fds[1]);
-        }
-
-        // Register read fd with kqueue using EVFILT_READ
-        var changes: [1]std.c.Kevent = .{.{
-            .ident = @intCast(fds[0]),
-            .filter = std.c.EVFILT.READ,
-            .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.CLEAR,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        }};
-        const rc = std.c.kevent(kqueue_fd, &changes, 1, &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| {
-                log.err("Failed to add read fd to kqueue: {}", .{err});
-                return unexpectedError(err);
-            },
-        }
-
-        self.* = .{
-            .kqueue_fd = kqueue_fd,
-            .read_fd = fds[0],
-            .write_fd = fds[1],
-        };
-    }
-
-    pub fn deinit(self: *FdWaker) void {
-        // Remove from kqueue
-        var changes: [1]std.c.Kevent = .{.{
-            .ident = @intCast(self.read_fd),
-            .filter = std.c.EVFILT.READ,
-            .flags = std.c.EV.DELETE,
-            .fflags = 0,
-            .data = 0,
-            .udata = 0,
-        }};
-        const rc = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| {
-                log.err("Failed to remove read fd from kqueue: {}", .{err});
-            },
-        }
-
-        // Close fds
-        std.posix.close(self.read_fd);
-        if (self.read_fd != self.write_fd) {
-            std.posix.close(self.write_fd);
-        }
-    }
-
-    /// Notify the event loop (async-signal-safe)
-    pub fn notify(self: *FdWaker) void {
-        switch (builtin.target.os.tag) {
-            .freebsd, .netbsd => {
-                // eventfd_write is async-signal-safe
-                posix.eventfd_write(self.write_fd, 1) catch |err| {
-                    log.err("Failed to write to eventfd: {}", .{err});
-                };
-            },
-            .macos => {
-                // write() is async-signal-safe
-                const byte: [1]u8 = .{1};
-                _ = fs.write(self.write_fd, &byte) catch |err| {
-                    log.err("Failed to write to pipe: {}", .{err});
-                };
-            },
-            else => @compileError("Unsupported OS for kqueue backend"),
-        }
-    }
-
-    /// Drain any pending notifications
-    pub fn drain(self: *FdWaker) void {
-        switch (builtin.target.os.tag) {
-            .freebsd, .netbsd => {
-                // Read and discard the counter
-                _ = posix.eventfd_read(self.read_fd) catch {};
-            },
-            .macos => {
-                // Read and discard bytes from pipe (up to 64 bytes)
-                var buf: [64]u8 = undefined;
-                _ = fs.read(self.read_fd, &buf) catch {};
-            },
-            else => @compileError("Unsupported OS for kqueue backend"),
-        }
-    }
-};

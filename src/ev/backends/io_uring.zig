@@ -131,7 +131,8 @@ const log = std.log.scoped(.zio_uring);
 
 allocator: std.mem.Allocator,
 ring: linux.IoUring,
-waker: Waker,
+waker_eventfd: i32,
+waker_needs_rearm: bool,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
@@ -143,27 +144,37 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     var ring = try linux.IoUring.init(queue_size, flags);
     errdefer ring.deinit();
 
+    const waker_eventfd = try posix_os.eventfd(0, posix_os.EFD.CLOEXEC | posix_os.EFD.NONBLOCK);
+    errdefer _ = linux.close(waker_eventfd);
+
     self.* = .{
         .allocator = allocator,
         .ring = ring,
-        .waker = undefined,
+        .waker_eventfd = waker_eventfd,
+        .waker_needs_rearm = true,
     };
-
-    try self.waker.init(&self.ring);
 }
 
 pub fn deinit(self: *Self) void {
-    self.waker.deinit();
+    _ = linux.close(self.waker_eventfd);
     self.ring.deinit();
 }
 
 pub fn wake(self: *Self) void {
-    self.waker.notify();
+    posix_os.eventfd_write(self.waker_eventfd, 1) catch {};
 }
 
-pub fn wakeFromAnywhere(self: *Self) void {
-    // eventfd is async-signal-safe, so we can use the same mechanism
-    self.waker.notify();
+fn rearmWaker(self: *Self) !void {
+    if (!self.waker_needs_rearm) return;
+    const sqe = try self.ring.get_sqe();
+    sqe.prep_poll_add(self.waker_eventfd, linux.POLL.IN);
+    sqe.user_data = USER_DATA_WAKER;
+    self.waker_needs_rearm = false;
+}
+
+fn drainWaker(self: *Self) void {
+    _ = posix_os.eventfd_read(self.waker_eventfd) catch {};
+    self.waker_needs_rearm = true;
 }
 
 /// Submit a completion to the backend - infallible.
@@ -729,8 +740,7 @@ fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
 pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     const linux_os = @import("../../os/linux.zig");
 
-    // Re-arm waker if needed (after drain() in previous tick)
-    try self.waker.rearm();
+    try self.rearmWaker();
 
     // Flush SQ to get number of pending submissions
     const to_submit = self.ring.flush_sq();
@@ -774,8 +784,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     for (cqes[0..count]) |cqe| {
         // Handle internal operations with special user_data values
         if (cqe.user_data == USER_DATA_WAKER) {
-            // Wake-up POLL_ADD completion
-            self.waker.drain();
+            self.drainWaker();
             continue;
         }
 
@@ -1109,52 +1118,3 @@ fn sendFlagsToMsg(flags: net.SendFlags) u32 {
     if (flags.no_signal) msg_flags |= linux.MSG.NOSIGNAL;
     return msg_flags;
 }
-
-// Async notification mechanism using eventfd with POLL_ADD
-const Waker = struct {
-    const linux_os = @import("../../os/linux.zig");
-
-    ring: *linux.IoUring,
-    eventfd: i32,
-    needs_rearm: bool,
-
-    fn init(self: *Waker, ring: *linux.IoUring) !void {
-        // Create an eventfd for wake-up notifications
-        const efd = try posix_os.eventfd(0, posix_os.EFD.CLOEXEC | posix_os.EFD.NONBLOCK);
-        errdefer _ = linux.close(efd);
-
-        self.* = .{
-            .ring = ring,
-            .eventfd = efd,
-            .needs_rearm = true, // Arm on first tick
-        };
-    }
-
-    fn deinit(self: *Waker) void {
-        _ = linux.close(self.eventfd);
-    }
-
-    fn notify(self: *Waker) void {
-        // Write to eventfd to wake up the POLL operation
-        posix_os.eventfd_write(self.eventfd, 1) catch {};
-    }
-
-    fn drain(self: *Waker) void {
-        // Read and clear the eventfd counter
-        _ = posix_os.eventfd_read(self.eventfd) catch {};
-
-        // Mark that we need to re-arm the POLL_ADD for next wake-up
-        // This will be done in tick() before io_uring_enter2
-        self.needs_rearm = true;
-    }
-
-    fn rearm(self: *Waker) !void {
-        if (!self.needs_rearm) return;
-
-        const sqe = try self.ring.get_sqe();
-        sqe.prep_poll_add(self.eventfd, linux.POLL.IN);
-        sqe.user_data = USER_DATA_WAKER;
-
-        self.needs_rearm = false;
-    }
-};

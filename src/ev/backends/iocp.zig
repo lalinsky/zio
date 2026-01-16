@@ -327,11 +327,6 @@ pub fn wake(self: *Self) void {
     }
 }
 
-pub fn wakeFromAnywhere(self: *Self) void {
-    // Same as wake() - QueueUserAPC is thread-safe
-    self.wake();
-}
-
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
     state.active += 1;

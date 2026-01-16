@@ -300,11 +300,6 @@ pub const Loop = struct {
         }
     }
 
-    /// Wake up the loop from anywhere, including signal handlers (async-signal-safe)
-    pub fn wakeFromAnywhere(self: *Loop) void {
-        self.backend.wakeFromAnywhere();
-    }
-
     /// Set or reset a timer with a new delay (works immediately, no completion required)
     pub fn setTimer(self: *Loop, timer: *Timer, delay_ms: u64) void {
         self.state.lockTimers();
