@@ -125,7 +125,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable(runtime);
-    try runtime.checkCanceled();
+    try runtime.checkCancel();
 }
 
 /// Atomically releases the mutex and waits for a signal with cancellation shielding.
@@ -143,7 +143,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 /// of cancellation (e.g., cleanup operations that need to wait for resources to be freed).
 ///
 /// If you need to propagate cancellation after the wait completes, call
-/// `runtime.checkCanceled()` after this function returns.
+/// `runtime.checkCancel()` after this function returns.
 pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
     runtime.beginShield();
     defer runtime.endShield();
@@ -202,7 +202,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
         // Must reacquire mutex before returning
         mutex.lockUncancelable(runtime);
         // Cancellation during lock has priority over timeout
-        try runtime.checkCanceled();
+        try runtime.checkCancel();
 
         // Check if this auto-cancel triggered, otherwise it was user cancellation
         if (timer.check(runtime, err)) return error.Timeout;
@@ -214,9 +214,9 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable(runtime);
-    try runtime.checkCanceled();
+    try runtime.checkCancel();
 
-    // If timeout fired, we should have received error.Canceled from yield or checkCanceled
+    // If timeout fired, we should have received error.Canceled from yield or checkCancel
     std.debug.assert(!timer.triggered);
 }
 

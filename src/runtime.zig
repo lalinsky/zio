@@ -452,7 +452,7 @@ pub const Executor = struct {
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCanceled(self.runtime);
+            try current_task.checkCancel(self.runtime);
         }
 
         // Atomically transition state - if this fails, someone changed our state
@@ -499,7 +499,7 @@ pub const Executor = struct {
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCanceled(self.runtime);
+            try current_task.checkCancel(self.runtime);
         }
     }
 
@@ -532,8 +532,8 @@ pub const Executor = struct {
     /// Check if cancellation has been requested and return error.Canceled if so.
     /// This consumes one pending error if available.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
-    pub fn checkCanceled(self: *Executor) Cancelable!void {
-        try self.getCurrentTask().checkCanceled(self.runtime);
+    pub fn checkCancel(self: *Executor) Cancelable!void {
+        try self.getCurrentTask().checkCancel(self.runtime);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).
@@ -1113,10 +1113,10 @@ pub const Runtime = struct {
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
     /// Can be called from the main thread or from within a coroutine.
     /// No-op (returns successfully) if called from a thread without an executor.
-    pub fn checkCanceled(self: *Runtime) Cancelable!void {
+    pub fn checkCancel(self: *Runtime) Cancelable!void {
         _ = self;
         const executor = Executor.current orelse return;
-        return executor.checkCanceled();
+        return executor.checkCancel();
     }
 
     /// Get the currently executing task.

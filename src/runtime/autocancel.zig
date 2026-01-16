@@ -64,7 +64,7 @@ pub const AutoCancel = struct {
     pub fn check(self: *AutoCancel, rt: *Runtime, err: Cancelable) bool {
         std.debug.assert(err == error.Canceled);
         if (!self.triggered) return false;
-        return rt.getCurrentTask().awaitable.consumeAutoCancel();
+        return rt.getCurrentTask().awaitable.checkAutoCancel();
     }
 };
 
@@ -76,19 +76,18 @@ fn autoCancelCallback(
     const autocancel: *AutoCancel = @ptrCast(@alignCast(completion.userdata.?));
     const task = autocancel.task orelse return;
 
-    // If there's no error, mark timeout as triggered
-    if (completion.err == null) {
-        if (task.setTimeout()) {
-            autocancel.triggered = true;
-        }
-    }
-
-    // Resume the task
-    resumeTask(task, .local);
-
     // Clear the associated task and loop
     autocancel.task = null;
     autocancel.loop = null;
+
+    // If there's an error, the timer was cancelled - don't wake the task
+    if (completion.err != null) return;
+
+    // Try to cancel and wake only if we triggered (not shadowed by user cancel)
+    if (task.awaitable.setCanceled(.auto)) {
+        autocancel.triggered = true;
+        resumeTask(task, .local);
+    }
 }
 
 const Cancelable = @import("../common.zig").Cancelable;
