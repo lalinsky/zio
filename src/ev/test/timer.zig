@@ -7,10 +7,10 @@ test "setTimer and clearTimer basic" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(0); // delay_ms will be set by setTimer
+    var timer: Timer = .init(.zero); // delay_ms will be set by setTimer
 
     // Test setTimer
-    loop.setTimer(&timer, 100);
+    loop.setTimer(&timer, .fromMilliseconds(100));
     try std.testing.expectEqual(.running, timer.c.state);
 
     var wall_timer = try std.time.Timer.start();
@@ -29,10 +29,10 @@ test "clearTimer before expiration" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(0);
+    var timer: Timer = .init(.zero);
 
     // Set a timer with a long delay
-    loop.setTimer(&timer, 1000);
+    loop.setTimer(&timer, .fromMilliseconds(1000));
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Clear it immediately
@@ -56,14 +56,14 @@ test "setTimer multiple times" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(0);
+    var timer: Timer = .init(.zero);
 
     // Set timer with a long delay
-    loop.setTimer(&timer, 2000);
+    loop.setTimer(&timer, .fromMilliseconds(2000));
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Reset it with a short delay
-    loop.setTimer(&timer, 100);
+    loop.setTimer(&timer, .fromMilliseconds(100));
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Should complete after ~100ms, not 2000ms
@@ -83,15 +83,15 @@ test "clearTimer and reuse timer" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(0);
+    var timer: Timer = .init(.zero);
 
     // Set and clear
-    loop.setTimer(&timer, 200);
+    loop.setTimer(&timer, .fromMilliseconds(200));
     loop.clearTimer(&timer);
     try std.testing.expectEqual(.new, timer.c.state);
 
     // Reuse the same timer
-    loop.setTimer(&timer, 100);
+    loop.setTimer(&timer, .fromMilliseconds(100));
     try std.testing.expectEqual(.running, timer.c.state);
 
     var wall_timer = try std.time.Timer.start();

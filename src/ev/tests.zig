@@ -56,7 +56,7 @@ test "Loop: timer basic" {
     defer loop.deinit();
 
     const timeout_ms = 50;
-    var timer: Timer = .init(timeout_ms);
+    var timer: Timer = .init(.fromMilliseconds(timeout_ms));
     loop.add(&timer.c);
 
     var wall_timer = try std.time.Timer.start();
@@ -152,7 +152,7 @@ test "Loop: async notification - cross-thread" {
     var ctx = Context{ .async_handle = &async_handle };
     const thread = try std.Thread.spawn(.{}, struct {
         fn notifyThread(c: *Context) void {
-            time.sleep(10);
+            time.sleep(.fromMilliseconds(10));
             c.async_handle.notify();
         }
     }.notifyThread, .{&ctx});

@@ -12,3 +12,4 @@ pub const iovec = fs.iovec;
 pub const iovec_const = fs.iovec_const;
 pub const iovecFromSlice = net.iovecFromSlice;
 pub const iovecConstFromSlice = net.iovecConstFromSlice;
+pub const timespec = posix.system.timespec;

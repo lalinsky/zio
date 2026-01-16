@@ -17,7 +17,7 @@ const genericCallback = @import("../io.zig").genericCallback;
 /// When the timeout expires, operations return error.Canceled and the `triggered` field is set to true,
 /// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
 pub const AutoCancel = struct {
-    timer: ev.Timer = .init(0),
+    timer: ev.Timer = .init(.zero),
     triggered: bool = false,
     task: ?*AnyTask = null,
     loop: ?*ev.Loop = null,
@@ -50,15 +50,12 @@ pub const AutoCancel = struct {
         self.triggered = false;
         self.loop = &executor.loop;
 
-        // Convert to milliseconds (saturating to avoid overflow)
-        const timeout_ms: u64 = (timeout.ns +| std.time.ns_per_ms / 2) / std.time.ns_per_ms;
-
         // Initialize ev.Timer
         self.timer.c.userdata = self;
         self.timer.c.callback = autoCancelCallback;
 
         // Activate the timer
-        executor.loop.setTimer(&self.timer, timeout_ms);
+        executor.loop.setTimer(&self.timer, timeout);
     }
 
     /// Check if this auto-cancel triggered the cancellation and consume it.

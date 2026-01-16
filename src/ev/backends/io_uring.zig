@@ -4,6 +4,7 @@ const posix_os = @import("../../os/posix.zig");
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 const time = @import("../../os/time.zig");
+const Duration = @import("../../time.zig").Duration;
 const common = @import("common.zig");
 const ReadBuf = @import("../buf.zig").ReadBuf;
 const WriteBuf = @import("../buf.zig").WriteBuf;
@@ -754,7 +755,7 @@ fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
     return self.ring.get_sqe() catch |err| {
         if (err == error.SubmissionQueueFull) {
             // Queue full - flush with non-blocking poll to drain completions
-            _ = try self.poll(state, 0);
+            _ = try self.poll(state, .zero);
             // Retry after flush
             return self.ring.get_sqe();
         }
@@ -762,7 +763,7 @@ fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
     };
 }
 
-pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
+pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     const linux_os = @import("../../os/linux.zig");
 
     try self.rearmWaker(state);
@@ -770,33 +771,32 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
     // Flush SQ to get number of pending submissions
     const to_submit = self.ring.flush_sq();
 
-    // Setup timeout for io_uring_enter2 if finite
+    // Setup timeout for io_uring_enter2
+    // If timeout is Duration.max (infinite), pass null ts so io_uring_enter2 waits forever
     var ts: linux.kernel_timespec = undefined;
-    var arg: linux_os.io_uring_getevents_arg = .{};
-    var flags: u32 = linux.IORING_ENTER_GETEVENTS;
-
-    if (timeout_ms < std.math.maxInt(u64)) {
-        ts = .{
-            .sec = @intCast(timeout_ms / 1000),
-            .nsec = @intCast((timeout_ms % 1000) * 1_000_000),
-        };
-        arg.ts = @intFromPtr(&ts);
-        flags |= linux.IORING_ENTER_EXT_ARG;
-    }
+    var arg: linux_os.io_uring_getevents_arg = .{
+        .ts = if (timeout.ns == Duration.max.ns) 0 else blk: {
+            ts = .{
+                .sec = @intCast(timeout.ns / std.time.ns_per_s),
+                .nsec = @intCast(timeout.ns % std.time.ns_per_s),
+            };
+            break :blk @intFromPtr(&ts);
+        },
+    };
+    const flags: u32 = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG;
 
     // Submit and wait using io_uring_enter2 with timeout
-    const submitted = linux_os.io_uring_enter2(
+    _ = linux_os.io_uring_enter2(
         self.ring.fd,
         to_submit,
         1, // min_complete = 1 to wait for at least one completion or timeout
         flags,
-        if (flags & linux.IORING_ENTER_EXT_ARG != 0) &arg else null,
+        &arg,
         @sizeOf(linux_os.io_uring_getevents_arg),
     ) catch |err| switch (err) {
         error.SignalInterrupt => return true, // Interrupted, treat as timeout
         else => return err,
     };
-    _ = submitted;
 
     // Process all available completions
     var cqes: [256]linux.io_uring_cqe = undefined;

@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const posix = @import("../../os/posix.zig");
 const net = @import("../../os/net.zig");
 const time = @import("../../os/time.zig");
+const Duration = @import("../../time.zig").Duration;
 const common = @import("common.zig");
 
 const unexpectedError = @import("../../os/base.zig").unexpectedError;
@@ -168,7 +169,7 @@ fn getFilter(completion: *Completion) i16 {
 fn reserveChange(self: *Self, state: *LoopState) !*std.c.Kevent {
     // If at capacity, flush with non-blocking poll to drain completions
     if (self.change_buffer.items.len >= self.queue_size) {
-        _ = try self.poll(state, 0);
+        _ = try self.poll(state, .zero);
     }
     // We pre-allocated capacity, so this will never fail
     return self.change_buffer.addOneAssumeCapacity();
@@ -342,12 +343,13 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     state.markCompletedFromBackend(target);
 }
 
-pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
+pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     var timeout_spec: std.c.timespec = undefined;
-    const timeout_ptr: ?*const std.c.timespec = if (timeout_ms < std.math.maxInt(u64)) blk: {
+    const timeout_ptr: ?*const std.c.timespec = if (timeout.ns < std.math.maxInt(u64)) blk: {
+        const timeout_ns = timeout.toNanoseconds();
         timeout_spec = .{
-            .sec = @intCast(timeout_ms / 1000),
-            .nsec = @intCast((timeout_ms % 1000) * 1_000_000),
+            .sec = @intCast(timeout_ns / std.time.ns_per_s),
+            .nsec = @intCast(timeout_ns % std.time.ns_per_s),
         };
         break :blk &timeout_spec;
     } else null;

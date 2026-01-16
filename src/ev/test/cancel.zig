@@ -22,8 +22,7 @@ test "cancel: timer with Cancel completion" {
     try loop.init(.{});
     defer loop.deinit();
 
-    const timeout_ms = 100;
-    var timer: Timer = .init(timeout_ms);
+    var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
     var cancel: Cancel = .init(&timer.c);
@@ -45,8 +44,7 @@ test "cancel: timer with loop.cancel()" {
     try loop.init(.{});
     defer loop.deinit();
 
-    const timeout_ms = 100;
-    var timer: Timer = .init(timeout_ms);
+    var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
     try loop.cancel(&timer.c);
@@ -66,7 +64,7 @@ test "cancel: double cancel returns AlreadyCanceled" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(100);
+    var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
     // First cancel should succeed
@@ -84,7 +82,7 @@ test "cancel: cancel with Cancel completion then loop.cancel() returns AlreadyCa
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(100);
+    var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
     // Cancel with Cancel completion
@@ -103,7 +101,7 @@ test "cancel: cancel completed operation returns AlreadyCompleted" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(1);
+    var timer: Timer = .init(.fromMilliseconds(1));
     loop.add(&timer.c);
 
     // Wait for timer to complete
@@ -120,7 +118,7 @@ test "cancel: cancel not-started operation returns NotStarted" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(100);
+    var timer: Timer = .init(.fromMilliseconds(100));
     // Don't add to loop
 
     // Try to cancel before adding
@@ -132,7 +130,7 @@ test "cancel: Cancel completion on not-started target" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(100);
+    var timer: Timer = .init(.fromMilliseconds(100));
     // Don't add timer yet
 
     // Add Cancel for not-yet-added target
@@ -442,7 +440,7 @@ test "cancel: canceled flag is set on completion" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(100);
+    var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
     try std.testing.expect(!timer.c.canceled);
@@ -460,7 +458,7 @@ test "cancel: canceled_by is set with Cancel completion" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(100);
+    var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
     var cancel: Cancel = .init(&timer.c);
@@ -494,7 +492,7 @@ test "cancel: callback is invoked on canceled operation" {
     };
 
     var ctx: Ctx = .{};
-    var timer: Timer = .init(100);
+    var timer: Timer = .init(.fromMilliseconds(100));
     timer.c.userdata = &ctx;
     timer.c.callback = Ctx.callback;
     loop.add(&timer.c);
@@ -513,7 +511,7 @@ test "cancel: race - operation completes before cancel" {
     defer loop.deinit();
 
     // Use very short timer to simulate race
-    var timer: Timer = .init(1);
+    var timer: Timer = .init(.fromMilliseconds(1));
     loop.add(&timer.c);
 
     // Wait for it to complete
@@ -530,9 +528,9 @@ test "cancel: multiple timers, cancel one" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer1: Timer = .init(100);
-    var timer2: Timer = .init(200);
-    var timer3: Timer = .init(300);
+    var timer1: Timer = .init(.fromMilliseconds(100));
+    var timer2: Timer = .init(.fromMilliseconds(200));
+    var timer3: Timer = .init(.fromMilliseconds(300));
 
     loop.add(&timer1.c);
     loop.add(&timer2.c);

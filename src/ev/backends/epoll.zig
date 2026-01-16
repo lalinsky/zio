@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = @import("../../os/posix.zig");
 const net = @import("../../os/net.zig");
 const time = @import("../../os/time.zig");
+const Duration = @import("../../time.zig").Duration;
 const common = @import("common.zig");
 
 const unexpectedError = @import("../../os/base.zig").unexpectedError;
@@ -172,7 +173,7 @@ fn getPollType(op: Op) PollEntryType {
 fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
     // If at capacity, flush with non-blocking poll to drain completions
     if (self.pending_changes >= self.queue_size) {
-        _ = self.poll(state, 0) catch {
+        _ = self.poll(state, .zero) catch {
             log.err("Failed to do no-wait poll during addToPollQueue", .{});
         };
     }
@@ -409,13 +410,13 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     state.markCompletedFromBackend(target);
 }
 
-pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
-    const timeout: i32 = std.math.cast(i32, timeout_ms) orelse std.math.maxInt(i32);
+pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
+    const timeout_ms: i32 = std.math.cast(i32, timeout.toMilliseconds()) orelse std.math.maxInt(i32);
 
     // Reset pending changes counter before poll (less aggressive)
     self.pending_changes = 0;
 
-    const rc = std.os.linux.epoll_wait(self.epoll_fd, self.events.ptr, @intCast(self.events.len), timeout);
+    const rc = std.os.linux.epoll_wait(self.epoll_fd, self.events.ptr, @intCast(self.events.len), timeout_ms);
     const n: usize = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INTR => 0, // Interrupted by signal, no events

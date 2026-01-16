@@ -8,6 +8,12 @@
 // license that can be found in the LICENSE file.
 
 const std = @import("std");
+const os = @import("os/root.zig");
+
+pub const Clock = enum {
+    monotonic,
+    realtime,
+};
 
 /// A duration of time stored as nanoseconds.
 pub const Duration = struct {
@@ -54,6 +60,13 @@ pub const Duration = struct {
 
     pub fn toMinutes(self: Duration) u64 {
         return @divTrunc(self.ns, std.time.ns_per_min);
+    }
+
+    pub fn toTimespec(self: Duration) os.timespec {
+        return .{
+            .sec = @intCast(self.ns / std.time.ns_per_s),
+            .nsec = @intCast(self.ns % std.time.ns_per_s),
+        };
     }
 
     /// Formats the duration in Go-style format (e.g., "1h30m45s", "500ms", "1.5us").
@@ -245,6 +258,108 @@ pub const Duration = struct {
     }
 };
 
+/// A point in time stored as nanoseconds since Unix epoch.
+pub const Timestamp = struct {
+    ns: u64,
+
+    pub const zero: Timestamp = .{ .ns = 0 };
+
+    pub fn fromNanoseconds(ns: u64) Timestamp {
+        return .{ .ns = ns };
+    }
+
+    pub fn fromMilliseconds(ms: u64) Timestamp {
+        return .{ .ns = ms *| std.time.ns_per_ms };
+    }
+
+    pub fn fromTimespec(ts: os.timespec) Timestamp {
+        const ns = @as(i64, @intCast(ts.sec)) * std.time.ns_per_s + @as(i64, @intCast(ts.nsec));
+        return .{ .ns = @intCast(@max(ns, 0)) };
+    }
+
+    pub fn toTimespec(self: Timestamp) os.timespec {
+        return .{
+            .sec = @intCast(self.ns / std.time.ns_per_s),
+            .nsec = @intCast(self.ns % std.time.ns_per_s),
+        };
+    }
+
+    pub fn durationTo(from: Timestamp, to: Timestamp) Duration {
+        return .{ .ns = to.ns -| from.ns };
+    }
+
+    pub fn addDuration(self: Timestamp, duration: Duration) Timestamp {
+        return .{ .ns = self.ns +| duration.ns };
+    }
+
+    pub fn subDuration(self: Timestamp, duration: Duration) Timestamp {
+        return .{ .ns = self.ns -| duration.ns };
+    }
+
+    /// Formats the timestamp as "YYYY-MM-DD HH:MM:SS".
+    pub fn format(self: Timestamp, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const secs = self.ns / std.time.ns_per_s;
+
+        // Days since Unix epoch
+        var days = secs / std.time.s_per_day;
+        const day_secs = secs % std.time.s_per_day;
+
+        // Time of day
+        const hour = day_secs / std.time.s_per_hour;
+        const minute = (day_secs % std.time.s_per_hour) / std.time.s_per_min;
+        const second = day_secs % std.time.s_per_min;
+
+        // Convert days to year/month/day
+        // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+        days += 719468; // days from 0000-03-01 to 1970-01-01
+        const era = days / 146097;
+        const doe = days - era * 146097; // day of era [0, 146096]
+        const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+        const y = yoe + era * 400;
+        const doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+        const mp = (5 * doy + 2) / 153; // month index [0, 11]
+        const d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+        const m = if (mp < 10) mp + 3 else mp - 9; // month [1, 12]
+        const year = if (m <= 2) y + 1 else y;
+
+        try w.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+            year, m, d, hour, minute, second,
+        });
+    }
+};
+
+pub const Timeout = union(enum) {
+    none,
+    duration: Duration,
+    deadline: Timestamp,
+};
+
+test "Timestamp: addDuration, subDuration, durationTo" {
+    const t1: Timestamp = .{ .ns = 1_000_000_000 };
+    const t2 = t1.addDuration(.fromSeconds(5));
+    try std.testing.expectEqual(6_000_000_000, t2.ns);
+
+    const t3 = t2.subDuration(.fromSeconds(2));
+    try std.testing.expectEqual(4_000_000_000, t3.ns);
+
+    const dur = t1.durationTo(t2);
+    try std.testing.expectEqual(5_000_000_000, dur.ns);
+}
+
+test "Timestamp: format" {
+    var buf: [64]u8 = undefined;
+
+    // Unix epoch
+    const epoch: Timestamp = .{ .ns = 0 };
+    var result = std.fmt.bufPrint(&buf, "{f}", .{epoch}) catch unreachable;
+    try std.testing.expectEqualStrings("1970-01-01 00:00:00", result);
+
+    // 2024-01-15 12:40:45 UTC
+    const t: Timestamp = .{ .ns = 1705322445 * std.time.ns_per_s };
+    result = std.fmt.bufPrint(&buf, "{f}", .{t}) catch unreachable;
+    try std.testing.expectEqualStrings("2024-01-15 12:40:45", result);
+}
+
 test "Duration: format" {
     var buf: [64]u8 = undefined;
 
@@ -267,7 +382,7 @@ test "Duration: format" {
     };
 
     for (cases) |case| {
-        const d = Duration{ .ns = case.ns };
+        const d: Duration = .{ .ns = case.ns };
         const result = std.fmt.bufPrint(&buf, "{f}", .{d}) catch unreachable;
         try std.testing.expectEqualStrings(case.expected, result);
     }

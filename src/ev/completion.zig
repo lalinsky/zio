@@ -7,6 +7,8 @@ const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
+const Duration = @import("../time.zig").Duration;
+const Timestamp = @import("../time.zig").Timestamp;
 
 pub const BackendCapabilities = struct {
     file_read: bool = false,
@@ -340,16 +342,16 @@ pub const Cancel = struct {
 pub const Timer = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    delay_ms: u64,
-    deadline_ms: u64 = 0,
+    delay: Duration,
+    deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
 
     pub const Error = Cancelable;
 
-    pub fn init(delay_ms: u64) Timer {
+    pub fn init(delay: Duration) Timer {
         return .{
             .c = .init(.timer),
-            .delay_ms = delay_ms,
+            .delay = delay,
         };
     }
 
