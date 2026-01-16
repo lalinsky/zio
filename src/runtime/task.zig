@@ -430,8 +430,15 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
         _ = task.awaitable.ref_count.decr();
         return error.RuntimeShutdown;
     }
+
     const executor = Executor.fromCoroutine(&task.coro);
     executor.scheduleTask(task, .maybe_remote);
+
+    if (Executor.current) |current_executor| {
+        if (current_executor == executor) {
+            current_executor.maybeYield(.ready, .ready, .no_cancel);
+        }
+    }
 }
 
 /// Spawn a task with raw context bytes and start function.

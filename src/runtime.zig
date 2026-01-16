@@ -498,6 +498,10 @@ pub const Executor = struct {
         }
     }
 
+    pub fn maybeYield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        return self.yield(expected_state, desired_state, cancel_mode);
+    }
+
     /// Begin a cancellation shield.
     /// While shielded, yield() will not check or consume the cancellation flag.
     /// The flag remains set for when the shield ends.
