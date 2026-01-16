@@ -13,7 +13,6 @@ const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
-const Cancel = @import("../completion.zig").Cancel;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
 const NetListen = @import("../completion.zig").NetListen;

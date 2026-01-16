@@ -524,11 +524,10 @@ test "cancel: cross-thread cancellation" {
     // Run loop1 until completion (should be cancelled quickly)
     var wall_timer = try std.time.Timer.start();
     while (!completed.load(.acquire)) {
-        try loop1.run(.no_wait);
+        try loop1.run(.once);
         if (wall_timer.read() > 1 * std.time.ns_per_s) {
             return error.TestTimeout;
         }
-        std.Thread.sleep(1 * std.time.ns_per_ms);
     }
 
     cancel_thread.join();
