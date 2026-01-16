@@ -60,7 +60,7 @@ const resumeTask = @import("../runtime/task.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
-const Timeout = @import("../runtime/timeout.zig").Timeout;
+const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 const Waiter = @import("common.zig").Waiter;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
@@ -125,7 +125,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable(runtime);
-    try runtime.checkCanceled();
+    try runtime.checkCancel();
 }
 
 /// Atomically releases the mutex and waits for a signal with cancellation shielding.
@@ -143,7 +143,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 /// of cancellation (e.g., cleanup operations that need to wait for resources to be freed).
 ///
 /// If you need to propagate cancellation after the wait completes, call
-/// `runtime.checkCanceled()` after this function returns.
+/// `runtime.checkCancel()` after this function returns.
 pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
     runtime.beginShield();
     defer runtime.endShield();
@@ -175,7 +175,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
     self.wait_queue.push(&waiter.wait_node);
 
     // Set up timeout timer
-    var timer = Timeout.init;
+    var timer = AutoCancel.init;
     defer timer.clear(runtime);
     timer.set(runtime, timeout);
 
@@ -202,10 +202,11 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
         // Must reacquire mutex before returning
         mutex.lockUncancelable(runtime);
         // Cancellation during lock has priority over timeout
-        try runtime.checkCanceled();
+        try runtime.checkCancel();
 
-        // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timer, err);
+        // Check if this auto-cancel triggered, otherwise it was user cancellation
+        if (timer.check(runtime, err)) return error.Timeout;
+        return err;
     };
 
     // Clear timeout before reacquiring mutex to prevent spurious timeout during lock wait
@@ -213,9 +214,9 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable(runtime);
-    try runtime.checkCanceled();
+    try runtime.checkCancel();
 
-    // If timeout fired, we should have received error.Canceled from yield or checkCanceled
+    // If timeout fired, we should have received error.Canceled from yield or checkCancel
     std.debug.assert(!timer.triggered);
 }
 

@@ -95,7 +95,7 @@ pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
 /// of cancellation (e.g., cleanup operations that need resource access).
 ///
 /// If you need to propagate cancellation after acquiring the permit, call
-/// `runtime.checkCanceled()` after this function returns.
+/// `runtime.checkCancel()` after this function returns.
 pub fn waitUncancelable(self: *Semaphore, rt: *Runtime) void {
     rt.beginShield();
     defer rt.endShield();

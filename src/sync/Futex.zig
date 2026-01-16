@@ -30,7 +30,7 @@ const builtin = @import("builtin");
 
 const Runtime = @import("../runtime.zig").Runtime;
 const AnyTask = @import("../runtime/task.zig").AnyTask;
-const Timeout = @import("../runtime/timeout.zig").Timeout;
+const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 const Cancelable = @import("../common.zig").Cancelable;
 const Duration = @import("../time.zig").Duration;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
@@ -111,7 +111,7 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Durat
     const bucket = getBucket(&runtime.futex_table, address);
 
     // Set up timeout timer
-    var timer: Timeout = .{};
+    var timer: AutoCancel = .{};
     defer timer.clear(runtime);
     timer.set(runtime, timeout);
 
@@ -143,8 +143,9 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Durat
         // On cancellation, remove from queue
         removeFromBucket(bucket, &waiter);
 
-        // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timer, err);
+        // Check if this auto-cancel triggered, otherwise it was user cancellation
+        if (timer.check(runtime, err)) return error.Timeout;
+        return err;
     };
 
     // If timeout fired, we should have received error.Canceled from yield
@@ -229,7 +230,7 @@ test "Futex: basic wait/wake" {
             var waker = try io.spawn(wakerFunc, .{ io, &value }, .{});
             try waker.join(io);
 
-            var timeout: Timeout = .init;
+            var timeout: AutoCancel = .init;
             defer timeout.clear(io);
             timeout.set(io, .fromMilliseconds(10));
 
@@ -298,7 +299,7 @@ test "Futex: multiple waiters same address" {
             var waker = try io.spawn(wakerFunc, .{ io, &value }, .{});
             try waker.join(io);
 
-            var timeout: Timeout = .init;
+            var timeout: AutoCancel = .init;
             defer timeout.clear(io);
             timeout.set(io, .fromMilliseconds(10));
 
@@ -342,7 +343,7 @@ test "Futex: multiple waiters different addresses" {
             var waker = try io.spawn(wakerFunc, .{ io, &value1 }, .{});
             try waker.join(io);
 
-            var timeout: Timeout = .init;
+            var timeout: AutoCancel = .init;
             defer timeout.clear(io);
             timeout.set(io, .fromMilliseconds(10));
 

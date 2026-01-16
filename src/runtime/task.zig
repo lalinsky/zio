@@ -7,13 +7,11 @@ const MemoryPoolAligned = @import("../utils/memory_pool.zig").MemoryPoolAligned;
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const Awaitable = @import("awaitable.zig").Awaitable;
-const CanceledStatus = @import("awaitable.zig").CanceledStatus;
 const Coroutine = @import("../coro/coroutines.zig").Coroutine;
 const WaitNode = @import("WaitNode.zig");
 const meta = @import("../meta.zig");
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
-const Timeout = @import("timeout.zig").Timeout;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
@@ -214,113 +212,19 @@ pub const AnyTask = struct {
         return true;
     }
 
-    /// Check if the given timeout triggered the cancellation.
-    /// This should be called in a catch block after receiving an error.
-    /// If the error is not error.Canceled, returns the original error unchanged.
-    /// Marks a timeout as triggered and updates the task's cancellation status.
-    /// If the task is already user-canceled, only increments pending_errors.
-    /// Otherwise, increments both timeout counter and pending_errors, and sets timeout.triggered.
-    pub fn setTimeout(self: *AnyTask) bool {
-        var triggered = false;
-        var current = self.awaitable.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-
-            if (status.user_canceled) {
-                // Task is already condemned by user cancellation
-                // Just increment pending_errors to add another error
-                triggered = false;
-                status.pending_errors += 1;
-            } else {
-                // This timeout is causing the cancellation
-                // Increment timeout counter and pending_errors
-                triggered = true;
-                status.timeout += 1;
-                status.pending_errors += 1;
-            }
-
-            const new: u32 = @bitCast(status);
-            if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                current = prev;
-                continue;
-            }
-            // CAS succeeded
-            break;
-        }
-
-        return triggered;
-    }
-
-    /// User cancellation has priority - if user_canceled is set, returns error.Canceled.
-    /// Otherwise, if the timeout was triggered, decrements the timeout counter and returns error.Timeout.
-    /// Otherwise, returns the original error.
-    /// Note: user_canceled is NEVER cleared - once set, task is condemned.
-    /// Note: Does NOT decrement pending_errors - that counter is only consumed by checkCanceled.
-    pub fn checkTimeout(self: *AnyTask, _: *Runtime, timeout: *Timeout, err: anytype) !void {
-        // If not error.Canceled, just return the original error
-        if (err != error.Canceled) {
-            return err;
-        }
-
-        var current = self.awaitable.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-
-            // User cancellation has priority - once condemned (user_canceled set), always return error.Canceled
-            if (status.user_canceled) {
-                return error.Canceled;
-            }
-
-            // No user cancellation - check if this timeout triggered
-            if (timeout.triggered and status.timeout > 0) {
-                // Decrement timeout counter
-                status.timeout -= 1;
-                const new: u32 = @bitCast(status);
-                if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                    current = prev;
-                    continue;
-                }
-                return error.Timeout;
-            }
-
-            // Timeout didn't trigger or already consumed
-            return err;
-        }
-    }
-
     /// Check if there are pending cancellation errors to consume.
     /// If pending_errors > 0 and not shielded, decrements the count and returns error.Canceled.
     /// Otherwise returns void (no error).
-    pub fn checkCanceled(self: *AnyTask, _: *Runtime) error{Canceled}!void {
-        // If shielded, don't check cancellation
+    pub fn checkCancel(self: *AnyTask, _: *Runtime) error{Canceled}!void {
         if (self.shield_count > 0) return;
-
-        // CAS loop to decrement pending_errors
-        var current = self.awaitable.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-
-            // If no pending errors, nothing to consume
-            if (status.pending_errors == 0) return;
-
-            // Decrement pending_errors
-            status.pending_errors -= 1;
-
-            const new: u32 = @bitCast(status);
-            if (self.awaitable.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                // CAS failed, use returned previous value and retry
-                current = prev;
-                continue;
-            }
-            // CAS succeeded - return error.Canceled
-            return error.Canceled;
-        }
+        if (self.awaitable.checkCancel()) return error.Canceled;
     }
 
     /// Cancel this task by setting canceled status and waking it if suspended.
     pub fn cancel(self: *AnyTask) void {
-        self.awaitable.setCanceled();
-        self.awaitable.wait_node.wake();
+        if (self.awaitable.setCanceled(.user)) {
+            resumeTask(self, .maybe_remote);
+        }
     }
 
     pub fn destroy(self: *AnyTask, rt: *Runtime) void {

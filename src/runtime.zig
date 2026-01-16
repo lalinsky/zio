@@ -30,7 +30,7 @@ const resumeTask = @import("runtime/task.zig").resumeTask;
 const spawnTask = @import("runtime/task.zig").spawnTask;
 const AnyBlockingTask = @import("runtime/blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
-const Timeout = @import("runtime/timeout.zig").Timeout;
+const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 const Group = @import("runtime/group.zig").Group;
 const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 
@@ -451,7 +451,7 @@ pub const Executor = struct {
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCanceled(self.runtime);
+            try current_task.checkCancel(self.runtime);
         }
 
         // Atomically transition state - if this fails, someone changed our state
@@ -498,7 +498,7 @@ pub const Executor = struct {
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCanceled(self.runtime);
+            try current_task.checkCancel(self.runtime);
         }
     }
 
@@ -531,8 +531,8 @@ pub const Executor = struct {
     /// Check if cancellation has been requested and return error.Canceled if so.
     /// This consumes one pending error if available.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
-    pub fn checkCanceled(self: *Executor) Cancelable!void {
-        try self.getCurrentTask().checkCanceled(self.runtime);
+    pub fn checkCancel(self: *Executor) Cancelable!void {
+        try self.getCurrentTask().checkCancel(self.runtime);
     }
 
     /// Pin the current task to its home executor (prevents cross-thread migration).
@@ -1079,16 +1079,6 @@ pub const Runtime = struct {
         executor.endShield();
     }
 
-    /// Check if the given timeout triggered the cancellation.
-    /// This should be called in a catch block after receiving an error.
-    /// If the error is not error.Canceled, returns the original error unchanged.
-    /// If the timeout was triggered, returns error.Timeout.
-    /// Otherwise, returns the original error (error.Canceled from user cancellation).
-    pub fn checkTimeout(self: *Runtime, timeout: *Timeout, err: anytype) !void {
-        const current_task = self.getCurrentTask();
-        try current_task.checkTimeout(self, timeout, err);
-    }
-
     /// Pin the current task to its home executor (prevents cross-thread migration).
     /// While pinned, the task will always run on its original executor, even when
     /// woken from other threads. Useful for tasks with executor-specific state.
@@ -1116,10 +1106,10 @@ pub const Runtime = struct {
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
     /// Can be called from the main thread or from within a coroutine.
     /// No-op (returns successfully) if called from a thread without an executor.
-    pub fn checkCanceled(self: *Runtime) Cancelable!void {
+    pub fn checkCancel(self: *Runtime) Cancelable!void {
         _ = self;
         const executor = Executor.current orelse return;
-        return executor.checkCanceled();
+        return executor.checkCancel();
     }
 
     /// Get the currently executing task.

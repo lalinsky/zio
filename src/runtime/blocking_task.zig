@@ -44,7 +44,7 @@ pub const AnyBlockingTask = struct {
 
     /// Cancel this blocking task by setting canceled status and canceling the thread pool work.
     pub fn cancel(self: *AnyBlockingTask) void {
-        self.awaitable.setCanceled();
+        _ = self.awaitable.setCanceled(.user);
         // TODO: Actually cancel the task via thread pool
         // self.runtime.thread_pool.cancel(&self.work);
     }

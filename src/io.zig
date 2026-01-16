@@ -12,7 +12,7 @@ const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Duration = @import("time.zig").Duration;
-const Timeout = @import("runtime/timeout.zig").Timeout;
+const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 
 /// Generic callback that resumes the task stored in userdata
 pub fn genericCallback(loop: *ev.Loop, completion: *ev.Completion) void {
@@ -157,7 +157,7 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout: Duratio
     var executor = task.getExecutor();
 
     // Set up timeout timer
-    var timer = Timeout.init;
+    var timer = AutoCancel.init;
     defer timer.clear(rt);
     timer.set(rt, timeout);
 
@@ -176,11 +176,12 @@ pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout: Duratio
     // Yield with atomic state transition (.preparing_to_wait -> .waiting)
     // If IO completes before the yield, the CAS inside yield() will fail and we won't suspend
     executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // Classify the error before clearing timeout state
-        const classified_err = rt.checkTimeout(&timer, err);
+        // Check if this auto-cancel triggered before clearing timeout state
+        const is_timeout = timer.check(rt, err);
         timer.clear(rt);
         cancelIo(rt, completion);
-        return classified_err;
+        if (is_timeout) return error.Timeout;
+        return err;
     };
 
     std.debug.assert(completion.state == .dead);

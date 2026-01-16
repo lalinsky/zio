@@ -54,7 +54,7 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
-const Timeout = @import("../runtime/timeout.zig").Timeout;
+const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 const Waiter = @import("common.zig").Waiter;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
@@ -157,7 +157,7 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Duration) (Timeoutab
     var waiter: Waiter = .init(&task.awaitable);
 
     // Set up timeout timer
-    var timer = Timeout.init;
+    var timer = AutoCancel.init;
     defer timer.clear(runtime);
     timer.set(runtime, timeout);
 
@@ -181,8 +181,9 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Duration) (Timeoutab
             }
         }
 
-        // Check if this timeout triggered, otherwise it was user cancellation
-        return runtime.checkTimeout(&timer, err);
+        // Check if this auto-cancel triggered, otherwise it was user cancellation
+        if (timer.check(runtime, err)) return error.Timeout;
+        return err;
     };
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
