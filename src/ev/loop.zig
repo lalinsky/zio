@@ -335,33 +335,46 @@ pub const Loop = struct {
     /// Cancel a completion directly without requiring a Cancel completion struct.
     /// This is a fire-and-forget operation - the completion's callback will still be
     /// invoked when the operation completes (either with error.Canceled or its natural result).
-    pub fn cancel(self: *Loop, completion: *Completion) !void {
-        return self.cancelInternal(completion, null);
-    }
+    /// Thread-safe: can be called from any thread.
+    pub fn cancel(self: *Loop, completion: *Completion) error{ AlreadyCanceled, AlreadyCompleted, NotStarted }!void {
+        // Check if already cancel-requested (atomic check first for double-cancel detection)
+        if (completion.cancel.requested.swap(true, .acq_rel)) {
+            return error.AlreadyCanceled;
+        }
 
-    /// Internal cancel implementation
-    fn cancelInternal(self: *Loop, completion: *Completion, cancel_comp: ?*Cancel) !void {
-        // Check if already being canceled
-        if (completion.canceled) return error.AlreadyCanceled;
+        // Also set the old canceled flag for compatibility during transition
+        completion.canceled = true;
 
         // Check state
         if (completion.state == .completed or completion.state == .dead) {
             return error.AlreadyCompleted;
         }
-
         if (completion.state == .new) {
             return error.NotStarted;
         }
 
-        if (completion.op == .cancel) {
-            return error.Uncancelable;
+        if (self == completion.loop) {
+            // Same loop - cancel directly
+            self.cancelLocal(completion);
+        } else {
+            // Different loop - queue to target and wake
+            const target = completion.loop orelse return;
+
+            // Push to target's cancel queue (lock-free Treiber stack)
+            var head = target.cancel_queue.load(.acquire);
+            while (true) {
+                completion.cancel.next = head;
+                head = target.cancel_queue.cmpxchgWeak(head, completion, .release, .acquire) orelse break;
+            }
+
+            if (target.state.wake_requested.fetchOr(LoopState.wake_cancel, .acq_rel) == 0) {
+                target.backend.wake(&target.state);
+            }
         }
+    }
 
-        // Mark as canceled and set canceled_by
-        completion.canceled = true;
-        completion.canceled_by = cancel_comp;
-
-        // Perform the cancellation
+    /// Cancel a completion on the local loop (must be called from the loop's thread)
+    fn cancelLocal(self: *Loop, completion: *Completion) void {
         switch (completion.op) {
             .timer => {
                 const timer = completion.cast(Timer);
@@ -399,6 +412,33 @@ pub const Loop = struct {
                 }
             },
         }
+    }
+
+    /// Internal cancel implementation (used by Cancel completion, will be removed)
+    fn cancelInternal(self: *Loop, completion: *Completion, cancel_comp: ?*Cancel) !void {
+        // Check if already being canceled
+        if (completion.canceled) return error.AlreadyCanceled;
+
+        // Check state
+        if (completion.state == .completed or completion.state == .dead) {
+            return error.AlreadyCompleted;
+        }
+
+        if (completion.state == .new) {
+            return error.NotStarted;
+        }
+
+        if (completion.op == .cancel) {
+            return error.Uncancelable;
+        }
+
+        // Mark as canceled (both old and new flags)
+        completion.canceled = true;
+        completion.canceled_by = cancel_comp;
+        _ = completion.cancel.requested.swap(true, .acq_rel);
+
+        // Perform the cancellation
+        self.cancelLocal(completion);
     }
 
     pub fn run(self: *Loop, mode: RunMode) !void {
@@ -634,6 +674,23 @@ pub const Loop = struct {
         }
     }
 
+    /// Process cross-thread cancel requests
+    fn processCancelQueue(self: *Loop) void {
+        // Atomically swap the entire queue
+        var c = self.cancel_queue.swap(null, .acquire);
+        while (c) |completion| {
+            const next = completion.cancel.next;
+            completion.cancel.next = null;
+
+            // Only cancel if still running
+            if (completion.state == .running) {
+                self.cancelLocal(completion);
+            }
+
+            c = next;
+        }
+    }
+
     fn submitFileOpToThreadPool(self: *Loop, completion: *Completion) void {
         const tp = self.thread_pool orelse {
             // No thread pool - complete with error
@@ -735,6 +792,11 @@ pub const Loop = struct {
         // Process async handles if the async bit was set
         if (wake_flags & LoopState.wake_async != 0) {
             self.processAsyncHandles();
+        }
+
+        // Process cross-thread cancel requests
+        if (wake_flags & LoopState.wake_cancel != 0) {
+            self.processCancelQueue();
         }
 
         // Process any work completions from thread pool
