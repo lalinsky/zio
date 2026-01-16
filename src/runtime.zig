@@ -563,7 +563,7 @@ pub const Executor = struct {
     }
 
     pub fn sleep(self: *Executor, duration: Duration) Cancelable!void {
-        var timer = ev.Timer.init(duration.toMilliseconds());
+        var timer = ev.Timer.init(duration);
         try runIo(self.runtime, &timer.c);
     }
 
@@ -1026,15 +1026,15 @@ pub const Runtime = struct {
 
         worker.ready.set();
 
-        var backoff_ms: i32 = 10;
-        const max_backoff_ms: i32 = 1000;
+        var backoff = Duration.fromMilliseconds(10);
+        const max_backoff = Duration.fromMilliseconds(1000);
 
         while (!self.shutting_down.load(.acquire)) {
             std.log.debug("Running executor", .{});
             executor.run(.until_stopped) catch |e| {
-                std.log.err("Worker executor error: {}, retrying in {}ms", .{ e, backoff_ms });
-                os.time.sleep(backoff_ms);
-                backoff_ms = @min(backoff_ms * 2, max_backoff_ms);
+                std.log.err("Worker executor error: {}, retrying in {f}", .{ e, backoff });
+                os.time.sleep(backoff);
+                backoff = .{ .ns = @min(backoff.ns *| 2, max_backoff.ns) };
                 continue;
             };
             break;

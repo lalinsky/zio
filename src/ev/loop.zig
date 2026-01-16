@@ -7,6 +7,7 @@ const Cancel = @import("completion.zig").Cancel;
 const NetClose = @import("completion.zig").NetClose;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
+const Duration = @import("../time.zig").Duration;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
@@ -191,7 +192,7 @@ pub const LoopState = struct {
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
         const was_active = timer.deadline_ms > 0;
-        timer.deadline_ms = self.now_ms +| timer.delay_ms;
+        timer.deadline_ms = self.now_ms +| timer.delay.toMilliseconds();
         timer.c.state = .running;
         if (was_active) {
             self.timers.remove(timer);
@@ -302,11 +303,11 @@ pub const Loop = struct {
     }
 
     /// Set or reset a timer with a new delay (works immediately, no completion required)
-    pub fn setTimer(self: *Loop, timer: *Timer, delay_ms: u64) void {
+    pub fn setTimer(self: *Loop, timer: *Timer, delay: Duration) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
         self.state.updateNow();
-        timer.delay_ms = delay_ms;
+        timer.delay = delay;
         self.state.setTimer(timer);
     }
 

@@ -24,7 +24,7 @@ const RepeatingTimer = struct {
     timer: ev.Timer,
 
     fn start(self: *RepeatingTimer, loop: *ev.Loop) void {
-        std.log.info("[{s}] starting, will tick {} times every {}ms", .{ self.name, self.count, self.timer.delay_ms });
+        std.log.info("[{s}] starting, will tick {} times every {f}", .{ self.name, self.count, self.timer.delay });
         self.timer.c.userdata = self;
         self.timer.c.callback = onTick;
         loop.add(&self.timer.c);
@@ -59,13 +59,13 @@ pub fn main() !void {
     var fast_timer: RepeatingTimer = .{
         .name = "fast",
         .count = 5,
-        .timer = .init(500),
+        .timer = .init(.fromMilliseconds(500)),
     };
 
     var slow_timer: RepeatingTimer = .{
         .name = "slow",
         .count = 5,
-        .timer = .init(1000),
+        .timer = .init(.fromMilliseconds(1000)),
     };
 
     fast_timer.start(&loop);

@@ -8,6 +8,12 @@
 // license that can be found in the LICENSE file.
 
 const std = @import("std");
+const os = @import("os/root.zig");
+
+pub const Clock = enum {
+    monotonic,
+    realtime,
+};
 
 /// A duration of time stored as nanoseconds.
 pub const Duration = struct {
@@ -54,6 +60,13 @@ pub const Duration = struct {
 
     pub fn toMinutes(self: Duration) u64 {
         return @divTrunc(self.ns, std.time.ns_per_min);
+    }
+
+    pub fn toTimespec(self: Duration) os.timespec {
+        return .{
+            .sec = @intCast(self.ns / std.time.ns_per_s),
+            .nsec = @intCast(self.ns % std.time.ns_per_s),
+        };
     }
 
     /// Formats the duration in Go-style format (e.g., "1h30m45s", "500ms", "1.5us").

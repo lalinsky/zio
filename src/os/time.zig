@@ -2,11 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
 const w = @import("windows.zig");
-
-pub const Clock = enum {
-    monotonic,
-    realtime,
-};
+const time = @import("../time.zig");
+const Duration = time.Duration;
+const Clock = time.Clock;
 
 pub fn now(clock: Clock) u64 {
     switch (builtin.os.tag) {
@@ -62,30 +60,24 @@ pub fn now(clock: Clock) u64 {
     unreachable;
 }
 
-pub fn sleep(timeout_ms: i32) void {
+pub fn sleep(duration: Duration) void {
+    if (duration.ns == 0) return;
     switch (builtin.os.tag) {
         .windows => {
-            if (timeout_ms > 0) {
-                _ = w.SleepEx(@intCast(timeout_ms), w.FALSE);
-            }
+            _ = w.SleepEx(@intCast(duration.toMilliseconds()), w.FALSE);
         },
         else => {
-            if (timeout_ms > 0) {
-                var req = posix.system.timespec{
-                    .sec = @intCast(@divFloor(timeout_ms, std.time.ms_per_s)),
-                    .nsec = @intCast(@mod(timeout_ms, std.time.ms_per_s) * std.time.ns_per_ms),
-                };
-                var rem: posix.system.timespec = undefined;
-                while (true) {
-                    const rc = posix.system.nanosleep(&req, &rem);
-                    switch (posix.errno(rc)) {
-                        .SUCCESS => return,
-                        .INTR => {
-                            req = rem;
-                            continue;
-                        },
-                        else => return,
-                    }
+            var req = duration.toTimespec();
+            var rem: posix.system.timespec = undefined;
+            while (true) {
+                const rc = posix.system.nanosleep(&req, &rem);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => return,
+                    .INTR => {
+                        req = rem;
+                        continue;
+                    },
+                    else => return,
                 }
             }
         },
