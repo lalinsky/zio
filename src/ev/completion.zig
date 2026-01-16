@@ -54,7 +54,6 @@ pub const BackendCapabilities = struct {
 
 pub const Op = enum {
     timer,
-    cancel,
     async,
     work,
     net_open,
@@ -109,7 +108,6 @@ pub const Op = enum {
     pub fn toType(comptime op: Op) type {
         return switch (op) {
             .timer => Timer,
-            .cancel => Cancel,
             .async => Async,
             .work => Work,
             .net_open => NetOpen,
@@ -166,7 +164,6 @@ pub const Op = enum {
     pub fn fromType(comptime T: type) Op {
         return switch (T) {
             Timer => .timer,
-            Cancel => .cancel,
             Async => .async,
             Work => .work,
             NetOpen => .net_open,
@@ -228,9 +225,6 @@ pub const Completion = struct {
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
 
-    canceled: bool = false,
-    canceled_by: ?*Cancel = null,
-
     /// Loop this completion was submitted to (set by loop.add())
     loop: ?*Loop = null,
 
@@ -271,8 +265,6 @@ pub const Completion = struct {
         c.state = .new;
         c.has_result = false;
         c.err = null;
-        c.canceled = false;
-        c.canceled_by = null;
         c.loop = null;
         c.cancel.next = null;
         c.cancel.requested.store(false, .release);
@@ -300,16 +292,6 @@ pub const Completion = struct {
 
     pub fn setError(c: *Completion, err: anyerror) void {
         std.debug.assert(!c.has_result);
-        // If this operation was canceled but got a different error (race condition),
-        // we need to mark the cancel as AlreadyCompleted.
-        // If err is error.Canceled, the normal cancelation flow handles the cancel.
-        if (c.canceled_by) |cancel| {
-            if (err != error.Canceled) {
-                cancel.c.err = error.AlreadyCompleted;
-                cancel.c.has_result = true;
-            }
-        }
-
         c.err = err;
         c.has_result = true;
     }
@@ -317,13 +299,6 @@ pub const Completion = struct {
     pub fn setResult(c: *Completion, comptime op: Op, result: @FieldType(op.toType(), "result_private_do_not_touch")) void {
         std.debug.assert(!c.has_result);
         std.debug.assert(c.op == op);
-        // If this operation was canceled but completed successfully (race condition),
-        // we need to mark the cancel as AlreadyCompleted.
-        if (c.canceled_by) |cancel| {
-            cancel.c.err = error.AlreadyCompleted;
-            cancel.c.has_result = true;
-        }
-
         const T = op.toType();
         c.cast(T).result_private_do_not_touch = result;
         c.has_result = true;
@@ -331,25 +306,6 @@ pub const Completion = struct {
 };
 
 pub const Cancelable = error{Canceled};
-
-pub const Cancel = struct {
-    c: Completion,
-    target: *Completion,
-    result_private_do_not_touch: void = {},
-
-    pub const Error = error{ AlreadyCanceled, AlreadyCompleted, Uncancelable };
-
-    pub fn init(target: *Completion) Cancel {
-        return .{
-            .c = .init(.cancel),
-            .target = target,
-        };
-    }
-
-    pub fn getResult(self: *const Cancel) Error!void {
-        return self.c.getResult(.cancel);
-    }
-};
 
 pub const Timer = struct {
     c: Completion,

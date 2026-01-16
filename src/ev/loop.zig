@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const Backend = @import("backend.zig").Backend;
 const BackendCapabilities = @import("completion.zig").BackendCapabilities;
 const Completion = @import("completion.zig").Completion;
-const Cancel = @import("completion.zig").Cancel;
 const NetClose = @import("completion.zig").NetClose;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
@@ -137,22 +136,6 @@ pub const LoopState = struct {
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
         std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
-
-        if (completion.canceled_by) |cancel| {
-            std.debug.assert(!cancel.c.has_result);
-            cancel.c.state = .running; // Set to running before marking completed
-            var set = false;
-            if (completion.err) |err| {
-                if (err == error.Canceled) {
-                    cancel.c.setResult(.cancel, {});
-                    set = true;
-                }
-            }
-            if (!set) {
-                cancel.c.setError(error.AlreadyCompleted);
-            }
-            self.markCompleted(&cancel.c);
-        }
 
         completion.state = .completed;
 
@@ -342,9 +325,6 @@ pub const Loop = struct {
             return error.AlreadyCanceled;
         }
 
-        // Also set the old canceled flag for compatibility during transition
-        completion.canceled = true;
-
         // Check state
         if (completion.state == .completed or completion.state == .dead) {
             return error.AlreadyCompleted;
@@ -414,33 +394,6 @@ pub const Loop = struct {
         }
     }
 
-    /// Internal cancel implementation (used by Cancel completion, will be removed)
-    fn cancelInternal(self: *Loop, completion: *Completion, cancel_comp: ?*Cancel) !void {
-        // Check if already being canceled
-        if (completion.canceled) return error.AlreadyCanceled;
-
-        // Check state
-        if (completion.state == .completed or completion.state == .dead) {
-            return error.AlreadyCompleted;
-        }
-
-        if (completion.state == .new) {
-            return error.NotStarted;
-        }
-
-        if (completion.op == .cancel) {
-            return error.Uncancelable;
-        }
-
-        // Mark as canceled (both old and new flags)
-        completion.canceled = true;
-        completion.canceled_by = cancel_comp;
-        _ = completion.cancel.requested.swap(true, .acq_rel);
-
-        // Perform the cancellation
-        self.cancelLocal(completion);
-    }
-
     pub fn run(self: *Loop, mode: RunMode) !void {
         std.debug.assert(self.state.initialized);
         if (self.state.stopped) return;
@@ -474,7 +427,7 @@ pub const Loop = struct {
         // Set the loop reference for cross-thread cancellation
         completion.loop = self;
 
-        if (completion.canceled) {
+        if (completion.cancel.requested.load(.acquire)) {
             // Directly mark it as canceled
             completion.setError(error.Canceled);
             self.state.active += 1;
@@ -522,31 +475,6 @@ pub const Loop = struct {
                 return;
             },
             else => {
-                if (completion.op == .cancel) {
-                    const cancel_comp = completion.cast(Cancel);
-
-                    // Cancel completion is always active and running
-                    self.state.active += 1;
-                    completion.state = .running;
-
-                    self.cancelInternal(cancel_comp.target, cancel_comp) catch |err| switch (err) {
-                        error.AlreadyCanceled, error.AlreadyCompleted, error.Uncancelable => |e| {
-                            completion.setError(e);
-                            self.state.markCompleted(completion);
-                            return;
-                        },
-                        error.NotStarted => {
-                            // Target hasn't been added yet - mark as canceled and wait
-                            // When it gets added, the early-exit check at the start of add() will catch it
-                            cancel_comp.target.canceled = true;
-                            cancel_comp.target.canceled_by = cancel_comp;
-                            return;
-                        },
-                    };
-
-                    return;
-                }
-
                 // Regular backend operation
                 // Route file/dir ops to thread pool for backends without native support
                 switch (completion.op) {

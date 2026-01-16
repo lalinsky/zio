@@ -211,7 +211,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
     switch (c.op) {
         .timer, .async, .work => unreachable, // Managed by the loop
-        .cancel => unreachable, // Handled separately via cancel() method
 
         // Synchronous operations (no io_uring support or always immediate)
         .net_open => {
@@ -731,12 +730,10 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
             //
             // In poll(), we:
             // - Skip cancel CQEs with user_data=USER_DATA_CANCEL
-            // - Process target CQE and mark target complete
-            // - markCompleted(target) recursively completes the Cancel operation if canceled_by is set
+            // - Process target CQE and mark target complete with error.Canceled (or natural result)
             const sqe = self.getSqe(state) catch {
                 log.err("Failed to get io_uring SQE for cancel", .{});
                 // Cancel SQE failed - do nothing, let target complete naturally
-                // When target completes, markCompleted(target) will recursively complete cancel if canceled_by is set
                 return;
             };
             sqe.prep_cancel(@intFromPtr(target), 0);
@@ -829,13 +826,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             continue;
         }
 
-        // For cancel operations: NEVER complete the cancel directly from tick()
-        // The cancel should only be completed when the target completes (via markCompleted recursion)
-        // So we always skip cancel CQEs - either the target already completed it, or will complete it
-        if (completion.op == .cancel) {
-            continue;
-        }
-
         // Store the result in the completion
         self.storeResult(completion, cqe.res);
 
@@ -848,7 +838,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
 fn storeResult(self: *Self, c: *Completion, res: i32) void {
     switch (c.op) {
-        .timer, .async, .work, .cancel => unreachable,
+        .timer, .async, .work => unreachable,
         .net_open => unreachable,
         .net_bind => unreachable,
         .net_listen => unreachable,
