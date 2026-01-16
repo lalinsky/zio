@@ -105,7 +105,8 @@ pub const StackPool = struct {
         }
 
         // Recycle the stack memory (MADV_FREE on POSIX) - no lock needed
-        stack.stackRecycle(stack_info);
+        // NOTE: this turns out to be tooo expensive to be worth it
+        // stack.stackRecycle(stack_info);
 
         // Store the FreeNode at the base of the stack
         const node = @as(*FreeNode, @ptrFromInt(node_addr));
