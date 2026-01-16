@@ -5,8 +5,9 @@ const w = @import("windows.zig");
 const time = @import("../time.zig");
 const Duration = time.Duration;
 const Clock = time.Clock;
+const Timestamp = time.Timestamp;
 
-pub fn now(clock: Clock) u64 {
+pub fn now(clock: Clock) Timestamp {
     switch (builtin.os.tag) {
         .windows => {
             switch (clock) {
@@ -15,27 +16,27 @@ pub fn now(clock: Clock) u64 {
                     const qpc = w.QueryPerformanceCounter();
                     const qpf = w.QueryPerformanceFrequency();
 
-                    // Convert QPC ticks to milliseconds
-                    // Using fixed-point arithmetic to avoid overflow: (qpc * 1000) / qpf
+                    // Convert QPC ticks to nanoseconds
+                    // Using fixed-point arithmetic to avoid overflow: (qpc * 1e9) / qpf
                     const common_qpf = 10_000_000; // 10MHz is common
                     if (qpf == common_qpf) {
-                        return qpc * std.time.ms_per_s / common_qpf;
+                        return .{ .ns = qpc * std.time.ns_per_s / common_qpf };
                     }
 
-                    // General case: convert to ms using fixed point
-                    const scale = (@as(u64, std.time.ms_per_s) << 32) / qpf;
+                    // General case: convert to ns using fixed point
+                    const scale = (@as(u64, std.time.ns_per_s) << 32) / qpf;
                     const result = (@as(u96, qpc) * scale) >> 32;
-                    return @truncate(result);
+                    return .{ .ns = @truncate(result) };
                 },
                 .realtime => {
                     // RtlGetSystemTimePrecise() has a granularity of 100 nanoseconds
                     // and uses the NTFS/Windows epoch, which is 1601-01-01.
                     // Convert to Unix epoch (1970-01-01) by subtracting the difference.
                     const ticks = w.RtlGetSystemTimePrecise();
-                    const ms_since_windows_epoch = @divFloor(ticks, std.time.ns_per_ms / 100);
-                    // Seconds between Windows epoch (1601) and Unix epoch (1970)
-                    const epoch_diff_ms: i64 = 11644473600 * std.time.ms_per_s;
-                    return @intCast(ms_since_windows_epoch - epoch_diff_ms);
+                    const ns_since_windows_epoch = ticks * 100;
+                    // Nanoseconds between Windows epoch (1601) and Unix epoch (1970)
+                    const epoch_diff_ns: i64 = 11644473600 * std.time.ns_per_s;
+                    return .{ .ns = @intCast(ns_since_windows_epoch - epoch_diff_ns) };
                 },
             }
         },
@@ -48,8 +49,7 @@ pub fn now(clock: Clock) u64 {
             const rc = posix.system.clock_gettime(clock_id, &tp);
             switch (posix.errno(rc)) {
                 .SUCCESS => {
-                    const ts = @as(i64, @intCast(tp.sec)) * std.time.ms_per_s + @divFloor(@as(i64, @intCast(tp.nsec)), std.time.ns_per_ms);
-                    return @intCast(@max(ts, 0));
+                    return .fromTimespec(tp);
                 },
                 else => |err| {
                     std.debug.panic("now: call to clock_gettime failed: {}", .{err});

@@ -13,6 +13,7 @@ const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Duration = @import("time.zig").Duration;
+const Timestamp = @import("time.zig").Timestamp;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const Context = @import("coro/coroutines.zig").Context;
@@ -72,7 +73,7 @@ pub const RuntimeOptions = struct {
         .maximum_size = 8 * 1024 * 1024, // 8MB reserved
         .committed_size = 64 * 1024, // 64KB initial commit
         .max_unused_stacks = 16,
-        .max_age_ms = 60 * std.time.ms_per_s, // 60 seconds
+        .max_age = .fromSeconds(60),
     },
     /// Number of executor threads to run (including main).
     /// - 0: auto-detect CPU count
@@ -323,7 +324,7 @@ pub const Executor = struct {
     ready_count: u32 = 0,
 
     // Timestamp of last event loop tick, used for time-based yield decisions.
-    last_tick_time: u64 = 0,
+    last_tick_time: Timestamp = .zero,
 
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
@@ -1125,9 +1126,9 @@ pub const Runtime = struct {
         return Executor.current orelse @panic("getCurrentExecutor called outside of executor context");
     }
 
-    /// Get the current time in milliseconds.
-    /// This uses the event loop's cached monotonic time for efficiency.
-    pub fn now(self: *Runtime) u64 {
+    /// Get the current monotonic timestamp.
+    /// This uses the event loop's cached time for efficiency.
+    pub fn now(self: *Runtime) Timestamp {
         return self.getCurrentExecutor().loop.now();
     }
 
@@ -1296,14 +1297,14 @@ test "Runtime: implicit run" {
     const TestContext = struct {
         fn asyncTask(rt: *Runtime) !void {
             const start = rt.now();
-            try testing.expect(start > 0);
+            try testing.expect(start.ns > 0);
 
             // Sleep to ensure time advances
             try rt.sleep(.fromMilliseconds(10));
 
             const end = rt.now();
-            try testing.expect(end > start);
-            try testing.expect(end - start >= 10);
+            try testing.expect(end.ns > start.ns);
+            try testing.expect(start.durationTo(end).toMilliseconds() >= 10);
         }
     };
 
@@ -1322,8 +1323,8 @@ test "Runtime: sleep from main" {
     try runtime.sleep(.fromMilliseconds(10));
     const end = runtime.now();
 
-    try testing.expect(end > start);
-    try testing.expect(end - start >= 10);
+    try testing.expect(end.ns > start.ns);
+    try testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 
 test "runtime: basic sleep" {
@@ -1349,14 +1350,14 @@ test "runtime: now() returns monotonic time" {
     defer runtime.deinit();
 
     const start = runtime.now();
-    try testing.expect(start > 0);
+    try testing.expect(start.ns > 0);
 
     // Sleep to ensure time advances
     try runtime.sleep(.fromMilliseconds(10));
 
     const end = runtime.now();
-    try testing.expect(end > start);
-    try testing.expect(end - start >= 10);
+    try testing.expect(end.ns > start.ns);
+    try testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 
 test "runtime: sleep is cancelable" {

@@ -8,6 +8,7 @@ const WriteBuf = @import("buf.zig").WriteBuf;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 const Duration = @import("../time.zig").Duration;
+const Timestamp = @import("../time.zig").Timestamp;
 
 pub const BackendCapabilities = struct {
     file_read: bool = false,
@@ -342,7 +343,7 @@ pub const Timer = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
     delay: Duration,
-    deadline_ms: u64 = 0,
+    deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
 
     pub const Error = Cancelable;

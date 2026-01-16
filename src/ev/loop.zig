@@ -8,6 +8,7 @@ const NetClose = @import("completion.zig").NetClose;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
 const Duration = @import("../time.zig").Duration;
+const Timestamp = @import("../time.zig").Timestamp;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
@@ -45,7 +46,7 @@ pub const RunMode = enum {
 };
 
 fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
-    return a.deadline_ms < b.deadline_ms;
+    return a.deadline.ns < b.deadline.ns;
 }
 
 const TimerHeap = Heap(Timer, void, timerDeadlineLess);
@@ -112,7 +113,7 @@ pub const LoopState = struct {
 
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
-    now_ms: u64 = 0,
+    now: Timestamp = .zero,
     timers: TimerHeap = .{ .context = {} },
     timer_mutex: if (Backend.capabilities.is_multi_threaded) std.Thread.Mutex else void =
         if (Backend.capabilities.is_multi_threaded) .{} else {},
@@ -175,7 +176,7 @@ pub const LoopState = struct {
     }
 
     pub fn updateNow(self: *LoopState) void {
-        self.now_ms = time.now(.monotonic);
+        self.now = time.now(.monotonic);
     }
 
     pub fn lockTimers(self: *LoopState) void {
@@ -191,8 +192,8 @@ pub const LoopState = struct {
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
-        const was_active = timer.deadline_ms > 0;
-        timer.deadline_ms = self.now_ms +| timer.delay.toMilliseconds();
+        const was_active = timer.deadline.ns > 0;
+        timer.deadline = self.now.addDuration(timer.delay);
         timer.c.state = .running;
         if (was_active) {
             self.timers.remove(timer);
@@ -203,8 +204,8 @@ pub const LoopState = struct {
     }
 
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
-        const was_active = timer.deadline_ms > 0;
-        timer.deadline_ms = 0;
+        const was_active = timer.deadline.ns > 0;
+        timer.deadline = .zero;
         if (was_active) {
             self.timers.remove(timer);
         }
@@ -281,9 +282,9 @@ pub const Loop = struct {
         return self.state.stopped or (self.state.active == 0 and self.state.completions.empty());
     }
 
-    /// Get the current monotonic timestamp in milliseconds
-    pub fn now(self: *const Loop) u64 {
-        return self.state.now_ms;
+    /// Get the current monotonic timestamp
+    pub fn now(self: *const Loop) Timestamp {
+        return self.state.now;
     }
 
     /// Wake up the loop from another thread (thread-safe)
@@ -315,7 +316,7 @@ pub const Loop = struct {
     pub fn clearTimer(self: *Loop, timer: *Timer) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
-        const was_active = timer.deadline_ms > 0;
+        const was_active = timer.deadline.ns > 0;
         self.state.clearTimer(timer);
         if (was_active) {
             // Reset state so timer can be reused
@@ -537,8 +538,8 @@ pub const Loop = struct {
             self.state.lockTimers();
             self.state.updateNow();
             while (self.state.timers.peek()) |timer| {
-                if (timer.deadline_ms > self.state.now_ms) {
-                    next_timeout_ms = timer.deadline_ms - self.state.now_ms;
+                if (timer.deadline.ns > self.state.now.ns) {
+                    next_timeout_ms = self.state.now.durationTo(timer.deadline).toMilliseconds();
                     break;
                 }
                 timer.c.setResult(.timer, {});

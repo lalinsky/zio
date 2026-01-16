@@ -4,13 +4,15 @@
 const std = @import("std");
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
+const Timestamp = @import("../time.zig").Timestamp;
+const Duration = @import("../time.zig").Duration;
 
 /// A node in the free list, stored at the base of an unused stack.
 const FreeNode = struct {
     prev: ?*FreeNode,
     next: ?*FreeNode,
     stack_info: StackInfo,
-    timestamp_ms: u64,
+    timestamp: Timestamp,
 };
 
 pub const Config = struct {
@@ -26,10 +28,10 @@ pub const Config = struct {
     /// When this limit is exceeded, the oldest stack is freed.
     max_unused_stacks: usize = 16,
 
-    /// Maximum age of an unused stack in milliseconds.
+    /// Maximum age of an unused stack.
     /// Stacks older than this will be freed on the next release() call.
-    /// 0 means no age limit.
-    max_age_ms: u64 = 0,
+    /// .zero means no age limit.
+    max_age: Duration = .zero,
 };
 
 pub const StackPool = struct {
@@ -91,8 +93,7 @@ pub const StackPool = struct {
     /// Expired stacks are removed before adding the new stack to avoid depleting the pool.
     /// If the pool is full, frees the oldest stack and adds this one.
     /// If the stack's committed region is too small to store the FreeNode, the stack is freed instead.
-    /// The timestamp_ms parameter is the current time in milliseconds (monotonic).
-    pub fn release(self: *StackPool, stack_info: StackInfo, timestamp_ms: u64) void {
+    pub fn release(self: *StackPool, stack_info: StackInfo, timestamp: Timestamp) void {
         // Check if the stack has enough committed space to store the FreeNode
         // The FreeNode is stored at the base of the stack (aligned backward)
         const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
@@ -114,7 +115,7 @@ pub const StackPool = struct {
             .prev = null,
             .next = null,
             .stack_info = stack_info,
-            .timestamp_ms = timestamp_ms,
+            .timestamp = timestamp,
         };
 
         // Collect stacks to free in a temporary singly-linked list
@@ -130,11 +131,11 @@ pub const StackPool = struct {
             // Remove expired stacks from the front of the list (up to limit)
             // Do this before adding the new stack to avoid the situation where we'd
             // remove all stacks (including the one we're about to add) and end up with an empty pool
-            if (self.config.max_age_ms > 0) {
+            if (self.config.max_age.ns > 0) {
                 while (self.head) |expired| {
                     if (to_free_count >= max_free_per_release) break;
-                    const age_ms = timestamp_ms -| expired.timestamp_ms;
-                    if (age_ms > self.config.max_age_ms) {
+                    const age = expired.timestamp.durationTo(timestamp);
+                    if (age.ns > self.config.max_age.ns) {
                         self.removeNode(expired);
                         expired.next = to_free_head;
                         to_free_head = expired;
@@ -211,7 +212,6 @@ test "StackPool basic acquire and release" {
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 4,
-        .max_age_ms = 0,
     });
     defer pool.deinit();
 
@@ -221,7 +221,7 @@ test "StackPool basic acquire and release" {
     try testing.expect(stack1.base > stack1.limit); // Stack grows downward
 
     // Release it back
-    pool.release(stack1, 0);
+    pool.release(stack1, .zero);
     try testing.expectEqual(1, pool.pool_size);
 
     // Acquire again - should reuse the same stack
@@ -240,7 +240,6 @@ test "StackPool respects max_unused_stacks" {
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 2,
-        .max_age_ms = 0,
     });
     defer pool.deinit();
 
@@ -249,14 +248,14 @@ test "StackPool respects max_unused_stacks" {
     const stack2 = try pool.acquire();
     const stack3 = try pool.acquire();
 
-    pool.release(stack1, 0);
+    pool.release(stack1, .zero);
     try testing.expectEqual(1, pool.pool_size);
 
-    pool.release(stack2, 0);
+    pool.release(stack2, .zero);
     try testing.expectEqual(2, pool.pool_size);
 
     // Releasing the third should evict the first (oldest)
-    pool.release(stack3, 0);
+    pool.release(stack3, .zero);
     try testing.expectEqual(2, pool.pool_size);
 
     // Verify that stack1 is not in the pool (stack2 and stack3 should be)
@@ -275,26 +274,26 @@ test "StackPool respects max_unused_stacks" {
 test "StackPool age-based expiration" {
     const testing = std.testing;
 
-    const max_age_ms = 100; // 100ms
+    const max_age: Duration = .fromMilliseconds(100);
 
     var pool = StackPool.init(.{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 4,
-        .max_age_ms = max_age_ms,
+        .max_age = max_age,
     });
     defer pool.deinit();
 
     // Acquire and release a stack at timestamp 0
     const stack1 = try pool.acquire();
-    pool.release(stack1, 0);
+    pool.release(stack1, .zero);
     try testing.expectEqual(1, pool.pool_size);
 
     // Acquire a new stack and release it with timestamp past expiration
     // This triggers expiration check and should evict stack1
     const stack2 = try pool.acquire();
     try testing.expectEqual(0, pool.pool_size);
-    pool.release(stack2, max_age_ms + 1);
+    pool.release(stack2, .fromMilliseconds(101));
     try testing.expectEqual(1, pool.pool_size);
 
     // Verify the pool contains stack2 (stack1 was expired)
