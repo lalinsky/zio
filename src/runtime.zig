@@ -299,7 +299,6 @@ pub const Executor = struct {
     current_coroutine: ?*Coroutine = null,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
-    next_ready_queue: SimpleQueue(WaitNode) = .{},
 
     // LIFO slot optimization: when a task wakes another task, the woken task
     // is placed here for immediate execution, improving cache locality.
@@ -641,9 +640,6 @@ pub const Executor = struct {
                 self.ready_count += 1;
             }
 
-            // Move yielded coroutines back to ready queue
-            self.ready_queue.concatByMoving(&self.next_ready_queue);
-
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
             const main_ready = check_ready and self.main_task.state.load(.acquire) == .ready;
             const has_work = self.ready_queue.head != null or self.lifo_slot != null or main_ready;
@@ -714,23 +710,20 @@ pub const Executor = struct {
         return null;
     }
 
-    /// Schedule a task to the current executor's local queues.
+    /// Schedule a task to the current executor's local queue.
     /// This must only be called when we're on the correct executor thread.
     ///
     /// The `is_yield` parameter determines scheduling behavior:
-    /// - `true`: Task is yielding - goes to next_ready_queue (runs next iteration)
+    /// - `true`: Task is yielding - goes to ready_queue (FIFO, bypasses LIFO slot)
     /// - `false`: Task is being woken - goes to LIFO slot (immediate) or ready_queue (FIFO)
     fn scheduleTaskLocal(self: *Executor, task: *AnyTask, is_yield: bool) void {
         const wait_node = &task.awaitable.wait_node;
         if (std.debug.runtime_safety) {
             std.debug.assert(!wait_node.in_list);
         }
-        if (is_yield) {
-            // Yields → next_ready_queue (runs next iteration for fairness)
-            self.next_ready_queue.push(wait_node);
-            self.ready_count += 1;
-        } else if (!self.lifo_slot_enabled) {
-            // LIFO disabled - woken tasks go to ready_queue (FIFO, fair scheduling)
+        if (is_yield or !self.lifo_slot_enabled) {
+            // Yields bypass LIFO slot for fairness, go to back of ready_queue
+            // LIFO disabled also uses ready_queue (FIFO, fair scheduling)
             self.ready_queue.push(wait_node);
             self.ready_count += 1;
         } else {
