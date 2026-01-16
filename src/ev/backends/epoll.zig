@@ -123,10 +123,6 @@ pub fn wake(self: *Self, state: *LoopState) void {
     posix.eventfd_write(self.waker_eventfd, 1) catch {};
 }
 
-fn drainWaker(self: *Self) void {
-    _ = posix.eventfd_read(self.waker_eventfd) catch {};
-}
-
 fn getEvents(completion: *Completion) u32 {
     return switch (completion.op) {
         .net_connect => std.os.linux.EPOLL.OUT,
@@ -435,7 +431,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
 
         // Check if this is the async wakeup fd
         if (fd == self.waker_eventfd) {
-            self.drainWaker();
+            _ = posix.eventfd_read(self.waker_eventfd) catch {};
             continue;
         }
 

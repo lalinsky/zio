@@ -115,17 +115,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
 }
 
 pub fn deinit(self: *Self) void {
-    // Remove waker from kqueue
-    var changes: [1]std.c.Kevent = .{.{
-        .ident = self.waker_ident,
-        .filter = EVFILT_USER,
-        .flags = std.c.EV.DELETE,
-        .fflags = 0,
-        .data = 0,
-        .udata = 0,
-    }};
-    _ = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
-
     self.change_buffer.deinit(self.allocator);
     self.allocator.free(self.events);
     if (self.kqueue_fd != -1) {
@@ -135,6 +124,7 @@ pub fn deinit(self: *Self) void {
 
 pub fn wake(self: *Self, state: *LoopState) void {
     _ = state;
+    // TODO: Could also submit other pending changes if we have any
     var changes: [1]std.c.Kevent = .{.{
         .ident = self.waker_ident,
         .filter = EVFILT_USER,
