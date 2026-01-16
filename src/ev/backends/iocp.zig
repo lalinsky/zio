@@ -335,7 +335,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
     switch (c.op) {
         .timer, .async, .work => unreachable, // Managed by the loop
-        .cancel => unreachable, // Handled separately via cancel() method
 
         // Synchronous operations - complete immediately
         .net_open => {

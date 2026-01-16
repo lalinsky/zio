@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const Backend = @import("backend.zig").Backend;
 const BackendCapabilities = @import("completion.zig").BackendCapabilities;
 const Completion = @import("completion.zig").Completion;
-const Cancel = @import("completion.zig").Cancel;
 const NetClose = @import("completion.zig").NetClose;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
@@ -115,8 +114,19 @@ pub const LoopState = struct {
 
     now: Timestamp = .zero,
     timers: TimerHeap = .{ .context = {} },
-    timer_mutex: if (Backend.capabilities.is_multi_threaded) std.Thread.Mutex else void =
-        if (Backend.capabilities.is_multi_threaded) .{} else {},
+    // TODO: Linked timers optimization
+    // Instead of mutex-protected cross-thread timer cancellation, link timers to their
+    // associated operations. When an operation completes, its linked timer is cleared
+    // on the same thread (no mutex). When a timer fires, its linked operation is
+    // cancelled on the same thread. This eliminates cross-thread synchronization for
+    // the common timeout pattern:
+    //   - Add `linked_timer: ?*Timer` to Completion
+    //   - Add `linked_completion: ?*Completion` to Timer
+    //   - On operation complete: clear linked timer (same thread, direct)
+    //   - On timer fire: cancel linked operation (same thread, direct)
+    // The cross-thread cancel mechanism remains for general cancellation (task migration,
+    // external cancellation), but timeouts become zero-overhead pointer unlinking.
+    timer_mutex: std.Thread.Mutex = .{},
 
     async_handles: Queue(Completion) = .{},
 
@@ -125,6 +135,7 @@ pub const LoopState = struct {
 
     pub const wake_loop: u32 = 1;
     pub const wake_async: u32 = 2;
+    pub const wake_cancel: u32 = 4;
 
     /// Called by backends when an I/O operation completes.
     /// Decrements inflight_io counter and marks the completion done.
@@ -136,22 +147,6 @@ pub const LoopState = struct {
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
         std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
-
-        if (completion.canceled_by) |cancel| {
-            std.debug.assert(!cancel.c.has_result);
-            cancel.c.state = .running; // Set to running before marking completed
-            var set = false;
-            if (completion.err) |err| {
-                if (err == error.Canceled) {
-                    cancel.c.setResult(.cancel, {});
-                    set = true;
-                }
-            }
-            if (!set) {
-                cancel.c.setError(error.AlreadyCompleted);
-            }
-            self.markCompleted(&cancel.c);
-        }
 
         completion.state = .completed;
 
@@ -180,15 +175,11 @@ pub const LoopState = struct {
     }
 
     pub fn lockTimers(self: *LoopState) void {
-        if (Backend.capabilities.is_multi_threaded) {
-            self.timer_mutex.lock();
-        }
+        self.timer_mutex.lock();
     }
 
     pub fn unlockTimers(self: *LoopState) void {
-        if (Backend.capabilities.is_multi_threaded) {
-            self.timer_mutex.unlock();
-        }
+        self.timer_mutex.unlock();
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
@@ -224,6 +215,9 @@ pub const Loop = struct {
 
     max_wait: Duration = .fromSeconds(60),
     defer_callbacks: bool = true,
+
+    /// Cross-thread cancel queue (lock-free MPSC)
+    cancel_queue: std.atomic.Value(?*Completion) = std.atomic.Value(?*Completion).init(null),
 
     in_add: if (in_safe_mode) bool else void = if (in_safe_mode) false else {},
 
@@ -308,6 +302,7 @@ pub const Loop = struct {
         self.state.lockTimers();
         defer self.state.unlockTimers();
         self.state.updateNow();
+        timer.c.loop = self;
         timer.delay = delay;
         self.state.setTimer(timer);
     }
@@ -328,35 +323,42 @@ pub const Loop = struct {
     }
 
     /// Cancel a completion directly without requiring a Cancel completion struct.
-    /// This is a fire-and-forget operation - the completion's callback will still be
+    /// This is a fire-and-forget, idempotent operation - the completion's callback will still be
     /// invoked when the operation completes (either with error.Canceled or its natural result).
-    pub fn cancel(self: *Loop, completion: *Completion) !void {
-        return self.cancelInternal(completion, null);
+    /// Thread-safe: can be called from any thread.
+    pub fn cancel(self: *Loop, completion: *Completion) void {
+        // Atomically mark as cancel-requested (idempotent - second call is no-op)
+        if (completion.cancel.requested.swap(true, .acq_rel)) {
+            return;
+        }
+
+        // Not yet submitted or already done - nothing to do
+        if (completion.state != .running) {
+            return;
+        }
+
+        if (self == completion.loop) {
+            // Same loop - cancel directly
+            self.cancelLocal(completion);
+        } else {
+            // Different loop - queue to target and wake
+            const target = completion.loop orelse return;
+
+            // Push to target's cancel queue (lock-free Treiber stack)
+            var head = target.cancel_queue.load(.acquire);
+            while (true) {
+                completion.cancel.next = head;
+                head = target.cancel_queue.cmpxchgWeak(head, completion, .release, .acquire) orelse break;
+            }
+
+            if (target.state.wake_requested.fetchOr(LoopState.wake_cancel, .acq_rel) == 0) {
+                target.backend.wake(&target.state);
+            }
+        }
     }
 
-    /// Internal cancel implementation
-    fn cancelInternal(self: *Loop, completion: *Completion, cancel_comp: ?*Cancel) !void {
-        // Check if already being canceled
-        if (completion.canceled) return error.AlreadyCanceled;
-
-        // Check state
-        if (completion.state == .completed or completion.state == .dead) {
-            return error.AlreadyCompleted;
-        }
-
-        if (completion.state == .new) {
-            return error.NotStarted;
-        }
-
-        if (completion.op == .cancel) {
-            return error.Uncancelable;
-        }
-
-        // Mark as canceled and set canceled_by
-        completion.canceled = true;
-        completion.canceled_by = cancel_comp;
-
-        // Perform the cancellation
+    /// Cancel a completion on the local loop (must be called from the loop's thread)
+    fn cancelLocal(self: *Loop, completion: *Completion) void {
         switch (completion.op) {
             .timer => {
                 const timer = completion.cast(Timer);
@@ -426,7 +428,10 @@ pub const Loop = struct {
 
         std.debug.assert(completion.state == .new);
 
-        if (completion.canceled) {
+        // Set the loop reference for cross-thread cancellation
+        completion.loop = self;
+
+        if (completion.cancel.requested.load(.acquire)) {
             // Directly mark it as canceled
             completion.setError(error.Canceled);
             self.state.active += 1;
@@ -445,7 +450,6 @@ pub const Loop = struct {
             },
             .async => {
                 const async = completion.cast(Async);
-                async.loop = self;
                 async.c.state = .running;
                 self.state.active += 1;
 
@@ -475,31 +479,6 @@ pub const Loop = struct {
                 return;
             },
             else => {
-                if (completion.op == .cancel) {
-                    const cancel_comp = completion.cast(Cancel);
-
-                    // Cancel completion is always active and running
-                    self.state.active += 1;
-                    completion.state = .running;
-
-                    self.cancelInternal(cancel_comp.target, cancel_comp) catch |err| switch (err) {
-                        error.AlreadyCanceled, error.AlreadyCompleted, error.Uncancelable => |e| {
-                            completion.setError(e);
-                            self.state.markCompleted(completion);
-                            return;
-                        },
-                        error.NotStarted => {
-                            // Target hasn't been added yet - mark as canceled and wait
-                            // When it gets added, the early-exit check at the start of add() will catch it
-                            cancel_comp.target.canceled = true;
-                            cancel_comp.target.canceled_by = cancel_comp;
-                            return;
-                        },
-                    };
-
-                    return;
-                }
-
                 // Regular backend operation
                 // Route file/dir ops to thread pool for backends without native support
                 switch (completion.op) {
@@ -570,7 +549,6 @@ pub const Loop = struct {
         const was_pending = async_handle.pending.swap(0, .acquire);
         if (was_pending != 0) {
             async_handle.c.setResult(.async, {});
-            async_handle.loop = null;
             return true;
         }
         return false;
@@ -625,6 +603,23 @@ pub const Loop = struct {
 
         while (self.state.completions.pop()) |completion| {
             self.state.finishCompletion(completion);
+        }
+    }
+
+    /// Process cross-thread cancel requests
+    fn processCancelQueue(self: *Loop) void {
+        // Atomically swap the entire queue
+        var c = self.cancel_queue.swap(null, .acquire);
+        while (c) |completion| {
+            const next = completion.cancel.next;
+            completion.cancel.next = null;
+
+            // Only cancel if still running
+            if (completion.state == .running) {
+                self.cancelLocal(completion);
+            }
+
+            c = next;
         }
     }
 
@@ -729,6 +724,11 @@ pub const Loop = struct {
         // Process async handles if the async bit was set
         if (wake_flags & LoopState.wake_async != 0) {
             self.processAsyncHandles();
+        }
+
+        // Process cross-thread cancel requests
+        if (wake_flags & LoopState.wake_cancel != 0) {
+            self.processCancelQueue();
         }
 
         // Process any work completions from thread pool

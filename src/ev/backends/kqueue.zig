@@ -13,7 +13,6 @@ const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
-const Cancel = @import("../completion.zig").Cancel;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
 const NetListen = @import("../completion.zig").NetListen;
@@ -239,7 +238,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
     switch (c.op) {
         .timer, .async, .work => unreachable, // Managed by the loop
-        .cancel => unreachable, // Handled separately via cancel() method
 
         // Synchronous operations - complete immediately
         .net_open => {
@@ -331,14 +329,12 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Try to queue unregister
     const fd = getHandle(target);
     if (!self.queueUnregister(state, fd, target)) {
-        // Queueing failed - target is still registered with target.canceled set
-        // When target completes, markCompleted(target) will recursively complete cancel if canceled_by is set
-        return; // Do nothing, let target complete naturally
+        // Queueing failed - target is still registered, let it complete naturally
+        return;
     }
 
     // Successfully queued - target will be unregistered on flush
     // Complete target with error.Canceled immediately
-    // markCompleted(target) will recursively complete the Cancel operation if canceled_by is set
     target.setError(error.Canceled);
     state.markCompletedFromBackend(target);
 }

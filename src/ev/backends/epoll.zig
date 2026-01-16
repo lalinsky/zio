@@ -12,7 +12,6 @@ const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
-const Cancel = @import("../completion.zig").Cancel;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
 const NetListen = @import("../completion.zig").NetListen;
@@ -306,7 +305,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
     switch (c.op) {
         .timer, .async, .work => unreachable, // Managed by the loop
-        .cancel => unreachable, // Handled separately via cancel() method
 
         // Synchronous operations - complete immediately
         .net_open => {
@@ -398,14 +396,12 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Try to remove from queue
     const fd = getHandle(target);
     self.removeFromPollQueue(fd, target) catch {
-        // Removal failed - target is still in queue with target.canceled set
-        // When target completes, markCompleted(target) will recursively complete cancel if canceled_by is set
+        // Removal failed - target is still in queue, let it complete naturally
         log.err("Failed to remove completion from poll queue during cancel", .{});
-        return; // Do nothing, let target complete naturally
+        return;
     };
 
     // Successfully removed - complete target with error.Canceled
-    // markCompleted(target) will recursively complete the Cancel operation if canceled_by is set
     target.setError(error.Canceled);
     state.markCompletedFromBackend(target);
 }

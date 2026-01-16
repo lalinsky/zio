@@ -20,18 +20,16 @@ pub const AutoCancel = struct {
     timer: ev.Timer = .init(.zero),
     triggered: bool = false,
     task: ?*AnyTask = null,
-    loop: ?*ev.Loop = null,
 
     pub const init: AutoCancel = .{};
 
     pub fn clear(self: *AutoCancel, rt: *Runtime) void {
         _ = rt;
-        const loop = self.loop orelse return;
+        const loop = self.timer.c.loop orelse return;
         if (self.timer.c.state != .running) return;
 
         loop.clearTimer(&self.timer);
         self.task = null;
-        self.loop = null;
     }
 
     pub fn set(self: *AutoCancel, rt: *Runtime, timeout: Duration) void {
@@ -48,7 +46,6 @@ pub const AutoCancel = struct {
         // Set task reference and reset triggered flag
         self.task = task;
         self.triggered = false;
-        self.loop = &executor.loop;
 
         // Initialize ev.Timer
         self.timer.c.userdata = self;
@@ -76,9 +73,8 @@ fn autoCancelCallback(
     const autocancel: *AutoCancel = @ptrCast(@alignCast(completion.userdata.?));
     const task = autocancel.task orelse return;
 
-    // Clear the associated task and loop
+    // Clear the associated task
     autocancel.task = null;
-    autocancel.loop = null;
 
     // If there's an error, the timer was cancelled - don't wake the task
     if (completion.err != null) return;

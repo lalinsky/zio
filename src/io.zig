@@ -27,20 +27,13 @@ pub fn cancelIo(rt: *Runtime, completion: *ev.Completion) void {
     rt.beginShield();
     defer rt.endShield();
 
-    // Cancel the operation and wait for the cancelation to complete
-    var cancel = ev.Cancel{
-        .c = ev.Completion.init(.cancel),
-        .target = completion,
-    };
     const task = rt.getCurrentTask();
-    cancel.c.userdata = task;
-    cancel.c.callback = genericCallback;
-
     const executor = task.getExecutor();
-    executor.loop.add(&cancel.c);
-    waitForIo(rt, &cancel.c) catch {};
 
-    // Now wait for the main operation to complete
+    // Request cancellation (idempotent, may already be completed)
+    executor.loop.cancel(completion);
+
+    // Wait for the operation to complete (with Canceled or natural result)
     // This can't return error.Canceled because of the shield
     waitForIo(rt, completion) catch unreachable;
 }
