@@ -30,8 +30,8 @@ pub fn cancelIo(rt: *Runtime, completion: *ev.Completion) void {
     const task = rt.getCurrentTask();
     const executor = task.getExecutor();
 
-    // Request cancellation (fire and forget, may already be completed)
-    executor.loop.cancel(completion) catch {};
+    // Request cancellation (idempotent, may already be completed)
+    executor.loop.cancel(completion);
 
     // Wait for the operation to complete (with Canceled or natural result)
     // This can't return error.Canceled because of the shield

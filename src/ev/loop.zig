@@ -316,21 +316,18 @@ pub const Loop = struct {
     }
 
     /// Cancel a completion directly without requiring a Cancel completion struct.
-    /// This is a fire-and-forget operation - the completion's callback will still be
+    /// This is a fire-and-forget, idempotent operation - the completion's callback will still be
     /// invoked when the operation completes (either with error.Canceled or its natural result).
     /// Thread-safe: can be called from any thread.
-    pub fn cancel(self: *Loop, completion: *Completion) error{ AlreadyCanceled, AlreadyCompleted, NotStarted }!void {
-        // Check if already cancel-requested (atomic check first for double-cancel detection)
+    pub fn cancel(self: *Loop, completion: *Completion) void {
+        // Atomically mark as cancel-requested (idempotent - second call is no-op)
         if (completion.cancel.requested.swap(true, .acq_rel)) {
-            return error.AlreadyCanceled;
+            return;
         }
 
-        // Check state
-        if (completion.state == .completed or completion.state == .dead) {
-            return error.AlreadyCompleted;
-        }
-        if (completion.state == .new) {
-            return error.NotStarted;
+        // Not yet submitted or already done - nothing to do
+        if (completion.state != .running) {
+            return;
         }
 
         if (self == completion.loop) {

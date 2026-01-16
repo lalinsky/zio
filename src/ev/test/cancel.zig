@@ -24,7 +24,7 @@ test "cancel: timer with loop.cancel()" {
     var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
-    try loop.cancel(&timer.c);
+    loop.cancel(&timer.c);
 
     var wall_timer = try std.time.Timer.start();
     try loop.run(.until_done);
@@ -36,7 +36,7 @@ test "cancel: timer with loop.cancel()" {
     try std.testing.expect(elapsed_ms < 50);
 }
 
-test "cancel: double cancel returns AlreadyCanceled" {
+test "cancel: double cancel is idempotent" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -44,17 +44,15 @@ test "cancel: double cancel returns AlreadyCanceled" {
     var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
-    // First cancel should succeed
-    try loop.cancel(&timer.c);
-
-    // Second cancel should fail
-    try std.testing.expectError(error.AlreadyCanceled, loop.cancel(&timer.c));
+    // Both cancels succeed (idempotent)
+    loop.cancel(&timer.c);
+    loop.cancel(&timer.c);
 
     try loop.run(.until_done);
     try std.testing.expectError(error.Canceled, timer.getResult());
 }
 
-test "cancel: cancel completed operation returns AlreadyCompleted" {
+test "cancel: cancel completed operation is no-op" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -67,20 +65,25 @@ test "cancel: cancel completed operation returns AlreadyCompleted" {
     try std.testing.expectEqual(.dead, timer.c.state);
     try timer.getResult();
 
-    // Try to cancel after completion
-    try std.testing.expectError(error.AlreadyCompleted, loop.cancel(&timer.c));
+    // Cancel after completion is no-op
+    loop.cancel(&timer.c);
 }
 
-test "cancel: cancel not-started operation returns NotStarted" {
+test "cancel: cancel not-started operation marks for cancel on add" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
 
     var timer: Timer = .init(.fromMilliseconds(100));
-    // Don't add to loop
+    // Don't add to loop yet
 
-    // Try to cancel before adding
-    try std.testing.expectError(error.NotStarted, loop.cancel(&timer.c));
+    // Cancel before adding - marks the completion
+    loop.cancel(&timer.c);
+
+    // Now add - should immediately fail with Canceled
+    loop.add(&timer.c);
+    try loop.run(.until_done);
+    try std.testing.expectError(error.Canceled, timer.getResult());
 }
 
 test "cancel: async handle with loop.cancel()" {
@@ -91,7 +94,7 @@ test "cancel: async handle with loop.cancel()" {
     var async_handle: Async = .init();
     loop.add(&async_handle.c);
 
-    try loop.cancel(&async_handle.c);
+    loop.cancel(&async_handle.c);
 
     try loop.run(.until_done);
 
@@ -136,7 +139,7 @@ test "cancel: net_accept with loop.cancel()" {
     try std.testing.expectEqual(.running, accept_comp.c.state);
 
     // Cancel with loop.cancel()
-    try loop.cancel(&accept_comp.c);
+    loop.cancel(&accept_comp.c);
 
     try loop.run(.until_done);
 
@@ -207,7 +210,7 @@ test "cancel: net_recv with loop.cancel()" {
     try std.testing.expectEqual(.running, recv.c.state);
 
     // Cancel with loop.cancel()
-    try loop.cancel(&recv.c);
+    loop.cancel(&recv.c);
 
     try loop.run(.until_done);
 
@@ -234,7 +237,7 @@ test "cancel: cancel.requested flag is set on completion" {
 
     try std.testing.expect(!timer.c.cancel.requested.load(.acquire));
 
-    try loop.cancel(&timer.c);
+    loop.cancel(&timer.c);
 
     try std.testing.expect(timer.c.cancel.requested.load(.acquire));
 
@@ -264,7 +267,7 @@ test "cancel: callback is invoked on canceled operation" {
     timer.c.callback = Ctx.callback;
     loop.add(&timer.c);
 
-    try loop.cancel(&timer.c);
+    loop.cancel(&timer.c);
     try loop.run(.until_done);
 
     try std.testing.expect(ctx.called);
@@ -286,8 +289,8 @@ test "cancel: race - operation completes before cancel" {
     try std.testing.expectEqual(.dead, timer.c.state);
     try timer.getResult(); // Should succeed
 
-    // Now try to cancel - should get AlreadyCompleted
-    try std.testing.expectError(error.AlreadyCompleted, loop.cancel(&timer.c));
+    // Cancel after completion is no-op
+    loop.cancel(&timer.c);
 }
 
 test "cancel: multiple timers, cancel one" {
@@ -304,7 +307,7 @@ test "cancel: multiple timers, cancel one" {
     loop.add(&timer3.c);
 
     // Cancel middle timer
-    try loop.cancel(&timer2.c);
+    loop.cancel(&timer2.c);
 
     try loop.run(.until_done);
 
@@ -316,7 +319,7 @@ test "cancel: multiple timers, cancel one" {
     try std.testing.expectError(error.Canceled, timer2.getResult());
 }
 
-test "cancel: work after completion returns AlreadyCompleted" {
+test "cancel: work after completion is no-op" {
     var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
@@ -347,8 +350,8 @@ test "cancel: work after completion returns AlreadyCompleted" {
     try work.getResult();
     try std.testing.expect(test_fn.called);
 
-    // Try to cancel after completion
-    try std.testing.expectError(error.AlreadyCompleted, loop.cancel(&work.c));
+    // Cancel after completion is no-op
+    loop.cancel(&work.c);
 }
 
 test "cancel: work before run" {
@@ -377,7 +380,7 @@ test "cancel: work before run" {
     loop.add(&work.c);
 
     // Cancel before running
-    try loop.cancel(&work.c);
+    loop.cancel(&work.c);
 
     try loop.run(.until_done);
 
@@ -386,7 +389,7 @@ test "cancel: work before run" {
     try std.testing.expect(!test_fn.called);
 }
 
-test "cancel: work double cancel returns AlreadyCanceled" {
+test "cancel: work double cancel is idempotent" {
     var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
@@ -411,11 +414,9 @@ test "cancel: work double cancel returns AlreadyCanceled" {
 
     loop.add(&work.c);
 
-    // First cancel should succeed
-    try loop.cancel(&work.c);
-
-    // Second cancel should fail
-    try std.testing.expectError(error.AlreadyCanceled, loop.cancel(&work.c));
+    // Both cancels succeed (idempotent)
+    loop.cancel(&work.c);
+    loop.cancel(&work.c);
 
     try loop.run(.until_done);
     try std.testing.expectError(error.Canceled, work.getResult());
@@ -516,7 +517,7 @@ test "cancel: cross-thread cancellation" {
             defer loop2.deinit();
 
             // Cancel from a different loop (cross-thread)
-            loop2.cancel(&target_timer.c) catch {};
+            loop2.cancel(&target_timer.c);
         }
     }.run, .{&timer}) catch unreachable;
 
