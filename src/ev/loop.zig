@@ -114,8 +114,19 @@ pub const LoopState = struct {
 
     now: Timestamp = .zero,
     timers: TimerHeap = .{ .context = {} },
-    timer_mutex: if (Backend.capabilities.is_multi_threaded) std.Thread.Mutex else void =
-        if (Backend.capabilities.is_multi_threaded) .{} else {},
+    // TODO: Linked timers optimization
+    // Instead of mutex-protected cross-thread timer cancellation, link timers to their
+    // associated operations. When an operation completes, its linked timer is cleared
+    // on the same thread (no mutex). When a timer fires, its linked operation is
+    // cancelled on the same thread. This eliminates cross-thread synchronization for
+    // the common timeout pattern:
+    //   - Add `linked_timer: ?*Timer` to Completion
+    //   - Add `linked_completion: ?*Completion` to Timer
+    //   - On operation complete: clear linked timer (same thread, direct)
+    //   - On timer fire: cancel linked operation (same thread, direct)
+    // The cross-thread cancel mechanism remains for general cancellation (task migration,
+    // external cancellation), but timeouts become zero-overhead pointer unlinking.
+    timer_mutex: std.Thread.Mutex = .{},
 
     async_handles: Queue(Completion) = .{},
 
@@ -164,15 +175,11 @@ pub const LoopState = struct {
     }
 
     pub fn lockTimers(self: *LoopState) void {
-        if (Backend.capabilities.is_multi_threaded) {
-            self.timer_mutex.lock();
-        }
+        self.timer_mutex.lock();
     }
 
     pub fn unlockTimers(self: *LoopState) void {
-        if (Backend.capabilities.is_multi_threaded) {
-            self.timer_mutex.unlock();
-        }
+        self.timer_mutex.unlock();
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
