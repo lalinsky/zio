@@ -231,6 +231,15 @@ pub const Completion = struct {
     canceled: bool = false,
     canceled_by: ?*Cancel = null,
 
+    /// Loop this completion was submitted to (set by loop.add())
+    loop: ?*Loop = null,
+
+    /// Cross-thread cancellation state
+    cancel: struct {
+        next: ?*Completion = null,
+        requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    } = .{},
+
     /// Error result - null means success, error means failure.
     /// Stored here instead of in each operation type to simplify error handling.
     err: ?anyerror = null,
@@ -264,6 +273,9 @@ pub const Completion = struct {
         c.err = null;
         c.canceled = false;
         c.canceled_by = null;
+        c.loop = null;
+        c.cancel.next = null;
+        c.cancel.requested.store(false, .release);
     }
 
     pub fn call(c: *Completion, loop: *Loop) void {
@@ -364,7 +376,6 @@ pub const Async = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
     pending: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    loop: ?*Loop = null,
 
     pub const Error = Cancelable;
 
@@ -381,7 +392,7 @@ pub const Async = struct {
         if (was_pending == 0) {
             // Only notify loop if transitioning from not-pending to pending
             // If loop is not set (not actively waiting), this is a no-op
-            if (self.loop) |loop| {
+            if (self.c.loop) |loop| {
                 loop.wakeAsync();
             }
         }

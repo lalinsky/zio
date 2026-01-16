@@ -125,6 +125,7 @@ pub const LoopState = struct {
 
     pub const wake_loop: u32 = 1;
     pub const wake_async: u32 = 2;
+    pub const wake_cancel: u32 = 4;
 
     /// Called by backends when an I/O operation completes.
     /// Decrements inflight_io counter and marks the completion done.
@@ -225,6 +226,9 @@ pub const Loop = struct {
     max_wait: Duration = .fromSeconds(60),
     defer_callbacks: bool = true,
 
+    /// Cross-thread cancel queue (lock-free MPSC)
+    cancel_queue: std.atomic.Value(?*Completion) = std.atomic.Value(?*Completion).init(null),
+
     in_add: if (in_safe_mode) bool else void = if (in_safe_mode) false else {},
 
     const default_queue_size = 256;
@@ -308,6 +312,7 @@ pub const Loop = struct {
         self.state.lockTimers();
         defer self.state.unlockTimers();
         self.state.updateNow();
+        timer.c.loop = self;
         timer.delay = delay;
         self.state.setTimer(timer);
     }
@@ -426,6 +431,9 @@ pub const Loop = struct {
 
         std.debug.assert(completion.state == .new);
 
+        // Set the loop reference for cross-thread cancellation
+        completion.loop = self;
+
         if (completion.canceled) {
             // Directly mark it as canceled
             completion.setError(error.Canceled);
@@ -445,7 +453,6 @@ pub const Loop = struct {
             },
             .async => {
                 const async = completion.cast(Async);
-                async.loop = self;
                 async.c.state = .running;
                 self.state.active += 1;
 
@@ -570,7 +577,6 @@ pub const Loop = struct {
         const was_pending = async_handle.pending.swap(0, .acquire);
         if (was_pending != 0) {
             async_handle.c.setResult(.async, {});
-            async_handle.loop = null;
             return true;
         }
         return false;
