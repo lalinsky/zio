@@ -64,17 +64,29 @@ const log = std.log.scoped(.zio_poll);
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 poll_fds: std.ArrayList(net.pollfd) = .empty,
-waker: Waker,
+waker_read_fd: net.fd_t = undefined,
+waker_write_fd: net.fd_t = undefined,
 queue_size: u16,
 pending_changes: usize = 0,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
+
+    const waker_fds = switch (builtin.os.tag) {
+        .windows => try net.createLoopbackSocketPair(),
+        else => try posix.pipe(.{ .nonblocking = true, .cloexec = true }),
+    };
+
     self.* = .{
         .allocator = allocator,
-        .waker = undefined,
+        .waker_read_fd = waker_fds[0],
+        .waker_write_fd = waker_fds[1],
         .queue_size = queue_size,
     };
+    errdefer {
+        net.close(self.waker_read_fd);
+        net.close(self.waker_write_fd);
+    }
 
     try self.poll_fds.ensureTotalCapacity(self.allocator, queue_size);
     errdefer self.poll_fds.deinit(self.allocator);
@@ -82,23 +94,45 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     try self.poll_queue.ensureTotalCapacity(self.allocator, queue_size);
     errdefer self.poll_queue.deinit(self.allocator);
 
-    // Initialize Waker
-    try self.waker.init(self);
+    // Add waker read fd to poll_fds
+    try self.poll_fds.append(self.allocator, .{
+        .fd = self.waker_read_fd,
+        .events = net.POLL.IN,
+        .revents = 0,
+    });
 }
 
 pub fn deinit(self: *Self) void {
-    self.waker.deinit();
+    net.close(self.waker_read_fd);
+    net.close(self.waker_write_fd);
     self.poll_queue.deinit(self.allocator);
     self.poll_fds.deinit(self.allocator);
 }
 
-pub fn wake(self: *Self) void {
-    self.waker.notify();
+pub fn wake(self: *Self, state: *LoopState) void {
+    _ = state;
+    const byte: [1]u8 = .{1};
+    switch (builtin.os.tag) {
+        .windows => {
+            _ = net.send(self.waker_write_fd, &[_]net.iovec_const{net.iovecConstFromSlice(&byte)}, .{}) catch {};
+        },
+        else => {
+            _ = fs.write(self.waker_write_fd, &byte) catch {};
+        },
+    }
 }
 
-pub fn wakeFromAnywhere(self: *Self) void {
-    // pipe write is async-signal-safe on POSIX, so we can use the same mechanism
-    self.waker.notify();
+fn drainWaker(self: *Self) void {
+    var buf: [64]u8 = undefined;
+    switch (builtin.os.tag) {
+        .windows => {
+            var bufs: [1]net.iovec = .{net.iovecFromSlice(&buf)};
+            _ = net.recv(self.waker_read_fd, &bufs, .{}) catch {};
+        },
+        else => {
+            _ = fs.read(self.waker_read_fd, &buf) catch {};
+        },
+    }
 }
 
 fn getEvents(completion: *Completion) @FieldType(net.pollfd, "events") {
@@ -396,9 +430,8 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
         const fd = item.fd;
 
         // Check if this is the async wakeup fd
-        if (fd == self.waker.read_fd) {
-            state.loop.processAsyncHandles();
-            self.waker.drain();
+        if (fd == self.waker_read_fd) {
+            self.drainWaker();
             i += 1;
             continue;
         }
@@ -630,87 +663,3 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
         },
     }
 }
-
-/// Async notification implementation using pipe (POSIX) or loopback socket (Windows)
-pub const Waker = struct {
-    read_fd: net.fd_t = undefined,
-    write_fd: net.fd_t = undefined,
-    backend: *Self,
-
-    pub fn init(self: *Waker, backend: *Self) !void {
-        net.ensureWSAInitialized();
-
-        switch (builtin.os.tag) {
-            .windows => {
-                // Windows: use loopback socket pair
-                const pair = try net.createLoopbackSocketPair();
-                self.* = .{
-                    .read_fd = pair[0],
-                    .write_fd = pair[1],
-                    .backend = backend,
-                };
-            },
-            else => {
-                // POSIX: use pipe
-                const pipefd = try posix.pipe(.{ .nonblocking = true, .cloexec = true });
-                self.* = .{
-                    .read_fd = pipefd[0],
-                    .write_fd = pipefd[1],
-                    .backend = backend,
-                };
-            },
-        }
-        errdefer self.deinit();
-
-        // Add read fd to poll_fds
-        try backend.poll_fds.append(backend.allocator, .{
-            .fd = self.read_fd,
-            .events = net.POLL.IN,
-            .revents = 0,
-        });
-    }
-
-    pub fn deinit(self: *Waker) void {
-        // Remove from poll_fds by finding its index
-        for (self.backend.poll_fds.items, 0..) |pfd, i| {
-            if (pfd.fd == self.read_fd) {
-                _ = self.backend.poll_fds.swapRemove(i);
-                break;
-            }
-        }
-
-        net.close(self.read_fd);
-        net.close(self.write_fd);
-    }
-
-    /// Notify the event loop (thread-safe)
-    pub fn notify(self: *Waker) void {
-        const byte: [1]u8 = .{1};
-        switch (builtin.os.tag) {
-            .windows => {
-                _ = net.send(self.write_fd, &[_]net.iovec_const{net.iovecConstFromSlice(&byte)}, .{}) catch |err| {
-                    log.err("Failed to send to wakeup socket: {}", .{err});
-                };
-            },
-            else => {
-                _ = fs.write(self.write_fd, &byte) catch |err| {
-                    log.err("Failed to write to wakeup pipe: {}", .{err});
-                };
-            },
-        }
-    }
-
-    /// Drain the pipe/socket (called by event loop when POLLIN is ready)
-    pub fn drain(self: *Waker) void {
-        var buf: [64]u8 = undefined;
-        switch (builtin.os.tag) {
-            .windows => {
-                var bufs: [1]net.iovec = .{net.iovecFromSlice(&buf)};
-                _ = net.recv(self.read_fd, &bufs, .{}) catch {};
-            },
-            else => {
-                _ = fs.read(self.read_fd, &buf) catch {};
-            },
-        }
-    }
-};

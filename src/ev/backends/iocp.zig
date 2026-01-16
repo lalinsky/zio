@@ -317,7 +317,8 @@ fn wakeAPC(dwParam: windows.ULONG_PTR) callconv(.winapi) void {
     // No-op - just waking up the thread
 }
 
-pub fn wake(self: *Self) void {
+pub fn wake(self: *Self, state: *LoopState) void {
+    _ = state;
     // Queue an APC to wake the thread
     const result = windows.QueueUserAPC(wakeAPC, self.thread_handle, 0);
     if (result == 0) {
@@ -325,11 +326,6 @@ pub fn wake(self: *Self) void {
     } else {
         log.debug("QueueUserAPC succeeded", .{});
     }
-}
-
-pub fn wakeFromAnywhere(self: *Self) void {
-    // Same as wake() - QueueUserAPC is thread-safe
-    self.wake();
 }
 
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
@@ -1484,8 +1480,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout_ms: u64) !bool {
             },
             WAIT_IO_COMPLETION => {
                 log.debug("poll() woken by APC", .{});
-                // Process async handles that triggered the wake
-                state.loop.processAsyncHandles();
                 return false; // Woken by APC (wake() call)
             },
             else => {

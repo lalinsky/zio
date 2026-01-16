@@ -109,6 +109,8 @@ pub const LoopState = struct {
     /// I/O operations submitted to backend awaiting completion
     inflight_io: usize = 0,
 
+    wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
     now_ms: u64 = 0,
     timers: TimerHeap = .{ .context = {} },
     timer_mutex: if (Backend.capabilities.is_multi_threaded) std.Thread.Mutex else void =
@@ -118,6 +120,9 @@ pub const LoopState = struct {
 
     completions: Queue(Completion) = .{},
     work_completions: AtomicStack(Completion) = .{},
+
+    pub const wake_loop: u32 = 1;
+    pub const wake_async: u32 = 2;
 
     /// Called by backends when an I/O operation completes.
     /// Decrements inflight_io counter and marks the completion done.
@@ -282,12 +287,18 @@ pub const Loop = struct {
 
     /// Wake up the loop from another thread (thread-safe)
     pub fn wake(self: *Loop) void {
-        self.backend.wake();
+        // If we're the first to request a wake since the last poll, do the syscall.
+        // Subsequent wakers see true and skip - the syscall is already pending.
+        if (self.state.wake_requested.fetchOr(LoopState.wake_loop, .acq_rel) == 0) {
+            self.backend.wake(&self.state);
+        }
     }
 
-    /// Wake up the loop from anywhere, including signal handlers (async-signal-safe)
-    pub fn wakeFromAnywhere(self: *Loop) void {
-        self.backend.wakeFromAnywhere();
+    /// Wake up the loop to process async handles (thread-safe)
+    pub fn wakeAsync(self: *Loop) void {
+        if (self.state.wake_requested.fetchOr(LoopState.wake_async, .acq_rel) == 0) {
+            self.backend.wake(&self.state);
+        }
     }
 
     /// Set or reset a timer with a new delay (works immediately, no completion required)
@@ -710,7 +721,13 @@ pub const Loop = struct {
         // Skip backend poll in no_wait mode if there's nothing to retrieve.
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.state.inflight_io > 0;
-        const timed_out = if (should_poll) try self.backend.poll(&self.state, timeout_ms) else false;
+        const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
+        const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) 0 else timeout_ms) else false;
+
+        // Process async handles if the async bit was set
+        if (wake_flags & LoopState.wake_async != 0) {
+            self.processAsyncHandles();
+        }
 
         // Process any work completions from thread pool
         self.processCompletions();
