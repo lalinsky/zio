@@ -162,9 +162,9 @@ test "Mutex basic lock/unlock" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
     defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
     defer task2.cancel(runtime);
 
     try runtime.run();

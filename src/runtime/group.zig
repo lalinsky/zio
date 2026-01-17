@@ -207,7 +207,7 @@ pub fn groupSpawnTask(
     context_alignment: std.mem.Alignment,
     start: *const fn (context: *const anyopaque) Cancelable!void,
 ) !void {
-    _ = try spawnTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, .{}, group);
+    _ = try spawnTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, group);
 }
 
 /// Spawn a blocking task in the group with raw context bytes and start function.
@@ -280,7 +280,7 @@ test "Group: spawn" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt});
     try handle.join(rt);
 }
 
@@ -311,7 +311,7 @@ test "Group: wait for multiple tasks" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt});
     try handle.join(rt);
 }
 
@@ -355,10 +355,10 @@ test "Group: cancellation while waiting" {
             canceled = 0;
 
             // Spawn the group task
-            var group_handle = try runtime.spawn(groupTask, .{runtime}, .{});
+            var group_handle = try runtime.spawn(groupTask, .{runtime});
 
             // Spawn a task that will cancel the group task
-            var canceller = try runtime.spawn(cancellerTask, .{ runtime, &group_handle }, .{});
+            var canceller = try runtime.spawn(cancellerTask, .{ runtime, &group_handle });
             defer canceller.cancel(runtime);
 
             // Wait for group task to complete (should be canceled)
@@ -370,6 +370,6 @@ test "Group: cancellation while waiting" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.asyncTask, .{rt}, .{});
+    var handle = try rt.spawn(TestContext.asyncTask, .{rt});
     try handle.join(rt);
 }

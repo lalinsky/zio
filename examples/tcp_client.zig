@@ -43,7 +43,7 @@ pub fn main() !void {
     });
     defer rt.deinit();
 
-    var task = try rt.spawn(clientTask, .{rt}, .{});
+    var task = try rt.spawn(clientTask, .{rt});
     defer task.cancel(rt);
 
     try rt.run();

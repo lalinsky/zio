@@ -36,13 +36,13 @@ pub fn main() !void {
     };
 
     // Spawn multiple tasks that increment shared counter
-    var task0 = try rt.spawn(incrementTask, .{ rt, &shared_data, 0 }, .{});
+    var task0 = try rt.spawn(incrementTask, .{ rt, &shared_data, 0 });
     defer task0.cancel(rt);
-    var task1 = try rt.spawn(incrementTask, .{ rt, &shared_data, 1 }, .{});
+    var task1 = try rt.spawn(incrementTask, .{ rt, &shared_data, 1 });
     defer task1.cancel(rt);
-    var task2 = try rt.spawn(incrementTask, .{ rt, &shared_data, 2 }, .{});
+    var task2 = try rt.spawn(incrementTask, .{ rt, &shared_data, 2 });
     defer task2.cancel(rt);
-    var task3 = try rt.spawn(incrementTask, .{ rt, &shared_data, 3 }, .{});
+    var task3 = try rt.spawn(incrementTask, .{ rt, &shared_data, 3 });
     defer task3.cancel(rt);
 
     try rt.run();

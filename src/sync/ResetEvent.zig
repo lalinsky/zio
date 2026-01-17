@@ -38,9 +38,9 @@
 //!
 //! var event = zio.ResetEvent.init;
 //!
-//! var task1 = try runtime.spawn(worker, .{runtime, &event, 1 }, .{});
-//! var task2 = try runtime.spawn(worker, .{runtime, &event, 2 }, .{});
-//! var task3 = try runtime.spawn(coordinator, .{runtime, &event }, .{});
+//! var task1 = try runtime.spawn(worker, .{runtime, &event, 1 });
+//! var task2 = try runtime.spawn(worker, .{runtime, &event, 2 });
+//! var task3 = try runtime.spawn(coordinator, .{runtime, &event });
 //! ```
 
 const std = @import("std");
@@ -288,9 +288,9 @@ test "ResetEvent wait/set signaling" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_finished }, .{});
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_finished });
     defer waiter_task.cancel(runtime);
-    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
+    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event });
     defer setter_task.cancel(runtime);
 
     try runtime.run();
@@ -336,13 +336,13 @@ test "ResetEvent multiple waiters broadcast" {
         }
     };
 
-    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
+    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
     defer waiter1.cancel(runtime);
-    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
+    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
     defer waiter2.cancel(runtime);
-    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count }, .{});
+    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
     defer waiter3.cancel(runtime);
-    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event }, .{});
+    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event });
     defer setter_task.cancel(runtime);
 
     try runtime.run();
@@ -391,7 +391,7 @@ test "ResetEvent: cancel waiting task" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &started }, .{});
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &started });
     defer waiter_task.cancel(runtime);
 
     // Wait until waiter has actually started and is blocked
@@ -420,7 +420,7 @@ test "ResetEvent: select" {
         fn asyncTask(rt: *Runtime) !void {
             var reset_event = ResetEvent.init;
 
-            var task = try rt.spawn(setterTask, .{ rt, &reset_event }, .{});
+            var task = try rt.spawn(setterTask, .{ rt, &reset_event });
             defer task.cancel(rt);
 
             const result = try select(rt, .{ .event = &reset_event, .task = &task });
@@ -431,6 +431,6 @@ test "ResetEvent: select" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }

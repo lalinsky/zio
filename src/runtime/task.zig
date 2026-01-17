@@ -16,11 +16,6 @@ const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
 
-/// Options for creating a task
-pub const CreateOptions = struct {
-    pinned: bool = false,
-};
-
 pub const Closure = struct {
     start: Start,
     result_len: u12,
@@ -149,9 +144,6 @@ pub const AnyTask = struct {
     // Number of active cancellation shields
     shield_count: u8 = 0,
 
-    // Number of times this task was pinned to the current executor
-    pin_count: u8 = 0,
-
     // Closure for the task
     closure: Closure,
 
@@ -204,13 +196,6 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
-    /// Check if this task can be migrated to a different executor.
-    /// Returns false if the task is pinned or canceled, true otherwise.
-    pub inline fn canMigrate(self: *const AnyTask) bool {
-        if (self.pin_count > 0) return false;
-        return true;
-    }
-
     /// Check if there are pending cancellation errors to consume.
     /// If pending_errors > 0 and not shielded, decrements the count and returns error.Canceled.
     /// Otherwise returns void (no error).
@@ -246,7 +231,6 @@ pub const AnyTask = struct {
         context: []const u8,
         context_alignment: std.mem.Alignment,
         start: Closure.Start,
-        options: CreateOptions,
     ) !*AnyTask {
         // Allocate task with closure
         const alloc_result = try Closure.alloc(
@@ -273,7 +257,6 @@ pub const AnyTask = struct {
                 .parent_context_ptr = &executor.main_task.coro.context,
             },
             .closure = alloc_result.closure,
-            .pin_count = if (options.pinned) 1 else 0,
         };
 
         // Acquire stack from pool and initialize context
@@ -319,7 +302,6 @@ pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
 }
 
 const getNextExecutor = @import("../runtime.zig").getNextExecutor;
-const SpawnOptions = @import("../runtime.zig").SpawnOptions;
 
 /// Register a task with the runtime and schedule it for execution.
 /// Increments its reference count, adds the task to the runtime's task list,
@@ -353,7 +335,6 @@ pub fn spawnTask(
     context: []const u8,
     context_alignment: std.mem.Alignment,
     start: Closure.Start,
-    options: SpawnOptions,
     group: ?*Group,
 ) !*AnyTask {
     const executor = try getNextExecutor(rt);
@@ -365,7 +346,6 @@ pub fn spawnTask(
         context,
         context_alignment,
         start,
-        .{ .pinned = options.pinned },
     );
     errdefer task.destroy(rt);
 

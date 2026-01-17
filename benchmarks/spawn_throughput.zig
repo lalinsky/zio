@@ -25,7 +25,7 @@ pub fn main() !void {
     var timer = try std.time.Timer.start();
 
     for (0..NUM_SPAWNS) |_| {
-        var t = try runtime.spawn(task, .{runtime}, .{});
+        var t = try runtime.spawn(task, .{runtime});
         t.detach(runtime);
     }
 

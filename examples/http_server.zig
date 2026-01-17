@@ -75,7 +75,7 @@ fn serverTask(rt: *zio.Runtime) !void {
         const stream = try server.accept(rt);
         errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
+        var task = try rt.spawn(handleClient, .{ rt, stream });
         task.detach(rt);
     }
 }
@@ -88,6 +88,6 @@ pub fn main() !void {
     var rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var handle = try rt.spawn(serverTask, .{rt}, .{});
+    var handle = try rt.spawn(serverTask, .{rt});
     try handle.join(rt);
 }

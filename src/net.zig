@@ -1256,10 +1256,10 @@ test "tcpConnectToAddress: basic" {
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch });
     defer server_task.cancel(runtime);
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
     defer client_task.cancel(runtime);
 
     try runtime.run();
@@ -1316,10 +1316,10 @@ test "tcpConnectToHost: basic" {
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch }, .{});
+    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch });
     defer server_task.cancel(runtime);
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch }, .{});
+    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
     defer client_task.cancel(runtime);
 
     try runtime.run();
@@ -1631,10 +1631,10 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            var server_task = try rt.spawn(serverFn, .{ rt, server });
             defer server_task.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner }, .{});
+            var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner });
             defer client_task.cancel(rt);
 
             // TODO use TaskGroup
@@ -1672,7 +1672,7 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer });
     try handle.join(runtime);
 }
 
@@ -1682,10 +1682,10 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
             const socket = try server_addr_inner.bind(rt, .{});
             defer socket.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, socket }, .{});
+            var server_task = try rt.spawn(serverFn, .{ rt, socket });
             defer server_task.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, socket, client_addr_inner }, .{});
+            var client_task = try rt.spawn(clientFn, .{ rt, socket, client_addr_inner });
             defer client_task.cancel(rt);
 
             try server_task.join(rt);
@@ -1719,7 +1719,7 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr });
     try handle.join(runtime);
 }
 
@@ -1729,10 +1729,10 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, server }, .{});
+            var server_task = try rt.spawn(serverFn, .{ rt, server });
             defer server_task.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, server }, .{});
+            var client_task = try rt.spawn(clientFn, .{ rt, server });
             defer client_task.cancel(rt);
 
             // TODO use TaskGroup
@@ -1763,7 +1763,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options }, .{});
+    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options });
     try handle.join(runtime);
 }
 

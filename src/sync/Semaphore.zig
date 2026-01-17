@@ -33,11 +33,11 @@
 //! // Allow up to 3 concurrent workers
 //! var semaphore = zio.Semaphore{ .permits = 3 };
 //!
-//! var task1 = try runtime.spawn(worker, .{runtime, &semaphore, 1 }, .{});
-//! var task2 = try runtime.spawn(worker, .{runtime, &semaphore, 2 }, .{});
-//! var task3 = try runtime.spawn(worker, .{runtime, &semaphore, 3 }, .{});
-//! var task4 = try runtime.spawn(worker, .{runtime, &semaphore, 4 }, .{});
-//! var task5 = try runtime.spawn(worker, .{runtime, &semaphore, 5 }, .{});
+//! var task1 = try runtime.spawn(worker, .{runtime, &semaphore, 1 });
+//! var task2 = try runtime.spawn(worker, .{runtime, &semaphore, 2 });
+//! var task3 = try runtime.spawn(worker, .{runtime, &semaphore, 3 });
+//! var task4 = try runtime.spawn(worker, .{runtime, &semaphore, 4 });
+//! var task5 = try runtime.spawn(worker, .{runtime, &semaphore, 5 });
 //! ```
 
 const std = @import("std");
@@ -175,11 +175,11 @@ test "Semaphore: basic wait/post" {
     };
 
     var n: i32 = 0;
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n });
     defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n });
     defer task2.cancel(runtime);
-    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n }, .{});
+    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &sem, &n });
     defer task3.cancel(runtime);
 
     try runtime.run();
@@ -206,7 +206,7 @@ test "Semaphore: timedWait timeout" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &timed_out }, .{});
+    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &timed_out });
     handle.join(runtime);
 
     try testing.expect(timed_out);
@@ -234,9 +234,9 @@ test "Semaphore: timedWait success" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &got_permit }, .{});
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &got_permit });
     defer waiter_task.cancel(runtime);
-    var poster_task = try runtime.spawn(TestFn.poster, .{ runtime, &sem }, .{});
+    var poster_task = try runtime.spawn(TestFn.poster, .{ runtime, &sem });
     defer poster_task.cancel(runtime);
 
     try runtime.run();
@@ -260,11 +260,11 @@ test "Semaphore: multiple permits" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &sem }, .{});
+    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &sem });
     defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &sem }, .{});
+    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &sem });
     defer task2.cancel(runtime);
-    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &sem }, .{});
+    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &sem });
     defer task3.cancel(runtime);
 
     try runtime.run();

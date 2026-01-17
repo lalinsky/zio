@@ -70,7 +70,7 @@ pub fn main() !void {
     var rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var tls_task = try rt.spawn(runTlsTask, .{rt}, .{});
+    var tls_task = try rt.spawn(runTlsTask, .{rt});
     defer tls_task.cancel(rt);
 
     try rt.run();
