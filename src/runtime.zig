@@ -58,14 +58,6 @@ pub const ExecutorId = enum(usize) {
     }
 };
 
-/// Options for spawning a coroutine
-pub const SpawnOptions = struct {
-    /// Pin task to its home executor (prevents cross-thread migration).
-    /// Pinned tasks always run on their original executor, even when woken from other threads.
-    /// Useful for tasks with executor-specific state or when thread affinity is desired.
-    pinned: bool = false,
-};
-
 // Runtime configuration options
 pub const RuntimeOptions = struct {
     thread_pool: ev.ThreadPool.Options = .{},
@@ -112,7 +104,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example:
         /// ```zig
-        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// var handle = try rt.spawn(myTask, .{});
         /// const result = handle.join(rt);
         /// ```
         pub fn join(self: *Self, rt: *Runtime) T {
@@ -169,7 +161,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example:
         /// ```zig
-        /// var handle = try rt.spawn(myTask, .{}, .{});
+        /// var handle = try rt.spawn(myTask, .{});
         /// defer handle.cancel(rt);
         /// // Do some other work that could return early
         /// const result = handle.join(rt);
@@ -201,7 +193,7 @@ pub fn JoinHandle(comptime T: type) type {
         ///
         /// Example:
         /// ```zig
-        /// var handle = try rt.spawn(backgroundTask, .{}, .{});
+        /// var handle = try rt.spawn(backgroundTask, .{});
         /// handle.detach(rt); // Task runs independently
         /// ```
         pub fn detach(self: *Self, rt: *Runtime) void {
@@ -536,25 +528,6 @@ pub const Executor = struct {
         try self.getCurrentTask().checkCancel(self.runtime);
     }
 
-    /// Pin the current task to its home executor (prevents cross-thread migration).
-    /// While pinned, the task will always run on its original executor, even when
-    /// woken from other threads. Useful for tasks with executor-specific state.
-    /// Must be paired with endPin().
-    pub fn beginPin(self: *Executor) void {
-        const current_coro = self.current_coroutine orelse unreachable;
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        current_task.pin_count += 1;
-    }
-
-    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
-    /// Must be paired with beginPin().
-    pub fn endPin(self: *Executor) void {
-        const current_coro = self.current_coroutine orelse unreachable;
-        const current_task = AnyTask.fromCoroutine(current_coro);
-        std.debug.assert(current_task.pin_count > 0);
-        current_task.pin_count -= 1;
-    }
-
     pub fn getCurrentTask(self: *Executor) *AnyTask {
         if (self.current_coroutine) |coro| {
             return AnyTask.fromCoroutine(coro);
@@ -790,7 +763,7 @@ pub const Executor = struct {
 
         // Migration is allowed only when mode == .maybe_remote
         // (I/O callbacks, timeouts, cancellation use .local mode and don't migrate)
-        if (old_state == .waiting and mode == .maybe_remote and task.canMigrate()) {
+        if (old_state == .waiting and mode == .maybe_remote) {
             const current_exec = Executor.current orelse {
                 self.scheduleTaskRemote(task);
                 return;
@@ -938,7 +911,7 @@ pub const Runtime = struct {
     }
 
     // High-level public API
-    pub fn spawn(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), options: SpawnOptions) !JoinHandle(meta.ReturnType(func)) {
+    pub fn spawn(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
         const Args = @TypeOf(args);
 
@@ -957,7 +930,6 @@ pub const Runtime = struct {
             std.mem.asBytes(&args),
             .fromByteUnits(@alignOf(Args)),
             .{ .regular = &Wrapper.start },
-            options,
             null,
         );
 
@@ -1078,28 +1050,6 @@ pub const Runtime = struct {
         _ = self;
         const executor = Executor.current orelse return;
         executor.endShield();
-    }
-
-    /// Pin the current task to its home executor (prevents cross-thread migration).
-    /// While pinned, the task will always run on its original executor, even when
-    /// woken from other threads. Useful for tasks with executor-specific state.
-    /// Must be paired with endPin().
-    /// No-op if not called from within a coroutine.
-    pub fn beginPin(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
-        executor.beginPin();
-    }
-
-    /// Unpin the current task (re-enables cross-thread migration if pin_count reaches 0).
-    /// Must be paired with beginPin().
-    /// No-op if not called from within a coroutine.
-    pub fn endPin(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.current orelse return;
-        if (executor.current_coroutine == null) return;
-        executor.endPin();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
@@ -1269,7 +1219,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
 
     // Test casting success case
     {
-        var handle = try runtime.spawn(taskSuccess, .{}, .{});
+        var handle = try runtime.spawn(taskSuccess, .{});
         var casted = handle.cast(anyerror!i32);
         defer casted.cancel(runtime);
 
@@ -1279,7 +1229,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
 
     // Test casting error case
     {
-        var handle = try runtime.spawn(taskError, .{}, .{});
+        var handle = try runtime.spawn(taskError, .{});
         var casted = handle.cast(anyerror!i32);
         defer casted.cancel(runtime);
 
@@ -1308,7 +1258,7 @@ test "Runtime: implicit run" {
         }
     };
 
-    var task = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var task = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try task.join(runtime);
 }
 
@@ -1337,7 +1287,7 @@ test "runtime: basic sleep" {
         }
     };
 
-    var task = try runtime.spawn(Sleeper.run, .{runtime}, .{});
+    var task = try runtime.spawn(Sleeper.run, .{runtime});
     task.detach(runtime);
 
     try runtime.run();
@@ -1377,7 +1327,7 @@ test "runtime: sleep is cancelable" {
 
     var timer = try std.time.Timer.start();
 
-    var handle = try runtime.spawn(sleepingTask, .{runtime}, .{});
+    var handle = try runtime.spawn(sleepingTask, .{runtime});
     defer handle.cancel(runtime);
 
     // Cancel the sleeping task
@@ -1407,7 +1357,7 @@ test "runtime: yield from main allows tasks to run" {
         }
     }.call;
 
-    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter }, .{});
+    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter });
     defer handle.cancel(runtime);
 
     // Instead of join(), use yield() from main to let the task run
@@ -1438,7 +1388,7 @@ test "runtime: sleep from main allows tasks to run" {
         }
     }.call;
 
-    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter }, .{});
+    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter });
     defer handle.cancel(runtime);
 
     // Instead of join(), use sleep() from main to let the task run

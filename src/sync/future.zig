@@ -158,7 +158,7 @@ test "Future: basic set and get" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
@@ -186,11 +186,11 @@ test "Future: await from coroutine" {
             var future = Future(i32).init;
 
             // Spawn setter coroutine
-            var setter_handle = try rt.spawn(setterTask, .{ rt, &future }, .{});
+            var setter_handle = try rt.spawn(setterTask, .{ rt, &future });
             defer setter_handle.cancel(rt);
 
             // Spawn getter coroutine
-            var getter_handle = try rt.spawn(getterTask, .{ rt, &future }, .{});
+            var getter_handle = try rt.spawn(getterTask, .{ rt, &future });
             defer getter_handle.cancel(rt);
 
             const result = try getter_handle.join(rt);
@@ -198,7 +198,7 @@ test "Future: await from coroutine" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
 
@@ -225,15 +225,15 @@ test "Future: multiple waiters" {
             var future = Future(i32).init;
 
             // Spawn multiple waiters
-            var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
+            var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) });
             defer waiter1.cancel(rt);
-            var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
+            var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) });
             defer waiter2.cancel(rt);
-            var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) }, .{});
+            var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) });
             defer waiter3.cancel(rt);
 
             // Spawn setter
-            var setter = try rt.spawn(setterTask, .{ rt, &future }, .{});
+            var setter = try rt.spawn(setterTask, .{ rt, &future });
             defer setter.cancel(rt);
 
             // Wait for all to complete
@@ -244,6 +244,6 @@ test "Future: multiple waiters" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime}, .{});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }

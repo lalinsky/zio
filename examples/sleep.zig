@@ -19,6 +19,6 @@ pub fn main() !void {
     var rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var task = try rt.spawn(sleepTask, .{rt}, .{});
+    var task = try rt.spawn(sleepTask, .{rt});
     try task.join(rt);
 }

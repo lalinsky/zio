@@ -34,7 +34,7 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
         var stream = try server.accept(rt);
         errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
+        var task = try rt.spawn(handleClient, .{ rt, stream });
         task.detach(rt);
     }
 
@@ -85,7 +85,7 @@ fn benchmarkTask(
     const total_messages = NUM_CLIENTS * MESSAGES_PER_CLIENT;
 
     // Spawn server
-    var server = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done }, .{});
+    var server = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done });
     defer server.cancel(rt);
 
     // Wait for server to be ready
@@ -98,7 +98,7 @@ fn benchmarkTask(
     defer allocator.free(client_tasks);
 
     for (client_tasks) |*task| {
-        const handle = try rt.spawn(clientTask, .{ rt, &server_ready }, .{});
+        const handle = try rt.spawn(clientTask, .{ rt, &server_ready });
         task.* = handle.cast(anyerror!void);
     }
 
@@ -141,6 +141,6 @@ pub fn main() !void {
     var runtime = try zio.Runtime.init(allocator, .{ .num_executors = 0 });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(benchmarkTask, .{ runtime, allocator }, .{});
+    var handle = try runtime.spawn(benchmarkTask, .{ runtime, allocator });
     try handle.join(runtime);
 }

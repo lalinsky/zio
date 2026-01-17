@@ -175,7 +175,7 @@ test "AutoCancel: user cancel has priority over timeout" {
         }
 
         fn main(rt: *Runtime) !void {
-            var handle = try rt.spawn(worker, .{rt}, .{});
+            var handle = try rt.spawn(worker, .{rt});
 
             // Let worker start and set timeout
             try rt.sleep(.fromMilliseconds(5));
@@ -191,7 +191,7 @@ test "AutoCancel: user cancel has priority over timeout" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var handle = try rt.spawn(Test.main, .{rt}, .{});
+    var handle = try rt.spawn(Test.main, .{rt});
     try handle.join(rt);
 }
 
@@ -277,7 +277,7 @@ test "AutoCancel: cancels spawned task via join" {
         }
 
         fn main(rt: *Runtime) !void {
-            var handle = try rt.spawn(blocker, .{rt}, .{});
+            var handle = try rt.spawn(blocker, .{rt});
             defer handle.cancel(rt);
 
             var timeout = AutoCancel.init;
@@ -297,6 +297,6 @@ test "AutoCancel: cancels spawned task via join" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var handle = try rt.spawn(Test.main, .{rt}, .{});
+    var handle = try rt.spawn(Test.main, .{rt});
     try handle.join(rt);
 }
