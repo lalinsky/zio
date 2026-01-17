@@ -19,7 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         zig_version: ['0.15.2']
-        optimize: ['Debug', 'ReleaseSafe']
         config:
           - { os: ubuntu-24.04, target: native, backends: 'io_uring epoll poll' }
           - { os: ubuntu-24.04-arm, target: native, backends: 'io_uring epoll poll' }
@@ -46,7 +45,7 @@ jobs:
       run: |
         for backend in ${{ matrix.config.backends }}; do
           echo "Testing with backend: $backend"
-          zig build test -Dtest-filter="ev." -Doptimize=${{ matrix.optimize }} -Dbackend=$backend --summary all \
+          zig build test -Dtest-filter="ev." -Dbackend=$backend --summary all \
             ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
         done
       timeout-minutes: 10
@@ -57,7 +56,7 @@ jobs:
       run: |
         for backend in ${{ matrix.config.backends }}; do
           echo "Building with backend: $backend"
-          zig build test -Dtest-filter="ev." -Doptimize=${{ matrix.optimize }} -Dbackend=$backend -Dtarget=${{ matrix.config.target }} -Demit-test-bin
+          zig build test -Dtest-filter="ev." -Dbackend=$backend -Dtarget=${{ matrix.config.target }} -Demit-test-bin
           cp zig-out/bin/test zig-out/bin/test-$backend
         done
       timeout-minutes: 5
