@@ -29,6 +29,8 @@ jobs:
     - name: Build tests
       run: zig build test --summary all
       timeout-minutes: 5
+      env:
+        TEST_VERBOSE: true
 
     - name: Build examples
       run: zig build examples

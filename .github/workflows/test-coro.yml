@@ -56,6 +56,8 @@ jobs:
         ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
         ${{ matrix.config.qemu && '-fqemu' || '' }}
       timeout-minutes: 10
+      env:
+        TEST_VERBOSE: true
 
     - name: Build for VM
       if: matrix.config.vm
