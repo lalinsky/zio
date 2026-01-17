@@ -355,32 +355,61 @@ test "cancel: work after completion is no-op" {
 }
 
 test "cancel: work before run" {
+    // Use events to ensure the work is queued but not running when we cancel.
+    var started_event: std.Thread.ResetEvent = .{};
+    var blocker_event: std.Thread.ResetEvent = .{};
+
     var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
         .max_threads = 1,
     });
     defer thread_pool.deinit();
+    defer blocker_event.set(); // Ensure thread unblocks before deinit
 
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
 
+    const BlockingFn = struct {
+        started: *std.Thread.ResetEvent,
+        blocker: *std.Thread.ResetEvent,
+
+        pub fn main(work: *Work) void {
+            const self: *@This() = @ptrCast(@alignCast(work.userdata));
+            self.started.set();
+            self.blocker.wait();
+        }
+    };
+
     const TestFn = struct {
         called: bool = false,
         pub fn main(work: *Work) void {
-            var self: *@This() = @ptrCast(@alignCast(work.userdata));
+            const self: *@This() = @ptrCast(@alignCast(work.userdata));
             self.called = true;
         }
     };
 
+    var blocking_ctx: BlockingFn = .{ .started = &started_event, .blocker = &blocker_event };
+    var blocking_work = Work.init(&BlockingFn.main, @ptrCast(&blocking_ctx));
+
     var test_fn: TestFn = .{};
     var work = Work.init(&TestFn.main, @ptrCast(&test_fn));
 
+    // Submit blocking work first to occupy the only thread
+    loop.add(&blocking_work.c);
+
+    // Wait for blocking work to start running
+    started_event.wait();
+
+    // Submit second work - it will be queued since thread is busy
     loop.add(&work.c);
 
-    // Cancel before running
+    // Cancel before running (work is guaranteed to be queued, not running)
     loop.cancel(&work.c);
+
+    // Unblock the first work so the loop can complete
+    blocker_event.set();
 
     try loop.run(.until_done);
 
@@ -390,33 +419,62 @@ test "cancel: work before run" {
 }
 
 test "cancel: work double cancel is idempotent" {
+    // Use events to ensure the work is queued but not running when we cancel.
+    var started_event: std.Thread.ResetEvent = .{};
+    var blocker_event: std.Thread.ResetEvent = .{};
+
     var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 1,
         .max_threads = 1,
     });
     defer thread_pool.deinit();
+    defer blocker_event.set(); // Ensure thread unblocks before deinit
 
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
 
+    const BlockingFn = struct {
+        started: *std.Thread.ResetEvent,
+        blocker: *std.Thread.ResetEvent,
+
+        pub fn main(work: *Work) void {
+            const self: *@This() = @ptrCast(@alignCast(work.userdata));
+            self.started.set();
+            self.blocker.wait();
+        }
+    };
+
     const TestFn = struct {
         called: bool = false,
         pub fn main(work: *Work) void {
-            var self: *@This() = @ptrCast(@alignCast(work.userdata));
+            const self: *@This() = @ptrCast(@alignCast(work.userdata));
             self.called = true;
         }
     };
 
+    var blocking_ctx: BlockingFn = .{ .started = &started_event, .blocker = &blocker_event };
+    var blocking_work = Work.init(&BlockingFn.main, @ptrCast(&blocking_ctx));
+
     var test_fn: TestFn = .{};
     var work = Work.init(&TestFn.main, @ptrCast(&test_fn));
 
+    // Submit blocking work first to occupy the only thread
+    loop.add(&blocking_work.c);
+
+    // Wait for blocking work to start running
+    started_event.wait();
+
+    // Submit second work - it will be queued since thread is busy
     loop.add(&work.c);
 
     // Both cancels succeed (idempotent)
     loop.cancel(&work.c);
     loop.cancel(&work.c);
+
+    // Unblock the first work so the loop can complete
+    blocker_event.set();
 
     try loop.run(.until_done);
     try std.testing.expectError(error.Canceled, work.getResult());
