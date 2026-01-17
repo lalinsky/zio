@@ -6,6 +6,7 @@ IFS=$'\n\t'
 # Default values
 CI_MODE=false
 FULL_MODE=false
+VERBOSE=false
 TEST_FILTER=""
 TARGET=""
 BACKEND=""
@@ -14,7 +15,7 @@ USE_QEMU=false
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--ci] [--full]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--ci] [--full] [--verbose]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --full)
             FULL_MODE=true
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=true
             shift
             ;;
         *)
@@ -86,6 +91,9 @@ if [ "$USE_WINE" = true ]; then
 fi
 if [ "$USE_QEMU" = true ]; then
     BUILD_ARGS="$BUILD_ARGS -fqemu"
+fi
+if [ "$VERBOSE" = true ]; then
+    export TEST_VERBOSE=true
 fi
 eval zig build $BUILD_ARGS --summary all
 
