@@ -26,8 +26,6 @@ const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const TaskPool = @import("runtime/task.zig").TaskPool;
-const ResumeMode = @import("runtime/task.zig").ResumeMode;
-const resumeTask = @import("runtime/task.zig").resumeTask;
 const spawnTask = @import("runtime/task.zig").spawnTask;
 const AnyBlockingTask = @import("runtime/blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
@@ -729,16 +727,8 @@ pub const Executor = struct {
 
     /// Schedule a task for execution. Called on the task's home executor (self).
     /// Atomically transitions task state to .ready and schedules it for execution.
-    ///
-    /// Task migration for cache locality:
-    /// - Tasks resumed with .maybe_remote: May migrate to current executor if conditions allow
-    /// - Tasks resumed with .local: Always stay on home executor (I/O callbacks, timeouts, cancellation)
-    /// - New/ready tasks: Schedule on home executor
-    ///
-    /// The `mode` parameter:
-    /// - `.maybe_remote`: Enables migration, uses remote queue when needed
-    /// - `.local`: No migration, always uses home executor
-    pub fn scheduleTask(self: *Executor, task: *AnyTask, comptime mode: ResumeMode) void {
+    /// May migrate the task to the current executor for cache locality.
+    pub fn scheduleTask(self: *Executor, task: *AnyTask) void {
         const old_state = task.state.swap(.ready, .acq_rel);
 
         // Task hasn't yielded yet - it will see .ready and skip the yield
@@ -761,40 +751,22 @@ pub const Executor = struct {
             return;
         }
 
-        // Migration is allowed only when mode == .maybe_remote
-        // (I/O callbacks, timeouts, cancellation use .local mode and don't migrate)
-        if (old_state == .waiting and mode == .maybe_remote) {
-            const current_exec = Executor.current orelse {
-                self.scheduleTaskRemote(task);
-                return;
-            };
-
-            // Check if we can migrate (same runtime, different executor)
-            if (current_exec.runtime == self.runtime) {
-                // Same runtime - migrate to current executor for cache locality
+        // Normal scheduling
+        if (Executor.current) |current_exec| {
+            // TODO: for now, we are forcing .new tasks to be remotely scheduled
+            //       to distribute them across executors, until we have work stealing
+            //       for re-balancing them
+            if (current_exec.runtime == self.runtime and old_state != .new) {
                 if (current_exec != self) {
                     task.coro.parent_context_ptr = &current_exec.main_task.coro.context;
                 }
                 current_exec.scheduleTaskLocal(task, false);
                 return;
             }
-
-            // Different runtime - use remote scheduling on home executor
-            self.scheduleTaskRemote(task);
-            return;
         }
 
-        // Default path: schedule on appropriate executor
-        if (mode == .maybe_remote) {
-            if (Executor.current == self) {
-                self.scheduleTaskLocal(task, false);
-            } else {
-                self.scheduleTaskRemote(task);
-            }
-        } else {
-            assert(Executor.current == self);
-            self.scheduleTaskLocal(task, false);
-        }
+        // No current executor or different runtime
+        self.scheduleTaskRemote(task);
     }
 };
 

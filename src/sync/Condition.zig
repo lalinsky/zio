@@ -56,7 +56,6 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-const resumeTask = @import("../runtime/task.zig").resumeTask;
 const Mutex = @import("Mutex.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");

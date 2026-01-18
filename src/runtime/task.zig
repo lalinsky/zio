@@ -160,7 +160,7 @@ pub const AnyTask = struct {
 
     fn waitNodeWake(wait_node: *WaitNode) void {
         const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
-        resumeTask(awaitable, .maybe_remote);
+        AnyTask.fromAwaitable(awaitable).wake();
     }
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
@@ -207,8 +207,14 @@ pub const AnyTask = struct {
     /// Cancel this task by setting canceled status and waking it if suspended.
     pub fn cancel(self: *AnyTask) void {
         if (self.awaitable.setCanceled(.user)) {
-            resumeTask(self, .maybe_remote);
+            self.wake();
         }
+    }
+
+    /// Wake this task (mark it as ready and schedule for execution).
+    pub fn wake(self: *AnyTask) void {
+        const executor = Executor.fromCoroutine(&self.coro);
+        executor.scheduleTask(self);
     }
 
     pub fn destroy(self: *AnyTask, rt: *Runtime) void {
@@ -273,34 +279,6 @@ pub const AnyTask = struct {
     }
 };
 
-/// Resume mode - controls cross-thread checking
-pub const ResumeMode = enum {
-    /// May resume on a different executor - checks thread-local executor
-    maybe_remote,
-    /// Always resumes on the current executor - skips check (use for IO callbacks)
-    local,
-};
-
-/// Resume a task (mark it as ready).
-/// Accepts *Awaitable, *AnyTask, or *Coroutine.
-/// The coroutine must currently be in waiting state.
-///
-/// The `mode` parameter controls cross-thread checking:
-/// - `.maybe_remote`: Checks if we're on the same executor (use for wait lists, futures)
-/// - `.local`: Assumes we're on the same executor (use for IO callbacks)
-pub fn resumeTask(obj: anytype, comptime mode: ResumeMode) void {
-    const T = @TypeOf(obj);
-    const task: *AnyTask = switch (T) {
-        *AnyTask => obj,
-        *Awaitable => AnyTask.fromAwaitable(obj),
-        *Coroutine => AnyTask.fromCoroutine(obj),
-        else => @compileError("resumeTask() requires, *AnyTask, *Awaitable or *Coroutine, got " ++ @typeName(T)),
-    };
-
-    const executor = Executor.fromCoroutine(&task.coro);
-    executor.scheduleTask(task, mode);
-}
-
 const getNextExecutor = @import("../runtime.zig").getNextExecutor;
 
 /// Register a task with the runtime and schedule it for execution.
@@ -317,7 +295,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     }
 
     const executor = Executor.fromCoroutine(&task.coro);
-    executor.scheduleTask(task, .maybe_remote);
+    executor.scheduleTask(task);
 
     if (Executor.current) |current_executor| {
         if (current_executor == executor) {

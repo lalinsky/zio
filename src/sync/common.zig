@@ -6,7 +6,7 @@
 const std = @import("std");
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Awaitable = @import("../runtime/awaitable.zig").Awaitable;
-const resumeTask = @import("../runtime/task.zig").resumeTask;
+const AnyTask = @import("../runtime/task.zig").AnyTask;
 
 /// Stack-allocated waiter for sync operations.
 ///
@@ -40,6 +40,6 @@ pub const Waiter = struct {
 
     fn wake(wait_node: *WaitNode) void {
         const self: *Waiter = @fieldParentPtr("wait_node", wait_node);
-        resumeTask(self.awaitable, .maybe_remote);
+        AnyTask.fromAwaitable(self.awaitable).wake();
     }
 };
