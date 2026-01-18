@@ -753,7 +753,10 @@ pub const Executor = struct {
 
         // Normal scheduling
         if (Executor.current) |current_exec| {
-            if (current_exec.runtime == self.runtime) {
+            // TODO: for now, we are forcing .new tasks to be remotely scheduled
+            //       to distribute them across executors, until we have work stealing
+            //       for re-balancing them
+            if (current_exec.runtime == self.runtime and old_state != .new) {
                 if (current_exec != self) {
                     task.coro.parent_context_ptr = &current_exec.main_task.coro.context;
                 }
