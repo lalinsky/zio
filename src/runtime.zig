@@ -792,6 +792,7 @@ pub const Runtime = struct {
         for (0..num_workers) |i| {
             std.log.debug("Spawning worker thread {}", .{i + 1});
             const worker = self.workers.addOneAssumeCapacity();
+            errdefer _ = self.workers.pop();
             worker.* = .{};
             worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + 1)) });
         }
@@ -1048,9 +1049,13 @@ pub const Runtime = struct {
             std.log.err("Error running main executor during shutdown: {}", .{err});
         };
 
-        // Stop all worker executor event loops
+        // Wait for all workers to finish initialization, then stop their event loops.
+        // Workers that failed to initialize (err != null) don't have valid executors.
         for (self.workers.items) |*worker| {
-            worker.executor.shutdown.notify();
+            worker.ready.wait();
+            if (worker.err == null) {
+                worker.executor.shutdown.notify();
+            }
         }
 
         // Join worker threads
