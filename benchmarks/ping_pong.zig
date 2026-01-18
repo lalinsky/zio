@@ -27,7 +27,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var runtime = try zio.Runtime.init(allocator, .{ .num_executors = 0 });
+    var runtime = try zio.Runtime.init(allocator, .{ .executors = .auto });
     defer runtime.deinit();
 
     // Create channels for ping-pong communication
