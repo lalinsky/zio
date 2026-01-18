@@ -749,7 +749,7 @@ pub const Runtime = struct {
 
     const Worker = struct {
         thread: std.Thread = undefined,
-        ready: std.Thread.ResetEvent = .{},
+        ready: std.Thread.ResetEvent = .unset,
         err: ?anyerror = null,
         executor: Executor = undefined,
     };

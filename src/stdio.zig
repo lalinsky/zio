@@ -1795,10 +1795,10 @@ test "Io: DNS lookup localhost" {
 
     while (lookup_queue.getOne(io)) |result| {
         switch (result) {
-            .address => |_| {
+            .address => {
                 address_count += 1;
             },
-            .canonical_name => |_| {
+            .canonical_name => {
                 saw_canonical_name = true;
             },
         }
@@ -1839,7 +1839,7 @@ test "Io: DNS lookup numeric IP" {
                     found_correct_port = true;
                 }
             },
-            .canonical_name => |_| {
+            .canonical_name => {
                 saw_canonical_name = true;
             },
         }
