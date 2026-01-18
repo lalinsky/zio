@@ -71,13 +71,13 @@ pub fn customLogFn(
 // use in custom panic handler
 var current_test: ?[]const u8 = null;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
     const allocator = gpa.allocator();
 
-    var env = Env.init(allocator);
+    var env = Env.init(allocator, init.environ);
     defer env.deinit(allocator);
 
     var slowest = SlowTracker.init(allocator, 5);
@@ -287,7 +287,7 @@ pub fn main() !void {
     Printer.fmt("\n", .{});
     try slowest.display();
     Printer.fmt("\n", .{});
-    std.posix.exit(if (fail == 0) 0 else 1);
+    std.process.exit(if (fail == 0) 0 else 1);
 }
 
 const Printer = struct {
@@ -393,11 +393,12 @@ const Env = struct {
     fail_first: bool,
     filters: std.ArrayList([]const u8),
     do_log_capture: bool,
+    environ: std.process.Environ,
 
-    fn init(allocator: Allocator) Env {
+    fn init(allocator: Allocator, environ: std.process.Environ) Env {
         var filters: std.ArrayList([]const u8) = .empty;
 
-        if (readEnv(allocator, "TEST_FILTER")) |filter_str| {
+        if (readEnv(allocator, environ, "TEST_FILTER")) |filter_str| {
             defer allocator.free(filter_str);
 
             var iter = std.mem.splitScalar(u8, filter_str, '|');
@@ -411,10 +412,11 @@ const Env = struct {
         }
 
         return .{
-            .verbose = readEnvBool(allocator, "TEST_VERBOSE", false),
-            .fail_first = readEnvBool(allocator, "TEST_FAIL_FIRST", false),
+            .verbose = readEnvBool(allocator, environ, "TEST_VERBOSE", false),
+            .fail_first = readEnvBool(allocator, environ, "TEST_FAIL_FIRST", false),
             .filters = filters,
-            .do_log_capture = readEnvBool(allocator, "TEST_LOG_CAPTURE", true),
+            .do_log_capture = readEnvBool(allocator, environ, "TEST_LOG_CAPTURE", true),
+            .environ = environ,
         };
     }
 
@@ -425,9 +427,9 @@ const Env = struct {
         self.filters.deinit(allocator);
     }
 
-    fn readEnv(allocator: Allocator, key: []const u8) ?[]const u8 {
-        const v = std.process.getEnvVarOwned(allocator, key) catch |err| {
-            if (err == error.EnvironmentVariableNotFound) {
+    fn readEnv(allocator: Allocator, environ: std.process.Environ, key: []const u8) ?[]const u8 {
+        const v = environ.getAlloc(allocator, key) catch |err| {
+            if (err == error.EnvironmentVariableMissing) {
                 return null;
             }
             std.log.warn("failed to get env var {s} due to err {}", .{ key, err });
@@ -436,8 +438,8 @@ const Env = struct {
         return v;
     }
 
-    fn readEnvBool(allocator: Allocator, key: []const u8, deflt: bool) bool {
-        const value = readEnv(allocator, key) orelse return deflt;
+    fn readEnvBool(allocator: Allocator, environ: std.process.Environ, key: []const u8, deflt: bool) bool {
+        const value = readEnv(allocator, environ, key) orelse return deflt;
         defer allocator.free(value);
         return std.ascii.eqlIgnoreCase(value, "true");
     }
