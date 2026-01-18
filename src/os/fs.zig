@@ -2252,7 +2252,7 @@ fn dirReadWindows(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize 
             &io_status_block,
             buffer.ptr,
             @intCast(buffer.len),
-            .FileBothDirectoryInformation,
+            .BothDirectory,
             0, // ReturnSingleEntry
             null, // FileName filter
             @intFromBool(restart),
