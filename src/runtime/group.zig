@@ -165,10 +165,9 @@ pub const Group = struct {
             try Futex.wait(rt, counter_ptr, counter);
         }
 
-        // All tasks completed - transition to closed state
-        // List must be empty (tasks remove themselves in onGroupTaskComplete)
-        const transitioned = group.getTasks().tryTransition(.sentinel0, .sentinel1);
-        std.debug.assert(transitioned);
+        // All tasks completed - verify list is empty (sentinel0)
+        // Tasks remove themselves in onGroupTaskComplete
+        std.debug.assert(group.getTasks().getState() == .sentinel0);
     }
 
     pub fn cancel(group: *Group, rt: *Runtime) void {
