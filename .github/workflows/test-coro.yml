@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.16.0-dev.2135+7c0b42ba0']
+        zig_version: ['master']
         optimize: ['Debug', 'ReleaseSafe']
         config:
           - { os: ubuntu-24.04, target: native }

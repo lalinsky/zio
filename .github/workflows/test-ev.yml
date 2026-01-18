@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.15.2']
+        zig_version: ['master']
         config:
           - { os: ubuntu-24.04, target: native, backends: 'io_uring epoll poll' }
           - { os: ubuntu-24.04-arm, target: native, backends: 'io_uring epoll poll' }
