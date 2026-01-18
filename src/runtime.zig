@@ -37,6 +37,25 @@ const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const runIo = @import("io.zig").runIo;
 
+/// Number of executor threads to run (including main).
+pub const ExecutorCount = enum(u6) {
+    /// Auto-detect based on CPU count
+    auto = 0,
+    _,
+
+    /// Create an exact executor count (1 = single-threaded, no worker threads)
+    pub fn exact(n: u6) ExecutorCount {
+        return @enumFromInt(n);
+    }
+
+    pub fn resolve(self: ExecutorCount) u6 {
+        return switch (self) {
+            .auto => @intCast(@min(Executor.max_executors, std.Thread.getCpuCount() catch 1)),
+            _ => @intFromEnum(self),
+        };
+    }
+};
+
 // Runtime configuration options
 pub const RuntimeOptions = struct {
     thread_pool: ev.ThreadPool.Options = .{},
@@ -47,10 +66,7 @@ pub const RuntimeOptions = struct {
         .max_age = .fromSeconds(60),
     },
     /// Number of executor threads to run (including main).
-    /// - 0: auto-detect CPU count
-    /// - 1: single-threaded mode, no worker threads (default)
-    /// - N > 1: use N executor threads (1 main + N-1 workers)
-    num_executors: usize = 1,
+    executors: ExecutorCount = .exact(1),
     /// Enable LIFO slot optimization for cache locality.
     /// When enabled, tasks woken by other tasks are placed in a LIFO slot
     /// for immediate execution, improving cache locality.
@@ -741,10 +757,7 @@ pub const Runtime = struct {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
-        const num_executors = if (options.num_executors == 0) (std.Thread.getCpuCount() catch 1) else options.num_executors;
-        if (num_executors > Executor.max_executors) {
-            return error.TooManyExecutors;
-        }
+        const num_executors = options.executors.resolve();
 
         var futex_table = try Futex.Table.init(allocator, num_executors);
         errdefer futex_table.deinit(allocator);
@@ -1293,8 +1306,8 @@ test "runtime: sleep from main allows tasks to run" {
     try std.testing.expectEqual(10, counter);
 }
 
-test "runtime: multi-threaded execution with num_executors = 2" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .num_executors = 2 });
+test "runtime: multi-threaded execution with 2 executors" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     const TestContext = struct {
