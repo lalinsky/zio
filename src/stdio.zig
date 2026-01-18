@@ -185,20 +185,50 @@ fn dirCreateDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, pe
 }
 
 fn dirCreateDirPathImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = permissions;
-    @panic("TODO");
+    var it = Io.Dir.path.componentIterator(sub_path);
+    var status: Io.Dir.CreatePathStatus = .existed;
+    var component = it.last() orelse return error.BadPathName;
+
+    while (true) {
+        // Try to create this component
+        if (dirCreateDirImpl(userdata, dir, component.path, permissions)) |_| {
+            status = .created;
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {
+                // Check if existing path is actually a directory.
+                // Important: a dangling symlink could cause an infinite loop otherwise.
+                const stat = dirStatFileImpl(userdata, dir, component.path, .{}) catch |e| switch (e) {
+                    error.Canceled => return error.Canceled,
+                    error.FileNotFound => return error.FileNotFound,
+                    error.AccessDenied => return error.AccessDenied,
+                    error.SymLinkLoop => return error.SymLinkLoop,
+                    error.NameTooLong => return error.NameTooLong,
+                    error.NotDir => return error.NotDir,
+                    error.SystemResources => return error.SystemResources,
+                    else => return error.Unexpected,
+                };
+                if (stat.kind != .directory) return error.NotDir;
+            },
+            error.FileNotFound => {
+                // Parent doesn't exist, go back one component
+                component = it.previous() orelse return error.FileNotFound;
+                continue;
+            },
+            else => |e| return e,
+        }
+        // Move to next component (toward the target)
+        component = it.next() orelse return status;
+    }
 }
 
 fn dirCreateDirPathOpenImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions, options: Io.Dir.OpenOptions) Io.Dir.CreateDirPathOpenError!Io.Dir {
-    _ = userdata;
-    _ = dir;
-    _ = sub_path;
-    _ = permissions;
-    _ = options;
-    @panic("TODO");
+    return dirOpenDirImpl(userdata, dir, sub_path, options) catch |err| switch (err) {
+        error.FileNotFound => {
+            _ = try dirCreateDirPathImpl(userdata, dir, sub_path, permissions);
+            return dirOpenDirImpl(userdata, dir, sub_path, options);
+        },
+        else => |e| return e,
+    };
 }
 
 fn dirStatImpl(userdata: ?*anyopaque, dir: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
@@ -2358,4 +2388,128 @@ test "Io: Dir read" {
     try std.testing.expect(found_file2);
     try std.testing.expect(found_subdir);
     try std.testing.expectEqual(@as(usize, 3), total_entries);
+}
+
+test "Io: Dir createDirPath" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const base_path = "test_stdio_create_dir_path";
+
+    // Clean up from any previous failed test
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Create base directory first
+    try cwd.createDir(io, base_path, .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Create nested directories in one call
+    const status = try cwd.createDirPathStatus(io, base_path ++ "/a/b/c", .default_dir);
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.created, status);
+
+    // Verify all directories were created
+    const dir_a = try cwd.openDir(io, base_path ++ "/a", .{});
+    dir_a.close(io);
+
+    const dir_b = try cwd.openDir(io, base_path ++ "/a/b", .{});
+    dir_b.close(io);
+
+    const dir_c = try cwd.openDir(io, base_path ++ "/a/b/c", .{});
+    dir_c.close(io);
+
+    // Calling again should return .existed
+    const status2 = try cwd.createDirPathStatus(io, base_path ++ "/a/b/c", .default_dir);
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.existed, status2);
+
+    // Clean up (in reverse order)
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+}
+
+test "Io: Dir createDirPath with existing file" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const base_path = "test_stdio_create_dir_path_file";
+
+    // Clean up from any previous failed test
+    os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Create base directory
+    try cwd.createDir(io, base_path, .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Create a file where we want a directory
+    const file = try cwd.createFile(io, base_path ++ "/a", .{});
+    file.close(io);
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+
+    // Trying to create a path through that file should fail with NotDir
+    const result = cwd.createDirPathStatus(io, base_path ++ "/a/b/c", .default_dir);
+    try std.testing.expectError(error.NotDir, result);
+}
+
+test "Io: Dir createDirPathOpen" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const base_path = "test_stdio_create_dir_path_open";
+
+    // Clean up from any previous failed test
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Create base directory first
+    try cwd.createDir(io, base_path, .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Create nested directories and open the result in one call
+    const opened_dir = try cwd.createDirPathOpen(io, base_path ++ "/a/b/c", .{});
+    defer opened_dir.close(io);
+
+    // Verify we got a valid directory handle
+    const stat = try opened_dir.stat(io);
+    try std.testing.expectEqual(Io.File.Kind.directory, stat.kind);
+
+    // Clean up (in reverse order)
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+}
+
+test "Io: Dir createDirPathOpen existing" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const io = rt.io();
+    const cwd = Io.Dir.cwd();
+    const base_path = "test_stdio_create_dir_path_open_existing";
+
+    // Clean up from any previous failed test
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Create directory
+    try cwd.createDir(io, base_path, .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
+
+    // Open existing directory with createDirPathOpen
+    const opened_dir = try cwd.createDirPathOpen(io, base_path, .{});
+    defer opened_dir.close(io);
+
+    // Verify we got a valid directory handle
+    const stat = try opened_dir.stat(io);
+    try std.testing.expectEqual(Io.File.Kind.directory, stat.kind);
 }
