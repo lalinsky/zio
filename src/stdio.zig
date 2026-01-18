@@ -2330,6 +2330,7 @@ test "Io: Dir read" {
 
     const io = rt.io();
     const cwd = Io.Dir.cwd();
+    const sep = Io.Dir.path.sep_str;
     const dir_path = "test_stdio_dir_read";
 
     // Create a test directory
@@ -2337,17 +2338,17 @@ test "Io: Dir read" {
     defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, dir_path) catch {};
 
     // Create test files (using cwd-relative paths)
-    const file1 = try cwd.createFile(io, dir_path ++ "/file1.txt", .{});
+    const file1 = try cwd.createFile(io, dir_path ++ sep ++ "file1.txt", .{});
     file1.close(io);
-    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, dir_path ++ "/file1.txt") catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, dir_path ++ sep ++ "file1.txt") catch {};
 
-    const file2 = try cwd.createFile(io, dir_path ++ "/file2.txt", .{});
+    const file2 = try cwd.createFile(io, dir_path ++ sep ++ "file2.txt", .{});
     file2.close(io);
-    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, dir_path ++ "/file2.txt") catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, dir_path ++ sep ++ "file2.txt") catch {};
 
     // Create a subdirectory
-    try cwd.createDir(io, dir_path ++ "/subdir", .default_dir);
-    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, dir_path ++ "/subdir") catch {};
+    try cwd.createDir(io, dir_path ++ sep ++ "subdir", .default_dir);
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, dir_path ++ sep ++ "subdir") catch {};
 
     // Now open for iteration (after files exist)
     const test_dir = try cwd.openDir(io, dir_path, .{ .iterate = true });
@@ -2396,12 +2397,13 @@ test "Io: Dir createDirPath" {
 
     const io = rt.io();
     const cwd = Io.Dir.cwd();
+    const sep = Io.Dir.path.sep_str;
     const base_path = "test_stdio_create_dir_path";
 
     // Clean up from any previous failed test
-    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
-    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
-    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a") catch {};
     os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
 
     // Create base directory first
@@ -2409,27 +2411,27 @@ test "Io: Dir createDirPath" {
     defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
 
     // Create nested directories in one call
-    const status = try cwd.createDirPathStatus(io, base_path ++ "/a/b/c", .default_dir);
+    const status = try cwd.createDirPathStatus(io, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c", .default_dir);
     try std.testing.expectEqual(Io.Dir.CreatePathStatus.created, status);
 
     // Verify all directories were created
-    const dir_a = try cwd.openDir(io, base_path ++ "/a", .{});
+    const dir_a = try cwd.openDir(io, base_path ++ sep ++ "a", .{});
     dir_a.close(io);
 
-    const dir_b = try cwd.openDir(io, base_path ++ "/a/b", .{});
+    const dir_b = try cwd.openDir(io, base_path ++ sep ++ "a" ++ sep ++ "b", .{});
     dir_b.close(io);
 
-    const dir_c = try cwd.openDir(io, base_path ++ "/a/b/c", .{});
+    const dir_c = try cwd.openDir(io, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c", .{});
     dir_c.close(io);
 
     // Calling again should return .existed
-    const status2 = try cwd.createDirPathStatus(io, base_path ++ "/a/b/c", .default_dir);
+    const status2 = try cwd.createDirPathStatus(io, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c", .default_dir);
     try std.testing.expectEqual(Io.Dir.CreatePathStatus.existed, status2);
 
     // Clean up (in reverse order)
-    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
-    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
-    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a") catch {};
 }
 
 test "Io: Dir createDirPath with existing file" {
@@ -2438,10 +2440,11 @@ test "Io: Dir createDirPath with existing file" {
 
     const io = rt.io();
     const cwd = Io.Dir.cwd();
+    const sep = Io.Dir.path.sep_str;
     const base_path = "test_stdio_create_dir_path_file";
 
     // Clean up from any previous failed test
-    os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a") catch {};
     os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
 
     // Create base directory
@@ -2449,12 +2452,12 @@ test "Io: Dir createDirPath with existing file" {
     defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
 
     // Create a file where we want a directory
-    const file = try cwd.createFile(io, base_path ++ "/a", .{});
+    const file = try cwd.createFile(io, base_path ++ sep ++ "a", .{});
     file.close(io);
-    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a") catch {};
 
     // Trying to create a path through that file should fail with NotDir
-    const result = cwd.createDirPathStatus(io, base_path ++ "/a/b/c", .default_dir);
+    const result = cwd.createDirPathStatus(io, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c", .default_dir);
     try std.testing.expectError(error.NotDir, result);
 }
 
@@ -2464,12 +2467,13 @@ test "Io: Dir createDirPathOpen" {
 
     const io = rt.io();
     const cwd = Io.Dir.cwd();
+    const sep = Io.Dir.path.sep_str;
     const base_path = "test_stdio_create_dir_path_open";
 
     // Clean up from any previous failed test
-    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
-    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
-    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b") catch {};
+    os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a") catch {};
     os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
 
     // Create base directory first
@@ -2477,7 +2481,7 @@ test "Io: Dir createDirPathOpen" {
     defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path) catch {};
 
     // Create nested directories and open the result in one call
-    const opened_dir = try cwd.createDirPathOpen(io, base_path ++ "/a/b/c", .{});
+    const opened_dir = try cwd.createDirPathOpen(io, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c", .{});
     defer opened_dir.close(io);
 
     // Verify we got a valid directory handle
@@ -2485,9 +2489,9 @@ test "Io: Dir createDirPathOpen" {
     try std.testing.expectEqual(Io.File.Kind.directory, stat.kind);
 
     // Clean up (in reverse order)
-    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b/c") catch {};
-    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a/b") catch {};
-    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ "/a") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a" ++ sep ++ "b") catch {};
+    defer os.fs.dirDeleteDir(std.testing.allocator, cwd.handle, base_path ++ sep ++ "a") catch {};
 }
 
 test "Io: Dir createDirPathOpen existing" {
