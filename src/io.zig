@@ -6,7 +6,6 @@ const std = @import("std");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
-const resumeTask = @import("runtime/task.zig").resumeTask;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
@@ -18,7 +17,7 @@ const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 pub fn genericCallback(loop: *ev.Loop, completion: *ev.Completion) void {
     _ = loop;
     const task: *AnyTask = @ptrCast(@alignCast(completion.userdata.?));
-    resumeTask(task, .local);
+    task.wake();
 }
 
 /// Cancels the I/O operation and waits for full completion.
@@ -94,7 +93,7 @@ fn multiIoCallback(loop: *ev.Loop, completion: *ev.Completion) void {
     _ = loop;
     const ctx: *MultiIoContext = @ptrCast(@alignCast(completion.userdata.?));
     if (ctx.remaining.fetchSub(1, .release) == 1) {
-        resumeTask(ctx.task, .maybe_remote);
+        ctx.task.wake();
     }
 }
 

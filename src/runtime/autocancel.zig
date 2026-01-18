@@ -6,7 +6,6 @@ const ev = @import("../ev/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const Duration = @import("../time.zig").Duration;
 const AnyTask = @import("task.zig").AnyTask;
-const resumeTask = @import("task.zig").resumeTask;
 const waitForIo = @import("../io.zig").waitForIo;
 const genericCallback = @import("../io.zig").genericCallback;
 
@@ -82,7 +81,7 @@ fn autoCancelCallback(
     // Try to cancel and wake only if we triggered (not shadowed by user cancel)
     if (task.awaitable.setCanceled(.auto)) {
         autocancel.triggered = true;
-        resumeTask(task, .local);
+        task.wake();
     }
 }
 

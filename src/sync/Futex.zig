@@ -198,8 +198,7 @@ pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
 
         // Wake outside lock to avoid holding lock during resume
         for (to_wake[0..batch_count]) |waiter| {
-            const executor = waiter.task.getExecutor();
-            executor.scheduleTask(waiter.task, .maybe_remote);
+            waiter.task.wake();
         }
 
         total_woken += batch_count;
