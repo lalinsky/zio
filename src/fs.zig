@@ -25,38 +25,66 @@ pub const Dir = struct {
         return .{ .fd = os.fs.cwd() };
     }
 
-    pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileOpenFlags) !File {
+    pub fn close(self: Dir, rt: *Runtime) void {
+        var op = ev.DirClose.init(self.fd);
+        rt.beginShield();
+        defer rt.endShield();
+        runIo(rt, &op.c) catch unreachable;
+        _ = op.getResult() catch {};
+    }
+
+    pub const OpenDirError = os.fs.DirOpenError || Cancelable;
+
+    pub fn openDir(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.DirOpenFlags) OpenDirError!Dir {
+        var op = ev.DirOpen.init(self.fd, path, flags);
+        try runIo(rt, &op.c);
+        return .{ .fd = try op.getResult() };
+    }
+
+    pub const OpenFileError = os.fs.FileOpenError || Cancelable;
+
+    pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileOpenFlags) OpenFileError!File {
         var op = ev.FileOpen.init(self.fd, path, flags);
         try runIo(rt, &op.c);
         return .fromFd(try op.getResult());
     }
 
-    pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) !File {
+    pub const CreateDirError = os.fs.DirCreateDirError || Cancelable;
+
+    pub fn createDir(self: Dir, rt: *Runtime, path: []const u8, mode: os.fs.mode_t) CreateDirError!void {
+        var op = ev.DirCreateDir.init(self.fd, path, mode);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const CreateFileError = os.fs.FileCreateError || Cancelable;
+
+    pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) CreateFileError!File {
         var op = ev.FileCreate.init(self.fd, path, flags);
         try runIo(rt, &op.c);
         return .fromFd(try op.getResult());
     }
 
-    pub fn rename(self: Dir, rt: *Runtime, old_path: []const u8, new_path: []const u8) !void {
-        var op = ev.DirRename.init(self.fd, old_path, self.fd, new_path);
-        try runIo(rt, &op.c);
-        try op.getResult();
-    }
+    pub const DeleteDirError = os.fs.DirDeleteDirError || Cancelable;
 
-    pub fn deleteFile(self: Dir, rt: *Runtime, path: []const u8) !void {
-        var op = ev.DirDeleteFile.init(self.fd, path);
-        try runIo(rt, &op.c);
-        try op.getResult();
-    }
-
-    pub fn deleteDir(self: Dir, rt: *Runtime, path: []const u8) !void {
+    pub fn deleteDir(self: Dir, rt: *Runtime, path: []const u8) DeleteDirError!void {
         var op = ev.DirDeleteDir.init(self.fd, path);
         try runIo(rt, &op.c);
         try op.getResult();
     }
 
-    pub fn createDir(self: Dir, rt: *Runtime, path: []const u8, mode: os.fs.mode_t) !void {
-        var op = ev.DirCreateDir.init(self.fd, path, mode);
+    pub const DeleteFileError = os.fs.DirDeleteFileError || Cancelable;
+
+    pub fn deleteFile(self: Dir, rt: *Runtime, path: []const u8) DeleteFileError!void {
+        var op = ev.DirDeleteFile.init(self.fd, path);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const RenameError = os.fs.DirRenameError || Cancelable;
+
+    pub fn rename(self: Dir, rt: *Runtime, old_path: []const u8, new_dir: Dir, new_path: []const u8) RenameError!void {
+        var op = ev.DirRename.init(self.fd, old_path, new_dir.fd, new_path);
         try runIo(rt, &op.c);
         try op.getResult();
     }
@@ -73,6 +101,93 @@ pub const Dir = struct {
         var op = ev.FileStat.init(self.fd, path);
         try runIo(rt, &op.c);
         return try op.getResult();
+    }
+
+    pub const SetPermissionsError = os.fs.FileSetPermissionsError || Cancelable;
+
+    pub fn setPermissions(self: Dir, rt: *Runtime, mode: os.fs.mode_t) SetPermissionsError!void {
+        var op = ev.DirSetPermissions.init(self.fd, mode);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const SetOwnerError = os.fs.FileSetOwnerError || Cancelable;
+
+    pub fn setOwner(self: Dir, rt: *Runtime, uid: ?os.fs.uid_t, gid: ?os.fs.gid_t) SetOwnerError!void {
+        var op = ev.DirSetOwner.init(self.fd, uid, gid);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub fn setFilePermissions(self: Dir, rt: *Runtime, path: []const u8, mode: os.fs.mode_t, flags: os.fs.PathSetFlags) SetPermissionsError!void {
+        var op = ev.DirSetFilePermissions.init(self.fd, path, mode, flags);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub fn setFileOwner(self: Dir, rt: *Runtime, path: []const u8, uid: ?os.fs.uid_t, gid: ?os.fs.gid_t, flags: os.fs.PathSetFlags) SetOwnerError!void {
+        var op = ev.DirSetFileOwner.init(self.fd, path, uid, gid, flags);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const SetTimestampsError = os.fs.FileSetTimestampsError || Cancelable;
+
+    pub fn setFileTimestamps(self: Dir, rt: *Runtime, path: []const u8, timestamps: os.fs.FileTimestamps, flags: os.fs.PathSetFlags) SetTimestampsError!void {
+        var op = ev.DirSetFileTimestamps.init(self.fd, path, timestamps, flags);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const ReadLinkError = os.fs.ReadLinkError || Cancelable;
+
+    pub fn readLink(self: Dir, rt: *Runtime, path: []const u8, buffer: []u8) ReadLinkError![]u8 {
+        var op = ev.DirReadLink.init(self.fd, path, buffer);
+        try runIo(rt, &op.c);
+        const len = try op.getResult();
+        return buffer[0..len];
+    }
+
+    pub const SymLinkError = os.fs.SymLinkError || Cancelable;
+
+    pub fn symLink(self: Dir, rt: *Runtime, target: []const u8, link_path: []const u8, flags: os.fs.SymLinkFlags) SymLinkError!void {
+        var op = ev.DirSymLink.init(self.fd, target, link_path, flags);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const HardLinkError = os.fs.HardLinkError || Cancelable;
+
+    pub fn hardLink(self: Dir, rt: *Runtime, old_path: []const u8, new_dir: Dir, new_path: []const u8, flags: os.fs.HardLinkFlags) HardLinkError!void {
+        var op = ev.DirHardLink.init(self.fd, old_path, new_dir.fd, new_path, flags);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const AccessError = os.fs.DirAccessError || Cancelable;
+
+    pub fn access(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.AccessFlags) AccessError!void {
+        var op = ev.DirAccess.init(self.fd, path, flags);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const RealPathError = os.fs.DirRealPathError || Cancelable;
+
+    pub fn realPath(self: Dir, rt: *Runtime, buffer: []u8) RealPathError![]u8 {
+        var op = ev.DirRealPath.init(self.fd, buffer);
+        try runIo(rt, &op.c);
+        const len = try op.getResult();
+        return buffer[0..len];
+    }
+
+    pub const RealPathFileError = os.fs.DirRealPathFileError || Cancelable;
+
+    pub fn realPathFile(self: Dir, rt: *Runtime, path: []const u8, buffer: []u8) RealPathFileError![]u8 {
+        var op = ev.DirRealPathFile.init(self.fd, path, buffer);
+        try runIo(rt, &op.c);
+        const len = try op.getResult();
+        return buffer[0..len];
     }
 };
 
@@ -537,4 +652,177 @@ test "File: reader and writer interface" {
 
     try std.testing.expectEqual(10, bytes_read);
     try std.testing.expectEqualStrings("xxxxxxxxxx", result[0..bytes_read]);
+}
+
+test "Dir: setPermissions" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const dir_path = "test_dir_permissions";
+
+    try dir.createDir(rt, dir_path, 0o755);
+    defer dir.deleteDir(rt, dir_path) catch {};
+
+    // Open the directory with iterate=true to get a real fd (not O_PATH)
+    var test_dir = try dir.openDir(rt, dir_path, .{ .iterate = true });
+    defer test_dir.close(rt);
+
+    // Set permissions
+    try test_dir.setPermissions(rt, 0o700);
+
+    // Verify via stat
+    const info = try test_dir.stat(rt);
+    try std.testing.expectEqual(0o700, info.mode & 0o777);
+}
+
+test "Dir: setFilePermissions" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const file_path = "test_dir_set_file_permissions.txt";
+
+    // Create a test file
+    var file = try dir.createFile(rt, file_path, .{});
+    file.close(rt);
+    defer dir.deleteFile(rt, file_path) catch {};
+
+    // Set permissions via Dir
+    try dir.setFilePermissions(rt, file_path, 0o444, .{});
+
+    // Verify via stat
+    const info = try dir.statPath(rt, file_path);
+    try std.testing.expectEqual(0o444, info.mode & 0o777);
+}
+
+test "Dir: setFileTimestamps" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const file_path = "test_dir_set_file_timestamps.txt";
+
+    // Create a test file
+    var file = try dir.createFile(rt, file_path, .{});
+    file.close(rt);
+    defer dir.deleteFile(rt, file_path) catch {};
+
+    const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
+    const mtime: i96 = 1500000000 * std.time.ns_per_s; // 2017-07-14
+
+    try dir.setFileTimestamps(rt, file_path, .{ .atime = atime, .mtime = mtime }, .{});
+
+    const info = try dir.statPath(rt, file_path);
+    try std.testing.expectEqual(atime, info.atime);
+    try std.testing.expectEqual(mtime, info.mtime);
+}
+
+test "Dir: symLink and readLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const target_path = "test_symlink_target.txt";
+    const link_path = "test_symlink_link";
+
+    // Create target file
+    var file = try dir.createFile(rt, target_path, .{});
+    file.close(rt);
+    defer dir.deleteFile(rt, target_path) catch {};
+
+    // Create symlink
+    try dir.symLink(rt, target_path, link_path, .{});
+    defer dir.deleteFile(rt, link_path) catch {};
+
+    // Read symlink
+    var buffer: [256]u8 = undefined;
+    const result = try dir.readLink(rt, link_path, &buffer);
+    try std.testing.expectEqualStrings(target_path, result);
+}
+
+test "Dir: hardLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const original_path = "test_hardlink_original.txt";
+    const link_path = "test_hardlink_link.txt";
+
+    // Create original file with content
+    var file = try dir.createFile(rt, original_path, .{ .read = true });
+    _ = try file.write(rt, "hello", 0);
+    file.close(rt);
+    defer dir.deleteFile(rt, original_path) catch {};
+
+    // Create hard link
+    try dir.hardLink(rt, original_path, dir, link_path, .{});
+    defer dir.deleteFile(rt, link_path) catch {};
+
+    // Verify link has same content
+    var link_file = try dir.openFile(rt, link_path, .{});
+    defer link_file.close(rt);
+
+    var buffer: [10]u8 = undefined;
+    const n = try link_file.read(rt, &buffer, 0);
+    try std.testing.expectEqualStrings("hello", buffer[0..n]);
+}
+
+test "Dir: rename" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const old_path = "test_rename_old.txt";
+    const new_path = "test_rename_new.txt";
+
+    // Create original file with content
+    var file = try dir.createFile(rt, old_path, .{});
+    _ = try file.write(rt, "renamed", 0);
+    file.close(rt);
+
+    // Rename file
+    try dir.rename(rt, old_path, dir, new_path);
+    defer dir.deleteFile(rt, new_path) catch {};
+
+    // Verify old path no longer exists
+    _ = dir.openFile(rt, old_path, .{}) catch |err| {
+        try std.testing.expectEqual(error.FileNotFound, err);
+        return;
+    };
+    return error.TestExpectedError;
+}
+
+test "Dir: access" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const file_path = "test_access.txt";
+
+    // Create a test file
+    var file = try dir.createFile(rt, file_path, .{});
+    file.close(rt);
+    defer dir.deleteFile(rt, file_path) catch {};
+
+    // Check read access - should succeed
+    try dir.access(rt, file_path, .{ .read = true });
+
+    // Check write access - should succeed
+    try dir.access(rt, file_path, .{ .write = true });
+
+    // Check non-existent file - should fail
+    dir.access(rt, "nonexistent_file.txt", .{ .read = true }) catch |err| {
+        try std.testing.expectEqual(error.FileNotFound, err);
+        return;
+    };
+    return error.TestExpectedError;
 }

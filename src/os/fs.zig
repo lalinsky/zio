@@ -624,8 +624,10 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
     }
 }
 
+pub const FileCreateError = FileOpenError;
+
 /// Create a file using openat() syscall
-pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileOpenError!fd_t {
+pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileCreateError!fd_t {
     if (builtin.os.tag == .windows) {
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
