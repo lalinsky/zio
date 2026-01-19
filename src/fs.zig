@@ -18,6 +18,51 @@ pub const max_vecs = switch (builtin.os.tag) {
     else => 16,
 };
 
+pub fn openDir(rt: *Runtime, path: []const u8) Dir.OpenDirError!Dir {
+    const cwd = Dir.cwd();
+    return cwd.openDir(rt, path, .{});
+}
+
+pub fn openFile(rt: *Runtime, path: []const u8) Dir.OpenFileError!File {
+    const cwd = Dir.cwd();
+    return cwd.openFile(rt, path, .{});
+}
+
+pub fn deleteDir(rt: *Runtime, path: []const u8) Dir.DeleteDirError!void {
+    const cwd = Dir.cwd();
+    return cwd.deleteDir(rt, path);
+}
+
+pub fn deleteFile(rt: *Runtime, path: []const u8) Dir.DeleteFileError!void {
+    const cwd = Dir.cwd();
+    return cwd.deleteFile(rt, path);
+}
+
+pub fn rename(rt: *Runtime, old_path: []const u8, new_path: []const u8) Dir.RenameError!void {
+    const cwd = Dir.cwd();
+    return cwd.rename(rt, old_path, cwd, new_path);
+}
+
+pub fn createDir(rt: *Runtime, path: []const u8, mode: os.fs.mode_t) Dir.CreateDirError!void {
+    const cwd = Dir.cwd();
+    return cwd.createDir(rt, path, mode);
+}
+
+pub fn createFile(rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) Dir.CreateFileError!File {
+    const cwd = Dir.cwd();
+    return cwd.createFile(rt, path, flags);
+}
+
+pub fn stat(rt: *Runtime, path: []const u8) Dir.StatError!os.fs.FileStatInfo {
+    const cwd = Dir.cwd();
+    return cwd.statPath(rt, path);
+}
+
+pub fn access(rt: *Runtime, path: []const u8, flags: os.fs.AccessFlags) Dir.AccessError!void {
+    const cwd = Dir.cwd();
+    return cwd.access(rt, path, flags);
+}
+
 pub const Dir = struct {
     fd: Handle,
 
@@ -508,6 +553,18 @@ const TestFile = struct {
         self.rt.deinit();
     }
 };
+
+test {
+    _ = openDir;
+    _ = openFile;
+    _ = deleteDir;
+    _ = deleteFile;
+    _ = rename;
+    _ = createDir;
+    _ = createFile;
+    _ = stat;
+    _ = access;
+}
 
 test "File: basic read and write" {
     const rt = try Runtime.init(std.testing.allocator, .{});
