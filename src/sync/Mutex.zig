@@ -144,9 +144,7 @@ pub fn unlock(self: *Mutex, runtime: *Runtime) void {
 }
 
 test "Mutex basic lock/unlock" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var shared_counter: u32 = 0;
@@ -169,22 +167,20 @@ test "Mutex basic lock/unlock" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(200, shared_counter);
+    try std.testing.expectEqual(200, shared_counter);
 }
 
 test "Mutex tryLock" {
-    const testing = std.testing;
-
-    const rt = try Runtime.init(testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     var mutex = Mutex.init;
 
-    try testing.expect(mutex.tryLock()); // Should succeed
-    try testing.expect(!mutex.tryLock()); // Should fail (already locked)
+    try std.testing.expect(mutex.tryLock()); // Should succeed
+    try std.testing.expect(!mutex.tryLock()); // Should fail (already locked)
     mutex.unlock(rt);
-    try testing.expect(mutex.tryLock()); // Should succeed again
+    try std.testing.expect(mutex.tryLock()); // Should succeed again
     mutex.unlock(rt);
 }

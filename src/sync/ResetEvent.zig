@@ -244,33 +244,29 @@ pub fn asyncCancelWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) voi
 }
 
 test "ResetEvent basic set/reset/isSet" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
 
     // Initially unset
-    try testing.expect(!reset_event.isSet());
+    try std.testing.expect(!reset_event.isSet());
 
     // Set the event
     reset_event.set();
-    try testing.expect(reset_event.isSet());
+    try std.testing.expect(reset_event.isSet());
 
     // Setting again should be no-op
     reset_event.set();
-    try testing.expect(reset_event.isSet());
+    try std.testing.expect(reset_event.isSet());
 
     // Reset the event
     reset_event.reset();
-    try testing.expect(!reset_event.isSet());
+    try std.testing.expect(!reset_event.isSet());
 }
 
 test "ResetEvent wait/set signaling" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -295,29 +291,25 @@ test "ResetEvent wait/set signaling" {
     try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(waiter_finished);
-    try testing.expect(reset_event.isSet());
+    try std.testing.expect(waiter_finished);
+    try std.testing.expect(reset_event.isSet());
 }
 
 test "ResetEvent timedWait timeout" {
-    const testing = std.testing;
-
-    const rt = try Runtime.init(testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     var reset_event = ResetEvent.init;
 
     // Should timeout after 10ms
-    try testing.expectError(error.Timeout, reset_event.timedWait(rt, .fromMilliseconds(10)));
-    try testing.expect(!reset_event.isSet());
+    try std.testing.expectError(error.Timeout, reset_event.timedWait(rt, .fromMilliseconds(10)));
+    try std.testing.expect(!reset_event.isSet());
 }
 
 test "ResetEvent multiple waiters broadcast" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -347,16 +339,14 @@ test "ResetEvent multiple waiters broadcast" {
     try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(reset_event.isSet());
-    try testing.expectEqual(3, waiter_count);
+    try std.testing.expect(reset_event.isSet());
+    try std.testing.expectEqual(3, waiter_count);
 }
 
 test "ResetEvent wait on already set event" {
-    const testing = std.testing;
-
-    const rt = try Runtime.init(testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     var reset_event = ResetEvent.init;
@@ -365,21 +355,17 @@ test "ResetEvent wait on already set event" {
     reset_event.set();
 
     try reset_event.wait(rt); // Should return immediately
-    try testing.expect(reset_event.isSet());
+    try std.testing.expect(reset_event.isSet());
 }
 
 test "ResetEvent size" {
-    const testing = std.testing;
     // ConcurrentQueue with mutex will be larger than a single pointer
     // but still reasonably sized
-    _ = testing;
     _ = @sizeOf(ResetEvent);
 }
 
 test "ResetEvent: cancel waiting task" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -406,7 +392,7 @@ test "ResetEvent: cancel waiting task" {
 
     waiter_task.cancel(runtime);
 
-    try testing.expectError(error.Canceled, waiter_task.join(runtime));
+    try std.testing.expectError(error.Canceled, waiter_task.join(runtime));
 }
 
 test "ResetEvent: select" {

@@ -368,8 +368,8 @@ pub fn Channel(comptime T: type) type {
 /// var recv2 = channel2.asyncReceive();
 /// const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
 /// switch (result) {
-///     .ch1 => |val| try testing.expectEqual(42, val),
-///     .ch2 => |val| try testing.expectEqual(99, val),
+///     .ch1 => |val| try std.testing.expectEqual(42, val),
+///     .ch2 => |val| try std.testing.expectEqual(99, val),
 /// }
 /// ```
 pub fn AsyncReceive(comptime T: type) type {
@@ -659,9 +659,7 @@ pub fn AsyncSend(comptime T: type) type {
 }
 
 test "Channel: basic send and receive" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -690,17 +688,15 @@ test "Channel: basic send and receive" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(1, results[0]);
-    try testing.expectEqual(2, results[1]);
-    try testing.expectEqual(3, results[2]);
+    try std.testing.expectEqual(1, results[0]);
+    try std.testing.expectEqual(2, results[1]);
+    try std.testing.expectEqual(3, results[2]);
 }
 
 test "Channel: trySend and tryReceive" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [2]u32 = undefined;
@@ -711,7 +707,7 @@ test "Channel: trySend and tryReceive" {
             _ = rt;
             // tryReceive on empty channel should fail
             const empty_err = ch.tryReceive();
-            try testing.expectError(error.ChannelEmpty, empty_err);
+            try std.testing.expectError(error.ChannelEmpty, empty_err);
 
             // trySend should succeed
             try ch.trySend(1);
@@ -719,18 +715,18 @@ test "Channel: trySend and tryReceive" {
 
             // trySend on full channel should fail
             const full_err = ch.trySend(3);
-            try testing.expectError(error.ChannelFull, full_err);
+            try std.testing.expectError(error.ChannelFull, full_err);
 
             // tryReceive should succeed
             const val1 = try ch.tryReceive();
-            try testing.expectEqual(1, val1);
+            try std.testing.expectEqual(1, val1);
 
             const val2 = try ch.tryReceive();
-            try testing.expectEqual(2, val2);
+            try std.testing.expectEqual(2, val2);
 
             // tryReceive on empty channel should fail again
             const empty_err2 = ch.tryReceive();
-            try testing.expectError(error.ChannelEmpty, empty_err2);
+            try std.testing.expectError(error.ChannelEmpty, empty_err2);
         }
     };
 
@@ -739,9 +735,7 @@ test "Channel: trySend and tryReceive" {
 }
 
 test "Channel: blocking behavior when empty" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -767,15 +761,13 @@ test "Channel: blocking behavior when empty" {
     try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(42, result);
+    try std.testing.expectEqual(42, result);
 }
 
 test "Channel: blocking behavior when full" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [2]u32 = undefined;
@@ -805,15 +797,13 @@ test "Channel: blocking behavior when full" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(1, count);
+    try std.testing.expectEqual(1, count);
 }
 
 test "Channel: multiple producers and consumers" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -845,16 +835,14 @@ test "Channel: multiple producers and consumers" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &sum });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // Sum should be: (0+1+2+3+4) + (100+101+102+103+104) = 10 + 510 = 520
-    try testing.expectEqual(520, sum);
+    try std.testing.expectEqual(520, sum);
 }
 
 test "Channel: close graceful" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -884,17 +872,15 @@ test "Channel: close graceful" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(1, results[0]);
-    try testing.expectEqual(2, results[1]);
-    try testing.expectEqual(null, results[2]); // Closed, no more items
+    try std.testing.expectEqual(1, results[0]);
+    try std.testing.expectEqual(2, results[1]);
+    try std.testing.expectEqual(null, results[2]); // Closed, no more items
 }
 
 test "Channel: close immediate" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -923,15 +909,13 @@ test "Channel: close immediate" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &result });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(null, result);
+    try std.testing.expectEqual(null, result);
 }
 
 test "Channel: send on closed channel" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -942,10 +926,10 @@ test "Channel: send on closed channel" {
             ch.close(.graceful);
 
             const put_err = ch.send(rt, 1);
-            try testing.expectError(error.ChannelClosed, put_err);
+            try std.testing.expectError(error.ChannelClosed, put_err);
 
             const tryput_err = ch.trySend(2);
-            try testing.expectError(error.ChannelClosed, tryput_err);
+            try std.testing.expectError(error.ChannelClosed, tryput_err);
         }
     };
 
@@ -954,9 +938,7 @@ test "Channel: send on closed channel" {
 }
 
 test "Channel: ring buffer wrapping" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [3]u32 = undefined;
@@ -984,9 +966,9 @@ test "Channel: ring buffer wrapping" {
             const v2 = try ch.receive(rt);
             const v3 = try ch.receive(rt);
 
-            try testing.expectEqual(4, v1);
-            try testing.expectEqual(5, v2);
-            try testing.expectEqual(6, v3);
+            try std.testing.expectEqual(4, v1);
+            try std.testing.expectEqual(5, v2);
+            try std.testing.expectEqual(6, v3);
         }
     };
 
@@ -995,9 +977,7 @@ test "Channel: ring buffer wrapping" {
 }
 
 test "Channel: asyncReceive with select - basic" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -1014,7 +994,7 @@ test "Channel: asyncReceive with select - basic" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(42, try val);
+                    try std.testing.expectEqual(42, try val);
                 },
             }
         }
@@ -1027,13 +1007,11 @@ test "Channel: asyncReceive with select - basic" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 }
 
 test "Channel: asyncReceive with select - already ready" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -1048,7 +1026,7 @@ test "Channel: asyncReceive with select - already ready" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(99, try val);
+                    try std.testing.expectEqual(99, try val);
                 },
             }
         }
@@ -1059,9 +1037,7 @@ test "Channel: asyncReceive with select - already ready" {
 }
 
 test "Channel: asyncReceive with select - closed channel" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -1075,7 +1051,7 @@ test "Channel: asyncReceive with select - closed channel" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectError(error.ChannelClosed, val);
+                    try std.testing.expectError(error.ChannelClosed, val);
                 },
             }
         }
@@ -1086,9 +1062,7 @@ test "Channel: asyncReceive with select - closed channel" {
 }
 
 test "Channel: asyncSend with select - basic" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [2]u32 = undefined;
@@ -1110,7 +1084,7 @@ test "Channel: asyncSend with select - basic" {
             try rt.yield();
             try rt.yield();
             const val = try ch.receive(rt);
-            try testing.expectEqual(42, val);
+            try std.testing.expectEqual(42, val);
         }
     };
 
@@ -1121,13 +1095,11 @@ test "Channel: asyncSend with select - basic" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 }
 
 test "Channel: asyncSend with select - already ready" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -1146,7 +1118,7 @@ test "Channel: asyncSend with select - already ready" {
 
             // Verify item was sent
             const val = try ch.receive(rt);
-            try testing.expectEqual(123, val);
+            try std.testing.expectEqual(123, val);
         }
     };
 
@@ -1155,9 +1127,7 @@ test "Channel: asyncSend with select - already ready" {
 }
 
 test "Channel: asyncSend with select - closed channel" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -1171,7 +1141,7 @@ test "Channel: asyncSend with select - closed channel" {
             const result = try select(rt, .{ .send = &send });
             switch (result) {
                 .send => |res| {
-                    try testing.expectError(error.ChannelClosed, res);
+                    try std.testing.expectError(error.ChannelClosed, res);
                 },
             }
         }
@@ -1182,9 +1152,7 @@ test "Channel: asyncSend with select - closed channel" {
 }
 
 test "Channel: select on both send and receive" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer1: [5]u32 = undefined;
@@ -1210,7 +1178,7 @@ test "Channel: select on both send and receive" {
             _ = try sender_task.join(rt);
 
             // Receive should win (sender provides value)
-            try testing.expectEqual(1, which);
+            try std.testing.expectEqual(1, which);
         }
 
         fn selectTask(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32), which: *u8) !void {
@@ -1220,7 +1188,7 @@ test "Channel: select on both send and receive" {
             const result = try select(rt, .{ .recv = &recv, .send = &send });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(42, try val);
+                    try std.testing.expectEqual(42, try val);
                     which.* = 1;
                 },
                 .send => |res| {
@@ -1241,9 +1209,7 @@ test "Channel: select on both send and receive" {
 }
 
 test "Channel: select with multiple receivers" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer1: [5]u32 = undefined;
@@ -1260,11 +1226,11 @@ test "Channel: select with multiple receivers" {
             const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
             switch (result) {
                 .ch1 => |val| {
-                    try testing.expectEqual(42, try val);
+                    try std.testing.expectEqual(42, try val);
                     which.* = 1;
                 },
                 .ch2 => |val| {
-                    try testing.expectEqual(99, try val);
+                    try std.testing.expectEqual(99, try val);
                     which.* = 2;
                 },
             }
@@ -1285,8 +1251,8 @@ test "Channel: select with multiple receivers" {
     try group.spawn(runtime, TestFn.sender2, .{ runtime, &channel2 });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // ch2 should win
-    try testing.expectEqual(2, which);
+    try std.testing.expectEqual(2, which);
 }

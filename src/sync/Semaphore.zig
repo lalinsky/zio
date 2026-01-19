@@ -160,9 +160,7 @@ pub fn post(self: *Semaphore, rt: *Runtime) void {
 }
 
 test "Semaphore: basic wait/post" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var sem = Semaphore{ .permits = 1 };
@@ -185,15 +183,13 @@ test "Semaphore: basic wait/post" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &sem, &n });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(3, n);
+    try std.testing.expectEqual(3, n);
 }
 
 test "Semaphore: timedWait timeout" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var sem = Semaphore{};
@@ -212,14 +208,12 @@ test "Semaphore: timedWait timeout" {
     var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &timed_out });
     handle.join(runtime);
 
-    try testing.expect(timed_out);
-    try testing.expectEqual(0, sem.permits);
+    try std.testing.expect(timed_out);
+    try std.testing.expectEqual(0, sem.permits);
 }
 
 test "Semaphore: timedWait success" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var sem = Semaphore{};
@@ -244,16 +238,14 @@ test "Semaphore: timedWait success" {
     try group.spawn(runtime, TestFn.poster, .{ runtime, &sem });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(got_permit);
-    try testing.expectEqual(0, sem.permits);
+    try std.testing.expect(got_permit);
+    try std.testing.expectEqual(0, sem.permits);
 }
 
 test "Semaphore: multiple permits" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var sem = Semaphore{ .permits = 3 };
@@ -273,7 +265,7 @@ test "Semaphore: multiple permits" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &sem });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(0, sem.permits);
+    try std.testing.expectEqual(0, sem.permits);
 }

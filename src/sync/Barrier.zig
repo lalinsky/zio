@@ -128,9 +128,7 @@ pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrie
 }
 
 test "Barrier: basic synchronization" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -158,18 +156,16 @@ test "Barrier: basic synchronization" {
     }
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // All coroutines should have seen counter == 3
     for (results) |result| {
-        try testing.expectEqual(3, result);
+        try std.testing.expectEqual(3, result);
     }
 }
 
 test "Barrier: leader detection" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -192,16 +188,14 @@ test "Barrier: leader detection" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // Exactly one coroutine should have been the leader
-    try testing.expectEqual(1, leader_count);
+    try std.testing.expectEqual(1, leader_count);
 }
 
 test "Barrier: reusable for multiple cycles" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(2);
@@ -232,17 +226,15 @@ test "Barrier: reusable for multiple cycles" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(2, phase1_done);
-    try testing.expectEqual(2, phase2_done);
-    try testing.expectEqual(2, phase3_done);
+    try std.testing.expectEqual(2, phase1_done);
+    try std.testing.expectEqual(2, phase2_done);
+    try std.testing.expectEqual(2, phase3_done);
 }
 
 test "Barrier: single coroutine barrier" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(1);
@@ -258,13 +250,11 @@ test "Barrier: single coroutine barrier" {
     var handle = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &is_leader_result });
     try handle.join(runtime);
 
-    try testing.expect(is_leader_result);
+    try std.testing.expect(is_leader_result);
 }
 
 test "Barrier: ordering test" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -294,24 +284,22 @@ test "Barrier: ordering test" {
     }
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // All three should have unique arrival numbers (0, 1, 2 in some order)
     var seen = [_]bool{false} ** 3;
     for (arrivals) |arrival| {
-        try testing.expect(arrival < 3);
-        try testing.expect(!seen[arrival]);
+        try std.testing.expect(arrival < 3);
+        try std.testing.expect(!seen[arrival]);
         seen[arrival] = true;
     }
 
     // After barrier, order should be 3
-    try testing.expectEqual(3, final_order);
+    try std.testing.expectEqual(3, final_order);
 }
 
 test "Barrier: many coroutines" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(5);
@@ -334,10 +322,10 @@ test "Barrier: many coroutines" {
     }
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // All should see the final counter value
     for (final_counts) |count| {
-        try testing.expectEqual(5, count);
+        try std.testing.expectEqual(5, count);
     }
 }

@@ -512,9 +512,7 @@ pub fn waitUntilComplete(rt: *Runtime, future: anytype) FutureResult(@TypeOf(fut
 }
 
 test "select: basic - first completes" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -536,11 +534,11 @@ test "select: basic - first completes" {
 
             const result = try select(rt, .{ .fast = &fast, .slow = &slow });
             switch (result) {
-                .slow => |val| try testing.expectEqual(42, val),
-                .fast => |val| try testing.expectEqual(99, val),
+                .slow => |val| try std.testing.expectEqual(42, val),
+                .fast => |val| try std.testing.expectEqual(99, val),
             }
             // Fast should win
-            try testing.expectEqual(std.meta.Tag(@TypeOf(result)).fast, std.meta.activeTag(result));
+            try std.testing.expectEqual(std.meta.Tag(@TypeOf(result)).fast, std.meta.activeTag(result));
         }
     };
 
@@ -549,9 +547,7 @@ test "select: basic - first completes" {
 }
 
 test "select: already complete - fast path" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -578,7 +574,7 @@ test "select: already complete - fast path" {
             // immediate should already be complete, select should return immediately
             const result = try select(rt, .{ .immediate = &immediate, .slow = &slow });
             switch (result) {
-                .immediate => |val| try testing.expectEqual(123, val),
+                .immediate => |val| try std.testing.expectEqual(123, val),
                 .slow => return error.TestUnexpectedResult,
             }
         }
@@ -589,9 +585,7 @@ test "select: already complete - fast path" {
 }
 
 test "select: heterogeneous types" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -626,15 +620,15 @@ test "select: heterogeneous types" {
 
             switch (result) {
                 .int => |val| {
-                    try testing.expectEqual(42, try val);
+                    try std.testing.expectEqual(42, try val);
                     return error.TestUnexpectedResult; // Should not complete first
                 },
                 .string => |val| {
-                    try testing.expectEqualStrings("hello", try val);
+                    try std.testing.expectEqualStrings("hello", try val);
                     // This should win
                 },
                 .bool => |val| {
-                    try testing.expectEqual(true, try val);
+                    try std.testing.expectEqual(true, try val);
                     return error.TestUnexpectedResult; // Should not complete first
                 },
             }
@@ -646,9 +640,7 @@ test "select: heterogeneous types" {
 }
 
 test "select: with cancellation" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -688,7 +680,7 @@ test "select: with cancellation" {
 
             // Should return error.Canceled
             const result = select_handle.join(rt);
-            try testing.expectError(error.Canceled, result);
+            try std.testing.expectError(error.Canceled, result);
         }
     };
 
@@ -697,9 +689,7 @@ test "select: with cancellation" {
 }
 
 test "select: with error unions - success case" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -732,19 +722,19 @@ test "select: with error unions - success case" {
                 .parse => |val_or_err| {
                     // val_or_err is ParseError!i32
                     const val = val_or_err catch |err| {
-                        try testing.expect(false); // Should not error
+                        try std.testing.expect(false); // Should not error
                         return err;
                     };
-                    try testing.expectEqual(42, val);
+                    try std.testing.expectEqual(42, val);
                     return error.TestUnexpectedResult; // validate should win
                 },
                 .validate => |val_or_err| {
                     // val_or_err is ValidationError![]const u8
                     const val = val_or_err catch |err| {
-                        try testing.expect(false); // Should not error
+                        try std.testing.expect(false); // Should not error
                         return err;
                     };
-                    try testing.expectEqualStrings("valid", val);
+                    try std.testing.expectEqualStrings("valid", val);
                     // This should win
                 },
             }
@@ -756,9 +746,7 @@ test "select: with error unions - success case" {
 }
 
 test "select: with error unions - error case" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -787,13 +775,13 @@ test "select: with error unions - error case" {
                     // val_or_err is ParseError!i32
                     _ = val_or_err catch |err| {
                         // Should receive the original error
-                        try testing.expectEqual(ParseError.OutOfRange, err);
+                        try std.testing.expectEqual(ParseError.OutOfRange, err);
                         return;
                     };
                     return error.TestUnexpectedResult; // Should have errored
                 },
                 .slow => |val| {
-                    try testing.expectEqual(99, val);
+                    try std.testing.expectEqual(99, val);
                     return error.TestUnexpectedResult; // failing should win
                 },
             }
@@ -805,9 +793,7 @@ test "select: with error unions - error case" {
 }
 
 test "select: with mixed error types" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -850,13 +836,13 @@ test "select: with mixed error types" {
                     // val_or_err is IOError![]const u8
                     _ = val_or_err catch |err| {
                         // Verify we got the original error type
-                        try testing.expectEqual(IOError.FileNotFound, err);
+                        try std.testing.expectEqual(IOError.FileNotFound, err);
                         return; // This is expected
                     };
                     return error.TestUnexpectedResult; // Should have errored
                 },
                 .h3 => |val| {
-                    try testing.expectEqual(true, val);
+                    try std.testing.expectEqual(true, val);
                     return error.TestUnexpectedResult;
                 },
             }
@@ -868,10 +854,9 @@ test "select: with mixed error types" {
 }
 
 test "wait: plain type" {
-    const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -888,7 +873,7 @@ test "wait: plain type" {
 
             // Wait for the future
             const result = try wait(rt, &future);
-            try testing.expectEqual(42, result.value);
+            try std.testing.expectEqual(42, result.value);
         }
     };
 
@@ -897,10 +882,9 @@ test "wait: plain type" {
 }
 
 test "wait: error union" {
-    const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -920,7 +904,7 @@ test "wait: error union" {
             // Wait for the future
             const result = try wait(rt, &future);
             const value = try result.value;
-            try testing.expectEqual(123, value);
+            try std.testing.expectEqual(123, value);
         }
     };
 
@@ -929,10 +913,9 @@ test "wait: error union" {
 }
 
 test "wait: error union with error" {
-    const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -951,7 +934,7 @@ test "wait: error union with error" {
 
             // Wait for the future
             const result = try wait(rt, &future);
-            try testing.expectError(MyError.Foo, result.value);
+            try std.testing.expectError(MyError.Foo, result.value);
         }
     };
 
@@ -960,10 +943,9 @@ test "wait: error union with error" {
 }
 
 test "wait: already complete (fast path)" {
-    const testing = std.testing;
     const Future = @import("sync/future.zig").Future;
 
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -973,7 +955,7 @@ test "wait: already complete (fast path)" {
 
             // Wait should return immediately since already set
             const result = try wait(rt, &future);
-            try testing.expectEqual(99, result.value);
+            try std.testing.expectEqual(99, result.value);
         }
     };
 
@@ -982,9 +964,7 @@ test "wait: already complete (fast path)" {
 }
 
 test "select: wait on JoinHandle from spawned task" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -1010,15 +990,15 @@ test "select: wait on JoinHandle from spawned task" {
             // Verify we got a result
             switch (result) {
                 .first => |val| {
-                    try testing.expectEqual(42, val);
+                    try std.testing.expectEqual(42, val);
                 },
                 .second => |val| {
-                    try testing.expectEqual(200, val);
+                    try std.testing.expectEqual(200, val);
                 },
             }
 
             // Both should be valid results, though timing determines which completes first
-            try testing.expect(std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
+            try std.testing.expect(std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
         }
     };
 

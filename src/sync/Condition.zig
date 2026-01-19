@@ -265,9 +265,7 @@ pub fn broadcast(self: *Condition, runtime: *Runtime) void {
 }
 
 test "Condition basic wait/signal" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -302,15 +300,13 @@ test "Condition basic wait/signal" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &mutex, &condition, &ready });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(ready);
+    try std.testing.expect(ready);
 }
 
 test "Condition timedWait timeout" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -334,13 +330,11 @@ test "Condition timedWait timeout" {
     var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &timed_out });
     try handle.join(runtime);
 
-    try testing.expect(timed_out);
+    try std.testing.expect(timed_out);
 }
 
 test "Condition broadcast" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -382,8 +376,8 @@ test "Condition broadcast" {
     try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(ready);
-    try testing.expectEqual(3, waiter_count);
+    try std.testing.expect(ready);
+    try std.testing.expectEqual(3, waiter_count);
 }

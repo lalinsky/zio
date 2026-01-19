@@ -228,9 +228,7 @@ pub fn asyncCancelWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) void {
 }
 
 test "Notify basic signal/wait" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -255,15 +253,13 @@ test "Notify basic signal/wait" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(waiter_finished);
+    try std.testing.expect(waiter_finished);
 }
 
 test "Notify signal with no waiters" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -273,13 +269,11 @@ test "Notify signal with no waiters" {
     notify.broadcast();
 
     // Verify state is still empty
-    try testing.expectEqual(empty, notify.wait_queue.getState());
+    try std.testing.expectEqual(empty, notify.wait_queue.getState());
 }
 
 test "Notify broadcast to multiple waiters" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -309,15 +303,13 @@ test "Notify broadcast to multiple waiters" {
     try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &notify });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(3, waiter_count);
+    try std.testing.expectEqual(3, waiter_count);
 }
 
 test "Notify multiple signals to multiple waiters" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -350,15 +342,13 @@ test "Notify multiple signals to multiple waiters" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(3, waiter_count);
+    try std.testing.expectEqual(3, waiter_count);
 }
 
 test "Notify timedWait timeout" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -378,13 +368,11 @@ test "Notify timedWait timeout" {
     var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &timed_out });
     try handle.join(runtime);
 
-    try testing.expect(timed_out);
+    try std.testing.expect(timed_out);
 }
 
 test "Notify timedWait success" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -410,15 +398,14 @@ test "Notify timedWait success" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(wait_succeeded);
+    try std.testing.expect(wait_succeeded);
 }
 
 test "Notify size and alignment" {
-    const testing = std.testing;
     // Should be the same size as WaitQueue (one pointer for head, one for tail)
-    try testing.expectEqual(@sizeOf(WaitQueue(WaitNode)), @sizeOf(Notify));
+    try std.testing.expectEqual(@sizeOf(WaitQueue(WaitNode)), @sizeOf(Notify));
     _ = @alignOf(Notify);
 }
 

@@ -1176,8 +1176,7 @@ test {
 }
 
 test "lookupHost: localhost" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
+    const allocator = std.testing.allocator;
 
     const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
@@ -1189,12 +1188,11 @@ test "lookupHost: localhost" {
     while (iter.next()) |_| {
         count += 1;
     }
-    try testing.expect(count > 0);
+    try std.testing.expect(count > 0);
 }
 
 test "lookupHost: numeric IP" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
+    const allocator = std.testing.allocator;
 
     const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
@@ -1208,8 +1206,8 @@ test "lookupHost: numeric IP" {
         if (first_addr == null) first_addr = addr;
         count += 1;
     }
-    try testing.expectEqual(1, count);
-    try testing.expectEqual(8080, first_addr.?.getPort());
+    try std.testing.expectEqual(1, count);
+    try std.testing.expectEqual(8080, first_addr.?.getPort());
 }
 
 test "tcpConnectToAddress: basic" {

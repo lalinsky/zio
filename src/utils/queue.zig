@@ -264,34 +264,30 @@ pub fn WorkStealingQueue(comptime T: type, comptime capacity: u32) type {
 // ============================================================================
 
 test "WorkStealingQueue: basic push and pop" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(u32, 8);
     var queue: Queue = .{};
 
     // Initially empty
-    try testing.expectEqual(0, queue.size());
-    try testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(0, queue.size());
+    try std.testing.expect(queue.isEmpty());
 
     // Push some tasks
     try queue.push(10);
     try queue.push(20);
     try queue.push(30);
 
-    try testing.expectEqual(3, queue.size());
+    try std.testing.expectEqual(3, queue.size());
 
     // Pop tasks (FIFO order)
-    try testing.expectEqual(10, queue.pop());
-    try testing.expectEqual(20, queue.pop());
-    try testing.expectEqual(30, queue.pop());
-    try testing.expectEqual(null, queue.pop());
+    try std.testing.expectEqual(10, queue.pop());
+    try std.testing.expectEqual(20, queue.pop());
+    try std.testing.expectEqual(30, queue.pop());
+    try std.testing.expectEqual(null, queue.pop());
 
-    try testing.expect(queue.isEmpty());
+    try std.testing.expect(queue.isEmpty());
 }
 
 test "WorkStealingQueue: push until full" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(usize, 4);
     var queue: Queue = .{};
 
@@ -301,15 +297,13 @@ test "WorkStealingQueue: push until full" {
     try queue.push(3);
     try queue.push(4);
 
-    try testing.expectEqual(4, queue.size());
+    try std.testing.expectEqual(4, queue.size());
 
     // Should fail when full
-    try testing.expectError(error.QueueFull, queue.push(5));
+    try std.testing.expectError(error.QueueFull, queue.push(5));
 }
 
 test "WorkStealingQueue: basic steal" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(u32, 16);
     var victim: Queue = .{};
     var dest: Queue = .{};
@@ -320,43 +314,39 @@ test "WorkStealingQueue: basic steal" {
         try victim.push(i);
     }
 
-    try testing.expectEqual(8, victim.size());
+    try std.testing.expectEqual(8, victim.size());
 
     // Steal ~half (should steal 4, leaving 4)
     victim.steal(&dest);
 
-    try testing.expectEqual(4, victim.size());
-    try testing.expectEqual(4, dest.size());
+    try std.testing.expectEqual(4, victim.size());
+    try std.testing.expectEqual(4, dest.size());
 
     // Verify stolen tasks in dest (should be 0, 1, 2, 3)
-    try testing.expectEqual(0, dest.pop());
-    try testing.expectEqual(1, dest.pop());
-    try testing.expectEqual(2, dest.pop());
-    try testing.expectEqual(3, dest.pop());
+    try std.testing.expectEqual(0, dest.pop());
+    try std.testing.expectEqual(1, dest.pop());
+    try std.testing.expectEqual(2, dest.pop());
+    try std.testing.expectEqual(3, dest.pop());
 
     // Verify remaining tasks in victim (should be 4, 5, 6, 7)
-    try testing.expectEqual(4, victim.pop());
-    try testing.expectEqual(5, victim.pop());
-    try testing.expectEqual(6, victim.pop());
-    try testing.expectEqual(7, victim.pop());
-    try testing.expectEqual(null, victim.pop());
+    try std.testing.expectEqual(4, victim.pop());
+    try std.testing.expectEqual(5, victim.pop());
+    try std.testing.expectEqual(6, victim.pop());
+    try std.testing.expectEqual(7, victim.pop());
+    try std.testing.expectEqual(null, victim.pop());
 }
 
 test "WorkStealingQueue: steal from empty queue" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(u32, 8);
     var victim: Queue = .{};
     var dest: Queue = .{};
 
     victim.steal(&dest);
 
-    try testing.expectEqual(0, dest.size());
+    try std.testing.expectEqual(0, dest.size());
 }
 
 test "WorkStealingQueue: steal with odd number of tasks" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(u32, 16);
     var victim: Queue = .{};
     var dest: Queue = .{};
@@ -370,19 +360,17 @@ test "WorkStealingQueue: steal with odd number of tasks" {
     // Steal: available=7, steal = 7 - (7/2) = 7 - 3 = 4 (leaves 3)
     victim.steal(&dest);
 
-    try testing.expectEqual(3, victim.size());
-    try testing.expectEqual(4, dest.size());
+    try std.testing.expectEqual(3, victim.size());
+    try std.testing.expectEqual(4, dest.size());
 
     // Verify stolen tasks in dest (first 4 tasks: 0, 10, 20, 30)
-    try testing.expectEqual(0, dest.pop());
-    try testing.expectEqual(10, dest.pop());
-    try testing.expectEqual(20, dest.pop());
-    try testing.expectEqual(30, dest.pop());
+    try std.testing.expectEqual(0, dest.pop());
+    try std.testing.expectEqual(10, dest.pop());
+    try std.testing.expectEqual(20, dest.pop());
+    try std.testing.expectEqual(30, dest.pop());
 }
 
 test "WorkStealingQueue: wrapping behavior" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(u32, 4);
     var queue: Queue = .{};
 
@@ -398,19 +386,17 @@ test "WorkStealingQueue: wrapping behavior" {
     try queue.push(6);
 
     // Should have 4 tasks
-    try testing.expectEqual(4, queue.size());
+    try std.testing.expectEqual(4, queue.size());
 
     // Pop all
-    try testing.expectEqual(3, queue.pop());
-    try testing.expectEqual(4, queue.pop());
-    try testing.expectEqual(5, queue.pop());
-    try testing.expectEqual(6, queue.pop());
-    try testing.expectEqual(null, queue.pop());
+    try std.testing.expectEqual(3, queue.pop());
+    try std.testing.expectEqual(4, queue.pop());
+    try std.testing.expectEqual(5, queue.pop());
+    try std.testing.expectEqual(6, queue.pop());
+    try std.testing.expectEqual(null, queue.pop());
 }
 
 test "WorkStealingQueue: concurrent push and steal" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(usize, 256);
     var victim_queue: Queue = .{};
 
@@ -454,12 +440,10 @@ test "WorkStealingQueue: concurrent push and steal" {
     }
 
     const total = stolen_count + popped_count;
-    try testing.expectEqual(num_items, total);
+    try std.testing.expectEqual(num_items, total);
 }
 
 test "WorkStealingQueue: multiple stealers" {
-    const testing = std.testing;
-
     const Queue = WorkStealingQueue(usize, 256);
     var victim: Queue = .{};
 
@@ -509,5 +493,5 @@ test "WorkStealingQueue: multiple stealers" {
     }
 
     const total = total_stolen + remaining;
-    try testing.expectEqual(num_items, total);
+    try std.testing.expectEqual(num_items, total);
 }

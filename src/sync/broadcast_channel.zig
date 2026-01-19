@@ -482,9 +482,7 @@ pub fn AsyncReceive(comptime T: type) type {
 }
 
 test "BroadcastChannel: basic send and receive" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -520,17 +518,15 @@ test "BroadcastChannel: basic send and receive" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(1, results[0]);
-    try testing.expectEqual(2, results[1]);
-    try testing.expectEqual(3, results[2]);
+    try std.testing.expectEqual(1, results[0]);
+    try std.testing.expectEqual(2, results[1]);
+    try std.testing.expectEqual(3, results[2]);
 }
 
 test "BroadcastChannel: multiple consumers receive same messages" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -572,18 +568,16 @@ test "BroadcastChannel: multiple consumers receive same messages" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer3, &sum3, &barrier });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // All consumers should receive all messages
-    try testing.expectEqual(60, sum1);
-    try testing.expectEqual(60, sum2);
-    try testing.expectEqual(60, sum3);
+    try std.testing.expectEqual(60, sum1);
+    try std.testing.expectEqual(60, sum2);
+    try std.testing.expectEqual(60, sum3);
 }
 
 test "BroadcastChannel: lagged consumer" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [3]u32 = undefined;
@@ -603,17 +597,17 @@ test "BroadcastChannel: lagged consumer" {
 
             // First receive should return Lagged since we missed items 1 and 2
             const err = ch.receive(rt, consumer);
-            try testing.expectError(error.Lagged, err);
+            try std.testing.expectError(error.Lagged, err);
 
             // After lag, we should be positioned at the oldest available (3)
             const val1 = try ch.receive(rt, consumer);
-            try testing.expectEqual(3, val1);
+            try std.testing.expectEqual(3, val1);
 
             const val2 = try ch.receive(rt, consumer);
-            try testing.expectEqual(4, val2);
+            try std.testing.expectEqual(4, val2);
 
             const val3 = try ch.receive(rt, consumer);
-            try testing.expectEqual(5, val3);
+            try std.testing.expectEqual(5, val3);
         }
     };
 
@@ -623,9 +617,7 @@ test "BroadcastChannel: lagged consumer" {
 }
 
 test "BroadcastChannel: tryReceive" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -639,7 +631,7 @@ test "BroadcastChannel: tryReceive" {
 
             // tryReceive on empty channel should return WouldBlock
             const err1 = ch.tryReceive(consumer);
-            try testing.expectError(error.WouldBlock, err1);
+            try std.testing.expectError(error.WouldBlock, err1);
 
             // Send some items
             try ch.send(42);
@@ -647,14 +639,14 @@ test "BroadcastChannel: tryReceive" {
 
             // tryReceive should succeed
             const val1 = try ch.tryReceive(consumer);
-            try testing.expectEqual(42, val1);
+            try std.testing.expectEqual(42, val1);
 
             const val2 = try ch.tryReceive(consumer);
-            try testing.expectEqual(43, val2);
+            try std.testing.expectEqual(43, val2);
 
             // tryReceive on caught-up consumer should return WouldBlock
             const err2 = ch.tryReceive(consumer);
-            try testing.expectError(error.WouldBlock, err2);
+            try std.testing.expectError(error.WouldBlock, err2);
         }
     };
 
@@ -664,9 +656,7 @@ test "BroadcastChannel: tryReceive" {
 }
 
 test "BroadcastChannel: new subscriber doesn't receive old messages" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -688,11 +678,11 @@ test "BroadcastChannel: new subscriber doesn't receive old messages" {
 
             // Should only receive message 4, not 1, 2, 3
             const val = try ch.receive(rt, consumer);
-            try testing.expectEqual(4, val);
+            try std.testing.expectEqual(4, val);
 
             // tryReceive should return WouldBlock (no more messages)
             const err = ch.tryReceive(consumer);
-            try testing.expectError(error.WouldBlock, err);
+            try std.testing.expectError(error.WouldBlock, err);
         }
     };
 
@@ -702,9 +692,7 @@ test "BroadcastChannel: new subscriber doesn't receive old messages" {
 }
 
 test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -719,8 +707,8 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
             try ch.send(2);
 
             // Both should receive
-            try testing.expectEqual(1, try ch.receive(rt, c1));
-            try testing.expectEqual(1, try ch.receive(rt, c2));
+            try std.testing.expectEqual(1, try ch.receive(rt, c1));
+            try std.testing.expectEqual(1, try ch.receive(rt, c2));
 
             // Unsubscribe c1
             ch.unsubscribe(c1);
@@ -728,8 +716,8 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
             try ch.send(3);
 
             // c2 should still receive
-            try testing.expectEqual(2, try ch.receive(rt, c2));
-            try testing.expectEqual(3, try ch.receive(rt, c2));
+            try std.testing.expectEqual(2, try ch.receive(rt, c2));
+            try std.testing.expectEqual(3, try ch.receive(rt, c2));
         }
     };
 
@@ -740,9 +728,7 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
 }
 
 test "BroadcastChannel: close prevents new sends" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -759,7 +745,7 @@ test "BroadcastChannel: close prevents new sends" {
 
             // Try to send after closing should fail
             const err = ch.send(2);
-            try testing.expectError(error.Closed, err);
+            try std.testing.expectError(error.Closed, err);
         }
     };
 
@@ -768,9 +754,7 @@ test "BroadcastChannel: close prevents new sends" {
 }
 
 test "BroadcastChannel: consumers can drain after close" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -810,18 +794,16 @@ test "BroadcastChannel: consumers can drain after close" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(1, results[0]);
-    try testing.expectEqual(2, results[1]);
-    try testing.expectEqual(3, results[2]);
-    try testing.expectEqual(null, results[3]); // Closed
+    try std.testing.expectEqual(1, results[0]);
+    try std.testing.expectEqual(2, results[1]);
+    try std.testing.expectEqual(3, results[2]);
+    try std.testing.expectEqual(null, results[3]); // Closed
 }
 
 test "BroadcastChannel: waiting consumers wake on close" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -861,15 +843,13 @@ test "BroadcastChannel: waiting consumers wake on close" {
     try group.spawn(runtime, TestFn.closer, .{ runtime, &channel, &barrier });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
-    try testing.expect(got_closed);
+    try std.testing.expect(got_closed);
 }
 
 test "BroadcastChannel: tryReceive returns Closed when channel closed and empty" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -886,7 +866,7 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
 
             // tryReceive should return Closed
             const err = ch.tryReceive(consumer);
-            try testing.expectError(error.Closed, err);
+            try std.testing.expectError(error.Closed, err);
         }
     };
 
@@ -896,9 +876,7 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
 }
 
 test "BroadcastChannel: asyncReceive with select - basic" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -921,7 +899,7 @@ test "BroadcastChannel: asyncReceive with select - basic" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(42, try val);
+                    try std.testing.expectEqual(42, try val);
                 },
             }
         }
@@ -936,13 +914,11 @@ test "BroadcastChannel: asyncReceive with select - basic" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &barrier });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 }
 
 test "BroadcastChannel: asyncReceive with select - already ready" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -960,7 +936,7 @@ test "BroadcastChannel: asyncReceive with select - already ready" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(99, try val);
+                    try std.testing.expectEqual(99, try val);
                 },
             }
         }
@@ -972,9 +948,7 @@ test "BroadcastChannel: asyncReceive with select - already ready" {
 }
 
 test "BroadcastChannel: asyncReceive with select - closed channel" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -991,7 +965,7 @@ test "BroadcastChannel: asyncReceive with select - closed channel" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectError(error.Closed, val);
+                    try std.testing.expectError(error.Closed, val);
                 },
             }
         }
@@ -1003,9 +977,7 @@ test "BroadcastChannel: asyncReceive with select - closed channel" {
 }
 
 test "BroadcastChannel: asyncReceive with select - lagged consumer" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [3]u32 = undefined;
@@ -1028,7 +1000,7 @@ test "BroadcastChannel: asyncReceive with select - lagged consumer" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectError(error.Lagged, val);
+                    try std.testing.expectError(error.Lagged, val);
                 },
             }
         }
@@ -1040,9 +1012,7 @@ test "BroadcastChannel: asyncReceive with select - lagged consumer" {
 }
 
 test "BroadcastChannel: select with multiple broadcast channels" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer1: [5]u32 = undefined;
@@ -1064,11 +1034,11 @@ test "BroadcastChannel: select with multiple broadcast channels" {
             const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
             switch (result) {
                 .ch1 => |val| {
-                    try testing.expectEqual(42, try val);
+                    try std.testing.expectEqual(42, try val);
                     which.* = 1;
                 },
                 .ch2 => |val| {
-                    try testing.expectEqual(99, try val);
+                    try std.testing.expectEqual(99, try val);
                     which.* = 2;
                 },
             }
@@ -1091,16 +1061,14 @@ test "BroadcastChannel: select with multiple broadcast channels" {
     try group.spawn(runtime, TestFn.sender2, .{ runtime, &channel2 });
 
     try group.wait(runtime);
-    try testing.expect(!group.hasFailed());
+    try std.testing.expect(!group.hasFailed());
 
     // ch2 should win
-    try testing.expectEqual(2, which);
+    try std.testing.expectEqual(2, which);
 }
 
 test "BroadcastChannel: position counter overflow handling" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [3]u32 = undefined;
@@ -1128,13 +1096,13 @@ test "BroadcastChannel: position counter overflow handling" {
 
             // Verify we can receive correctly even after overflow
             const val1 = try ch.tryReceive(consumer);
-            try testing.expectEqual(100, val1);
+            try std.testing.expectEqual(100, val1);
 
             const val2 = try ch.tryReceive(consumer);
-            try testing.expectEqual(101, val2);
+            try std.testing.expectEqual(101, val2);
 
             const val3 = try ch.tryReceive(consumer);
-            try testing.expectEqual(102, val3);
+            try std.testing.expectEqual(102, val3);
 
             // At this point: write_pos has wrapped to (maxInt - 2),
             // consumer.read_pos has wrapped to (maxInt - 2)
@@ -1145,13 +1113,13 @@ test "BroadcastChannel: position counter overflow handling" {
 
             // Receive them to verify wrapping arithmetic works
             const val4 = try ch.tryReceive(consumer);
-            try testing.expectEqual(103, val4);
+            try std.testing.expectEqual(103, val4);
 
             const val5 = try ch.tryReceive(consumer);
-            try testing.expectEqual(104, val5);
+            try std.testing.expectEqual(104, val5);
 
             const val6 = try ch.tryReceive(consumer);
-            try testing.expectEqual(105, val6);
+            try std.testing.expectEqual(105, val6);
 
             // Now test lag detection with wrapped counters
             // Send more than buffer capacity without consuming
@@ -1162,11 +1130,11 @@ test "BroadcastChannel: position counter overflow handling" {
 
             // Next receive should detect lag correctly even with wrapped positions
             const err = ch.tryReceive(consumer);
-            try testing.expectError(error.Lagged, err);
+            try std.testing.expectError(error.Lagged, err);
 
             // After lag, we should be at the oldest available message (201)
             const val7 = try ch.tryReceive(consumer);
-            try testing.expectEqual(201, val7);
+            try std.testing.expectEqual(201, val7);
         }
     };
 

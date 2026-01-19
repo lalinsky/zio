@@ -206,8 +206,6 @@ pub const StackPool = struct {
 };
 
 test "StackPool basic acquire and release" {
-    const testing = std.testing;
-
     var pool = StackPool.init(.{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
@@ -217,25 +215,23 @@ test "StackPool basic acquire and release" {
 
     // Acquire a stack
     const stack1 = try pool.acquire();
-    try testing.expect(stack1.base != 0);
-    try testing.expect(stack1.base > stack1.limit); // Stack grows downward
+    try std.testing.expect(stack1.base != 0);
+    try std.testing.expect(stack1.base > stack1.limit); // Stack grows downward
 
     // Release it back
     pool.release(stack1, .zero);
-    try testing.expectEqual(1, pool.pool_size);
+    try std.testing.expectEqual(1, pool.pool_size);
 
     // Acquire again - should reuse the same stack
     const stack2 = try pool.acquire();
-    try testing.expectEqual(stack1.base, stack2.base);
-    try testing.expectEqual(0, pool.pool_size);
+    try std.testing.expectEqual(stack1.base, stack2.base);
+    try std.testing.expectEqual(0, pool.pool_size);
 
     // Clean up
     stack.stackFree(stack2);
 }
 
 test "StackPool respects max_unused_stacks" {
-    const testing = std.testing;
-
     var pool = StackPool.init(.{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
@@ -249,22 +245,22 @@ test "StackPool respects max_unused_stacks" {
     const stack3 = try pool.acquire();
 
     pool.release(stack1, .zero);
-    try testing.expectEqual(1, pool.pool_size);
+    try std.testing.expectEqual(1, pool.pool_size);
 
     pool.release(stack2, .zero);
-    try testing.expectEqual(2, pool.pool_size);
+    try std.testing.expectEqual(2, pool.pool_size);
 
     // Releasing the third should evict the first (oldest)
     pool.release(stack3, .zero);
-    try testing.expectEqual(2, pool.pool_size);
+    try std.testing.expectEqual(2, pool.pool_size);
 
     // Verify that stack1 is not in the pool (stack2 and stack3 should be)
     const reused1 = try pool.acquire();
     const reused2 = try pool.acquire();
 
-    try testing.expect(reused1.base == stack2.base or reused1.base == stack3.base);
-    try testing.expect(reused2.base == stack2.base or reused2.base == stack3.base);
-    try testing.expect(reused1.base != reused2.base);
+    try std.testing.expect(reused1.base == stack2.base or reused1.base == stack3.base);
+    try std.testing.expect(reused2.base == stack2.base or reused2.base == stack3.base);
+    try std.testing.expect(reused1.base != reused2.base);
 
     // Clean up
     stack.stackFree(reused1);
@@ -272,8 +268,6 @@ test "StackPool respects max_unused_stacks" {
 }
 
 test "StackPool age-based expiration" {
-    const testing = std.testing;
-
     const max_age: Duration = .fromMilliseconds(100);
 
     var pool = StackPool.init(.{
@@ -287,18 +281,18 @@ test "StackPool age-based expiration" {
     // Acquire and release a stack at timestamp 0
     const stack1 = try pool.acquire();
     pool.release(stack1, .zero);
-    try testing.expectEqual(1, pool.pool_size);
+    try std.testing.expectEqual(1, pool.pool_size);
 
     // Acquire a new stack and release it with timestamp past expiration
     // This triggers expiration check and should evict stack1
     const stack2 = try pool.acquire();
-    try testing.expectEqual(0, pool.pool_size);
+    try std.testing.expectEqual(0, pool.pool_size);
     pool.release(stack2, .fromMilliseconds(101));
-    try testing.expectEqual(1, pool.pool_size);
+    try std.testing.expectEqual(1, pool.pool_size);
 
     // Verify the pool contains stack2 (stack1 was expired)
     const reused = try pool.acquire();
-    try testing.expectEqual(stack2.base, reused.base);
+    try std.testing.expectEqual(stack2.base, reused.base);
 
     // Clean up
     stack.stackFree(reused);

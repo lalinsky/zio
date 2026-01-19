@@ -977,8 +977,6 @@ pub fn CompactWaitQueue(comptime T: type) type {
 }
 
 test "SimpleWaitQueue basic operations" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -989,8 +987,8 @@ test "SimpleWaitQueue basic operations" {
     var queue: SimpleWaitQueue(TestNode) = .empty;
 
     // Initially empty
-    try testing.expect(queue.isEmpty());
-    try testing.expectEqual(null, queue.pop());
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(null, queue.pop());
 
     // Create nodes
     var node1 = TestNode{ .value = 1 };
@@ -999,29 +997,27 @@ test "SimpleWaitQueue basic operations" {
 
     // Push items
     queue.push(&node1);
-    try testing.expect(!queue.isEmpty());
+    try std.testing.expect(!queue.isEmpty());
     queue.push(&node2);
     queue.push(&node3);
 
     // Pop items (FIFO order)
     const popped1 = queue.pop();
-    try testing.expectEqual(&node1, popped1);
-    try testing.expectEqual(1, popped1.?.value);
+    try std.testing.expectEqual(&node1, popped1);
+    try std.testing.expectEqual(1, popped1.?.value);
 
     const popped2 = queue.pop();
-    try testing.expectEqual(&node2, popped2);
+    try std.testing.expectEqual(&node2, popped2);
 
     const popped3 = queue.pop();
-    try testing.expectEqual(&node3, popped3);
+    try std.testing.expectEqual(&node3, popped3);
 
     // Empty again
-    try testing.expect(queue.isEmpty());
-    try testing.expectEqual(null, queue.pop());
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(null, queue.pop());
 }
 
 test "SimpleWaitQueue remove operations" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1041,28 +1037,26 @@ test "SimpleWaitQueue remove operations" {
     queue.push(&node3);
 
     // Remove middle item
-    try testing.expect(queue.remove(&node2));
-    try testing.expect(!queue.isEmpty());
+    try std.testing.expect(queue.remove(&node2));
+    try std.testing.expect(!queue.isEmpty());
 
     // Try to remove same item again - should fail
-    try testing.expect(!queue.remove(&node2));
+    try std.testing.expect(!queue.remove(&node2));
 
     // Remove head
-    try testing.expect(queue.remove(&node1));
+    try std.testing.expect(queue.remove(&node1));
 
     // Remove tail
-    try testing.expect(queue.remove(&node3));
+    try std.testing.expect(queue.remove(&node3));
 
     // Queue should be empty
-    try testing.expect(queue.isEmpty());
+    try std.testing.expect(queue.isEmpty());
 
     // Try to remove from empty queue
-    try testing.expect(!queue.remove(&node1));
+    try std.testing.expect(!queue.remove(&node1));
 }
 
 test "SimpleWaitQueue remove head and tail" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1079,24 +1073,22 @@ test "SimpleWaitQueue remove head and tail" {
     // Test removing head
     queue.push(&node1);
     queue.push(&node2);
-    try testing.expect(queue.remove(&node1));
+    try std.testing.expect(queue.remove(&node1));
     const popped = queue.pop();
-    try testing.expectEqual(&node2, popped);
-    try testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(&node2, popped);
+    try std.testing.expect(queue.isEmpty());
 
     // Test removing tail
     queue.push(&node1);
     queue.push(&node2);
     queue.push(&node3);
-    try testing.expect(queue.remove(&node3));
-    try testing.expectEqual(&node1, queue.pop());
-    try testing.expectEqual(&node2, queue.pop());
-    try testing.expect(queue.isEmpty());
+    try std.testing.expect(queue.remove(&node3));
+    try std.testing.expectEqual(&node1, queue.pop());
+    try std.testing.expectEqual(&node2, queue.pop());
+    try std.testing.expect(queue.isEmpty());
 }
 
 test "SimpleWaitQueue empty constant" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1106,23 +1098,21 @@ test "SimpleWaitQueue empty constant" {
 
     // Test .empty initialization
     var queue: SimpleWaitQueue(TestNode) = .empty;
-    try testing.expect(queue.isEmpty());
-    try testing.expectEqual(null, queue.head);
-    try testing.expectEqual(null, queue.tail);
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(null, queue.head);
+    try std.testing.expectEqual(null, queue.tail);
 
     // Verify it works
     var node = TestNode{ .value = 42 };
     queue.push(&node);
-    try testing.expect(!queue.isEmpty());
+    try std.testing.expect(!queue.isEmpty());
 
     const popped = queue.pop();
-    try testing.expectEqual(&node, popped);
-    try testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(&node, popped);
+    try std.testing.expect(queue.isEmpty());
 }
 
 test "WaitQueue basic operations" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1134,7 +1124,7 @@ test "WaitQueue basic operations" {
     var queue: Queue = .empty;
 
     // Initially in sentinel0 state
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 
     // Create mock nodes - ensure proper alignment
     var node1 align(8) = TestNode{ .value = 1 };
@@ -1142,24 +1132,22 @@ test "WaitQueue basic operations" {
 
     // Push items
     queue.push(&node1);
-    try testing.expect(queue.getState().isPointer());
+    try std.testing.expect(queue.getState().isPointer());
     queue.push(&node2);
 
     // Pop items (FIFO order)
     const popped1 = queue.pop();
-    try testing.expectEqual(&node1, popped1);
+    try std.testing.expectEqual(&node1, popped1);
 
     // Remove specific item
-    try testing.expectEqual(true, queue.remove(&node2));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(true, queue.remove(&node2));
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 
     // Remove non-existent item
-    try testing.expectEqual(false, queue.remove(&node1));
+    try std.testing.expectEqual(false, queue.remove(&node1));
 }
 
 test "WaitQueue state transitions" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1169,20 +1157,18 @@ test "WaitQueue state transitions" {
 
     const Queue = WaitQueue(TestNode);
     var queue = Queue.initWithState(.sentinel1);
-    try testing.expectEqual(Queue.State.sentinel1, queue.getState());
+    try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
 
     // Transition between sentinels
-    try testing.expectEqual(true, queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(true, queue.tryTransition(.sentinel1, .sentinel0));
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 
     // Failed transition
-    try testing.expectEqual(false, queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(false, queue.tryTransition(.sentinel1, .sentinel0));
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "WaitQueue empty constant" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1192,22 +1178,20 @@ test "WaitQueue empty constant" {
 
     // Test .empty initialization
     var queue: WaitQueue(TestNode) = .empty;
-    try testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
-    try testing.expectEqual(null, queue.tail);
+    try std.testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
+    try std.testing.expectEqual(null, queue.tail);
 
     // Verify it works like init()
     var node align(8) = TestNode{ .value = 42 };
     queue.push(&node);
-    try testing.expect(queue.getState().isPointer());
+    try std.testing.expect(queue.getState().isPointer());
 
     const popped = queue.pop();
-    try testing.expectEqual(&node, popped);
-    try testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
+    try std.testing.expectEqual(&node, popped);
+    try std.testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
 }
 
 test "WaitQueue double remove" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1229,30 +1213,28 @@ test "WaitQueue double remove" {
     queue.push(&node3);
 
     // Remove middle item
-    try testing.expectEqual(true, queue.remove(&node2));
+    try std.testing.expectEqual(true, queue.remove(&node2));
 
     // Try to remove the same item again - should return false
-    try testing.expectEqual(false, queue.remove(&node2));
+    try std.testing.expectEqual(false, queue.remove(&node2));
 
     // Remove head
-    try testing.expectEqual(true, queue.remove(&node1));
+    try std.testing.expectEqual(true, queue.remove(&node1));
 
     // Try to remove head again - should return false
-    try testing.expectEqual(false, queue.remove(&node1));
+    try std.testing.expectEqual(false, queue.remove(&node1));
 
     // Remove tail
-    try testing.expectEqual(true, queue.remove(&node3));
+    try std.testing.expectEqual(true, queue.remove(&node3));
 
     // Try to remove tail again - should return false
-    try testing.expectEqual(false, queue.remove(&node3));
+    try std.testing.expectEqual(false, queue.remove(&node3));
 
     // List should be empty (back to sentinel0)
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "WaitQueue concurrent push and pop" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1268,8 +1250,8 @@ test "WaitQueue concurrent push and pop" {
     const total_items = num_threads * items_per_thread;
 
     // Create nodes for pushing
-    const nodes = try testing.allocator.alloc(TestNode, total_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, total_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -1300,13 +1282,11 @@ test "WaitQueue concurrent push and pop" {
         popped_count += 1;
     }
 
-    try testing.expectEqual(total_items, popped_count);
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(total_items, popped_count);
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "WaitQueue concurrent remove during modifications" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1320,8 +1300,8 @@ test "WaitQueue concurrent remove during modifications" {
     const num_items = 200;
 
     // Create nodes
-    const nodes = try testing.allocator.alloc(TestNode, num_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, num_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -1379,13 +1359,11 @@ test "WaitQueue concurrent remove during modifications" {
     const total_processed = pop_count.load(.monotonic) + remove_count.load(.monotonic) + remaining_count;
 
     // Verify all items were accounted for
-    try testing.expectEqual(num_items, total_processed);
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(num_items, total_processed);
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "WaitQueue popOrTransition with concurrent removals" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1399,8 +1377,8 @@ test "WaitQueue popOrTransition with concurrent removals" {
     const num_items = 500;
 
     // Create nodes
-    const nodes = try testing.allocator.alloc(TestNode, num_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, num_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -1452,13 +1430,11 @@ test "WaitQueue popOrTransition with concurrent removals" {
     const total_processed = pop_count.load(.monotonic) + remove_count.load(.monotonic);
 
     // Verify all items were accounted for and state transitioned
-    try testing.expectEqual(num_items, total_processed);
-    try testing.expectEqual(Queue.State.sentinel1, queue.getState());
+    try std.testing.expectEqual(num_items, total_processed);
+    try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
 }
 
 test "WaitQueue stress test with heavy contention" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1474,8 +1450,8 @@ test "WaitQueue stress test with heavy contention" {
     const total_items = num_threads * items_per_thread;
 
     // Create nodes
-    const nodes = try testing.allocator.alloc(TestNode, total_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, total_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -1551,13 +1527,11 @@ test "WaitQueue stress test with heavy contention" {
     const total_accounted = total_popped + total_removed + remaining;
 
     // All items must be accounted for
-    try testing.expectEqual(total_items, total_accounted);
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(total_items, total_accounted);
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "CompactWaitQueue basic operations" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1570,7 +1544,7 @@ test "CompactWaitQueue basic operations" {
     var queue: Queue = .empty;
 
     // Initially in sentinel0 state
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 
     // Create mock nodes - ensure proper alignment
     var node1 align(8) = TestNode{ .value = 1 };
@@ -1578,31 +1552,29 @@ test "CompactWaitQueue basic operations" {
 
     // Push items
     queue.push(&node1);
-    try testing.expect(queue.getState().isPointer());
+    try std.testing.expect(queue.getState().isPointer());
     // When there's only one item, it should point to itself as tail
-    try testing.expectEqual(@intFromPtr(&node1), node1.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node1), node1.userdata);
 
     queue.push(&node2);
     // node1 is still head, its userdata should now point to node2 (tail)
-    try testing.expectEqual(@intFromPtr(&node2), node1.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node2), node1.userdata);
 
     // Pop items (FIFO order)
     const popped1 = queue.pop();
-    try testing.expectEqual(&node1, popped1);
+    try std.testing.expectEqual(&node1, popped1);
     // node2 is now head and tail, should point to itself
-    try testing.expectEqual(@intFromPtr(&node2), node2.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node2), node2.userdata);
 
     // Remove specific item
-    try testing.expectEqual(true, queue.remove(&node2));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(true, queue.remove(&node2));
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 
     // Remove non-existent item
-    try testing.expectEqual(false, queue.remove(&node1));
+    try std.testing.expectEqual(false, queue.remove(&node1));
 }
 
 test "CompactWaitQueue state transitions" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1613,20 +1585,18 @@ test "CompactWaitQueue state transitions" {
 
     const Queue = CompactWaitQueue(TestNode);
     var queue = Queue.initWithState(.sentinel1);
-    try testing.expectEqual(Queue.State.sentinel1, queue.getState());
+    try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
 
     // Transition between sentinels
-    try testing.expectEqual(true, queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(true, queue.tryTransition(.sentinel1, .sentinel0));
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 
     // Failed transition
-    try testing.expectEqual(false, queue.tryTransition(.sentinel1, .sentinel0));
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(false, queue.tryTransition(.sentinel1, .sentinel0));
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "CompactWaitQueue empty constant" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1637,21 +1607,19 @@ test "CompactWaitQueue empty constant" {
 
     // Test .empty initialization
     var queue: CompactWaitQueue(TestNode) = .empty;
-    try testing.expectEqual(CompactWaitQueue(TestNode).State.sentinel0, queue.getState());
+    try std.testing.expectEqual(CompactWaitQueue(TestNode).State.sentinel0, queue.getState());
 
     // Verify it works
     var node align(8) = TestNode{ .value = 42 };
     queue.push(&node);
-    try testing.expect(queue.getState().isPointer());
+    try std.testing.expect(queue.getState().isPointer());
 
     const popped = queue.pop();
-    try testing.expectEqual(&node, popped);
-    try testing.expectEqual(CompactWaitQueue(TestNode).State.sentinel0, queue.getState());
+    try std.testing.expectEqual(&node, popped);
+    try std.testing.expectEqual(CompactWaitQueue(TestNode).State.sentinel0, queue.getState());
 }
 
 test "CompactWaitQueue tail tracking" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1673,22 +1641,20 @@ test "CompactWaitQueue tail tracking" {
     queue.push(&node3);
 
     // node1 is head, should have tail pointer to node3
-    try testing.expectEqual(@intFromPtr(&node3), node1.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node3), node1.userdata);
 
     // Pop head
     _ = queue.pop();
     // node2 is now head, should still have tail pointer to node3
-    try testing.expectEqual(@intFromPtr(&node3), node2.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node3), node2.userdata);
 
     // Pop again
     _ = queue.pop();
     // node3 is now head and tail, should point to itself
-    try testing.expectEqual(@intFromPtr(&node3), node3.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node3), node3.userdata);
 }
 
 test "CompactWaitQueue remove tail updates head.userdata" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1710,19 +1676,17 @@ test "CompactWaitQueue remove tail updates head.userdata" {
     queue.push(&node3);
 
     // Remove tail (node3)
-    try testing.expectEqual(true, queue.remove(&node3));
+    try std.testing.expectEqual(true, queue.remove(&node3));
     // node1.userdata should now point to node2 (new tail)
-    try testing.expectEqual(@intFromPtr(&node2), node1.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node2), node1.userdata);
 
     // Remove new tail (node2)
-    try testing.expectEqual(true, queue.remove(&node2));
+    try std.testing.expectEqual(true, queue.remove(&node2));
     // node1.userdata should now point to itself (only item)
-    try testing.expectEqual(@intFromPtr(&node1), node1.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node1), node1.userdata);
 }
 
 test "CompactWaitQueue remove head transfers userdata" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1744,17 +1708,15 @@ test "CompactWaitQueue remove head transfers userdata" {
     queue.push(&node3);
 
     // node1.userdata points to node3
-    try testing.expectEqual(@intFromPtr(&node3), node1.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node3), node1.userdata);
 
     // Remove head (node1)
-    try testing.expectEqual(true, queue.remove(&node1));
+    try std.testing.expectEqual(true, queue.remove(&node1));
     // node2 is now head, should have tail pointer to node3
-    try testing.expectEqual(@intFromPtr(&node3), node2.userdata);
+    try std.testing.expectEqual(@intFromPtr(&node3), node2.userdata);
 }
 
 test "CompactWaitQueue double remove" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1776,30 +1738,28 @@ test "CompactWaitQueue double remove" {
     queue.push(&node3);
 
     // Remove middle item
-    try testing.expectEqual(true, queue.remove(&node2));
+    try std.testing.expectEqual(true, queue.remove(&node2));
 
     // Try to remove the same item again - should return false
-    try testing.expectEqual(false, queue.remove(&node2));
+    try std.testing.expectEqual(false, queue.remove(&node2));
 
     // Remove head
-    try testing.expectEqual(true, queue.remove(&node1));
+    try std.testing.expectEqual(true, queue.remove(&node1));
 
     // Try to remove head again - should return false
-    try testing.expectEqual(false, queue.remove(&node1));
+    try std.testing.expectEqual(false, queue.remove(&node1));
 
     // Remove tail
-    try testing.expectEqual(true, queue.remove(&node3));
+    try std.testing.expectEqual(true, queue.remove(&node3));
 
     // Try to remove tail again - should return false
-    try testing.expectEqual(false, queue.remove(&node3));
+    try std.testing.expectEqual(false, queue.remove(&node3));
 
     // Queue should be empty
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "CompactWaitQueue concurrent push and pop" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1816,8 +1776,8 @@ test "CompactWaitQueue concurrent push and pop" {
     const total_items = num_threads * items_per_thread;
 
     // Create nodes for pushing
-    const nodes = try testing.allocator.alloc(TestNode, total_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, total_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -1848,13 +1808,11 @@ test "CompactWaitQueue concurrent push and pop" {
         popped_count += 1;
     }
 
-    try testing.expectEqual(total_items, popped_count);
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(total_items, popped_count);
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "CompactWaitQueue concurrent remove during modifications" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1869,8 +1827,8 @@ test "CompactWaitQueue concurrent remove during modifications" {
     const num_items = 200;
 
     // Create nodes
-    const nodes = try testing.allocator.alloc(TestNode, num_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, num_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -1928,13 +1886,11 @@ test "CompactWaitQueue concurrent remove during modifications" {
     const total_processed = pop_count.load(.monotonic) + remove_count.load(.monotonic) + remaining_count;
 
     // Verify all items were accounted for
-    try testing.expectEqual(num_items, total_processed);
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(num_items, total_processed);
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
 test "CompactWaitQueue popOrTransition with concurrent removals" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1949,8 +1905,8 @@ test "CompactWaitQueue popOrTransition with concurrent removals" {
     const num_items = 500;
 
     // Create nodes
-    const nodes = try testing.allocator.alloc(TestNode, num_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, num_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -2000,13 +1956,11 @@ test "CompactWaitQueue popOrTransition with concurrent removals" {
     const total_processed = pop_count.load(.monotonic) + remove_count.load(.monotonic);
 
     // Verify all items were accounted for and state transitioned
-    try testing.expectEqual(num_items, total_processed);
-    try testing.expectEqual(Queue.State.sentinel1, queue.getState());
+    try std.testing.expectEqual(num_items, total_processed);
+    try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
 }
 
 test "CompactWaitQueue stress test with heavy contention" {
-    const testing = std.testing;
-
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -2023,8 +1977,8 @@ test "CompactWaitQueue stress test with heavy contention" {
     const total_items = num_threads * items_per_thread;
 
     // Create nodes
-    const nodes = try testing.allocator.alloc(TestNode, total_items);
-    defer testing.allocator.free(nodes);
+    const nodes = try std.testing.allocator.alloc(TestNode, total_items);
+    defer std.testing.allocator.free(nodes);
 
     for (nodes, 0..) |*n, i| {
         n.* = .{ .value = i };
@@ -2098,6 +2052,6 @@ test "CompactWaitQueue stress test with heavy contention" {
     const total_accounted = total_popped + total_removed + remaining;
 
     // All items must be accounted for
-    try testing.expectEqual(total_items, total_accounted);
-    try testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expectEqual(total_items, total_accounted);
+    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }

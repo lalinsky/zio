@@ -140,9 +140,7 @@ pub fn Future(comptime T: type) type {
 }
 
 test "Future: basic set and get" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -154,7 +152,7 @@ test "Future: basic set and get" {
 
             // Get value (should return immediately since already set)
             const result = try future.wait(rt);
-            try testing.expectEqual(42, result.value);
+            try std.testing.expectEqual(42, result.value);
         }
     };
 
@@ -163,9 +161,7 @@ test "Future: basic set and get" {
 }
 
 test "Future: await from coroutine" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -194,7 +190,7 @@ test "Future: await from coroutine" {
             defer getter_handle.cancel(rt);
 
             const result = try getter_handle.join(rt);
-            try testing.expectEqual(123, result);
+            try std.testing.expectEqual(123, result);
         }
     };
 
@@ -203,15 +199,13 @@ test "Future: await from coroutine" {
 }
 
 test "Future: multiple waiters" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
         fn waiterTask(rt: *Runtime, future: *Future(i32), expected: i32) !void {
             const result = try future.wait(rt);
-            try testing.expectEqual(expected, result.value);
+            try std.testing.expectEqual(expected, result.value);
         }
 
         fn setterTask(rt: *Runtime, future: *Future(i32)) !void {

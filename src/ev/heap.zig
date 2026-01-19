@@ -220,11 +220,10 @@ test "heap" {
     h.insert(&d);
     h.remove(&d);
 
-    const testing = std.testing;
-    try testing.expect(h.deleteMin().?.value == 7);
-    try testing.expect(h.deleteMin().?.value == 12);
-    try testing.expect(h.deleteMin().?.value == 24);
-    try testing.expect(h.deleteMin() == null);
+    try std.testing.expect(h.deleteMin().?.value == 7);
+    try std.testing.expect(h.deleteMin().?.value == 12);
+    try std.testing.expect(h.deleteMin().?.value == 24);
+    try std.testing.expect(h.deleteMin() == null);
 }
 
 test "heap remove root" {
@@ -249,9 +248,8 @@ test "heap remove root" {
     h.insert(&b);
     h.remove(&a);
 
-    const testing = std.testing;
-    try testing.expect(h.deleteMin().?.value == 24);
-    try testing.expect(h.deleteMin() == null);
+    try std.testing.expect(h.deleteMin().?.value == 24);
+    try std.testing.expect(h.deleteMin() == null);
 }
 
 test "heap remove with children" {
@@ -278,15 +276,12 @@ test "heap remove with children" {
     h.insert(&c);
     h.remove(&b);
 
-    const testing = std.testing;
-    try testing.expect(h.deleteMin().?.value == 12);
-    try testing.expect(h.deleteMin().?.value == 36);
-    try testing.expect(h.deleteMin() == null);
+    try std.testing.expect(h.deleteMin().?.value == 12);
+    try std.testing.expect(h.deleteMin().?.value == 36);
+    try std.testing.expect(h.deleteMin() == null);
 }
 
 test "heap equal values" {
-    const testing = std.testing;
-
     const Elem = struct {
         const Self = @This();
         value: usize = 0,
@@ -311,16 +306,15 @@ test "heap equal values" {
     h.insert(&c);
     h.insert(&d);
 
-    try testing.expect(h.deleteMin().?.value == 1);
-    try testing.expect(h.deleteMin().?.value == 2);
-    try testing.expect(h.deleteMin().?.value == 3);
-    try testing.expect(h.deleteMin().?.value == 4);
-    try testing.expect(h.deleteMin() == null);
+    try std.testing.expect(h.deleteMin().?.value == 1);
+    try std.testing.expect(h.deleteMin().?.value == 2);
+    try std.testing.expect(h.deleteMin().?.value == 3);
+    try std.testing.expect(h.deleteMin().?.value == 4);
+    try std.testing.expect(h.deleteMin() == null);
 }
 
 test "heap: million values" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
+    const alloc = std.testing.allocator;
 
     const Elem = struct {
         const Self = @This();
@@ -355,15 +349,14 @@ test "heap: million values" {
     var last: usize = 0;
     while (h.deleteMin()) |elem| {
         count += 1;
-        try testing.expect(elem.value >= last);
+        try std.testing.expect(elem.value >= last);
         last = elem.value;
     }
-    try testing.expect(h.deleteMin() == null);
-    try testing.expect(count == NUM_TIMERS);
+    try std.testing.expect(h.deleteMin() == null);
+    try std.testing.expect(count == NUM_TIMERS);
 }
 
 test "heap: dangling next pointer" {
-    const testing = std.testing;
     const Elem = struct {
         const Self = @This();
         value: usize = 0,
@@ -390,10 +383,10 @@ test "heap: dangling next pointer" {
     h.insert(&d);
     h.insert(&e);
 
-    try testing.expect(h.deleteMin().?.value == 1);
-    try testing.expect(h.deleteMin().?.value == 2);
-    try testing.expect(h.deleteMin().?.value == 3);
-    try testing.expect(h.deleteMin().?.value == 4);
-    try testing.expect(h.deleteMin().?.value == 5);
-    try testing.expect(h.deleteMin() == null);
+    try std.testing.expect(h.deleteMin().?.value == 1);
+    try std.testing.expect(h.deleteMin().?.value == 2);
+    try std.testing.expect(h.deleteMin().?.value == 3);
+    try std.testing.expect(h.deleteMin().?.value == 4);
+    try std.testing.expect(h.deleteMin().?.value == 5);
+    try std.testing.expect(h.deleteMin() == null);
 }

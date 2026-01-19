@@ -119,7 +119,6 @@ pub fn Queue(comptime T: type) type {
 }
 
 test Queue {
-    const testing = std.testing;
 
     // Types
     const Elem = struct {
@@ -129,65 +128,65 @@ test Queue {
     };
     const Q = Queue(Elem);
     var q: Q = .{};
-    try testing.expect(q.empty());
+    try std.testing.expect(q.empty());
 
     // Elems
     var elems: [10]Elem = .{Elem{}} ** 10;
 
     // One
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.pop() == null);
     q.push(&elems[0]);
-    try testing.expect(!q.empty());
-    try testing.expect(q.pop().? == &elems[0]);
-    try testing.expect(q.pop() == null);
-    try testing.expect(q.empty());
+    try std.testing.expect(!q.empty());
+    try std.testing.expect(q.pop().? == &elems[0]);
+    try std.testing.expect(q.pop() == null);
+    try std.testing.expect(q.empty());
 
     // Two
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.pop() == null);
     q.push(&elems[0]);
     q.push(&elems[1]);
-    try testing.expect(q.pop().? == &elems[0]);
-    try testing.expect(q.pop().? == &elems[1]);
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.pop().? == &elems[0]);
+    try std.testing.expect(q.pop().? == &elems[1]);
+    try std.testing.expect(q.pop() == null);
 
     // Interleaved
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.pop() == null);
     q.push(&elems[0]);
-    try testing.expect(q.pop().? == &elems[0]);
+    try std.testing.expect(q.pop().? == &elems[0]);
     q.push(&elems[1]);
-    try testing.expect(q.pop().? == &elems[1]);
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.pop().? == &elems[1]);
+    try std.testing.expect(q.pop() == null);
 
     // Remove from middle
     q.push(&elems[0]);
     q.push(&elems[1]);
     q.push(&elems[2]);
-    try testing.expect(q.remove(&elems[1]));
-    try testing.expect(q.pop().? == &elems[0]);
-    try testing.expect(q.pop().? == &elems[2]);
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.remove(&elems[1]));
+    try std.testing.expect(q.pop().? == &elems[0]);
+    try std.testing.expect(q.pop().? == &elems[2]);
+    try std.testing.expect(q.pop() == null);
 
     // Remove from head
     q.push(&elems[0]);
     q.push(&elems[1]);
     q.push(&elems[2]);
-    try testing.expect(q.remove(&elems[0]));
-    try testing.expect(q.pop().? == &elems[1]);
-    try testing.expect(q.pop().? == &elems[2]);
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.remove(&elems[0]));
+    try std.testing.expect(q.pop().? == &elems[1]);
+    try std.testing.expect(q.pop().? == &elems[2]);
+    try std.testing.expect(q.pop() == null);
 
     // Remove from tail
     q.push(&elems[0]);
     q.push(&elems[1]);
     q.push(&elems[2]);
-    try testing.expect(q.remove(&elems[2]));
-    try testing.expect(q.pop().? == &elems[0]);
-    try testing.expect(q.pop().? == &elems[1]);
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.remove(&elems[2]));
+    try std.testing.expect(q.pop().? == &elems[0]);
+    try std.testing.expect(q.pop().? == &elems[1]);
+    try std.testing.expect(q.pop() == null);
 
     // Remove single element
     q.push(&elems[0]);
-    try testing.expect(q.remove(&elems[0]));
-    try testing.expect(q.empty());
-    try testing.expect(q.pop() == null);
+    try std.testing.expect(q.remove(&elems[0]));
+    try std.testing.expect(q.empty());
+    try std.testing.expect(q.pop() == null);
 }

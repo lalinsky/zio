@@ -1016,9 +1016,7 @@ pub const Runtime = struct {
 };
 
 test "runtime: spawnBlocking smoke test" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
+    const runtime = try Runtime.init(std.testing.allocator, .{
         .thread_pool = .{},
     });
     defer runtime.deinit();
@@ -1033,13 +1031,11 @@ test "runtime: spawnBlocking smoke test" {
     defer handle.cancel(runtime);
 
     const result = handle.join(runtime);
-    try testing.expectEqual(42, result);
+    try std.testing.expectEqual(42, result);
 }
 
 test "runtime: JoinHandle.cast() error set conversion" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const MyError = error{ Foo, Bar };
@@ -1063,7 +1059,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
         defer casted.cancel(runtime);
 
         const result = try casted.join(runtime);
-        try testing.expectEqual(42, result);
+        try std.testing.expectEqual(42, result);
     }
 
     // Test casting error case
@@ -1073,27 +1069,25 @@ test "runtime: JoinHandle.cast() error set conversion" {
         defer casted.cancel(runtime);
 
         const result = casted.join(runtime);
-        try testing.expectError(error.Foo, result);
+        try std.testing.expectError(error.Foo, result);
     }
 }
 
 test "Runtime: implicit run" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {
         fn asyncTask(rt: *Runtime) !void {
             const start = rt.now();
-            try testing.expect(start.ns > 0);
+            try std.testing.expect(start.ns > 0);
 
             // Sleep to ensure time advances
             try rt.sleep(.fromMilliseconds(10));
 
             const end = rt.now();
-            try testing.expect(end.ns > start.ns);
-            try testing.expect(start.durationTo(end).toMilliseconds() >= 10);
+            try std.testing.expect(end.ns > start.ns);
+            try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
         }
     };
 
@@ -1102,9 +1096,7 @@ test "Runtime: implicit run" {
 }
 
 test "Runtime: sleep from main" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     // Call sleep directly from main thread - no spawn needed
@@ -1112,8 +1104,8 @@ test "Runtime: sleep from main" {
     try runtime.sleep(.fromMilliseconds(10));
     const end = runtime.now();
 
-    try testing.expect(end.ns > start.ns);
-    try testing.expect(start.durationTo(end).toMilliseconds() >= 10);
+    try std.testing.expect(end.ns > start.ns);
+    try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 
 test "runtime: basic sleep" {
@@ -1131,26 +1123,22 @@ test "runtime: basic sleep" {
 }
 
 test "runtime: now() returns monotonic time" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const start = runtime.now();
-    try testing.expect(start.ns > 0);
+    try std.testing.expect(start.ns > 0);
 
     // Sleep to ensure time advances
     try runtime.sleep(.fromMilliseconds(10));
 
     const end = runtime.now();
-    try testing.expect(end.ns > start.ns);
-    try testing.expect(start.durationTo(end).toMilliseconds() >= 10);
+    try std.testing.expect(end.ns > start.ns);
+    try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 
 test "runtime: sleep is cancelable" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const sleepingTask = struct {
@@ -1172,11 +1160,11 @@ test "runtime: sleep is cancelable" {
 
     // Should return error.Canceled
     const result = handle.join(runtime);
-    try testing.expectError(error.Canceled, result);
+    try std.testing.expectError(error.Canceled, result);
 
     // Ensure the sleep was canceled before completion
     const elapsed = timer.read();
-    try testing.expect(elapsed <= 500 * std.time.ns_per_ms);
+    try std.testing.expect(elapsed <= 500 * std.time.ns_per_ms);
 }
 
 test "runtime: yield from main allows tasks to run" {
