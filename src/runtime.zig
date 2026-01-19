@@ -1033,7 +1033,7 @@ test "runtime: spawnBlocking smoke test" {
     defer handle.cancel(runtime);
 
     const result = handle.join(runtime);
-    try testing.expectEqual(@as(i32, 42), result);
+    try testing.expectEqual(42, result);
 }
 
 test "runtime: JoinHandle.cast() error set conversion" {
@@ -1063,7 +1063,7 @@ test "runtime: JoinHandle.cast() error set conversion" {
         defer casted.cancel(runtime);
 
         const result = try casted.join(runtime);
-        try testing.expectEqual(@as(i32, 42), result);
+        try testing.expectEqual(42, result);
     }
 
     // Test casting error case

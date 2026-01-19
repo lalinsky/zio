@@ -536,8 +536,8 @@ test "select: basic - first completes" {
 
             const result = try select(rt, .{ .fast = &fast, .slow = &slow });
             switch (result) {
-                .slow => |val| try testing.expectEqual(@as(i32, 42), val),
-                .fast => |val| try testing.expectEqual(@as(i32, 99), val),
+                .slow => |val| try testing.expectEqual(42, val),
+                .fast => |val| try testing.expectEqual(99, val),
             }
             // Fast should win
             try testing.expectEqual(std.meta.Tag(@TypeOf(result)).fast, std.meta.activeTag(result));
@@ -578,7 +578,7 @@ test "select: already complete - fast path" {
             // immediate should already be complete, select should return immediately
             const result = try select(rt, .{ .immediate = &immediate, .slow = &slow });
             switch (result) {
-                .immediate => |val| try testing.expectEqual(@as(i32, 123), val),
+                .immediate => |val| try testing.expectEqual(123, val),
                 .slow => return error.TestUnexpectedResult,
             }
         }
@@ -626,7 +626,7 @@ test "select: heterogeneous types" {
 
             switch (result) {
                 .int => |val| {
-                    try testing.expectEqual(@as(i32, 42), try val);
+                    try testing.expectEqual(42, try val);
                     return error.TestUnexpectedResult; // Should not complete first
                 },
                 .string => |val| {
@@ -735,7 +735,7 @@ test "select: with error unions - success case" {
                         try testing.expect(false); // Should not error
                         return err;
                     };
-                    try testing.expectEqual(@as(i32, 42), val);
+                    try testing.expectEqual(42, val);
                     return error.TestUnexpectedResult; // validate should win
                 },
                 .validate => |val_or_err| {
@@ -793,7 +793,7 @@ test "select: with error unions - error case" {
                     return error.TestUnexpectedResult; // Should have errored
                 },
                 .slow => |val| {
-                    try testing.expectEqual(@as(i32, 99), val);
+                    try testing.expectEqual(99, val);
                     return error.TestUnexpectedResult; // failing should win
                 },
             }
@@ -888,7 +888,7 @@ test "wait: plain type" {
 
             // Wait for the future
             const result = try wait(rt, &future);
-            try testing.expectEqual(@as(i32, 42), result.value);
+            try testing.expectEqual(42, result.value);
         }
     };
 
@@ -920,7 +920,7 @@ test "wait: error union" {
             // Wait for the future
             const result = try wait(rt, &future);
             const value = try result.value;
-            try testing.expectEqual(@as(i32, 123), value);
+            try testing.expectEqual(123, value);
         }
     };
 
@@ -973,7 +973,7 @@ test "wait: already complete (fast path)" {
 
             // Wait should return immediately since already set
             const result = try wait(rt, &future);
-            try testing.expectEqual(@as(i32, 99), result.value);
+            try testing.expectEqual(99, result.value);
         }
     };
 
@@ -1010,10 +1010,10 @@ test "select: wait on JoinHandle from spawned task" {
             // Verify we got a result
             switch (result) {
                 .first => |val| {
-                    try testing.expectEqual(@as(i32, 42), val);
+                    try testing.expectEqual(42, val);
                 },
                 .second => |val| {
-                    try testing.expectEqual(@as(i32, 200), val);
+                    try testing.expectEqual(200, val);
                 },
             }
 

@@ -306,7 +306,7 @@ test "Group: wait for multiple tasks" {
 
             try group.wait(runtime);
 
-            try std.testing.expectEqual(@as(usize, 3), completed);
+            try std.testing.expectEqual(3, completed);
         }
     };
 
@@ -364,8 +364,8 @@ test "Group: cancellation while waiting" {
             try group_handle.join(runtime);
 
             // All tasks should have been canceled
-            try std.testing.expectEqual(@as(usize, 3), started);
-            try std.testing.expectEqual(@as(usize, 3), canceled);
+            try std.testing.expectEqual(3, started);
+            try std.testing.expectEqual(3, canceled);
         }
     };
 

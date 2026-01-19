@@ -285,7 +285,7 @@ test "fillBuf: single-byte pattern with large splat" {
         total += slice.len;
         // Verify all bytes are 'y'
         for (slice) |byte| {
-            try std.testing.expectEqual(@as(u8, 'y'), byte);
+            try std.testing.expectEqual('y', byte);
         }
     }
     try std.testing.expectEqual(200, total);

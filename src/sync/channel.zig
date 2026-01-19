@@ -368,8 +368,8 @@ pub fn Channel(comptime T: type) type {
 /// var recv2 = channel2.asyncReceive();
 /// const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
 /// switch (result) {
-///     .ch1 => |val| try testing.expectEqual(@as(u32, 42), val),
-///     .ch2 => |val| try testing.expectEqual(@as(u32, 99), val),
+///     .ch1 => |val| try testing.expectEqual(42, val),
+///     .ch2 => |val| try testing.expectEqual(99, val),
 /// }
 /// ```
 pub fn AsyncReceive(comptime T: type) type {
@@ -723,10 +723,10 @@ test "Channel: trySend and tryReceive" {
 
             // tryReceive should succeed
             const val1 = try ch.tryReceive();
-            try testing.expectEqual(@as(u32, 1), val1);
+            try testing.expectEqual(1, val1);
 
             const val2 = try ch.tryReceive();
-            try testing.expectEqual(@as(u32, 2), val2);
+            try testing.expectEqual(2, val2);
 
             // tryReceive on empty channel should fail again
             const empty_err2 = ch.tryReceive();
@@ -886,9 +886,9 @@ test "Channel: close graceful" {
     try group.wait(runtime);
     try testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(@as(?u32, 1), results[0]);
-    try testing.expectEqual(@as(?u32, 2), results[1]);
-    try testing.expectEqual(@as(?u32, null), results[2]); // Closed, no more items
+    try testing.expectEqual(1, results[0]);
+    try testing.expectEqual(2, results[1]);
+    try testing.expectEqual(null, results[2]); // Closed, no more items
 }
 
 test "Channel: close immediate" {
@@ -925,7 +925,7 @@ test "Channel: close immediate" {
     try group.wait(runtime);
     try testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(@as(?u32, null), result);
+    try testing.expectEqual(null, result);
 }
 
 test "Channel: send on closed channel" {
@@ -984,9 +984,9 @@ test "Channel: ring buffer wrapping" {
             const v2 = try ch.receive(rt);
             const v3 = try ch.receive(rt);
 
-            try testing.expectEqual(@as(u32, 4), v1);
-            try testing.expectEqual(@as(u32, 5), v2);
-            try testing.expectEqual(@as(u32, 6), v3);
+            try testing.expectEqual(4, v1);
+            try testing.expectEqual(5, v2);
+            try testing.expectEqual(6, v3);
         }
     };
 
@@ -1014,7 +1014,7 @@ test "Channel: asyncReceive with select - basic" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(@as(u32, 42), try val);
+                    try testing.expectEqual(42, try val);
                 },
             }
         }
@@ -1048,7 +1048,7 @@ test "Channel: asyncReceive with select - already ready" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(@as(u32, 99), try val);
+                    try testing.expectEqual(99, try val);
                 },
             }
         }
@@ -1110,7 +1110,7 @@ test "Channel: asyncSend with select - basic" {
             try rt.yield();
             try rt.yield();
             const val = try ch.receive(rt);
-            try testing.expectEqual(@as(u32, 42), val);
+            try testing.expectEqual(42, val);
         }
     };
 
@@ -1146,7 +1146,7 @@ test "Channel: asyncSend with select - already ready" {
 
             // Verify item was sent
             const val = try ch.receive(rt);
-            try testing.expectEqual(@as(u32, 123), val);
+            try testing.expectEqual(123, val);
         }
     };
 
@@ -1210,7 +1210,7 @@ test "Channel: select on both send and receive" {
             _ = try sender_task.join(rt);
 
             // Receive should win (sender provides value)
-            try testing.expectEqual(@as(u8, 1), which);
+            try testing.expectEqual(1, which);
         }
 
         fn selectTask(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32), which: *u8) !void {
@@ -1220,7 +1220,7 @@ test "Channel: select on both send and receive" {
             const result = try select(rt, .{ .recv = &recv, .send = &send });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(@as(u32, 42), try val);
+                    try testing.expectEqual(42, try val);
                     which.* = 1;
                 },
                 .send => |res| {
@@ -1260,11 +1260,11 @@ test "Channel: select with multiple receivers" {
             const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
             switch (result) {
                 .ch1 => |val| {
-                    try testing.expectEqual(@as(u32, 42), try val);
+                    try testing.expectEqual(42, try val);
                     which.* = 1;
                 },
                 .ch2 => |val| {
-                    try testing.expectEqual(@as(u32, 99), try val);
+                    try testing.expectEqual(99, try val);
                     which.* = 2;
                 },
             }

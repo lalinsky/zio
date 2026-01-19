@@ -281,10 +281,10 @@ test "WorkStealingQueue: basic push and pop" {
     try testing.expectEqual(3, queue.size());
 
     // Pop tasks (FIFO order)
-    try testing.expectEqual(@as(?u32, 10), queue.pop());
-    try testing.expectEqual(@as(?u32, 20), queue.pop());
-    try testing.expectEqual(@as(?u32, 30), queue.pop());
-    try testing.expectEqual(@as(?u32, null), queue.pop());
+    try testing.expectEqual(10, queue.pop());
+    try testing.expectEqual(20, queue.pop());
+    try testing.expectEqual(30, queue.pop());
+    try testing.expectEqual(null, queue.pop());
 
     try testing.expect(queue.isEmpty());
 }
@@ -329,17 +329,17 @@ test "WorkStealingQueue: basic steal" {
     try testing.expectEqual(4, dest.size());
 
     // Verify stolen tasks in dest (should be 0, 1, 2, 3)
-    try testing.expectEqual(@as(?u32, 0), dest.pop());
-    try testing.expectEqual(@as(?u32, 1), dest.pop());
-    try testing.expectEqual(@as(?u32, 2), dest.pop());
-    try testing.expectEqual(@as(?u32, 3), dest.pop());
+    try testing.expectEqual(0, dest.pop());
+    try testing.expectEqual(1, dest.pop());
+    try testing.expectEqual(2, dest.pop());
+    try testing.expectEqual(3, dest.pop());
 
     // Verify remaining tasks in victim (should be 4, 5, 6, 7)
-    try testing.expectEqual(@as(?u32, 4), victim.pop());
-    try testing.expectEqual(@as(?u32, 5), victim.pop());
-    try testing.expectEqual(@as(?u32, 6), victim.pop());
-    try testing.expectEqual(@as(?u32, 7), victim.pop());
-    try testing.expectEqual(@as(?u32, null), victim.pop());
+    try testing.expectEqual(4, victim.pop());
+    try testing.expectEqual(5, victim.pop());
+    try testing.expectEqual(6, victim.pop());
+    try testing.expectEqual(7, victim.pop());
+    try testing.expectEqual(null, victim.pop());
 }
 
 test "WorkStealingQueue: steal from empty queue" {
@@ -374,10 +374,10 @@ test "WorkStealingQueue: steal with odd number of tasks" {
     try testing.expectEqual(4, dest.size());
 
     // Verify stolen tasks in dest (first 4 tasks: 0, 10, 20, 30)
-    try testing.expectEqual(@as(?u32, 0), dest.pop());
-    try testing.expectEqual(@as(?u32, 10), dest.pop());
-    try testing.expectEqual(@as(?u32, 20), dest.pop());
-    try testing.expectEqual(@as(?u32, 30), dest.pop());
+    try testing.expectEqual(0, dest.pop());
+    try testing.expectEqual(10, dest.pop());
+    try testing.expectEqual(20, dest.pop());
+    try testing.expectEqual(30, dest.pop());
 }
 
 test "WorkStealingQueue: wrapping behavior" {
@@ -401,11 +401,11 @@ test "WorkStealingQueue: wrapping behavior" {
     try testing.expectEqual(4, queue.size());
 
     // Pop all
-    try testing.expectEqual(@as(?u32, 3), queue.pop());
-    try testing.expectEqual(@as(?u32, 4), queue.pop());
-    try testing.expectEqual(@as(?u32, 5), queue.pop());
-    try testing.expectEqual(@as(?u32, 6), queue.pop());
-    try testing.expectEqual(@as(?u32, null), queue.pop());
+    try testing.expectEqual(3, queue.pop());
+    try testing.expectEqual(4, queue.pop());
+    try testing.expectEqual(5, queue.pop());
+    try testing.expectEqual(6, queue.pop());
+    try testing.expectEqual(null, queue.pop());
 }
 
 test "WorkStealingQueue: concurrent push and steal" {

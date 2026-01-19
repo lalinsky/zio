@@ -990,7 +990,7 @@ test "SimpleWaitQueue basic operations" {
 
     // Initially empty
     try testing.expect(queue.isEmpty());
-    try testing.expectEqual(@as(?*TestNode, null), queue.pop());
+    try testing.expectEqual(null, queue.pop());
 
     // Create nodes
     var node1 = TestNode{ .value = 1 };
@@ -1006,7 +1006,7 @@ test "SimpleWaitQueue basic operations" {
     // Pop items (FIFO order)
     const popped1 = queue.pop();
     try testing.expectEqual(&node1, popped1);
-    try testing.expectEqual(@as(i32, 1), popped1.?.value);
+    try testing.expectEqual(1, popped1.?.value);
 
     const popped2 = queue.pop();
     try testing.expectEqual(&node2, popped2);
@@ -1016,7 +1016,7 @@ test "SimpleWaitQueue basic operations" {
 
     // Empty again
     try testing.expect(queue.isEmpty());
-    try testing.expectEqual(@as(?*TestNode, null), queue.pop());
+    try testing.expectEqual(null, queue.pop());
 }
 
 test "SimpleWaitQueue remove operations" {
@@ -1107,8 +1107,8 @@ test "SimpleWaitQueue empty constant" {
     // Test .empty initialization
     var queue: SimpleWaitQueue(TestNode) = .empty;
     try testing.expect(queue.isEmpty());
-    try testing.expectEqual(@as(?*TestNode, null), queue.head);
-    try testing.expectEqual(@as(?*TestNode, null), queue.tail);
+    try testing.expectEqual(null, queue.head);
+    try testing.expectEqual(null, queue.tail);
 
     // Verify it works
     var node = TestNode{ .value = 42 };
@@ -1193,7 +1193,7 @@ test "WaitQueue empty constant" {
     // Test .empty initialization
     var queue: WaitQueue(TestNode) = .empty;
     try testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
-    try testing.expectEqual(@as(?*TestNode, null), queue.tail);
+    try testing.expectEqual(null, queue.tail);
 
     // Verify it works like init()
     var node align(8) = TestNode{ .value = 42 };

@@ -467,7 +467,7 @@ test "Signal: multiple handlers for same signal" {
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
     try handle.join(rt);
 
-    try std.testing.expectEqual(@as(usize, 3), ctx.count.load(.monotonic));
+    try std.testing.expectEqual(3, ctx.count.load(.monotonic));
 }
 
 test "Signal: timedWait timeout" {

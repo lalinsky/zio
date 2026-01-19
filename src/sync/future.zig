@@ -154,7 +154,7 @@ test "Future: basic set and get" {
 
             // Get value (should return immediately since already set)
             const result = try future.wait(rt);
-            try testing.expectEqual(@as(i32, 42), result.value);
+            try testing.expectEqual(42, result.value);
         }
     };
 
@@ -194,7 +194,7 @@ test "Future: await from coroutine" {
             defer getter_handle.cancel(rt);
 
             const result = try getter_handle.join(rt);
-            try testing.expectEqual(@as(i32, 123), result);
+            try testing.expectEqual(123, result);
         }
     };
 
@@ -225,11 +225,11 @@ test "Future: multiple waiters" {
             var future = Future(i32).init;
 
             // Spawn multiple waiters
-            var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) });
+            var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
             defer waiter1.cancel(rt);
-            var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) });
+            var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
             defer waiter2.cancel(rt);
-            var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, @as(i32, 999) });
+            var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
             defer waiter3.cancel(rt);
 
             // Spawn setter

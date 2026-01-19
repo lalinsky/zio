@@ -171,7 +171,7 @@ test "Mutex basic lock/unlock" {
     try group.wait(runtime);
     try testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(@as(u32, 200), shared_counter);
+    try testing.expectEqual(200, shared_counter);
 }
 
 test "Mutex tryLock" {

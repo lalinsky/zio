@@ -338,6 +338,6 @@ test "Barrier: many coroutines" {
 
     // All should see the final counter value
     for (final_counts) |count| {
-        try testing.expectEqual(@as(u32, 5), count);
+        try testing.expectEqual(5, count);
     }
 }

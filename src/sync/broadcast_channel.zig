@@ -607,13 +607,13 @@ test "BroadcastChannel: lagged consumer" {
 
             // After lag, we should be positioned at the oldest available (3)
             const val1 = try ch.receive(rt, consumer);
-            try testing.expectEqual(@as(u32, 3), val1);
+            try testing.expectEqual(3, val1);
 
             const val2 = try ch.receive(rt, consumer);
-            try testing.expectEqual(@as(u32, 4), val2);
+            try testing.expectEqual(4, val2);
 
             const val3 = try ch.receive(rt, consumer);
-            try testing.expectEqual(@as(u32, 5), val3);
+            try testing.expectEqual(5, val3);
         }
     };
 
@@ -647,10 +647,10 @@ test "BroadcastChannel: tryReceive" {
 
             // tryReceive should succeed
             const val1 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 42), val1);
+            try testing.expectEqual(42, val1);
 
             const val2 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 43), val2);
+            try testing.expectEqual(43, val2);
 
             // tryReceive on caught-up consumer should return WouldBlock
             const err2 = ch.tryReceive(consumer);
@@ -688,7 +688,7 @@ test "BroadcastChannel: new subscriber doesn't receive old messages" {
 
             // Should only receive message 4, not 1, 2, 3
             const val = try ch.receive(rt, consumer);
-            try testing.expectEqual(@as(u32, 4), val);
+            try testing.expectEqual(4, val);
 
             // tryReceive should return WouldBlock (no more messages)
             const err = ch.tryReceive(consumer);
@@ -719,8 +719,8 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
             try ch.send(2);
 
             // Both should receive
-            try testing.expectEqual(@as(u32, 1), try ch.receive(rt, c1));
-            try testing.expectEqual(@as(u32, 1), try ch.receive(rt, c2));
+            try testing.expectEqual(1, try ch.receive(rt, c1));
+            try testing.expectEqual(1, try ch.receive(rt, c2));
 
             // Unsubscribe c1
             ch.unsubscribe(c1);
@@ -728,8 +728,8 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
             try ch.send(3);
 
             // c2 should still receive
-            try testing.expectEqual(@as(u32, 2), try ch.receive(rt, c2));
-            try testing.expectEqual(@as(u32, 3), try ch.receive(rt, c2));
+            try testing.expectEqual(2, try ch.receive(rt, c2));
+            try testing.expectEqual(3, try ch.receive(rt, c2));
         }
     };
 
@@ -812,10 +812,10 @@ test "BroadcastChannel: consumers can drain after close" {
     try group.wait(runtime);
     try testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(@as(?u32, 1), results[0]);
-    try testing.expectEqual(@as(?u32, 2), results[1]);
-    try testing.expectEqual(@as(?u32, 3), results[2]);
-    try testing.expectEqual(@as(?u32, null), results[3]); // Closed
+    try testing.expectEqual(1, results[0]);
+    try testing.expectEqual(2, results[1]);
+    try testing.expectEqual(3, results[2]);
+    try testing.expectEqual(null, results[3]); // Closed
 }
 
 test "BroadcastChannel: waiting consumers wake on close" {
@@ -921,7 +921,7 @@ test "BroadcastChannel: asyncReceive with select - basic" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(@as(u32, 42), try val);
+                    try testing.expectEqual(42, try val);
                 },
             }
         }
@@ -960,7 +960,7 @@ test "BroadcastChannel: asyncReceive with select - already ready" {
             const result = try select(rt, .{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try testing.expectEqual(@as(u32, 99), try val);
+                    try testing.expectEqual(99, try val);
                 },
             }
         }
@@ -1064,11 +1064,11 @@ test "BroadcastChannel: select with multiple broadcast channels" {
             const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
             switch (result) {
                 .ch1 => |val| {
-                    try testing.expectEqual(@as(u32, 42), try val);
+                    try testing.expectEqual(42, try val);
                     which.* = 1;
                 },
                 .ch2 => |val| {
-                    try testing.expectEqual(@as(u32, 99), try val);
+                    try testing.expectEqual(99, try val);
                     which.* = 2;
                 },
             }
@@ -1128,13 +1128,13 @@ test "BroadcastChannel: position counter overflow handling" {
 
             // Verify we can receive correctly even after overflow
             const val1 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 100), val1);
+            try testing.expectEqual(100, val1);
 
             const val2 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 101), val2);
+            try testing.expectEqual(101, val2);
 
             const val3 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 102), val3);
+            try testing.expectEqual(102, val3);
 
             // At this point: write_pos has wrapped to (maxInt - 2),
             // consumer.read_pos has wrapped to (maxInt - 2)
@@ -1145,13 +1145,13 @@ test "BroadcastChannel: position counter overflow handling" {
 
             // Receive them to verify wrapping arithmetic works
             const val4 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 103), val4);
+            try testing.expectEqual(103, val4);
 
             const val5 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 104), val5);
+            try testing.expectEqual(104, val5);
 
             const val6 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 105), val6);
+            try testing.expectEqual(105, val6);
 
             // Now test lag detection with wrapped counters
             // Send more than buffer capacity without consuming
@@ -1166,7 +1166,7 @@ test "BroadcastChannel: position counter overflow handling" {
 
             // After lag, we should be at the oldest available message (201)
             const val7 = try ch.tryReceive(consumer);
-            try testing.expectEqual(@as(u32, 201), val7);
+            try testing.expectEqual(201, val7);
         }
     };
 

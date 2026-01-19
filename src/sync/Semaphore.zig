@@ -213,7 +213,7 @@ test "Semaphore: timedWait timeout" {
     handle.join(runtime);
 
     try testing.expect(timed_out);
-    try testing.expectEqual(@as(usize, 0), sem.permits);
+    try testing.expectEqual(0, sem.permits);
 }
 
 test "Semaphore: timedWait success" {
