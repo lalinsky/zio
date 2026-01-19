@@ -48,6 +48,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
@@ -149,19 +150,19 @@ test "Barrier: basic synchronization" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[0] });
-    defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[1] });
-    defer task2.cancel(runtime);
-    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &results[2] });
-    defer task3.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    for (&results) |*result| {
+        try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &counter, result });
+    }
+
+    try group.wait(runtime);
 
     // All coroutines should have seen counter == 3
-    try testing.expectEqual(@as(u32, 3), results[0]);
-    try testing.expectEqual(@as(u32, 3), results[1]);
-    try testing.expectEqual(@as(u32, 3), results[2]);
+    for (results) |result| {
+        try testing.expectEqual(3, result);
+    }
 }
 
 test "Barrier: leader detection" {
@@ -182,14 +183,14 @@ test "Barrier: leader detection" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count });
-    defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count });
-    defer task2.cancel(runtime);
-    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &leader_count });
-    defer task3.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
+    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
+    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
+
+    try group.wait(runtime);
 
     // Exactly one coroutine should have been the leader
     try testing.expectEqual(@as(u32, 1), leader_count);
@@ -222,12 +223,13 @@ test "Barrier: reusable for multiple cycles" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
-    defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
-    defer task2.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
+    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
+
+    try group.wait(runtime);
 
     try testing.expectEqual(@as(u32, 2), phase1_done);
     try testing.expectEqual(@as(u32, 2), phase2_done);
@@ -281,14 +283,14 @@ test "Barrier: ordering test" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[0], &final_order });
-    defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[1], &final_order });
-    defer task2.cancel(runtime);
-    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &arrival_order, &arrivals[2], &final_order });
-    defer task3.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    for (&arrivals) |*my_arrival| {
+        try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &arrival_order, my_arrival, &final_order });
+    }
+
+    try group.wait(runtime);
 
     // All three should have unique arrival numbers (0, 1, 2 in some order)
     var seen = [_]bool{false} ** 3;
@@ -299,7 +301,7 @@ test "Barrier: ordering test" {
     }
 
     // After barrier, order should be 3
-    try testing.expectEqual(@as(u32, 3), final_order);
+    try testing.expectEqual(3, final_order);
 }
 
 test "Barrier: many coroutines" {
@@ -320,18 +322,14 @@ test "Barrier: many coroutines" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[0] });
-    defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[1] });
-    defer task2.cancel(runtime);
-    var task3 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[2] });
-    defer task3.cancel(runtime);
-    var task4 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[3] });
-    defer task4.cancel(runtime);
-    var task5 = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &counter, &final_counts[4] });
-    defer task5.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    for (&final_counts) |*result| {
+        try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &counter, result });
+    }
+
+    try group.wait(runtime);
 
     // All should see the final counter value
     for (final_counts) |count| {

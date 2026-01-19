@@ -53,16 +53,17 @@ pub fn main() !void {
 
     std.log.info("Starting demo (press Ctrl+C to stop gracefully)...", .{});
 
+    var group: zio.Group = .init;
+    defer group.cancel(rt);
+
     // Spawn server task
-    var server_task = try rt.spawn(serverTask, .{ rt, &shutdown });
-    defer server_task.cancel(rt);
+    try group.spawn(rt, serverTask, .{ rt, &shutdown });
 
     // Spawn signal handler task
-    var signal_task = try rt.spawn(signalHandler, .{ rt, &shutdown });
-    defer signal_task.cancel(rt);
+    try group.spawn(rt, signalHandler, .{ rt, &shutdown });
 
     // Run until all tasks complete
-    try rt.run();
+    try group.wait(rt);
 
     std.log.info("Demo completed.", .{});
 }

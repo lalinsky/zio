@@ -46,6 +46,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
+const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -287,12 +288,13 @@ test "ResetEvent wait/set signaling" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_finished });
-    defer waiter_task.cancel(runtime);
-    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event });
-    defer setter_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_finished });
+    try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
+
+    try group.wait(runtime);
 
     try testing.expect(waiter_finished);
     try testing.expect(reset_event.isSet());
@@ -335,19 +337,18 @@ test "ResetEvent multiple waiters broadcast" {
         }
     };
 
-    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    defer waiter1.cancel(runtime);
-    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    defer waiter2.cancel(runtime);
-    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    defer waiter3.cancel(runtime);
-    var setter_task = try runtime.spawn(TestFn.setter, .{ runtime, &reset_event });
-    defer setter_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
+    try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
+
+    try group.wait(runtime);
 
     try testing.expect(reset_event.isSet());
-    try testing.expectEqual(@as(u32, 3), waiter_count);
+    try testing.expectEqual(3, waiter_count);
 }
 
 test "ResetEvent wait on already set event" {

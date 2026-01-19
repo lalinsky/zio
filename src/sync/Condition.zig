@@ -50,6 +50,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -294,12 +295,13 @@ test "Condition basic wait/signal" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready });
-    defer waiter_task.cancel(runtime);
-    var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &mutex, &condition, &ready });
-    defer signaler_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready });
+    try group.spawn(runtime, TestFn.signaler, .{ runtime, &mutex, &condition, &ready });
+
+    try group.wait(runtime);
 
     try testing.expect(ready);
 }
@@ -370,17 +372,16 @@ test "Condition broadcast" {
         }
     };
 
-    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
-    defer waiter1.cancel(runtime);
-    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
-    defer waiter2.cancel(runtime);
-    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
-    defer waiter3.cancel(runtime);
-    var broadcaster_task = try runtime.spawn(TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready });
-    defer broadcaster_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready });
+
+    try group.wait(runtime);
 
     try testing.expect(ready);
-    try testing.expectEqual(@as(u32, 3), waiter_count);
+    try testing.expectEqual(3, waiter_count);
 }

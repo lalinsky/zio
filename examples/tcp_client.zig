@@ -44,7 +44,5 @@ pub fn main() !void {
     defer rt.deinit();
 
     var task = try rt.spawn(clientTask, .{rt});
-    defer task.cancel(rt);
-
-    try rt.run();
+    try task.join(rt);
 }

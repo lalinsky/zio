@@ -863,14 +863,6 @@ pub const Runtime = struct {
         };
     }
 
-    /// Run the executor event loop on the current thread until idle.
-    /// Panics if called from a thread without an executor.
-    pub fn run(self: *Runtime) !void {
-        _ = self;
-        const executor = Executor.current orelse @panic("Runtime.run() called from thread without executor");
-        try executor.run(.until_idle);
-    }
-
     /// Worker thread entry point. Initializes executor and runs until stopped.
     /// Signals worker.ready after initialization (success or failure).
     fn runWorker(self: *Runtime, worker: *Worker, id: u6) void {
@@ -1023,20 +1015,6 @@ pub const Runtime = struct {
     }
 };
 
-test "runtime with thread pool smoke test" {
-    const testing = std.testing;
-
-    const runtime = try Runtime.init(testing.allocator, .{
-        .thread_pool = .{},
-    });
-    defer runtime.deinit();
-
-    // ThreadPool is always created (no need to check)
-
-    // Run empty runtime (should exit immediately)
-    try runtime.run();
-}
-
 test "runtime: spawnBlocking smoke test" {
     const testing = std.testing;
 
@@ -1149,9 +1127,7 @@ test "runtime: basic sleep" {
     };
 
     var task = try runtime.spawn(Sleeper.run, .{runtime});
-    task.detach(runtime);
-
-    try runtime.run();
+    try task.join(runtime);
 }
 
 test "runtime: now() returns monotonic time" {

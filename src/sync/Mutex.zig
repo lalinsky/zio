@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Awaitable = @import("../runtime.zig").Awaitable;
@@ -161,12 +162,13 @@ test "Mutex basic lock/unlock" {
         }
     };
 
-    var task1 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
-    defer task1.cancel(runtime);
-    var task2 = try runtime.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
-    defer task2.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
+    try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
+
+    try group.wait(runtime);
 
     try testing.expectEqual(@as(u32, 200), shared_counter);
 }

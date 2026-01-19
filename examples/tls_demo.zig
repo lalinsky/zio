@@ -71,9 +71,5 @@ pub fn main() !void {
     defer rt.deinit();
 
     var tls_task = try rt.spawn(runTlsTask, .{rt});
-    defer tls_task.cancel(rt);
-
-    try rt.run();
-
     try tls_task.join(rt);
 }

@@ -48,6 +48,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -247,12 +248,13 @@ test "Notify basic signal/wait" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_finished });
-    defer waiter_task.cancel(runtime);
-    var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify });
-    defer signaler_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_finished });
+    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+
+    try group.wait(runtime);
 
     try testing.expect(waiter_finished);
 }
@@ -297,18 +299,17 @@ test "Notify broadcast to multiple waiters" {
         }
     };
 
-    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    defer waiter1.cancel(runtime);
-    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    defer waiter2.cancel(runtime);
-    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    defer waiter3.cancel(runtime);
-    var broadcaster_task = try runtime.spawn(TestFn.broadcaster, .{ runtime, &notify });
-    defer broadcaster_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
+    try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &notify });
 
-    try testing.expectEqual(@as(u32, 3), waiter_count);
+    try group.wait(runtime);
+
+    try testing.expectEqual(3, waiter_count);
 }
 
 test "Notify multiple signals to multiple waiters" {
@@ -338,18 +339,17 @@ test "Notify multiple signals to multiple waiters" {
         }
     };
 
-    var waiter1 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    defer waiter1.cancel(runtime);
-    var waiter2 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    defer waiter2.cancel(runtime);
-    var waiter3 = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    defer waiter3.cancel(runtime);
-    var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify });
-    defer signaler_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
+    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
 
-    try testing.expectEqual(@as(u32, 3), waiter_count);
+    try group.wait(runtime);
+
+    try testing.expectEqual(3, waiter_count);
 }
 
 test "Notify timedWait timeout" {
@@ -400,12 +400,13 @@ test "Notify timedWait success" {
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &wait_succeeded });
-    defer waiter_task.cancel(runtime);
-    var signaler_task = try runtime.spawn(TestFn.signaler, .{ runtime, &notify });
-    defer signaler_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &wait_succeeded });
+    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+
+    try group.wait(runtime);
 
     try testing.expect(wait_succeeded);
 }

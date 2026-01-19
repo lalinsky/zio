@@ -41,14 +41,14 @@ pub fn main() !void {
     var timer = try std.time.Timer.start();
 
     // Spawn pinger and ponger tasks
-    var pinger_task = try runtime.spawn(pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
-    defer pinger_task.cancel(runtime);
+    var group: zio.Group = .init;
+    defer group.cancel(runtime);
 
-    var ponger_task = try runtime.spawn(ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
-    defer ponger_task.cancel(runtime);
+    try group.spawn(runtime, pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
+    try group.spawn(runtime, ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
 
     // Run until both tasks complete
-    try runtime.run();
+    try group.wait(runtime);
 
     const elapsed_ns = timer.read();
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;

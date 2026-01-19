@@ -36,16 +36,14 @@ pub fn main() !void {
     };
 
     // Spawn multiple tasks that increment shared counter
-    var task0 = try rt.spawn(incrementTask, .{ rt, &shared_data, 0 });
-    defer task0.cancel(rt);
-    var task1 = try rt.spawn(incrementTask, .{ rt, &shared_data, 1 });
-    defer task1.cancel(rt);
-    var task2 = try rt.spawn(incrementTask, .{ rt, &shared_data, 2 });
-    defer task2.cancel(rt);
-    var task3 = try rt.spawn(incrementTask, .{ rt, &shared_data, 3 });
-    defer task3.cancel(rt);
+    var group: zio.Group = .init;
+    defer group.cancel(rt);
 
-    try rt.run();
+    for (0..4) |i| {
+        try group.spawn(rt, incrementTask, .{ rt, &shared_data, @intCast(i) });
+    }
+
+    try group.wait(rt);
 
     std.log.info("Final counter value: {} (expected: {})", .{ shared_data.counter, 4000 });
 }

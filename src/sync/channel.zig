@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const select = @import("../select.zig").select;
@@ -681,16 +682,18 @@ test "Channel: basic send and receive" {
     };
 
     var results: [3]u32 = undefined;
-    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel });
-    defer producer_task.cancel(runtime);
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &results });
-    defer consumer_task.cancel(runtime);
 
-    try runtime.run();
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try testing.expectEqual(@as(u32, 1), results[0]);
-    try testing.expectEqual(@as(u32, 2), results[1]);
-    try testing.expectEqual(@as(u32, 3), results[2]);
+    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
+
+    try group.wait(runtime);
+
+    try testing.expectEqual(1, results[0]);
+    try testing.expectEqual(2, results[1]);
+    try testing.expectEqual(3, results[2]);
 }
 
 test "Channel: trySend and tryReceive" {
@@ -755,14 +758,16 @@ test "Channel: blocking behavior when empty" {
     };
 
     var result: u32 = 0;
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &result });
-    defer consumer_task.cancel(runtime);
-    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel });
-    defer producer_task.cancel(runtime);
 
-    try runtime.run();
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try testing.expectEqual(@as(u32, 42), result);
+    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &result });
+    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
+
+    try group.wait(runtime);
+
+    try testing.expectEqual(42, result);
 }
 
 test "Channel: blocking behavior when full" {
@@ -790,14 +795,16 @@ test "Channel: blocking behavior when full" {
     };
 
     var count: u32 = 0;
-    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel, &count });
-    defer producer_task.cancel(runtime);
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel });
-    defer consumer_task.cancel(runtime);
 
-    try runtime.run();
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try testing.expectEqual(@as(u32, 1), count);
+    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel, &count });
+    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel });
+
+    try group.wait(runtime);
+
+    try testing.expectEqual(1, count);
 }
 
 test "Channel: multiple producers and consumers" {
@@ -825,19 +832,19 @@ test "Channel: multiple producers and consumers" {
     };
 
     var sum: u32 = 0;
-    var producer1 = try runtime.spawn(TestFn.producer, .{ runtime, &channel, @as(u32, 0) });
-    defer producer1.cancel(runtime);
-    var producer2 = try runtime.spawn(TestFn.producer, .{ runtime, &channel, @as(u32, 100) });
-    defer producer2.cancel(runtime);
-    var consumer1 = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &sum });
-    defer consumer1.cancel(runtime);
-    var consumer2 = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &sum });
-    defer consumer2.cancel(runtime);
 
-    try runtime.run();
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel, 0 });
+    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel, 100 });
+    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &sum });
+    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &sum });
+
+    try group.wait(runtime);
 
     // Sum should be: (0+1+2+3+4) + (100+101+102+103+104) = 10 + 510 = 520
-    try testing.expectEqual(@as(u32, 520), sum);
+    try testing.expectEqual(520, sum);
 }
 
 test "Channel: close graceful" {
@@ -865,12 +872,14 @@ test "Channel: close graceful" {
     };
 
     var results: [3]?u32 = .{ null, null, null };
-    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel });
-    defer producer_task.cancel(runtime);
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &results });
-    defer consumer_task.cancel(runtime);
 
-    try runtime.run();
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
+
+    try group.wait(runtime);
 
     try testing.expectEqual(@as(?u32, 1), results[0]);
     try testing.expectEqual(@as(?u32, 2), results[1]);
@@ -901,12 +910,14 @@ test "Channel: close immediate" {
     };
 
     var result: ?u32 = null;
-    var producer_task = try runtime.spawn(TestFn.producer, .{ runtime, &channel });
-    defer producer_task.cancel(runtime);
-    var consumer_task = try runtime.spawn(TestFn.consumer, .{ runtime, &channel, &result });
-    defer consumer_task.cancel(runtime);
 
-    try runtime.run();
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &result });
+
+    try group.wait(runtime);
 
     try testing.expectEqual(@as(?u32, null), result);
 }
@@ -1003,12 +1014,13 @@ test "Channel: asyncReceive with select - basic" {
         }
     };
 
-    var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel });
-    defer sender_task.cancel(runtime);
-    var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel });
-    defer receiver_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+
+    try group.wait(runtime);
 }
 
 test "Channel: asyncReceive with select - already ready" {
@@ -1095,12 +1107,13 @@ test "Channel: asyncSend with select - basic" {
         }
     };
 
-    var sender_task = try runtime.spawn(TestFn.sender, .{ runtime, &channel });
-    defer sender_task.cancel(runtime);
-    var receiver_task = try runtime.spawn(TestFn.receiver, .{ runtime, &channel });
-    defer receiver_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    try runtime.run();
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+
+    try group.wait(runtime);
 }
 
 test "Channel: asyncSend with select - already ready" {
@@ -1256,13 +1269,15 @@ test "Channel: select with multiple receivers" {
     };
 
     var which: u8 = 0;
-    var select_task = try runtime.spawn(TestFn.selectTask, .{ runtime, &channel1, &channel2, &which });
-    defer select_task.cancel(runtime);
-    var sender_task = try runtime.spawn(TestFn.sender2, .{ runtime, &channel2 });
-    defer sender_task.cancel(runtime);
 
-    try runtime.run();
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.selectTask, .{ runtime, &channel1, &channel2, &which });
+    try group.spawn(runtime, TestFn.sender2, .{ runtime, &channel2 });
+
+    try group.wait(runtime);
 
     // ch2 should win
-    try testing.expectEqual(@as(u8, 2), which);
+    try testing.expectEqual(2, which);
 }

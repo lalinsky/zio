@@ -52,24 +52,15 @@ pub fn main() !void {
     var channel = zio.Channel(i32).init(&buffer);
 
     // Start 2 producers and 2 consumers
-    var producers: [2]zio.JoinHandle(zio.Cancelable!void) = undefined;
-    var consumers: [2]zio.JoinHandle(zio.Cancelable!void) = undefined;
-    var producer_count: usize = 0;
-    var consumer_count: usize = 0;
-
-    defer {
-        for (producers[0..producer_count]) |*task| task.cancel(rt);
-        for (consumers[0..consumer_count]) |*task| task.cancel(rt);
-    }
+    var group: zio.Group = .init;
+    defer group.cancel(rt);
 
     for (0..2) |i| {
-        producers[i] = try rt.spawn(producer, .{ rt, &channel, @as(u32, @intCast(i)) });
-        producer_count += 1;
-        consumers[i] = try rt.spawn(consumer, .{ rt, &channel, @as(u32, @intCast(i)) });
-        consumer_count += 1;
+        try group.spawn(rt, producer, .{ rt, &channel, @intCast(i) });
+        try group.spawn(rt, consumer, .{ rt, &channel, @intCast(i) });
     }
 
-    try rt.run();
+    try group.wait(rt);
 
     std.log.info("All tasks completed.", .{});
 }

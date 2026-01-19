@@ -1262,8 +1262,6 @@ test "tcpConnectToAddress: basic" {
     var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
     defer client_task.cancel(runtime);
 
-    try runtime.run();
-
     try server_task.join(runtime);
     try client_task.join(runtime);
 }
@@ -1321,8 +1319,6 @@ test "tcpConnectToHost: basic" {
 
     var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
     defer client_task.cancel(runtime);
-
-    try runtime.run();
 
     try server_task.join(runtime);
     try client_task.join(runtime);
