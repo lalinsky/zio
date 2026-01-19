@@ -90,18 +90,19 @@ pub fn main() !void {
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
-
     const server = try addr.listen(rt, .{});
     defer server.close(rt);
 
-    std.log.info("Listening on 127.0.0.1:8080", .{});
+    std.log.info("Listening on {f}", .{server.socket.address});
+
+    var group: zio.Group = .init;
+    defer group.cancel(rt);
 
     while (true) {
         const stream = try server.accept(rt);
         errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{ rt, stream }, .{});
-        task.detach(rt);
+        try group.spawn(rt, handleClient, .{ rt, stream });
     }
 }
 ```
