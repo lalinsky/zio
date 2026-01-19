@@ -520,6 +520,7 @@ test "BroadcastChannel: basic send and receive" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(1, results[0]);
     try testing.expectEqual(2, results[1]);
@@ -571,6 +572,7 @@ test "BroadcastChannel: multiple consumers receive same messages" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer3, &sum3, &barrier });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // All consumers should receive all messages
     try testing.expectEqual(60, sum1);
@@ -808,6 +810,7 @@ test "BroadcastChannel: consumers can drain after close" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(@as(?u32, 1), results[0]);
     try testing.expectEqual(@as(?u32, 2), results[1]);
@@ -858,6 +861,7 @@ test "BroadcastChannel: waiting consumers wake on close" {
     try group.spawn(runtime, TestFn.closer, .{ runtime, &channel, &barrier });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(got_closed);
 }
@@ -932,6 +936,7 @@ test "BroadcastChannel: asyncReceive with select - basic" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &barrier });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 }
 
 test "BroadcastChannel: asyncReceive with select - already ready" {
@@ -1086,6 +1091,7 @@ test "BroadcastChannel: select with multiple broadcast channels" {
     try group.spawn(runtime, TestFn.sender2, .{ runtime, &channel2 });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // ch2 should win
     try testing.expectEqual(2, which);

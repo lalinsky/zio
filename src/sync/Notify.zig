@@ -255,6 +255,7 @@ test "Notify basic signal/wait" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(waiter_finished);
 }
@@ -308,6 +309,7 @@ test "Notify broadcast to multiple waiters" {
     try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &notify });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(3, waiter_count);
 }
@@ -348,6 +350,7 @@ test "Notify multiple signals to multiple waiters" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(3, waiter_count);
 }
@@ -407,6 +410,7 @@ test "Notify timedWait success" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(wait_succeeded);
 }

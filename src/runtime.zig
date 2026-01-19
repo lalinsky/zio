@@ -1264,6 +1264,7 @@ test "runtime: multi-threaded execution with 2 executors" {
     }
 
     try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(4, TestContext.counter);
 }

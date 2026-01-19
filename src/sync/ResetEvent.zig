@@ -295,6 +295,7 @@ test "ResetEvent wait/set signaling" {
     try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(waiter_finished);
     try testing.expect(reset_event.isSet());
@@ -346,6 +347,7 @@ test "ResetEvent multiple waiters broadcast" {
     try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(reset_event.isSet());
     try testing.expectEqual(3, waiter_count);

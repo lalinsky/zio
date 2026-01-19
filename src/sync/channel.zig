@@ -690,6 +690,7 @@ test "Channel: basic send and receive" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(1, results[0]);
     try testing.expectEqual(2, results[1]);
@@ -766,6 +767,7 @@ test "Channel: blocking behavior when empty" {
     try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(42, result);
 }
@@ -803,6 +805,7 @@ test "Channel: blocking behavior when full" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(1, count);
 }
@@ -842,6 +845,7 @@ test "Channel: multiple producers and consumers" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &sum });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // Sum should be: (0+1+2+3+4) + (100+101+102+103+104) = 10 + 510 = 520
     try testing.expectEqual(520, sum);
@@ -880,6 +884,7 @@ test "Channel: close graceful" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(@as(?u32, 1), results[0]);
     try testing.expectEqual(@as(?u32, 2), results[1]);
@@ -918,6 +923,7 @@ test "Channel: close immediate" {
     try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &result });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(@as(?u32, null), result);
 }
@@ -1021,6 +1027,7 @@ test "Channel: asyncReceive with select - basic" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 }
 
 test "Channel: asyncReceive with select - already ready" {
@@ -1114,6 +1121,7 @@ test "Channel: asyncSend with select - basic" {
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 }
 
 test "Channel: asyncSend with select - already ready" {
@@ -1277,6 +1285,7 @@ test "Channel: select with multiple receivers" {
     try group.spawn(runtime, TestFn.sender2, .{ runtime, &channel2 });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // ch2 should win
     try testing.expectEqual(2, which);

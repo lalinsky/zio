@@ -169,6 +169,7 @@ test "Mutex basic lock/unlock" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(@as(u32, 200), shared_counter);
 }

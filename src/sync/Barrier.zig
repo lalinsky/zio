@@ -158,6 +158,7 @@ test "Barrier: basic synchronization" {
     }
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // All coroutines should have seen counter == 3
     for (results) |result| {
@@ -191,9 +192,10 @@ test "Barrier: leader detection" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // Exactly one coroutine should have been the leader
-    try testing.expectEqual(@as(u32, 1), leader_count);
+    try testing.expectEqual(1, leader_count);
 }
 
 test "Barrier: reusable for multiple cycles" {
@@ -230,10 +232,11 @@ test "Barrier: reusable for multiple cycles" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
-    try testing.expectEqual(@as(u32, 2), phase1_done);
-    try testing.expectEqual(@as(u32, 2), phase2_done);
-    try testing.expectEqual(@as(u32, 2), phase3_done);
+    try testing.expectEqual(2, phase1_done);
+    try testing.expectEqual(2, phase2_done);
+    try testing.expectEqual(2, phase3_done);
 }
 
 test "Barrier: single coroutine barrier" {
@@ -291,6 +294,7 @@ test "Barrier: ordering test" {
     }
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // All three should have unique arrival numbers (0, 1, 2 in some order)
     var seen = [_]bool{false} ** 3;
@@ -330,6 +334,7 @@ test "Barrier: many coroutines" {
     }
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     // All should see the final counter value
     for (final_counts) |count| {

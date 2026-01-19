@@ -185,6 +185,7 @@ test "Semaphore: basic wait/post" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &sem, &n });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(3, n);
 }
@@ -243,6 +244,7 @@ test "Semaphore: timedWait success" {
     try group.spawn(runtime, TestFn.poster, .{ runtime, &sem });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(got_permit);
     try testing.expectEqual(0, sem.permits);
@@ -271,6 +273,7 @@ test "Semaphore: multiple permits" {
     try group.spawn(runtime, TestFn.worker, .{ runtime, &sem });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expectEqual(0, sem.permits);
 }

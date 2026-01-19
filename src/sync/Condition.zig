@@ -302,6 +302,7 @@ test "Condition basic wait/signal" {
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &mutex, &condition, &ready });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(ready);
 }
@@ -381,6 +382,7 @@ test "Condition broadcast" {
     try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready });
 
     try group.wait(runtime);
+    try testing.expect(!group.hasFailed());
 
     try testing.expect(ready);
     try testing.expectEqual(3, waiter_count);
