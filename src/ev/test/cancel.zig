@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("../../time.zig");
 const ev = @import("../root.zig");
 const os = @import("../../os/root.zig");
 const Loop = ev.Loop;
@@ -26,10 +27,9 @@ test "cancel: timer with loop.cancel()" {
 
     loop.cancel(&timer.c);
 
-    var wall_timer = try std.time.Timer.start();
+    var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
-    const elapsed_ns = wall_timer.read();
-    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+    const elapsed_ms = wall_timer.read().toMilliseconds();
 
     try std.testing.expectEqual(.dead, timer.c.state);
     try std.testing.expectError(error.Canceled, timer.getResult());
@@ -580,10 +580,10 @@ test "cancel: cross-thread cancellation" {
     }.run, .{&timer}) catch unreachable;
 
     // Run loop1 until completion (should be cancelled quickly)
-    var wall_timer = try std.time.Timer.start();
+    var wall_timer = time.Stopwatch.start();
     while (!completed.load(.acquire)) {
         try loop1.run(.once);
-        if (wall_timer.read() > 1 * std.time.ns_per_s) {
+        if (wall_timer.read().toSeconds() > 1) {
             return error.TestTimeout;
         }
     }

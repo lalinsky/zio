@@ -334,6 +334,50 @@ pub const Timeout = union(enum) {
     deadline: Timestamp,
 };
 
+/// A monotonic, high performance stopwatch for measuring elapsed time.
+///
+/// Monotonicity is ensured by saturating on the most previous sample.
+/// This means that while timings reported are monotonic,
+/// they're not guaranteed to tick at a steady rate as this is up to the underlying system.
+pub const Stopwatch = struct {
+    started: Timestamp,
+    previous: Timestamp,
+
+    /// Initialize the stopwatch by sampling the monotonic clock.
+    pub fn start() Stopwatch {
+        const current = os.time.now(.monotonic);
+        return .{ .started = current, .previous = current };
+    }
+
+    /// Reads the elapsed time since start or the last reset.
+    pub fn read(self: *Stopwatch) Duration {
+        const current = self.sample();
+        return self.started.durationTo(current);
+    }
+
+    /// Resets the stopwatch to 0/now.
+    pub fn reset(self: *Stopwatch) void {
+        const current = self.sample();
+        self.started = current;
+    }
+
+    /// Returns the elapsed time since start or the last reset, then resets the stopwatch.
+    pub fn lap(self: *Stopwatch) Duration {
+        const current = self.sample();
+        defer self.started = current;
+        return self.started.durationTo(current);
+    }
+
+    /// Samples the monotonic clock, ensuring monotonicity by saturating on the previous sample.
+    fn sample(self: *Stopwatch) Timestamp {
+        const current = os.time.now(.monotonic);
+        if (current.ns > self.previous.ns) {
+            self.previous = current;
+        }
+        return self.previous;
+    }
+};
+
 test "Timestamp: addDuration, subDuration, durationTo" {
     const t1: Timestamp = .{ .ns = 1_000_000_000 };
     const t2 = t1.addDuration(.fromSeconds(5));
@@ -460,4 +504,23 @@ test "Duration: overflow saturation" {
     // Verify non-overflowing values still work correctly
     try std.testing.expectEqual(1_000_000_000, Duration.fromSeconds(1).ns);
     try std.testing.expectEqual(60_000_000_000, Duration.fromMinutes(1).ns);
+}
+
+test "Stopwatch: start, read, lap, reset" {
+    var timer = Stopwatch.start();
+
+    os.time.sleep(.fromMilliseconds(10));
+    const time_0 = timer.read();
+    try std.testing.expect(time_0.ns > 0);
+
+    const time_1 = timer.lap();
+    try std.testing.expect(time_1.ns >= time_0.ns);
+
+    // After lap, timer should be reset
+    const time_2 = timer.read();
+    try std.testing.expect(time_2.ns < time_1.ns);
+
+    timer.reset();
+    const time_3 = timer.read();
+    try std.testing.expect(time_3.ns < time_2.ns);
 }

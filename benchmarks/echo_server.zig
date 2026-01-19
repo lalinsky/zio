@@ -100,7 +100,7 @@ pub fn main() !void {
 
     try server_ready.wait(rt);
 
-    var timer = try std.time.Timer.start();
+    var timer = zio.time.Stopwatch.start();
 
     var client_group: zio.Group = .init;
     defer client_group.cancel(rt);
@@ -110,7 +110,7 @@ pub fn main() !void {
     }
     try client_group.wait(rt);
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns = timer.read().toNanoseconds();
 
     server_done.set();
     try server_task.join(rt);

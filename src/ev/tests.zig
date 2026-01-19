@@ -12,7 +12,8 @@ const FileStreamWrite = @import("completion.zig").FileStreamWrite;
 const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
 const net = @import("../os/net.zig");
-const time = @import("../os/time.zig");
+const os_time = @import("../os/time.zig");
+const time = @import("../time.zig");
 const posix = @import("../os/posix.zig");
 const fs = @import("../os/fs.zig");
 
@@ -59,15 +60,14 @@ test "Loop: timer basic" {
     var timer: Timer = .init(.fromMilliseconds(timeout_ms));
     loop.add(&timer.c);
 
-    var wall_timer = try std.time.Timer.start();
+    var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
-    const elapsed_ns = wall_timer.read();
-    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+    const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expect(elapsed_ms >= timeout_ms - 5);
-    try std.testing.expect(elapsed_ms <= timeout_ms + 100);
-    std.log.info("timer: expected={}ms, actual={}ms", .{ timeout_ms, elapsed_ms });
+    try std.testing.expect(elapsed.toMilliseconds() >= timeout_ms - 5);
+    try std.testing.expect(elapsed.toMilliseconds() <= timeout_ms + 100);
+    std.log.info("timer: expected={}ms, actual={f}", .{ timeout_ms, elapsed });
 }
 
 test "Loop: close" {
@@ -152,7 +152,7 @@ test "Loop: async notification - cross-thread" {
     var ctx = Context{ .async_handle = &async_handle };
     const thread = try std.Thread.spawn(.{}, struct {
         fn notifyThread(c: *Context) void {
-            time.sleep(.fromMilliseconds(10));
+            os_time.sleep(.fromMilliseconds(10));
             c.async_handle.notify();
         }
     }.notifyThread, .{&ctx});

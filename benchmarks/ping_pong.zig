@@ -38,7 +38,7 @@ pub fn main() !void {
 
     std.debug.print("Running ping-pong benchmark with {} rounds...\n", .{NUM_ROUNDS});
 
-    var timer = try std.time.Timer.start();
+    var timer = zio.time.Stopwatch.start();
 
     // Spawn pinger and ponger tasks
     var group: zio.Group = .init;
@@ -50,7 +50,7 @@ pub fn main() !void {
     // Run until both tasks complete
     try group.wait(runtime);
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns = timer.read().toNanoseconds();
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
     const elapsed_s = elapsed_ms / 1000.0;
 

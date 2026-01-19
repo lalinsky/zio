@@ -22,7 +22,7 @@ pub fn main() !void {
 
     std.debug.print("Running spawn throughput benchmark with {} spawns...\n", .{NUM_SPAWNS});
 
-    var timer = try std.time.Timer.start();
+    var timer = zio.time.Stopwatch.start();
 
     var group: zio.Group = .init;
     defer group.cancel(runtime);
@@ -33,7 +33,8 @@ pub fn main() !void {
 
     try group.wait(runtime);
 
-    const elapsed_ns = timer.read();
+    const elapsed = timer.read();
+    const elapsed_ns = elapsed.toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
     const spawns_per_sec = @as(f64, @floatFromInt(NUM_SPAWNS)) / elapsed_s;
     const ns_per_spawn = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(NUM_SPAWNS));

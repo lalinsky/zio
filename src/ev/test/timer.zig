@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("../../time.zig");
 const Loop = @import("../loop.zig").Loop;
 const Timer = @import("../completion.zig").Timer;
 
@@ -13,15 +14,14 @@ test "setTimer and clearTimer basic" {
     loop.setTimer(&timer, .fromMilliseconds(100));
     try std.testing.expectEqual(.running, timer.c.state);
 
-    var wall_timer = try std.time.Timer.start();
+    var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
-    const elapsed_ns = wall_timer.read();
-    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+    const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expect(elapsed_ms >= 90);
-    try std.testing.expect(elapsed_ms <= 250);
-    std.log.info("setTimer: expected=100ms, actual={}ms", .{elapsed_ms});
+    try std.testing.expect(elapsed.toMilliseconds() >= 90);
+    try std.testing.expect(elapsed.toMilliseconds() <= 250);
+    std.log.info("setTimer: expected=100ms, actual={f}", .{elapsed});
 }
 
 test "clearTimer before expiration" {
@@ -40,15 +40,14 @@ test "clearTimer before expiration" {
     try std.testing.expectEqual(.new, timer.c.state);
 
     // Run the loop - should complete immediately with no active timers
-    var wall_timer = try std.time.Timer.start();
+    var wall_timer = time.Stopwatch.start();
     try loop.run(.once);
-    const elapsed_ns = wall_timer.read();
-    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+    const elapsed = wall_timer.read();
 
     // Should be very fast since there's nothing to wait for
-    try std.testing.expect(elapsed_ms < 200);
+    try std.testing.expect(elapsed.toMilliseconds() < 200);
     try std.testing.expect(loop.done());
-    std.log.info("clearTimer: elapsed={}ms", .{elapsed_ms});
+    std.log.info("clearTimer: elapsed={f}", .{elapsed});
 }
 
 test "setTimer multiple times" {
@@ -67,15 +66,14 @@ test "setTimer multiple times" {
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Should complete after ~100ms, not 2000ms
-    var wall_timer = try std.time.Timer.start();
+    var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
-    const elapsed_ns = wall_timer.read();
-    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+    const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expect(elapsed_ms >= 90);
-    try std.testing.expect(elapsed_ms <= 300);
-    std.log.info("setTimer multiple: expected=100ms, actual={}ms", .{elapsed_ms});
+    try std.testing.expect(elapsed.toMilliseconds() >= 90);
+    try std.testing.expect(elapsed.toMilliseconds() <= 300);
+    std.log.info("setTimer multiple: expected=100ms, actual={f}", .{elapsed});
 }
 
 test "clearTimer and reuse timer" {
@@ -94,13 +92,12 @@ test "clearTimer and reuse timer" {
     loop.setTimer(&timer, .fromMilliseconds(100));
     try std.testing.expectEqual(.running, timer.c.state);
 
-    var wall_timer = try std.time.Timer.start();
+    var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
-    const elapsed_ns = wall_timer.read();
-    const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+    const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expect(elapsed_ms >= 90);
-    try std.testing.expect(elapsed_ms <= 250);
-    std.log.info("clearTimer reuse: expected=100ms, actual={}ms", .{elapsed_ms});
+    try std.testing.expect(elapsed.toMilliseconds() >= 90);
+    try std.testing.expect(elapsed.toMilliseconds() <= 250);
+    std.log.info("clearTimer reuse: expected=100ms, actual={f}", .{elapsed});
 }

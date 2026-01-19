@@ -31,12 +31,12 @@ pub fn main() !void {
 
     std.debug.print("Running spawn tree benchmark with {} spawns...\n", .{NUM_SPAWNS});
 
-    var timer = try std.time.Timer.start();
+    var timer = zio.time.Stopwatch.start();
 
     var t = try runtime.spawn(task, .{runtime});
     try t.join(runtime);
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns = timer.read().toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
     const total_spawned = spawn_count.load(.monotonic);
     const total_completed = complete_count.load(.monotonic);

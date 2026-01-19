@@ -12,8 +12,9 @@ const os = @import("os/root.zig");
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
-const Duration = @import("time.zig").Duration;
-const Timestamp = @import("time.zig").Timestamp;
+const time = @import("time.zig");
+const Duration = time.Duration;
+const Timestamp = time.Timestamp;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const Context = @import("coro/coroutines.zig").Context;
@@ -1150,7 +1151,7 @@ test "runtime: sleep is cancelable" {
         }
     }.call;
 
-    var timer = try std.time.Timer.start();
+    var timer = time.Stopwatch.start();
 
     var handle = try runtime.spawn(sleepingTask, .{runtime});
     defer handle.cancel(runtime);
@@ -1163,8 +1164,7 @@ test "runtime: sleep is cancelable" {
     try std.testing.expectError(error.Canceled, result);
 
     // Ensure the sleep was canceled before completion
-    const elapsed = timer.read();
-    try std.testing.expect(elapsed <= 500 * std.time.ns_per_ms);
+    try std.testing.expect(timer.read().toMilliseconds() <= 500);
 }
 
 test "runtime: yield from main allows tasks to run" {

@@ -45,7 +45,8 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
-const Duration = @import("../time.zig").Duration;
+const time = @import("../time.zig");
+const Duration = time.Duration;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 mutex: Mutex = Mutex.init,
@@ -114,19 +115,18 @@ pub fn waitUncancelable(self: *Semaphore, rt: *Runtime) void {
 /// Returns `error.Timeout` if the timeout expires before a permit becomes available.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
-    var timer = std.time.Timer.start() catch unreachable;
-    const timeout_ns = timeout.toNanoseconds();
+    var timer = time.Stopwatch.start();
 
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
     while (self.permits == 0) {
         const elapsed = timer.read();
-        if (elapsed >= timeout_ns) {
+        if (elapsed.ns >= timeout.ns) {
             return error.Timeout;
         }
 
-        const remaining = Duration.fromNanoseconds(timeout_ns - elapsed);
+        const remaining = Duration.fromNanoseconds(timeout.ns - elapsed.ns);
         self.cond.timedWait(rt, &self.mutex, remaining) catch |err| switch (err) {
             error.Timeout => return error.Timeout,
             error.Canceled => {
