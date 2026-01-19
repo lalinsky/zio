@@ -67,25 +67,20 @@ pub const Awaitable = struct {
     /// Registers a wait node to be notified when the awaitable completes.
     /// This is part of the Future protocol for select().
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
-    pub fn asyncWait(self: *const Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
         // Fast path: check if already complete
         if (self.done.load(.acquire)) {
             return false;
         }
-        // Cast away const to mutate the waiting list
-        // This is safe because waiting_list is designed to be mutated even from const contexts
-        const mutable_self: *Awaitable = @constCast(self);
         // Try to push to queue - only succeeds if awaitable is not complete
         // Returns false if awaitable is complete, preventing invalid transition: complete -> has_waiters
-        return mutable_self.waiting_list.pushUnless(complete, wait_node);
+        return self.waiting_list.pushUnless(complete, wait_node);
     }
 
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
-    pub fn asyncCancelWait(self: *const Awaitable, _: *Runtime, wait_node: *WaitNode) void {
-        // Cast away const to mutate the waiting list
-        const mutable_self: *Awaitable = @constCast(self);
-        _ = mutable_self.waiting_list.remove(wait_node);
+    pub fn asyncCancelWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) void {
+        _ = self.waiting_list.remove(wait_node);
     }
 
     /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
