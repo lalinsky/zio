@@ -249,7 +249,6 @@ pub const Executor = struct {
 
     id: u6,
     loop: ev.Loop,
-    allocator: Allocator,
     current_coroutine: ?*Coroutine = null,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
@@ -285,12 +284,6 @@ pub const Executor = struct {
     // Back-reference to runtime for global coordination
     runtime: *Runtime,
 
-    // Worker thread (null for main executor that runs on calling thread)
-    thread: ?std.Thread = null,
-
-    // Coordination for thread startup
-    available: bool = true,
-
     // Main task for non-coroutine contexts (e.g., main thread calling rt.sleep())
     // This allows the main thread to use the same yield/wake mechanisms as spawned tasks.
     // Note: main_task.coro is not a real coroutine - scheduleTask handles it specially
@@ -316,7 +309,6 @@ pub const Executor = struct {
     pub fn init(self: *Executor, runtime: *Runtime, id: u6) !void {
         self.* = .{
             .id = id,
-            .allocator = runtime.allocator,
             .loop = undefined,
             .lifo_slot_enabled = runtime.options.lifo_slot_enabled,
             .runtime = runtime,
@@ -344,7 +336,7 @@ pub const Executor = struct {
         errdefer cleanupStackGrowth();
 
         try self.loop.init(.{
-            .allocator = self.allocator,
+            .allocator = self.runtime.allocator,
             .thread_pool = &self.runtime.thread_pool,
             .defer_callbacks = false,
         });
