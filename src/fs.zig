@@ -129,6 +129,54 @@ pub const File = struct {
         return try op.getResult();
     }
 
+    pub const SyncError = os.fs.FileSyncError || Cancelable;
+
+    pub fn sync(self: File, rt: *Runtime, flags: os.fs.FileSyncFlags) SyncError!void {
+        var op = ev.FileSync.init(self.fd, flags);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const SetSizeError = os.fs.FileSetSizeError || Cancelable;
+
+    pub fn setSize(self: File, rt: *Runtime, length: u64) SetSizeError!void {
+        var op = ev.FileSetSize.init(self.fd, length);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const SizeError = os.fs.FileSizeError || Cancelable;
+
+    pub fn size(self: File, rt: *Runtime) SizeError!u64 {
+        var op = ev.FileSize.init(self.fd);
+        try runIo(rt, &op.c);
+        return try op.getResult();
+    }
+
+    pub const SetPermissionsError = os.fs.FileSetPermissionsError || Cancelable;
+
+    pub fn setPermissions(self: File, rt: *Runtime, mode: os.fs.mode_t) SetPermissionsError!void {
+        var op = ev.FileSetPermissions.init(self.fd, mode);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const SetOwnerError = os.fs.FileSetOwnerError || Cancelable;
+
+    pub fn setOwner(self: File, rt: *Runtime, uid: ?os.fs.uid_t, gid: ?os.fs.gid_t) SetOwnerError!void {
+        var op = ev.FileSetOwner.init(self.fd, uid, gid);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
+    pub const SetTimestampsError = os.fs.FileSetTimestampsError || Cancelable;
+
+    pub fn setTimestamps(self: File, rt: *Runtime, timestamps: os.fs.FileTimestamps) SetTimestampsError!void {
+        var op = ev.FileSetTimestamps.init(self.fd, timestamps);
+        try runIo(rt, &op.c);
+        try op.getResult();
+    }
+
     pub fn reader(self: File, rt: *Runtime, buffer: []u8) FileReader {
         return FileReader.init(self, rt, buffer);
     }
@@ -315,6 +363,27 @@ pub const FileWriter = struct {
     }
 };
 
+const TestFile = struct {
+    rt: *Runtime,
+    dir: Dir,
+    file: File,
+    path: []const u8,
+
+    pub fn create(path: []const u8, flags: os.fs.FileCreateFlags) !TestFile {
+        const rt = try Runtime.init(std.testing.allocator, .{});
+        errdefer rt.deinit();
+        const dir = Dir.cwd();
+        const file = try dir.createFile(rt, path, flags);
+        return .{ .rt = rt, .dir = dir, .file = file, .path = path };
+    }
+
+    pub fn deinit(self: *TestFile) void {
+        self.file.close(self.rt);
+        self.dir.deleteFile(self.rt, self.path) catch {};
+        self.rt.deinit();
+    }
+};
+
 test "File: basic read and write" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
@@ -343,90 +412,121 @@ test "File: basic read and write" {
 }
 
 test "File: positional read and write" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const dir = Dir.cwd();
-    const file_path = "test_file_positional.txt";
-    var zio_file = try dir.createFile(rt, file_path, .{ .read = true });
+    var t = try TestFile.create("test_file_positional.txt", .{ .read = true });
+    defer t.deinit();
 
     // Write at different positions
-    try std.testing.expectEqual(5, try zio_file.write(rt, "HELLO", 0));
-    try std.testing.expectEqual(5, try zio_file.write(rt, "WORLD", 10));
+    try std.testing.expectEqual(5, try t.file.write(t.rt, "HELLO", 0));
+    try std.testing.expectEqual(5, try t.file.write(t.rt, "WORLD", 10));
 
     // Read from positions
     var buf: [5]u8 = undefined;
-    try std.testing.expectEqual(5, try zio_file.read(rt, &buf, 0));
+    try std.testing.expectEqual(5, try t.file.read(t.rt, &buf, 0));
     try std.testing.expectEqualStrings("HELLO", &buf);
 
-    try std.testing.expectEqual(5, try zio_file.read(rt, &buf, 10));
+    try std.testing.expectEqual(5, try t.file.read(t.rt, &buf, 10));
     try std.testing.expectEqualStrings("WORLD", &buf);
 
     // Test reading from gap (should be zeros or random data)
     var gap_buf: [3]u8 = undefined;
-    try std.testing.expectEqual(3, try zio_file.read(rt, &gap_buf, 5));
-
-    zio_file.close(rt);
-    try dir.deleteFile(rt, file_path);
+    try std.testing.expectEqual(3, try t.file.read(t.rt, &gap_buf, 5));
 }
 
-test "File: close operation" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const dir = Dir.cwd();
-    const file_path = "test_file_close.txt";
-    var zio_file = try dir.createFile(rt, file_path, .{});
+test "File: sync operation" {
+    var t = try TestFile.create("test_file_sync.txt", .{});
+    defer t.deinit();
 
     // Write some data
-    const bytes_written = try zio_file.write(rt, "test data", 0);
+    const bytes_written = try t.file.write(t.rt, "test data", 0);
     try std.testing.expectEqual(9, bytes_written);
 
-    // Close the file using zio
-    zio_file.close(rt);
+    // Full sync (fsync)
+    try t.file.sync(t.rt, .{});
 
-    try dir.deleteFile(rt, file_path);
+    // Data-only sync (fdatasync)
+    try t.file.sync(t.rt, .{ .only_data = true });
+}
+
+test "File: size and setSize" {
+    var t = try TestFile.create("test_file_size.txt", .{ .read = true });
+    defer t.deinit();
+
+    // Write some data
+    try std.testing.expectEqual(10, try t.file.write(t.rt, "0123456789", 0));
+
+    // Check size
+    try std.testing.expectEqual(10, try t.file.size(t.rt));
+
+    // Truncate
+    try t.file.setSize(t.rt, 5);
+    try std.testing.expectEqual(5, try t.file.size(t.rt));
+
+    // Verify content
+    var buf: [10]u8 = undefined;
+    try std.testing.expectEqual(5, try t.file.read(t.rt, &buf, 0));
+    try std.testing.expectEqualStrings("01234", buf[0..5]);
+
+    // Extend
+    try t.file.setSize(t.rt, 8);
+    try std.testing.expectEqual(8, try t.file.size(t.rt));
+}
+
+test "File: setPermissions" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var t = try TestFile.create("test_file_permissions.txt", .{});
+    defer t.deinit();
+
+    // Set permissions to read-only
+    try t.file.setPermissions(t.rt, 0o444);
+
+    // Verify via stat
+    const info = try t.file.stat(t.rt);
+    try std.testing.expectEqual(0o444, info.mode & 0o777);
+
+    // Restore permissions for cleanup
+    try t.file.setPermissions(t.rt, 0o644);
+}
+
+test "File: setTimestamps" {
+    var t = try TestFile.create("test_file_timestamps.txt", .{});
+    defer t.deinit();
+
+    const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
+    const mtime: i96 = 1500000000 * std.time.ns_per_s; // 2017-07-14
+
+    try t.file.setTimestamps(t.rt, .{ .atime = atime, .mtime = mtime });
+
+    const info = try t.file.stat(t.rt);
+    try std.testing.expectEqual(atime, info.atime);
+    try std.testing.expectEqual(mtime, info.mtime);
 }
 
 test "File: reader and writer interface" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const dir = Dir.cwd();
-    const file_path = "test_file_rw_interface.txt";
+    var t = try TestFile.create("test_file_rw_interface.txt", .{});
+    defer t.deinit();
 
     // Write using writer interface
-    {
-        var file = try dir.createFile(rt, file_path, .{});
+    var write_buffer: [256]u8 = undefined;
+    var writer = t.file.writer(t.rt, &write_buffer);
 
-        var write_buffer: [256]u8 = undefined;
-        var writer = file.writer(rt, &write_buffer);
+    var data = [_][]const u8{"x"};
+    try writer.interface.writeSplatAll(&data, 10);
+    try writer.interface.flush();
 
-        // Test writeSplatAll with single-character pattern
-        var data = [_][]const u8{"x"};
-        try writer.interface.writeSplatAll(&data, 10);
-        try writer.interface.flush();
-
-        file.close(rt);
-    }
+    // Reopen for reading
+    t.file.close(t.rt);
+    t.file = try t.dir.openFile(t.rt, t.path, .{});
 
     // Read using reader interface
-    {
-        var file = try dir.openFile(rt, file_path, .{});
+    var read_buffer: [256]u8 = undefined;
+    var reader = t.file.reader(t.rt, &read_buffer);
 
-        var read_buffer: [256]u8 = undefined;
-        var reader = file.reader(rt, &read_buffer);
+    var result: [20]u8 = undefined;
+    const bytes_read = try reader.interface.readSliceShort(&result);
 
-        var result: [20]u8 = undefined;
-        const bytes_read = try reader.interface.readSliceShort(&result);
-
-        try std.testing.expectEqual(10, bytes_read);
-        try std.testing.expectEqualStrings("xxxxxxxxxx", result[0..bytes_read]);
-
-        file.close(rt);
-    }
-
-    try dir.deleteFile(rt, file_path);
+    try std.testing.expectEqual(10, bytes_read);
+    try std.testing.expectEqualStrings("xxxxxxxxxx", result[0..bytes_read]);
 }
 
 /// Positional write from vectored buffers (for std.Io compatibility).
