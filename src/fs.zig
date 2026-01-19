@@ -278,7 +278,7 @@ pub const FileReader = struct {
     fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
         const r: *FileReader = @fieldParentPtr("interface", io_reader);
 
-        var iovec_storage: [max_vecs]os.iovec = undefined;
+        var iovec_storage: [1 + max_vecs]os.iovec = undefined;
         const dest_n, const data_size = if (builtin.os.tag == .windows)
             try io_reader.writableVectorWsa(&iovec_storage, data)
         else
