@@ -19,7 +19,7 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 [`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io.Writer
 [goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
 
-*The `main` branch works with Zig 0.15. If you want to use the library with the development version of Zig with the `std.Io` interface, use the [`zig-0.16`] branch.*
+*The `main` branch works with Zig 0.15. If you want to use the library with the development version of Zig with the `std.Io` interface, use the [`zig-0.16`] branch. Keep in mind that the development version Zig has frequent breaking changes, so the branch might not be always up to date. Contributions are welcome.*
 
 [`zig-0.16`]: https://github.com/lalinsky/zio/tree/zig-0.16
 
