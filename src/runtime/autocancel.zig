@@ -60,7 +60,7 @@ pub const AutoCancel = struct {
     pub fn check(self: *AutoCancel, rt: *Runtime, err: Cancelable) bool {
         std.debug.assert(err == error.Canceled);
         if (!self.triggered) return false;
-        return rt.getCurrentTask().awaitable.checkAutoCancel();
+        return rt.getCurrentTask().checkAutoCancel();
     }
 };
 
@@ -79,7 +79,7 @@ fn autoCancelCallback(
     if (completion.err != null) return;
 
     // Try to cancel and wake only if we triggered (not shadowed by user cancel)
-    if (task.awaitable.setCanceled(.auto)) {
+    if (task.setCanceled(.auto)) {
         autocancel.triggered = true;
         task.wake();
     }

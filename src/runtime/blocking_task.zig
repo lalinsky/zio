@@ -22,6 +22,9 @@ pub const AnyBlockingTask = struct {
     runtime: *Runtime,
     closure: Closure,
 
+    // Simple cancellation flag for blocking tasks
+    user_canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     pub const wait_node_vtable = WaitNode.VTable{};
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
@@ -42,9 +45,9 @@ pub const AnyBlockingTask = struct {
         return result_ptr.*;
     }
 
-    /// Cancel this blocking task by setting canceled status and canceling the thread pool work.
+    /// Cancel this blocking task by setting canceled flag and canceling the thread pool work.
     pub fn cancel(self: *AnyBlockingTask) void {
-        _ = self.awaitable.setCanceled(.user);
+        self.user_canceled.store(true, .release);
         // TODO: Actually cancel the task via thread pool
         // self.runtime.thread_pool.cancel(&self.work);
     }

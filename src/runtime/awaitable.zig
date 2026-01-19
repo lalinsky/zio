@@ -23,17 +23,6 @@ pub const AwaitableKind = enum {
     blocking_task,
 };
 
-// Cancellation status - tracks both user and auto-cancellation
-pub const CanceledStatus = packed struct(u32) {
-    user_canceled: bool = false,
-    auto_canceled: u8 = 0,
-    pending_errors: u16 = 0,
-    _padding: u7 = 0,
-};
-
-// Kind of cancellation
-pub const CancelKind = enum { user, auto };
-
 // Awaitable - base type for anything that can be waited on
 pub const Awaitable = struct {
     kind: AwaitableKind,
@@ -43,9 +32,6 @@ pub const Awaitable = struct {
 
     // Completion status - true when awaitable has completed
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-    // Cancellation status - tracks user cancel, timeout, and pending errors
-    canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     // WaitNodes waiting for the completion of this awaitable
     // Use WaitQueue sentinel states:
@@ -69,118 +55,12 @@ pub const Awaitable = struct {
     pub const not_complete = State.sentinel0;
     pub const complete = State.sentinel1;
 
-    /// Set the canceled status on this awaitable.
-    /// Returns true if this cancellation triggered, false if shadowed by prior user cancellation.
-    pub fn setCanceled(self: *Awaitable, kind: CancelKind) bool {
-        var current = self.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-            var triggered: bool = undefined;
-
-            switch (kind) {
-                .user => {
-                    status.user_canceled = true;
-                    status.pending_errors += 1;
-                    triggered = true;
-                },
-                .auto => {
-                    if (status.user_canceled) {
-                        // Shadowed by user cancellation
-                        status.pending_errors += 1;
-                        triggered = false;
-                    } else {
-                        status.auto_canceled += 1;
-                        status.pending_errors += 1;
-                        triggered = true;
-                    }
-                },
-            }
-
-            const new: u32 = @bitCast(status);
-            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                current = prev;
-                continue;
-            }
-            return triggered;
-        }
-    }
-
     /// Request cancellation of this awaitable.
     /// Dispatches to the sub-type's cancel method.
     pub fn cancel(self: *Awaitable) void {
         switch (self.kind) {
             .task => AnyTask.fromAwaitable(self).cancel(),
             .blocking_task => AnyBlockingTask.fromAwaitable(self).cancel(),
-        }
-    }
-
-    /// Re-arm cancellation after it was acknowledged.
-    /// This increments pending_errors so the next cancellation point returns error.Canceled.
-    /// Asserts that user_canceled is already set.
-    pub fn recancel(self: *Awaitable) void {
-        var current = self.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-
-            // Must have been canceled already
-            std.debug.assert(status.user_canceled);
-
-            // Increment pending_errors
-            status.pending_errors += 1;
-
-            const new: u32 = @bitCast(status);
-            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                current = prev;
-                continue;
-            }
-            break;
-        }
-    }
-
-    /// Try to consume an auto-cancel. Returns true if an auto-cancel was consumed,
-    /// false if user-canceled or no auto-cancel pending.
-    pub fn checkAutoCancel(self: *Awaitable) bool {
-        var current = self.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-
-            // User cancellation has priority
-            if (status.user_canceled) return false;
-
-            // Check if there's an auto-cancel to consume
-            if (status.auto_canceled > 0) {
-                status.auto_canceled -= 1;
-                const new: u32 = @bitCast(status);
-                if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                    current = prev;
-                    continue;
-                }
-                return true;
-            }
-
-            return false;
-        }
-    }
-
-    /// Consume a pending cancellation error if one exists.
-    /// Returns true if a pending error was consumed, false otherwise.
-    pub fn checkCancel(self: *Awaitable) bool {
-        var current = self.canceled_status.load(.acquire);
-        while (true) {
-            var status: CanceledStatus = @bitCast(current);
-
-            // If no pending errors, nothing to consume
-            if (status.pending_errors == 0) return false;
-
-            // Decrement pending_errors
-            status.pending_errors -= 1;
-
-            const new: u32 = @bitCast(status);
-            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
-                current = prev;
-                continue;
-            }
-            return true;
         }
     }
 
