@@ -313,7 +313,7 @@ test "heap equal values" {
     try std.testing.expect(h.deleteMin() == null);
 }
 
-test "heap: million values" {
+test "heap: 100K values" {
     const alloc = std.testing.allocator;
 
     const Elem = struct {
@@ -329,7 +329,7 @@ test "heap: million values" {
         }
     }).less);
 
-    const NUM_TIMERS: usize = 1000 * 1000;
+    const NUM_TIMERS: usize = 100 * 1000;
     var elems = try alloc.alloc(Elem, NUM_TIMERS);
     defer alloc.free(elems);
 

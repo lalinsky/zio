@@ -383,7 +383,6 @@ test "ResetEvent: cancel waiting task" {
     defer waiter_task.cancel(runtime);
 
     // Wait until waiter has actually started and is blocked
-    try runtime.sleep(.fromMilliseconds(100));
     while (!started.load(.acquire)) {
         try runtime.yield();
     }

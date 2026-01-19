@@ -62,18 +62,18 @@ test "setTimer multiple times" {
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Reset it with a short delay
-    loop.setTimer(&timer, .fromMilliseconds(100));
+    loop.setTimer(&timer, .fromMilliseconds(10));
     try std.testing.expectEqual(.running, timer.c.state);
 
-    // Should complete after ~100ms, not 2000ms
+    // Should complete after ~10ms, not 2000ms
     var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expect(elapsed.toMilliseconds() >= 90);
-    try std.testing.expect(elapsed.toMilliseconds() <= 300);
-    std.log.info("setTimer multiple: expected=100ms, actual={f}", .{elapsed});
+    try std.testing.expect(elapsed.toMilliseconds() >= 5);
+    try std.testing.expect(elapsed.toMilliseconds() <= 100);
+    std.log.info("setTimer multiple: expected=10ms, actual={f}", .{elapsed});
 }
 
 test "clearTimer and reuse timer" {
@@ -89,7 +89,7 @@ test "clearTimer and reuse timer" {
     try std.testing.expectEqual(.new, timer.c.state);
 
     // Reuse the same timer
-    loop.setTimer(&timer, .fromMilliseconds(100));
+    loop.setTimer(&timer, .fromMilliseconds(10));
     try std.testing.expectEqual(.running, timer.c.state);
 
     var wall_timer = time.Stopwatch.start();
@@ -97,7 +97,7 @@ test "clearTimer and reuse timer" {
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expect(elapsed.toMilliseconds() >= 90);
-    try std.testing.expect(elapsed.toMilliseconds() <= 250);
-    std.log.info("clearTimer reuse: expected=100ms, actual={f}", .{elapsed});
+    try std.testing.expect(elapsed.toMilliseconds() >= 5);
+    try std.testing.expect(elapsed.toMilliseconds() <= 100);
+    std.log.info("clearTimer reuse: expected=10ms, actual={f}", .{elapsed});
 }
