@@ -61,7 +61,14 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     std.log.info("HTTP client disconnected", .{});
 }
 
-fn serverTask(rt: *zio.Runtime) !void {
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
     const server = try addr.listen(rt, .{});
@@ -71,23 +78,14 @@ fn serverTask(rt: *zio.Runtime) !void {
     std.log.info("Visit http://{f} in your browser", .{server.socket.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
 
+    var group: zio.Group = .init;
+    defer group.cancel(rt);
+
     while (true) {
         const stream = try server.accept(rt);
-        errdefer stream.close(rt);
-
-        var task = try rt.spawn(handleClient, .{ rt, stream });
-        task.detach(rt);
+        group.spawn(rt, handleClient, .{ rt, stream }) catch |err| {
+            std.log.debug("Failed to spawn client handler: {}", .{err});
+            stream.close(rt);
+        };
     }
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    var handle = try rt.spawn(serverTask, .{rt});
-    try handle.join(rt);
 }

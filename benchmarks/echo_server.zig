@@ -29,16 +29,17 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
 
     ready.set();
 
+    var group: zio.Group = .init;
+    defer group.cancel(rt);
+
     var clients_handled: usize = 0;
     while (clients_handled < NUM_CLIENTS) : (clients_handled += 1) {
         var stream = try server.accept(rt);
         errdefer stream.close(rt);
 
-        var task = try rt.spawn(handleClient, .{ rt, stream });
-        task.detach(rt);
+        try group.spawn(rt, handleClient, .{ rt, stream });
     }
 
-    // Wait for signal that all clients are done before shutting down
     try done.wait(rt);
 }
 
@@ -75,58 +76,6 @@ fn clientTask(
     }
 }
 
-fn benchmarkTask(
-    rt: *zio.Runtime,
-    allocator: std.mem.Allocator,
-) !void {
-    var server_ready = zio.ResetEvent.init;
-    var server_done = zio.ResetEvent.init;
-
-    const total_messages = NUM_CLIENTS * MESSAGES_PER_CLIENT;
-
-    // Spawn server
-    var server = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done });
-    defer server.cancel(rt);
-
-    // Wait for server to be ready
-    try server_ready.wait(rt);
-
-    var timer = try std.time.Timer.start();
-
-    // Spawn all clients
-    const client_tasks = try allocator.alloc(zio.JoinHandle(anyerror!void), NUM_CLIENTS);
-    defer allocator.free(client_tasks);
-
-    for (client_tasks) |*task| {
-        const handle = try rt.spawn(clientTask, .{ rt, &server_ready });
-        task.* = handle.cast(anyerror!void);
-    }
-
-    // Wait for all clients to complete
-    for (client_tasks) |*task| {
-        defer task.detach(rt);
-        try task.join(rt);
-    }
-
-    const elapsed_ns = timer.read();
-
-    // Signal server to shut down
-    server_done.set();
-    try server.join(rt);
-
-    // Calculate statistics
-    const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-    const elapsed_s = elapsed_ms / 1000.0;
-
-    const messages_per_sec = @as(f64, @floatFromInt(total_messages)) / elapsed_s;
-    const throughput_mbps = (@as(f64, @floatFromInt(total_messages * MESSAGE_SIZE * 2)) / elapsed_s) / (1024.0 * 1024.0);
-
-    std.debug.print("Results:\n", .{});
-    std.debug.print("  Total time: {d:.2} ms ({d:.3} s)\n", .{ elapsed_ms, elapsed_s });
-    std.debug.print("  Messages/sec: {d:.0}\n", .{messages_per_sec});
-    std.debug.print("  Throughput: {d:.2} MB/s (rx+tx)\n", .{throughput_mbps});
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -138,9 +87,42 @@ pub fn main() !void {
     std.debug.print("  Message size: {} bytes\n", .{MESSAGE_SIZE});
     std.debug.print("  Total messages: {}\n\n", .{NUM_CLIENTS * MESSAGES_PER_CLIENT});
 
-    var runtime = try zio.Runtime.init(allocator, .{ .executors = .auto });
-    defer runtime.deinit();
+    var rt = try zio.Runtime.init(allocator, .{ .executors = .auto });
+    defer rt.deinit();
 
-    var handle = try runtime.spawn(benchmarkTask, .{ runtime, allocator });
-    try handle.join(runtime);
+    var server_ready = zio.ResetEvent.init;
+    var server_done = zio.ResetEvent.init;
+
+    const total_messages = NUM_CLIENTS * MESSAGES_PER_CLIENT;
+
+    var server_task = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done });
+    defer server_task.cancel(rt);
+
+    try server_ready.wait(rt);
+
+    var timer = try std.time.Timer.start();
+
+    var client_group: zio.Group = .init;
+    defer client_group.cancel(rt);
+
+    for (0..NUM_CLIENTS) |_| {
+        try client_group.spawn(rt, clientTask, .{ rt, &server_ready });
+    }
+    try client_group.wait(rt);
+
+    const elapsed_ns = timer.read();
+
+    server_done.set();
+    try server_task.join(rt);
+
+    const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+    const elapsed_s = elapsed_ms / 1000.0;
+
+    const messages_per_sec = @as(f64, @floatFromInt(total_messages)) / elapsed_s;
+    const throughput_mbps = (@as(f64, @floatFromInt(total_messages * MESSAGE_SIZE * 2)) / elapsed_s) / (1024.0 * 1024.0);
+
+    std.debug.print("Results:\n", .{});
+    std.debug.print("  Total time: {d:.2} ms ({d:.3} s)\n", .{ elapsed_ms, elapsed_s });
+    std.debug.print("  Messages/sec: {d:.0}\n", .{messages_per_sec});
+    std.debug.print("  Throughput: {d:.2} MB/s (rx+tx)\n", .{throughput_mbps});
 }
