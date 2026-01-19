@@ -758,6 +758,8 @@ test "Dir: setFilePermissions" {
 }
 
 test "Dir: setFileTimestamps" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
