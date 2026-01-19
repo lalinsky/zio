@@ -242,6 +242,11 @@ pub const Awaitable = struct {
         };
     }
 
+    /// Release the awaitable, decrementing the reference count and destroying it if necessary.
+    pub fn release(self: *Awaitable, rt: *Runtime) void {
+        if (self.ref_count.decr()) self.destroy(rt);
+    }
+
     /// Destroy the awaitable, freeing any associated resources.
     pub fn destroy(self: *Awaitable, rt: *Runtime) void {
         switch (self.kind) {

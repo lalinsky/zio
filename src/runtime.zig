@@ -89,7 +89,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// Helper to get result from awaitable and release it
         fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
             self.result = awaitable.getTypedResult(T);
-            rt.releaseAwaitable(awaitable);
+            awaitable.release(rt);
             self.awaitable = null;
         }
 
@@ -195,7 +195,7 @@ pub fn JoinHandle(comptime T: type) type {
             // If awaitable is null, already detached - no-op
             const awaitable = self.awaitable orelse return;
 
-            rt.releaseAwaitable(awaitable);
+            awaitable.release(rt);
             self.awaitable = null;
             self.result = undefined;
         }
@@ -393,7 +393,7 @@ pub const Executor = struct {
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCancel(self.runtime);
+            try current_task.checkCancel();
         }
 
         // Atomically transition state - if this fails, someone changed our state
@@ -440,7 +440,7 @@ pub const Executor = struct {
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCancel(self.runtime);
+            try current_task.checkCancel();
         }
     }
 
@@ -453,41 +453,15 @@ pub const Executor = struct {
         }
     }
 
-    /// Begin a cancellation shield.
-    /// While shielded, yield() will not check or consume the cancellation flag.
-    /// The flag remains set for when the shield ends.
-    /// This is useful for cleanup operations (like close()) that must complete even if canceled.
-    /// Must be paired with endShield().
-    pub fn beginShield(self: *Executor) void {
-        self.getCurrentTask().shield_count += 1;
-    }
-
-    /// End a cancellation shield.
-    /// Must be paired with beginShield().
-    pub fn endShield(self: *Executor) void {
-        const current_task = self.getCurrentTask();
-        std.debug.assert(current_task.shield_count > 0);
-        current_task.shield_count -= 1;
-    }
-
-    /// Check if cancellation has been requested and return error.Canceled if so.
-    /// This consumes one pending error if available.
-    /// Use this after endShield() to detect cancellation that occurred during the shielded section.
-    pub fn checkCancel(self: *Executor) Cancelable!void {
-        try self.getCurrentTask().checkCancel(self.runtime);
-    }
-
     pub fn getCurrentTask(self: *Executor) *AnyTask {
+        if (std.debug.runtime_safety) {
+            std.debug.assert(current == self);
+        }
         if (self.current_coroutine) |coro| {
             return AnyTask.fromCoroutine(coro);
         } else {
             return &self.main_task;
         }
-    }
-
-    pub fn sleep(self: *Executor, duration: Duration) Cancelable!void {
-        var timer = ev.Timer.init(duration);
-        try runIo(self.runtime, &timer.c);
     }
 
     pub const RunMode = enum {
@@ -940,36 +914,25 @@ pub const Runtime = struct {
     /// Sleep for the specified number of milliseconds.
     /// Returns error.Canceled if the task was canceled during sleep.
     pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
-        return self.getCurrentExecutor().sleep(duration);
+        var timer = ev.Timer.init(duration);
+        try runIo(self, &timer.c);
     }
 
-    /// Begin a cancellation shield to prevent cancellation during critical sections.
-    /// Can be called from the main thread or from within a coroutine.
-    /// No-op if called from a thread without an executor.
+    /// Begin a cancellation shield to prevent being canceled during critical sections.
     pub fn beginShield(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.current orelse return;
-        executor.beginShield();
+        self.getCurrentTask().beginShield();
     }
 
     /// End a cancellation shield.
-    /// Can be called from the main thread or from within a coroutine.
-    /// No-op if called from a thread without an executor.
     pub fn endShield(self: *Runtime) void {
-        _ = self;
-        const executor = Executor.current orelse return;
-        executor.endShield();
+        self.getCurrentTask().endShield();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
     /// This consumes the cancellation flag.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
-    /// Can be called from the main thread or from within a coroutine.
-    /// No-op (returns successfully) if called from a thread without an executor.
     pub fn checkCancel(self: *Runtime) Cancelable!void {
-        _ = self;
-        const executor = Executor.current orelse return;
-        return executor.checkCancel();
+        return self.getCurrentTask().checkCancel();
     }
 
     /// Get the currently executing task.
@@ -981,18 +944,17 @@ pub const Runtime = struct {
     /// Get the current thread's executor.
     /// Panics if called from a thread without an active executor context.
     pub fn getCurrentExecutor(self: *Runtime) *Executor {
-        _ = self;
-        return Executor.current orelse @panic("getCurrentExecutor called outside of executor context");
+        const executor = Executor.current orelse @panic("no current executor");
+        if (std.debug.runtime_safety) {
+            std.debug.assert(executor.runtime == self);
+        }
+        return executor;
     }
 
     /// Get the current monotonic timestamp.
     /// This uses the event loop's cached time for efficiency.
     pub fn now(self: *Runtime) Timestamp {
         return self.getCurrentExecutor().loop.now();
-    }
-
-    pub fn releaseAwaitable(self: *Runtime, awaitable: *Awaitable) void {
-        if (awaitable.ref_count.decr()) awaitable.destroy(self);
     }
 
     pub fn onTaskComplete(self: *Runtime, awaitable: *Awaitable) void {
@@ -1006,10 +968,10 @@ pub const Runtime = struct {
 
         // Decref for list membership (if we successfully remove)
         if (self.tasks.remove(awaitable)) {
-            self.releaseAwaitable(awaitable);
+            awaitable.release(self);
         }
         // Decref for task completion
-        self.releaseAwaitable(awaitable);
+        awaitable.release(self);
 
         // Decrement task count
         const prev_count = self.task_count.fetchSub(1, .acq_rel);
@@ -1033,7 +995,7 @@ pub const Runtime = struct {
         // preventing new tasks from being added.
         while (self.tasks.popOrTransition(.sentinel0, .sentinel1)) |awaitable| {
             awaitable.cancel();
-            self.releaseAwaitable(awaitable);
+            awaitable.release(self);
         }
 
         // Run until all tasks complete

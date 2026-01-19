@@ -196,10 +196,21 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
+    /// Begin a cancellation shield to prevent being canceled during critical sections.
+    pub fn beginShield(self: *AnyTask) void {
+        self.shield_count += 1;
+    }
+
+    /// End a cancellation shield.
+    pub fn endShield(self: *AnyTask) void {
+        std.debug.assert(self.shield_count > 0);
+        self.shield_count -= 1;
+    }
+
     /// Check if there are pending cancellation errors to consume.
     /// If pending_errors > 0 and not shielded, decrements the count and returns error.Canceled.
     /// Otherwise returns void (no error).
-    pub fn checkCancel(self: *AnyTask, _: *Runtime) error{Canceled}!void {
+    pub fn checkCancel(self: *AnyTask) Cancelable!void {
         if (self.shield_count > 0) return;
         if (self.awaitable.checkCancel()) return error.Canceled;
     }

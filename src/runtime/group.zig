@@ -181,7 +181,7 @@ pub const Group = struct {
         while (group.getTasks().popOrTransition(.sentinel0, .sentinel1)) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             awaitable.cancel();
-            rt.releaseAwaitable(awaitable);
+            awaitable.release(rt);
         }
 
         // Wait for all tasks to complete
@@ -239,7 +239,7 @@ pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!voi
 pub fn unregisterGroupTask(rt: *Runtime, group: *Group, awaitable: *Awaitable) void {
     // Only release if we successfully removed it (cancel might have popped it first)
     if (group.getTasks().remove(&awaitable.group_node)) {
-        rt.releaseAwaitable(awaitable);
+        awaitable.release(rt);
     }
 
     const counter_ptr = group.getCounter();
