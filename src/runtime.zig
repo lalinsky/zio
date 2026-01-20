@@ -248,8 +248,20 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 pub const Executor = struct {
     pub const max_executors = 64;
 
+    pub const pending_bit = 1 << 15;
+
+    pub const GlobalState = struct {
+        lock: std.Thread.Mutex = .{},
+        ready_queue: SimpleQueue(WaitNode) = .{},
+        ready_queue_len: usize = 0,
+
+        idle: std.atomic.Value(u64) = .init(0),
+        searching: std.atomic.Value(u16) = .init(0),
+    };
+
     id: u6,
     loop: ev.Loop,
+    global_state: *GlobalState,
     current_coroutine: ?*Coroutine = null,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
@@ -278,9 +290,6 @@ pub const Executor = struct {
 
     // Timestamp of last event loop tick, used for time-based yield decisions.
     last_tick_time: Timestamp = .zero,
-
-    // Remote task support - lock-free LIFO stack for cross-thread resumption
-    next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
 
     // Back-reference to runtime for global coordination
     runtime: *Runtime,
@@ -311,6 +320,7 @@ pub const Executor = struct {
         self.* = .{
             .id = id,
             .loop = undefined,
+            .global_state = &runtime.global_state,
             .lifo_slot_enabled = runtime.options.lifo_slot_enabled,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
@@ -644,8 +654,24 @@ pub const Executor = struct {
             std.debug.assert(!wait_node.in_list);
         }
 
-        // Push to remote ready queue (thread-safe)
-        self.next_ready_queue_remote.push(wait_node);
+        self.global_state.lock.lock();
+        self.global_state.ready_queue.push(wait_node);
+        self.global_state.ready_queue_len += 1;
+        self.global_state.lock.unlock();
+
+        const prev = self.global_state.searching.load(.acquire);
+        if ((prev & ~pending_bit) > 0) return;
+
+        while (self.global_state.searching.cmpxchgStrong(pending_bit, pending_bit | 1, .ack_rel, .monotonic)) {}
+
+        const prev = ;
+        if (prev == pending_bit) {
+            self.global_state.searching.fetchAnd(~pending_bit, .acq_rel);
+            self.global_state.lock.lock();
+            self.global_state.ready_queue.push(wait_node);
+            self.global_state.ready_queue_len += 1;
+            self.global_state.lock.unlock();
+        }
 
         // Wake the target executor's event loop (only if initialized)
         self.loop.wake();
@@ -704,6 +730,7 @@ pub const Runtime = struct {
     allocator: Allocator,
     options: RuntimeOptions,
 
+    global_state: Executor.GlobalState = .{},
     executors: std.ArrayList(*Executor) = .empty,
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
