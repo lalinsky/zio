@@ -227,7 +227,7 @@ test "cancel: net_recv with loop.cancel()" {
     try loop.run(.until_done);
 }
 
-test "cancel: cancel.requested flag is set on completion" {
+test "cancel: cancel_state.requested flag is set on completion" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -235,11 +235,11 @@ test "cancel: cancel.requested flag is set on completion" {
     var timer: Timer = .init(.fromMilliseconds(100));
     loop.add(&timer.c);
 
-    try std.testing.expect(!timer.c.cancel.requested.load(.acquire));
+    try std.testing.expect(!timer.c.cancel_state.load(.acquire).requested);
 
     loop.cancel(&timer.c);
 
-    try std.testing.expect(timer.c.cancel.requested.load(.acquire));
+    try std.testing.expect(timer.c.cancel_state.load(.acquire).requested);
 
     try loop.run(.until_done);
 }
@@ -257,7 +257,7 @@ test "cancel: callback is invoked on canceled operation" {
             _ = l;
             const self: *@This() = @ptrCast(@alignCast(c.userdata.?));
             self.called = true;
-            self.was_canceled = c.cancel.requested.load(.acquire);
+            self.was_canceled = c.cancel_state.load(.acquire).requested;
         }
     };
 

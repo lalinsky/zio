@@ -231,11 +231,11 @@ pub const Completion = struct {
     /// Loop this completion was submitted to (set by loop.add())
     loop: ?*Loop = null,
 
-    /// Cross-thread cancellation state
-    cancel: struct {
-        next: ?*Completion = null,
-        requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    } = .{},
+    /// Cross-thread cancellation state (atomic for thread-safe cancel)
+    cancel_state: std.atomic.Value(CancelState) = .init(.{}),
+
+    /// Cancel queue intrusive linked list
+    cancel_next: ?*Completion = null,
 
     /// Group this completion belongs to
     group: struct {
@@ -261,6 +261,14 @@ pub const Completion = struct {
 
     pub const State = enum { new, running, completed, dead };
 
+    /// Atomic state for cross-thread cancellation coordination
+    pub const CancelState = packed struct(u8) {
+        requested: bool = false, // Cancel was requested
+        in_queue: bool = false, // Completion is in cancel queue, queue will call finish
+        completed: bool = false, // markCompleted ran, result is set
+        _pad: u5 = 0,
+    };
+
     pub const CallbackFn = fn (
         loop: *Loop,
         completion: *Completion,
@@ -275,8 +283,8 @@ pub const Completion = struct {
         c.has_result = false;
         c.err = null;
         c.loop = null;
-        c.cancel.next = null;
-        c.cancel.requested.store(false, .release);
+        c.cancel_state.store(.{}, .release);
+        c.cancel_next = null;
         c.group.next = null;
         c.group.owner = null;
     }
