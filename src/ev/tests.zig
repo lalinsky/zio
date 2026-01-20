@@ -25,6 +25,7 @@ test {
     _ = @import("test/fs.zig");
     _ = @import("test/timer.zig");
     _ = @import("test/cancel.zig");
+    _ = @import("test/group.zig");
 }
 
 test "Loop: empty run(.no_wait)" {

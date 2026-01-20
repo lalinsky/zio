@@ -285,7 +285,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     state.active += 1;
 
     switch (c.op) {
-        .timer, .async, .work => unreachable, // Managed by the loop
+        .group, .timer, .async, .work => unreachable, // Managed by the loop
 
         // Synchronous operations - complete immediately
         .net_open => {

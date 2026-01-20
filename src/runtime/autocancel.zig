@@ -6,8 +6,6 @@ const ev = @import("../ev/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const Duration = @import("../time.zig").Duration;
 const AnyTask = @import("task.zig").AnyTask;
-const waitForIo = @import("../io.zig").waitForIo;
-const genericCallback = @import("../io.zig").genericCallback;
 
 /// Automatically cancels I/O operations on the current task after a timeout.
 /// Multiple AutoCancel instances can be nested - each has its own independent timer.

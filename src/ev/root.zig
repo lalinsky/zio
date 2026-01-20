@@ -25,6 +25,7 @@ const completion = @import("completion.zig");
 pub const Completion = completion.Completion;
 pub const Op = completion.Op;
 pub const Cancelable = completion.Cancelable;
+pub const Group = completion.Group;
 pub const Timer = completion.Timer;
 pub const Async = completion.Async;
 pub const Work = completion.Work;

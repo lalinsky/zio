@@ -210,7 +210,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     state.active += 1;
 
     switch (c.op) {
-        .timer, .async, .work => unreachable, // Managed by the loop
+        .group, .timer, .async, .work => unreachable, // Managed by the loop
 
         // Synchronous operations (no io_uring support or always immediate)
         .net_open => {
@@ -838,7 +838,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
 fn storeResult(self: *Self, c: *Completion, res: i32) void {
     switch (c.op) {
-        .timer, .async, .work => unreachable,
+        .group, .timer, .async, .work => unreachable,
         .net_open => unreachable,
         .net_bind => unreachable,
         .net_listen => unreachable,
