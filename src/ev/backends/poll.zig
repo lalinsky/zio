@@ -438,6 +438,12 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         var iter: ?*Completion = entry.completions.head;
         while (iter) |completion| {
             iter = completion.next;
+
+            // Skip if already completed (can happen with cancellations)
+            if (completion.state == .completed or completion.state == .dead) {
+                continue;
+            }
+
             switch (checkCompletion(completion, item)) {
                 .completed => {
                     try self.removeFromPollQueue(fd, completion);
