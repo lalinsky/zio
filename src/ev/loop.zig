@@ -180,8 +180,9 @@ pub const LoopState = struct {
             }
 
             if (prev == 1) {
-                // Last completion in group - complete the group
-                if (!group.c.has_result) {
+                if (group.c.cancel.requested.load(.acquire)) {
+                    group.c.setError(error.Canceled);
+                } else {
                     group.c.setResult(.group, {});
                 }
                 self.markCompleted(&group.c);
@@ -388,15 +389,12 @@ pub const Loop = struct {
         switch (completion.op) {
             .group => {
                 const group = completion.cast(Group);
-                group.c.setError(error.Canceled);
-                // Cancel all children - use self.cancel() to handle remote completions
                 var child = group.head;
                 while (child) |c| {
                     const next = c.group.next;
                     self.cancel(c);
                     child = next;
                 }
-                // Group completes when all children finish (they decrement remaining)
             },
             .timer => {
                 const timer = completion.cast(Timer);
