@@ -166,13 +166,19 @@ pub const LoopState = struct {
 
         // Notify group owner if this completion belongs to one
         if (completion.group.owner) |group| {
-            const prev = if (Backend.capabilities.is_multi_threaded)
-                @atomicRmw(usize, &group.remaining, .Sub, 1, .acq_rel)
-            else blk: {
-                const old = group.remaining;
-                group.remaining -= 1;
-                break :blk old;
-            };
+            const prev = group.remaining.fetchSub(1, .acq_rel);
+
+            // Race mode: first to clear the flag wins, cancels siblings
+            if (group.race.swap(false, .acq_rel)) {
+                var child = group.head;
+                while (child) |c| {
+                    if (c != completion) {
+                        self.loop.cancel(c);
+                    }
+                    child = c.group.next;
+                }
+            }
+
             if (prev == 1) {
                 // Last completion in group - complete the group
                 if (!group.c.has_result) {
@@ -487,7 +493,7 @@ pub const Loop = struct {
                 group.c.state = .running;
                 self.state.active += 1;
 
-                if (group.remaining == 0) {
+                if (group.remaining.load(.acquire) == 0) {
                     // Empty group - complete immediately
                     group.c.setResult(.group, {});
                     self.state.markCompleted(&group.c);

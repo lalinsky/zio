@@ -322,13 +322,17 @@ pub const Group = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
     head: ?*Completion = null,
-    remaining: usize = 0,
+    remaining: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    race: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub const Error = Cancelable;
 
-    pub fn init() Group {
+    pub const Mode = enum { gather, race };
+
+    pub fn init(mode: Mode) Group {
         return .{
             .c = .init(.group),
+            .race = std.atomic.Value(bool).init(mode == .race),
         };
     }
 
@@ -342,7 +346,7 @@ pub const Group = struct {
         c.group.next = self.head;
         c.group.owner = self;
         self.head = c;
-        self.remaining += 1;
+        _ = self.remaining.fetchAdd(1, .monotonic);
     }
 
     pub fn getResult(self: *const Group) Error!void {

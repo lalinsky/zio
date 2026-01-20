@@ -11,7 +11,7 @@ test "group: empty group completes immediately" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var group: Group = .init();
+    var group: Group = .init(.gather);
     loop.add(&group.c);
 
     try loop.run(.until_done);
@@ -26,7 +26,7 @@ test "group: single completion" {
     defer loop.deinit();
 
     var timer: Timer = .init(.fromMilliseconds(10));
-    var group: Group = .init();
+    var group: Group = .init(.gather);
 
     group.add(&timer.c);
     loop.add(&group.c);
@@ -47,7 +47,7 @@ test "group: multiple completions" {
     var timer1: Timer = .init(.fromMilliseconds(10));
     var timer2: Timer = .init(.fromMilliseconds(20));
     var timer3: Timer = .init(.fromMilliseconds(30));
-    var group: Group = .init();
+    var group: Group = .init(.gather);
 
     group.add(&timer1.c);
     group.add(&timer2.c);
@@ -107,7 +107,7 @@ test "group: callback invoked when all complete" {
     timer2.c.userdata = &ctx;
     timer2.c.callback = Ctx.timer2Callback;
 
-    var group: Group = .init();
+    var group: Group = .init(.gather);
     group.c.userdata = &ctx;
     group.c.callback = Ctx.groupCallback;
 
@@ -130,7 +130,7 @@ test "group: cancel cancels all children" {
     var timer1: Timer = .init(.fromMilliseconds(1000));
     var timer2: Timer = .init(.fromMilliseconds(1000));
     var timer3: Timer = .init(.fromMilliseconds(1000));
-    var group: Group = .init();
+    var group: Group = .init(.gather);
 
     group.add(&timer1.c);
     group.add(&timer2.c);
@@ -158,7 +158,7 @@ test "group: child error does not affect group result" {
 
     var timer1: Timer = .init(.fromMilliseconds(10));
     var timer2: Timer = .init(.fromMilliseconds(1000)); // Will be canceled
-    var group: Group = .init();
+    var group: Group = .init(.gather);
 
     group.add(&timer1.c);
     group.add(&timer2.c);
@@ -186,7 +186,7 @@ test "group: mixed completion types" {
 
     var timer: Timer = .init(.fromMilliseconds(10));
     var async_handle: Async = .init();
-    var group: Group = .init();
+    var group: Group = .init(.gather);
 
     group.add(&timer.c);
     group.add(&async_handle.c);
@@ -203,5 +203,78 @@ test "group: mixed completion types" {
 
     try timer.getResult();
     try async_handle.getResult();
+    try group.getResult();
+}
+
+test "group: race mode first completer wins" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var fast_timer: Timer = .init(.fromMilliseconds(10));
+    var slow_timer: Timer = .init(.fromMilliseconds(1000));
+    var group: Group = .init(.race);
+
+    group.add(&fast_timer.c);
+    group.add(&slow_timer.c);
+    loop.add(&group.c);
+
+    try loop.run(.until_done);
+
+    // Fast timer should complete successfully
+    try fast_timer.getResult();
+
+    // Slow timer should be canceled
+    try std.testing.expectError(error.Canceled, slow_timer.getResult());
+
+    // Group should succeed (first completer won)
+    try group.getResult();
+}
+
+test "group: race mode cancels siblings" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var timer1: Timer = .init(.fromMilliseconds(10));
+    var timer2: Timer = .init(.fromMilliseconds(1000));
+    var timer3: Timer = .init(.fromMilliseconds(1000));
+    var group: Group = .init(.race);
+
+    group.add(&timer1.c);
+    group.add(&timer2.c);
+    group.add(&timer3.c);
+    loop.add(&group.c);
+
+    try loop.run(.until_done);
+
+    // timer1 should complete successfully (it fires first)
+    try timer1.getResult();
+
+    // timer2 and timer3 should be canceled
+    try std.testing.expectError(error.Canceled, timer2.getResult());
+    try std.testing.expectError(error.Canceled, timer3.getResult());
+
+    // Group should succeed
+    try group.getResult();
+}
+
+test "group: race mode with single child" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var timer: Timer = .init(.fromMilliseconds(10));
+    var group: Group = .init(.race);
+
+    group.add(&timer.c);
+    loop.add(&group.c);
+
+    try loop.run(.until_done);
+
+    // Timer should complete successfully
+    try timer.getResult();
+
+    // Group should succeed
     try group.getResult();
 }
