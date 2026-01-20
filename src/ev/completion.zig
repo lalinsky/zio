@@ -53,6 +53,7 @@ pub const BackendCapabilities = struct {
 };
 
 pub const Op = enum {
+    group,
     timer,
     async,
     work,
@@ -107,6 +108,7 @@ pub const Op = enum {
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
         return switch (op) {
+            .group => Group,
             .timer => Timer,
             .async => Async,
             .work => Work,
@@ -163,6 +165,7 @@ pub const Op = enum {
     /// Get the operation type from a completion type
     pub fn fromType(comptime T: type) Op {
         return switch (T) {
+            Group => .group,
             Timer => .timer,
             Async => .async,
             Work => .work,
@@ -234,6 +237,12 @@ pub const Completion = struct {
         requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     } = .{},
 
+    /// Group this completion belongs to
+    group: struct {
+        next: ?*Completion = null,
+        owner: ?*Group = null,
+    } = .{},
+
     /// Error result - null means success, error means failure.
     /// Stored here instead of in each operation type to simplify error handling.
     err: ?anyerror = null,
@@ -268,6 +277,8 @@ pub const Completion = struct {
         c.loop = null;
         c.cancel.next = null;
         c.cancel.requested.store(false, .release);
+        c.group.next = null;
+        c.group.owner = null;
     }
 
     pub fn call(c: *Completion, loop: *Loop) void {
@@ -306,6 +317,38 @@ pub const Completion = struct {
 };
 
 pub const Cancelable = error{Canceled};
+
+pub const Group = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    head: ?*Completion = null,
+    remaining: usize = 0,
+
+    pub const Error = Cancelable;
+
+    pub fn init() Group {
+        return .{
+            .c = .init(.group),
+        };
+    }
+
+    /// Add a completion to this group. Must be called before submitting the group.
+    /// Nested groups are not supported.
+    pub fn add(self: *Group, c: *Completion) void {
+        std.debug.assert(c.op != .group); // Nested groups are not supported
+        std.debug.assert(c.state == .new);
+        std.debug.assert(self.c.state == .new); // Group must not be submitted yet
+        std.debug.assert(c.group.owner == null);
+        c.group.next = self.head;
+        c.group.owner = self;
+        self.head = c;
+        self.remaining += 1;
+    }
+
+    pub fn getResult(self: *const Group) Error!void {
+        return self.c.getResult(.group);
+    }
+};
 
 pub const Timer = struct {
     c: Completion,

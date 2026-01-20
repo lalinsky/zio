@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Backend = @import("backend.zig").Backend;
 const BackendCapabilities = @import("completion.zig").BackendCapabilities;
 const Completion = @import("completion.zig").Completion;
+const Group = @import("completion.zig").Group;
 const NetClose = @import("completion.zig").NetClose;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
@@ -162,6 +163,25 @@ pub const LoopState = struct {
 
         completion.state = .dead;
         self.active -= 1;
+
+        // Notify group owner if this completion belongs to one
+        if (completion.group.owner) |group| {
+            const prev = if (Backend.capabilities.is_multi_threaded)
+                @atomicRmw(usize, &group.remaining, .Sub, 1, .acq_rel)
+            else blk: {
+                const old = group.remaining;
+                group.remaining -= 1;
+                break :blk old;
+            };
+            if (prev == 1) {
+                // Last completion in group - complete the group
+                if (!group.c.has_result) {
+                    group.c.setResult(.group, {});
+                }
+                self.markCompleted(&group.c);
+            }
+        }
+
         completion.call(self.loop);
     }
 
@@ -360,6 +380,18 @@ pub const Loop = struct {
     /// Cancel a completion on the local loop (must be called from the loop's thread)
     fn cancelLocal(self: *Loop, completion: *Completion) void {
         switch (completion.op) {
+            .group => {
+                const group = completion.cast(Group);
+                group.c.setError(error.Canceled);
+                // Cancel all children - use self.cancel() to handle remote completions
+                var child = group.head;
+                while (child) |c| {
+                    const next = c.group.next;
+                    self.cancel(c);
+                    child = next;
+                }
+                // Group completes when all children finish (they decrement remaining)
+            },
             .timer => {
                 const timer = completion.cast(Timer);
                 timer.c.setError(error.Canceled);
@@ -420,7 +452,10 @@ pub const Loop = struct {
         defer {
             if (in_safe_mode) self.in_add = false;
         }
+        self.addInternal(completion);
+    }
 
+    fn addInternal(self: *Loop, completion: *Completion) void {
         // If completion is dead (callback was called), reset it to new state for rearming
         if (completion.state == .dead) {
             completion.reset();
@@ -441,6 +476,32 @@ pub const Loop = struct {
         }
 
         switch (completion.op) {
+            .group => {
+                const group = completion.cast(Group);
+
+                // Groups cannot be canceled before submission
+                if (group.c.cancel.requested.load(.acquire)) {
+                    @panic("cannot cancel a group before adding it to the loop");
+                }
+
+                group.c.state = .running;
+                self.state.active += 1;
+
+                if (group.remaining == 0) {
+                    // Empty group - complete immediately
+                    group.c.setResult(.group, {});
+                    self.state.markCompleted(&group.c);
+                } else {
+                    // Add all children to the loop
+                    var child = group.head;
+                    while (child) |c| {
+                        const next = c.group.next;
+                        self.addInternal(c);
+                        child = next;
+                    }
+                }
+                return;
+            },
             .timer => {
                 const timer = completion.cast(Timer);
                 self.state.lockTimers();
