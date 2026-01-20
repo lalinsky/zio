@@ -149,12 +149,25 @@ pub const LoopState = struct {
         std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
 
+        // Atomically set completed flag
+        var old = completion.cancel_state.load(.acquire);
+        while (true) {
+            var new = old;
+            new.completed = true;
+            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
+        }
+
+        // Always set state
         completion.state = .completed;
 
-        if (self.loop.defer_callbacks) {
-            self.completions.push(completion);
-        } else {
-            self.finishCompletion(completion);
+        // Only call finish if not in cancel queue
+        // If in_queue, cancel queue processing will call finishCompletion
+        if (!old.in_queue) {
+            if (self.loop.defer_callbacks) {
+                self.completions.push(completion);
+            } else {
+                self.finishCompletion(completion);
+            }
         }
     }
 
@@ -180,7 +193,7 @@ pub const LoopState = struct {
             }
 
             if (prev == 1) {
-                if (group.c.cancel.requested.load(.acquire)) {
+                if (group.c.cancel_state.load(.acquire).requested) {
                     group.c.setError(error.Canceled);
                 } else {
                     group.c.setResult(.group, {});
@@ -354,27 +367,39 @@ pub const Loop = struct {
     /// invoked when the operation completes (either with error.Canceled or its natural result).
     /// Thread-safe: can be called from any thread.
     pub fn cancel(self: *Loop, completion: *Completion) void {
-        // Atomically mark as cancel-requested (idempotent - second call is no-op)
-        if (completion.cancel.requested.swap(true, .acq_rel)) {
+        // Check if completion has been added to a loop
+        // (loop is set once by addInternal and never changes)
+        const target = completion.loop orelse {
+            // Not yet submitted - just set requested, addInternal will handle it
+            var old = completion.cancel_state.load(.acquire);
+            while (true) {
+                if (old.requested) return;
+                var new = old;
+                new.requested = true;
+                old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse return;
+            }
             return;
+        };
+
+        // Atomically set requested and in_queue flags
+        var old = completion.cancel_state.load(.acquire);
+        while (true) {
+            if (old.requested) return; // Already requested
+            if (old.completed) return; // Already completed
+            var new = old;
+            new.requested = true;
+            new.in_queue = true;
+            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
         }
 
-        // Not yet submitted or already done - nothing to do
-        if (completion.state != .running) {
-            return;
-        }
-
-        if (self == completion.loop) {
+        if (self == target) {
             // Same loop - cancel directly
             self.cancelLocal(completion);
         } else {
-            // Different loop - queue to target and wake
-            const target = completion.loop orelse return;
-
             // Push to target's cancel queue (lock-free Treiber stack)
             var head = target.cancel_queue.load(.acquire);
             while (true) {
-                completion.cancel.next = head;
+                completion.cancel_next = head;
                 head = target.cancel_queue.cmpxchgWeak(head, completion, .release, .acquire) orelse break;
             }
 
@@ -386,6 +411,24 @@ pub const Loop = struct {
 
     /// Cancel a completion on the local loop (must be called from the loop's thread)
     fn cancelLocal(self: *Loop, completion: *Completion) void {
+        defer {
+            // Clear in_queue and call finishCompletion if completed
+            var old = completion.cancel_state.load(.acquire);
+            while (true) {
+                var new = old;
+                new.in_queue = false;
+                old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
+            }
+            if (old.completed) {
+                self.state.finishCompletion(completion);
+            }
+        }
+
+        // If already completed, skip cancel work (defer will still run)
+        if (completion.cancel_state.load(.acquire).completed) {
+            return;
+        }
+
         switch (completion.op) {
             .group => {
                 const group = completion.cast(Group);
@@ -470,7 +513,7 @@ pub const Loop = struct {
         // Set the loop reference for cross-thread cancellation
         completion.loop = self;
 
-        if (completion.cancel.requested.load(.acquire)) {
+        if (completion.cancel_state.load(.acquire).requested) {
             // Directly mark it as canceled
             completion.setError(error.Canceled);
             self.state.active += 1;
@@ -484,7 +527,7 @@ pub const Loop = struct {
                 const group = completion.cast(Group);
 
                 // Groups cannot be canceled before submission
-                if (group.c.cancel.requested.load(.acquire)) {
+                if (group.c.cancel_state.load(.acquire).requested) {
                     @panic("cannot cancel a group before adding it to the loop");
                 }
 
@@ -676,13 +719,11 @@ pub const Loop = struct {
         // Atomically swap the entire queue
         var c = self.cancel_queue.swap(null, .acquire);
         while (c) |completion| {
-            const next = completion.cancel.next;
-            completion.cancel.next = null;
+            const next = completion.cancel_next;
+            completion.cancel_next = null;
 
-            // Only cancel if still running
-            if (completion.state == .running) {
-                self.cancelLocal(completion);
-            }
+            // cancelLocal handles completed check and clears in_queue
+            self.cancelLocal(completion);
 
             c = next;
         }

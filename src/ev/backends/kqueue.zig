@@ -385,6 +385,11 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         const completion: *Completion = @ptrFromInt(event.udata);
         const fd: NetHandle = @intCast(event.ident);
 
+        // Skip if already completed (can happen with cancellations)
+        if (completion.state == .completed or completion.state == .dead) {
+            continue;
+        }
+
         switch (checkCompletion(completion, &event)) {
             .completed => {
                 // EV_ONESHOT automatically removes the event
