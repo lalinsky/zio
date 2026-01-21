@@ -205,9 +205,14 @@ fn prepFutexWait(sqe: *linux.io_uring_sqe, futex: *const u32, expected: u64) voi
 
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
+/// Can be called for initial submission (state == .new) or resubmission after EINTR (state == .running).
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
-    c.state = .running;
-    state.active += 1;
+    if (c.state == .new) {
+        c.state = .running;
+        state.active += 1;
+    } else {
+        std.debug.assert(c.state == .running);
+    }
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
@@ -823,6 +828,12 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         // So when we get the cancel's CQE, it's already completed
         // Similarly, when we get the target's CQE after the cancel already completed it
         if (completion.state == .completed or completion.state == .dead) {
+            continue;
+        }
+
+        // Handle EINTR by resubmitting - operation was interrupted by a signal
+        if (cqe.res == -@as(i32, @intFromEnum(linux.E.INTR))) {
+            self.submit(state, completion);
             continue;
         }
 
