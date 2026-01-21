@@ -9,7 +9,7 @@ const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
 
 const runIo = @import("io.zig").runIo;
-const fillBuf = @import("io.zig").fillBuf;
+const fillBuf = @import("utils/writer.zig").fillBuf;
 
 const Handle = ev.Backend.NetHandle;
 

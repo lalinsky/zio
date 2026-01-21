@@ -9,7 +9,7 @@ const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const runIo = @import("io.zig").runIo;
-const fillBuf = @import("io.zig").fillBuf;
+const fillBuf = @import("utils/writer.zig").fillBuf;
 
 pub const Handle = os.fs.fd_t;
 
