@@ -5,13 +5,8 @@ const std = @import("std");
 
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
-const Executor = @import("runtime.zig").Executor;
 const AnyTask = @import("runtime/task.zig").AnyTask;
-const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
-const Timeoutable = @import("common.zig").Timeoutable;
-const Duration = @import("time.zig").Duration;
-const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 
 /// Generic callback that resumes the task stored in userdata
 pub fn genericCallback(loop: *ev.Loop, completion: *ev.Completion) void {
@@ -20,167 +15,56 @@ pub fn genericCallback(loop: *ev.Loop, completion: *ev.Completion) void {
     task.wake();
 }
 
-/// Cancels the I/O operation and waits for full completion.
-pub fn cancelIo(rt: *Runtime, completion: *ev.Completion) void {
-    // We can't handle user cancelations during this
-    rt.beginShield();
-    defer rt.endShield();
-
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
-    // Request cancellation (idempotent, may already be completed)
-    executor.loop.cancel(completion);
-
-    // Wait for the operation to complete (with Canceled or natural result)
-    // This can't return error.Canceled because of the shield
-    waitForIo(rt, completion) catch unreachable;
-}
-
-pub fn waitForIo(rt: *Runtime, completion: *ev.Completion) Cancelable!void {
-    const task = rt.getCurrentTask();
-    var executor = task.getExecutor();
-
-    // Transition to preparing_to_wait state before yielding
-    task.state.store(.preparing_to_wait, .release);
-
-    // Re-check completion state after setting preparing_to_wait
-    // If IO completed and callback was already called, restore ready state and exit
-    // We must check for .dead (not .completed) because .completed means the callback
-    // hasn't been called yet, and the completion is still referenced by the loop
-    if (completion.state == .dead) {
-        task.state.store(.ready, .release);
-        return;
-    }
-
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-    // If IO completes before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        cancelIo(rt, completion);
-        return err;
-    };
-
-    std.debug.assert(completion.state == .dead);
-}
-
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
 pub fn runIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
 
     c.userdata = task;
     c.callback = genericCallback;
 
-    // Clear callback and context in defer when runtime safety is on to catch use-after-return bugs
     defer if (std.debug.runtime_safety) {
         c.callback = null;
         c.userdata = null;
     };
 
-    executor.loop.add(c);
-    try waitForIo(rt, c);
-}
+    var canceling = false;
+    while (true) {
+        task.state.store(.preparing_to_wait, .release);
+        var executor = task.getExecutor();
 
-/// Context for tracking multiple I/O operations
-const MultiIoContext = struct {
-    task: *AnyTask,
-    remaining: std.atomic.Value(usize),
-};
-
-/// Callback for multi I/O that only resumes when all operations complete
-fn multiIoCallback(loop: *ev.Loop, completion: *ev.Completion) void {
-    _ = loop;
-    const ctx: *MultiIoContext = @ptrCast(@alignCast(completion.userdata.?));
-    if (ctx.remaining.fetchSub(1, .release) == 1) {
-        ctx.task.wake();
-    }
-}
-
-/// Runs multiple I/O operations to completion.
-/// Submits all operations and waits for all to complete.
-pub fn runIoMulti(rt: *Runtime, completions: []const *ev.Completion) Cancelable!void {
-    if (completions.len == 0) return;
-
-    const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
-
-    var ctx = MultiIoContext{
-        .task = task,
-        .remaining = .init(completions.len),
-    };
-
-    for (completions) |c| {
-        c.userdata = &ctx;
-        c.callback = multiIoCallback;
-    }
-
-    // Clear callbacks and context in defer when runtime safety is on to catch use-after-return bugs
-    defer if (std.debug.runtime_safety) {
-        for (completions) |c| {
-            c.callback = null;
-            c.userdata = null;
+        if (canceling) {
+            executor.loop.cancel(c);
+        } else {
+            executor.loop.add(c);
         }
-    };
 
-    task.state.store(.preparing_to_wait, .release);
-
-    for (completions) |c| {
-        executor.loop.add(c);
+        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
+            if (c.isCompleted()) {
+                // IO completed before we could cancel - restore the pending cancel
+                task.recancel();
+                return;
+            }
+            std.debug.assert(!canceling);
+            rt.beginShield();
+            canceling = true;
+            continue;
+        };
+        std.debug.assert(c.isCompleted());
+        break;
     }
 
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // Cancel all remaining operations
-        for (completions) |c| {
-            if (c.state != .dead) {
-                cancelIo(rt, c);
+    if (canceling) {
+        rt.endShield();
+        if (c.err) |err| {
+            if (err == error.Canceled) {
+                return error.Canceled;
             }
         }
-        return err;
-    };
-
-    for (completions) |c| {
-        std.debug.assert(c.state == .dead);
+        // IO completed successfully despite cancel request - restore the pending cancel
+        task.recancel();
     }
 }
-
-pub fn timedWaitForIo(rt: *Runtime, completion: *ev.Completion, timeout: Duration) (Timeoutable || Cancelable)!void {
-    const task = rt.getCurrentTask();
-    var executor = task.getExecutor();
-
-    // Set up timeout timer
-    var timer = AutoCancel.init;
-    defer timer.clear(rt);
-    timer.set(rt, timeout);
-
-    // Transition to preparing_to_wait state before yielding
-    task.state.store(.preparing_to_wait, .release);
-
-    // Re-check completion state after setting preparing_to_wait
-    // If IO completed and callback was already called, restore ready state and exit
-    // We must check for .dead (not .completed) because .completed means the callback
-    // hasn't been called yet, and the completion is still referenced by the loop
-    if (completion.state == .dead) {
-        task.state.store(.ready, .release);
-        return;
-    }
-
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-    // If IO completes before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // Check if this auto-cancel triggered before clearing timeout state
-        const is_timeout = timer.check(rt, err);
-        timer.clear(rt);
-        cancelIo(rt, completion);
-        if (is_timeout) return error.Timeout;
-        return err;
-    };
-
-    std.debug.assert(completion.state == .dead);
-}
-
-// Note: runIo and IoOperation have been removed in favor of working directly
-// with ev's typed completions (FileRead, FileWrite, etc.)
 
 /// Helper function to fill an iovec buffer for writing with support for splatting patterns.
 /// Used by both FileWriter and Stream.Writer to handle the splat parameter correctly.

@@ -295,6 +295,10 @@ pub const Completion = struct {
         }
     }
 
+    pub fn isCompleted(c: *const Completion) bool {
+        return c.cancel_state.load(.acquire).completed and c.state == .dead;
+    }
+
     pub fn cast(c: *Completion, comptime T: type) *T {
         std.debug.assert(c.op == Op.fromType(T));
         return @alignCast(@fieldParentPtr("c", c));
