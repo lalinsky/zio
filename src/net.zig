@@ -21,6 +21,144 @@ pub const has_unix_sockets = switch (builtin.os.tag) {
 
 pub const default_kernel_backlog = 128;
 
+/// A validated hostname according to RFC 1123.
+/// * Has length less than or equal to `max_len`.
+/// * Labels are 1-63 characters, separated by dots.
+/// * Labels start and end with alphanumeric characters.
+/// * Labels can contain alphanumeric characters and hyphens.
+pub const HostName = struct {
+    /// Externally managed memory. Already checked to be valid.
+    bytes: []const u8,
+
+    pub const max_len = 255;
+
+    pub const ValidateError = error{
+        NameTooLong,
+        InvalidHostName,
+    };
+
+    /// Validates a hostname according to RFC 1123.
+    pub fn validate(bytes: []const u8) ValidateError!void {
+        if (bytes.len == 0) return error.InvalidHostName;
+        if (bytes[0] == '.') return error.InvalidHostName;
+
+        // Ignore trailing dot (FQDN). It doesn't count toward our length.
+        const end = if (bytes[bytes.len - 1] == '.') end: {
+            if (bytes.len == 1) return error.InvalidHostName;
+            break :end bytes.len - 1;
+        } else bytes.len;
+
+        if (end > max_len) return error.NameTooLong;
+
+        // Hostnames are divided into dot-separated "labels", which:
+        // - Start with a letter or digit
+        // - Can contain letters, digits, or hyphens
+        // - Must end with a letter or digit
+        // - Have a minimum of 1 character and a maximum of 63
+        var label_start: usize = 0;
+        var label_len: usize = 0;
+        for (bytes[0..end], 0..) |c, i| {
+            switch (c) {
+                '.' => {
+                    if (label_len == 0 or label_len > 63) return error.InvalidHostName;
+                    if (!std.ascii.isAlphanumeric(bytes[label_start])) return error.InvalidHostName;
+                    if (!std.ascii.isAlphanumeric(bytes[i - 1])) return error.InvalidHostName;
+
+                    label_start = i + 1;
+                    label_len = 0;
+                },
+                '-' => {
+                    label_len += 1;
+                },
+                else => {
+                    if (!std.ascii.isAlphanumeric(c)) return error.InvalidHostName;
+                    label_len += 1;
+                },
+            }
+        }
+
+        // Validate the final label
+        if (label_len == 0 or label_len > 63) return error.InvalidHostName;
+        if (!std.ascii.isAlphanumeric(bytes[label_start])) return error.InvalidHostName;
+        if (!std.ascii.isAlphanumeric(bytes[end - 1])) return error.InvalidHostName;
+    }
+
+    pub fn init(bytes: []const u8) ValidateError!HostName {
+        try validate(bytes);
+        return .{ .bytes = bytes };
+    }
+
+    /// Domain names are case-insensitive (RFC 5890, Section 2.3.2.4)
+    pub fn eql(a: HostName, b: HostName) bool {
+        return std.ascii.eqlIgnoreCase(a.bytes, b.bytes);
+    }
+
+    pub const LookupOptions = struct {
+        port: u16,
+        /// Buffer to store the canonical name. If null, canonical name is not returned.
+        canonical_name_buffer: ?*[max_len]u8 = null,
+        /// Filter by address family. `null` means either.
+        family: ?IpAddress.Family = null,
+    };
+
+    pub const LookupResult = union(enum) {
+        address: IpAddress,
+        canonical_name: HostName,
+    };
+
+    pub const LookupError = LookupHostError;
+
+    /// Resolves the hostname to IP addresses.
+    /// Results are written into the provided buffer.
+    /// Returns a slice of the results that were written.
+    pub fn lookup(
+        self: HostName,
+        rt: *Runtime,
+        results: []LookupResult,
+        options: LookupOptions,
+    ) LookupError![]LookupResult {
+        var iter = try lookupHost(rt, self.bytes, options.port, options.family);
+        defer iter.deinit();
+
+        var count: usize = 0;
+
+        // Add canonical name if buffer provided
+        if (options.canonical_name_buffer) |canon_buf| {
+            if (count < results.len) {
+                const canon_len = @min(self.bytes.len, max_len);
+                @memcpy(canon_buf[0..canon_len], self.bytes[0..canon_len]);
+                results[count] = .{ .canonical_name = .{ .bytes = canon_buf[0..canon_len] } };
+                count += 1;
+            }
+        }
+
+        // Add addresses
+        while (iter.next()) |addr| {
+            if (count >= results.len) break;
+            results[count] = .{ .address = addr };
+            count += 1;
+        }
+
+        return results[0..count];
+    }
+
+    /// Resolves the hostname and connects to the first successful address.
+    pub fn connect(self: HostName, rt: *Runtime, port: u16) !Stream {
+        var iter = try lookupHost(rt, self.bytes, port, null);
+        defer iter.deinit();
+
+        var last_err: ?anyerror = null;
+        while (iter.next()) |addr| {
+            return addr.connect(rt) catch |err| {
+                last_err = err;
+                continue;
+            };
+        }
+        if (last_err) |err| return err;
+        return error.UnknownHostName;
+    }
+};
+
 pub const ShutdownHow = os.net.ShutdownHow;
 
 /// Get the socket address length for a given sockaddr.
@@ -38,6 +176,16 @@ pub const IpAddress = extern union {
     any: os.net.sockaddr,
     in: os.net.sockaddr.in,
     in6: os.net.sockaddr.in6,
+
+    pub const Family = enum { ipv4, ipv6 };
+
+    pub fn getFamily(self: IpAddress) Family {
+        return switch (self.any.family) {
+            os.net.AF.INET => .ipv4,
+            os.net.AF.INET6 => .ipv6,
+            else => unreachable,
+        };
+    }
 
     pub fn initIp4(addr: [4]u8, port: u16) IpAddress {
         return .{ .in = .{
@@ -1101,10 +1249,11 @@ pub fn lookupHost(
     runtime: *Runtime,
     name: []const u8,
     port: u16,
+    family: ?IpAddress.Family,
 ) LookupHostError!IpAddressIterator {
     var task = runtime.spawnBlocking(
         lookupHostBlocking,
-        .{ name, port },
+        .{ name, port, family },
     ) catch |err| switch (err) {
         error.ResultTooLarge, error.ContextTooLarge => unreachable,
         else => |e| return @as(LookupHostError, e),
@@ -1117,6 +1266,7 @@ pub fn lookupHost(
 fn lookupHostBlocking(
     name: []const u8,
     port: u16,
+    family: ?IpAddress.Family,
 ) LookupHostError!IpAddressIterator {
     // Use stack buffer for temporary allocations
     var buf: [512]u8 = undefined;
@@ -1127,7 +1277,10 @@ fn lookupHostBlocking(
     const port_c = try std.fmt.allocPrintSentinel(allocator, "{d}", .{port}, 0);
 
     var hints: os.net.addrinfo = std.mem.zeroes(os.net.addrinfo);
-    hints.family = os.net.AF.UNSPEC;
+    hints.family = if (family) |f| switch (f) {
+        .ipv4 => os.net.AF.INET,
+        .ipv6 => os.net.AF.INET6,
+    } else os.net.AF.UNSPEC;
     hints.socktype = std.posix.SOCK.STREAM;
     hints.protocol = std.posix.IPPROTO.TCP;
 
@@ -1153,7 +1306,7 @@ pub fn tcpConnectToHost(
     name: []const u8,
     port: u16,
 ) !Stream {
-    var iter = try lookupHost(rt, name, port);
+    var iter = try lookupHost(rt, name, port, null);
     defer iter.deinit();
 
     var last_err: ?anyerror = null;
@@ -1175,13 +1328,131 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+test "HostName: validate" {
+    // Valid hostnames
+    try HostName.validate("example");
+    try HostName.validate("example.com");
+    try HostName.validate("www.example.com");
+    try HostName.validate("sub.domain.example.com");
+    try HostName.validate("example.com.");
+    try HostName.validate("host-name.example.com.");
+    try HostName.validate("123.example.com.");
+    try HostName.validate("a-b.com");
+    try HostName.validate("a.b.c.d.e.f.g");
+    try HostName.validate("127.0.0.1"); // Also a valid hostname
+    try HostName.validate("a" ** 63 ++ ".com"); // Label exactly 63 chars (valid)
+    try HostName.validate("a." ** 127 ++ "a"); // Total length 255 (valid)
+
+    // Invalid hostnames
+    try std.testing.expectError(error.InvalidHostName, HostName.validate(""));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate(".example.com"));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("example.com.."));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("host..domain"));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("-hostname"));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("hostname-"));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("a.-.b"));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("host_name.com"));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("."));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate(".."));
+    try std.testing.expectError(error.InvalidHostName, HostName.validate("a" ** 64 ++ ".com")); // Label length 64 (too long)
+    try std.testing.expectError(error.NameTooLong, HostName.validate("a." ** 127 ++ "ab")); // Total length 256 (too long)
+}
+
+test "HostName: eql" {
+    const a = try HostName.init("Example.COM");
+    const b = try HostName.init("example.com");
+    const c = try HostName.init("other.com");
+
+    try std.testing.expect(a.eql(b));
+    try std.testing.expect(b.eql(a));
+    try std.testing.expect(!a.eql(c));
+}
+
+test "HostName: lookup" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const host = try HostName.init("localhost");
+    var results_buf: [16]HostName.LookupResult = undefined;
+    const results = try host.lookup(rt, &results_buf, .{ .port = 80 });
+
+    try std.testing.expect(results.len > 0);
+
+    var has_address = false;
+    for (results) |result| {
+        switch (result) {
+            .address => |addr| {
+                try std.testing.expectEqual(80, addr.getPort());
+                has_address = true;
+            },
+            .canonical_name => {},
+        }
+    }
+    try std.testing.expect(has_address);
+}
+
+test "HostName: lookup with family filter" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const host = try HostName.init("localhost");
+    var results_buf: [16]HostName.LookupResult = undefined;
+    const results = try host.lookup(rt, &results_buf, .{ .port = 80, .family = .ipv4 });
+
+    for (results) |result| {
+        switch (result) {
+            .address => |addr| {
+                try std.testing.expectEqual(IpAddress.Family.ipv4, addr.getFamily());
+            },
+            .canonical_name => {},
+        }
+    }
+}
+
+test "HostName: connect" {
+    if (builtin.os.tag == .macos) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const Test = struct {
+        fn run(runtime: *Runtime) !void {
+            // Start a server
+            const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try server_addr.listen(runtime, .{});
+            defer server.close(runtime);
+
+            const port = server.socket.address.ip.getPort();
+
+            // Connect via HostName
+            const host = try HostName.init("localhost");
+            var stream = try host.connect(runtime, port);
+            defer stream.close(runtime);
+
+            try stream.writeAll(runtime, "hello");
+        }
+    };
+
+    var task = try rt.spawn(Test.run, .{rt});
+    defer task.cancel(rt);
+    try task.join(rt);
+}
+
+test "IpAddress: getFamily" {
+    const ipv4 = try IpAddress.parseIp4("127.0.0.1", 80);
+    try std.testing.expectEqual(IpAddress.Family.ipv4, ipv4.getFamily());
+
+    const ipv6 = try IpAddress.parseIp6("::1", 80);
+    try std.testing.expectEqual(IpAddress.Family.ipv6, ipv6.getFamily());
+}
+
 test "lookupHost: localhost" {
     const allocator = std.testing.allocator;
 
     const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    var iter = try lookupHost(rt, "localhost", 80);
+    var iter = try lookupHost(rt, "localhost", 80, null);
     defer iter.deinit();
 
     var count: usize = 0;
@@ -1197,7 +1468,7 @@ test "lookupHost: numeric IP" {
     const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    var iter = try lookupHost(rt, "127.0.0.1", 8080);
+    var iter = try lookupHost(rt, "127.0.0.1", 8080, null);
     defer iter.deinit();
 
     var count: usize = 0;
