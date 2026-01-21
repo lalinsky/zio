@@ -205,9 +205,15 @@ fn prepFutexWait(sqe: *linux.io_uring_sqe, futex: *const u32, expected: u64) voi
 
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
+/// Can be called for initial submission (state == .new) or resubmission after EINTR (state == .running).
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
-    c.state = .running;
-    state.active += 1;
+    const is_new = c.state == .new;
+    if (is_new) {
+        c.state = .running;
+        state.active += 1;
+    } else {
+        std.debug.assert(c.state == .running);
+    }
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
@@ -378,13 +384,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
         .file_open => {
             const data = c.cast(FileOpen);
-            const path = self.allocator.dupeZ(u8, data.path) catch {
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            if (is_new) {
+                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
             const sqe = self.getSqe(state) catch {
-                self.allocator.free(path);
+                self.allocator.free(data.internal.path);
                 log.err("Failed to get io_uring SQE for file_open", .{});
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
@@ -398,19 +406,20 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 },
                 .CLOEXEC = true,
             };
-            sqe.prep_openat(data.dir, path, flags, 0);
+            sqe.prep_openat(data.dir, data.internal.path, flags, 0);
             sqe.user_data = @intFromPtr(c);
-            data.internal.path = path;
         },
         .file_create => {
             const data = c.cast(FileCreate);
-            const path = self.allocator.dupeZ(u8, data.path) catch {
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            if (is_new) {
+                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
             const sqe = self.getSqe(state) catch {
-                self.allocator.free(path);
+                self.allocator.free(data.internal.path);
                 log.err("Failed to get io_uring SQE for file_create", .{});
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
@@ -423,9 +432,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .TRUNC = data.flags.truncate,
                 .EXCL = data.flags.exclusive,
             };
-            sqe.prep_openat(data.dir, path, flags, data.flags.mode);
+            sqe.prep_openat(data.dir, data.internal.path, flags, data.flags.mode);
             sqe.user_data = @intFromPtr(c);
-            data.internal.path = path;
         },
         .file_close => {
             const data = c.cast(FileClose);
@@ -488,83 +496,86 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_set_timestamps => unreachable, // Handled by thread pool
         .dir_create_dir => {
             const data = c.cast(DirCreateDir);
-            const path = self.allocator.dupeZ(u8, data.path) catch {
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            if (is_new) {
+                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
             const sqe = self.getSqe(state) catch {
-                self.allocator.free(path);
+                self.allocator.free(data.internal.path);
                 log.err("Failed to get io_uring SQE for dir_create_dir", .{});
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             };
-            sqe.prep_mkdirat(@intCast(data.dir), path.ptr, data.mode);
+            sqe.prep_mkdirat(@intCast(data.dir), data.internal.path.ptr, data.mode);
             sqe.user_data = @intFromPtr(c);
-            data.internal.path = path;
         },
         .dir_rename => {
             const data = c.cast(DirRename);
-            const old_path = self.allocator.dupeZ(u8, data.old_path) catch {
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
-            const new_path = self.allocator.dupeZ(u8, data.new_path) catch {
-                self.allocator.free(old_path);
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            if (is_new) {
+                data.internal.old_path = self.allocator.dupeZ(u8, data.old_path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+                data.internal.new_path = self.allocator.dupeZ(u8, data.new_path) catch {
+                    self.allocator.free(data.internal.old_path);
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
             const sqe = self.getSqe(state) catch {
-                self.allocator.free(old_path);
-                self.allocator.free(new_path);
+                self.allocator.free(data.internal.old_path);
+                self.allocator.free(data.internal.new_path);
                 log.err("Failed to get io_uring SQE for dir_rename", .{});
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             };
-            sqe.prep_renameat(@intCast(data.old_dir), old_path.ptr, @intCast(data.new_dir), new_path.ptr, 0);
+            sqe.prep_renameat(@intCast(data.old_dir), data.internal.old_path.ptr, @intCast(data.new_dir), data.internal.new_path.ptr, 0);
             sqe.user_data = @intFromPtr(c);
-            data.internal.old_path = old_path;
-            data.internal.new_path = new_path;
         },
         .dir_delete_file => {
             const data = c.cast(DirDeleteFile);
-            const path = self.allocator.dupeZ(u8, data.path) catch {
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            if (is_new) {
+                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
             const sqe = self.getSqe(state) catch {
-                self.allocator.free(path);
+                self.allocator.free(data.internal.path);
                 log.err("Failed to get io_uring SQE for dir_delete_file", .{});
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             };
-            sqe.prep_unlinkat(@intCast(data.dir), path.ptr, 0);
+            sqe.prep_unlinkat(@intCast(data.dir), data.internal.path.ptr, 0);
             sqe.user_data = @intFromPtr(c);
-            data.internal.path = path;
         },
         .dir_delete_dir => {
             const data = c.cast(DirDeleteDir);
-            const path = self.allocator.dupeZ(u8, data.path) catch {
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            if (is_new) {
+                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
             const sqe = self.getSqe(state) catch {
-                self.allocator.free(path);
+                self.allocator.free(data.internal.path);
                 log.err("Failed to get io_uring SQE for dir_delete_dir", .{});
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             };
-            sqe.prep_unlinkat(@intCast(data.dir), path.ptr, linux.AT.REMOVEDIR);
+            sqe.prep_unlinkat(@intCast(data.dir), data.internal.path.ptr, linux.AT.REMOVEDIR);
             sqe.user_data = @intFromPtr(c);
-            data.internal.path = path;
         },
 
         .file_size => {
@@ -590,21 +601,22 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
             if (data.path) |user_path| {
                 // Path provided - stat relative to handle
-                const path = self.allocator.dupeZ(u8, user_path) catch {
-                    c.setError(error.SystemResources);
-                    state.markCompletedFromBackend(c);
-                    return;
-                };
+                if (is_new) {
+                    data.internal.path = self.allocator.dupeZ(u8, user_path) catch {
+                        c.setError(error.SystemResources);
+                        state.markCompletedFromBackend(c);
+                        return;
+                    };
+                }
                 const sqe = self.getSqe(state) catch {
-                    self.allocator.free(path);
+                    self.allocator.free(data.internal.path);
                     log.err("Failed to get io_uring SQE for file_stat", .{});
                     c.setError(error.Unexpected);
                     state.markCompletedFromBackend(c);
                     return;
                 };
-                sqe.prep_statx(@intCast(data.handle), path.ptr, 0, mask, &data.internal.statx);
+                sqe.prep_statx(@intCast(data.handle), data.internal.path.ptr, 0, mask, &data.internal.statx);
                 sqe.user_data = @intFromPtr(c);
-                data.internal.path = path;
             } else {
                 // No path - use AT_EMPTY_PATH to stat the fd itself
                 const sqe = self.getSqe(state) catch {
@@ -620,13 +632,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
         .dir_open => {
             const data = c.cast(DirOpen);
-            const path = self.allocator.dupeZ(u8, data.path) catch {
-                c.setError(error.SystemResources);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            if (is_new) {
+                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
             const sqe = self.getSqe(state) catch {
-                self.allocator.free(path);
+                self.allocator.free(data.internal.path);
                 log.err("Failed to get io_uring SQE for dir_open", .{});
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
@@ -643,9 +657,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             if (!data.flags.iterate) {
                 flags.PATH = true;
             }
-            sqe.prep_openat(data.dir, path, flags, 0);
+            sqe.prep_openat(data.dir, data.internal.path, flags, 0);
             sqe.user_data = @intFromPtr(c);
-            data.internal.path = path;
         },
 
         .dir_close => {
@@ -823,6 +836,12 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         // So when we get the cancel's CQE, it's already completed
         // Similarly, when we get the target's CQE after the cancel already completed it
         if (completion.state == .completed or completion.state == .dead) {
+            continue;
+        }
+
+        // Handle EINTR by resubmitting - operation was interrupted by a signal
+        if (cqe.res == -@as(i32, @intFromEnum(linux.E.INTR))) {
+            self.submit(state, completion);
             continue;
         }
 
