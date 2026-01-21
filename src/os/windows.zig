@@ -693,7 +693,7 @@ pub extern "ws2_32" fn WSASendTo(
 pub extern "ws2_32" fn setsockopt(
     s: SOCKET,
     level: i32,
-    optname: i32,
+    optname: u32,
     optval: ?[*]const u8,
     optlen: i32,
 ) callconv(.winapi) i32;
