@@ -94,11 +94,12 @@ pub const HostName = struct {
     }
 
     pub const LookupOptions = struct {
+        /// Port number for the returned addresses.
         port: u16,
-        /// Buffer to store the canonical name. If null, canonical name is not returned.
-        canonical_name_buffer: ?*[max_len]u8 = null,
         /// Filter by address family. `null` means either.
         family: ?IpAddress.Family = null,
+        /// Request canonical name from DNS.
+        canonical_name: bool = false,
     };
 
     pub const LookupResult = union(enum) {
@@ -108,51 +109,79 @@ pub const HostName = struct {
 
     pub const LookupError = LookupHostError;
 
+    pub const LookupResultIterator = struct {
+        head: ?*os.net.addrinfo,
+        current: ?*os.net.addrinfo,
+        return_canonical_name: bool,
+
+        pub fn next(self: *LookupResultIterator) ?LookupResult {
+            // Return canonical name first if requested
+            if (self.return_canonical_name) {
+                self.return_canonical_name = false;
+                if (self.head) |head| {
+                    if (head.canonname) |name| {
+                        return .{ .canonical_name = .{ .bytes = std.mem.sliceTo(name, 0) } };
+                    }
+                }
+            }
+
+            // Then return addresses
+            while (self.current) |info| {
+                self.current = @ptrCast(info.next);
+                const addr = info.addr orelse continue;
+                if (addr.family != os.net.AF.INET and addr.family != os.net.AF.INET6) continue;
+                return .{ .address = IpAddress.initPosix(@ptrCast(addr), @intCast(info.addrlen)) };
+            }
+            return null;
+        }
+
+        pub fn deinit(self: *LookupResultIterator) void {
+            if (self.head) |head| {
+                os.net.freeaddrinfo(head);
+            }
+        }
+    };
+
     /// Resolves the hostname to IP addresses.
-    /// Results are written into the provided buffer.
-    /// Returns a slice of the results that were written.
+    /// Returns an iterator over the results. Call `deinit()` when done.
     pub fn lookup(
         self: HostName,
         rt: *Runtime,
-        results: []LookupResult,
         options: LookupOptions,
-    ) LookupError![]LookupResult {
-        var iter = try lookupHost(rt, self.bytes, options.port, options.family);
-        defer iter.deinit();
+    ) LookupError!LookupResultIterator {
+        var task = rt.spawnBlocking(
+            lookupHostBlocking,
+            .{ self.bytes, options.port, options.family, options.canonical_name },
+        ) catch |err| switch (err) {
+            error.ResultTooLarge, error.ContextTooLarge => unreachable,
+            else => |e| return @as(LookupError, e),
+        };
+        defer task.cancel(rt);
 
-        var count: usize = 0;
-
-        // Add canonical name if buffer provided
-        if (options.canonical_name_buffer) |canon_buf| {
-            if (count < results.len) {
-                const canon_len = @min(self.bytes.len, max_len);
-                @memcpy(canon_buf[0..canon_len], self.bytes[0..canon_len]);
-                results[count] = .{ .canonical_name = .{ .bytes = canon_buf[0..canon_len] } };
-                count += 1;
-            }
-        }
-
-        // Add addresses
-        while (iter.next()) |addr| {
-            if (count >= results.len) break;
-            results[count] = .{ .address = addr };
-            count += 1;
-        }
-
-        return results[0..count];
+        const res = try task.join(rt);
+        return .{
+            .head = res,
+            .current = res,
+            .return_canonical_name = options.canonical_name,
+        };
     }
 
     /// Resolves the hostname and connects to the first successful address.
     pub fn connect(self: HostName, rt: *Runtime, port: u16) !Stream {
-        var iter = try lookupHost(rt, self.bytes, port, null);
+        var iter = try self.lookup(rt, .{ .port = port });
         defer iter.deinit();
 
         var last_err: ?anyerror = null;
-        while (iter.next()) |addr| {
-            return addr.connect(rt) catch |err| {
-                last_err = err;
-                continue;
-            };
+        while (iter.next()) |result| {
+            switch (result) {
+                .address => |addr| {
+                    return addr.connect(rt) catch |err| {
+                        last_err = err;
+                        continue;
+                    };
+                },
+                .canonical_name => {},
+            }
         }
         if (last_err) |err| return err;
         return error.UnknownHostName;
@@ -1203,29 +1232,6 @@ pub fn netClose(rt: *Runtime, fd: Handle) void {
     _ = op.getResult() catch {};
 }
 
-pub const IpAddressIterator = struct {
-    head: ?*os.net.addrinfo,
-    current: ?*os.net.addrinfo,
-
-    pub fn next(self: *IpAddressIterator) ?IpAddress {
-        while (self.current) |info| {
-            self.current = info.next;
-            const addr = info.addr orelse continue;
-            // Skip unsupported address families
-            if (addr.family != os.net.AF.INET and addr.family != os.net.AF.INET6) continue;
-            // Cast needed on Windows where we have our own sockaddr type
-            return IpAddress.initPosix(@ptrCast(addr), @intCast(info.addrlen));
-        }
-        return null;
-    }
-
-    pub fn deinit(self: *IpAddressIterator) void {
-        if (self.head) |head| {
-            os.net.freeaddrinfo(head);
-        }
-    }
-};
-
 pub const LookupHostError = error{
     HostLacksNetworkAddresses,
     TemporaryNameServerFailure,
@@ -1242,32 +1248,12 @@ pub const LookupHostError = error{
     SystemResources,
 } || std.posix.UnexpectedError;
 
-/// Async DNS resolution using the runtime's thread pool.
-/// Performs DNS lookup in a blocking task to avoid blocking the event loop.
-/// Call `IpAddressIterator.deinit()` on the result when done.
-pub fn lookupHost(
-    runtime: *Runtime,
-    name: []const u8,
-    port: u16,
-    family: ?IpAddress.Family,
-) LookupHostError!IpAddressIterator {
-    var task = runtime.spawnBlocking(
-        lookupHostBlocking,
-        .{ name, port, family },
-    ) catch |err| switch (err) {
-        error.ResultTooLarge, error.ContextTooLarge => unreachable,
-        else => |e| return @as(LookupHostError, e),
-    };
-    defer task.cancel(runtime);
-
-    return try task.join(runtime);
-}
-
 fn lookupHostBlocking(
     name: []const u8,
     port: u16,
     family: ?IpAddress.Family,
-) LookupHostError!IpAddressIterator {
+    canonical_name: bool,
+) LookupHostError!?*os.net.addrinfo {
     // Use stack buffer for temporary allocations
     var buf: [512]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
@@ -1283,6 +1269,9 @@ fn lookupHostBlocking(
     } else os.net.AF.UNSPEC;
     hints.socktype = std.posix.SOCK.STREAM;
     hints.protocol = std.posix.IPPROTO.TCP;
+    if (canonical_name) {
+        hints.flags.CANONNAME = true;
+    }
 
     var res: ?*os.net.addrinfo = null;
 
@@ -1295,10 +1284,7 @@ fn lookupHostBlocking(
         };
     };
 
-    return .{
-        .head = res,
-        .current = res,
-    };
+    return res;
 }
 
 pub fn tcpConnectToHost(
@@ -1306,18 +1292,8 @@ pub fn tcpConnectToHost(
     name: []const u8,
     port: u16,
 ) !Stream {
-    var iter = try lookupHost(rt, name, port, null);
-    defer iter.deinit();
-
-    var last_err: ?anyerror = null;
-    while (iter.next()) |addr| {
-        return addr.connect(rt) catch |err| {
-            last_err = err;
-            continue;
-        };
-    }
-    if (last_err) |err| return err;
-    return error.UnknownHostName;
+    const host = try HostName.init(name);
+    return host.connect(rt, port);
 }
 
 pub fn tcpConnectToAddress(rt: *Runtime, addr: IpAddress) !Stream {
@@ -1373,19 +1349,17 @@ test "HostName: lookup" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var results_buf: [16]HostName.LookupResult = undefined;
-    const results = try host.lookup(rt, &results_buf, .{ .port = 80 });
-
-    try std.testing.expect(results.len > 0);
+    var iter = try host.lookup(rt, .{ .port = 80 });
+    defer iter.deinit();
 
     var has_address = false;
-    for (results) |result| {
+    while (iter.next()) |result| {
         switch (result) {
             .address => |addr| {
                 try std.testing.expectEqual(80, addr.getPort());
                 has_address = true;
             },
-            .canonical_name => {},
+            .canonical_name => unreachable,
         }
     }
     try std.testing.expect(has_address);
@@ -1396,15 +1370,15 @@ test "HostName: lookup with family filter" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var results_buf: [16]HostName.LookupResult = undefined;
-    const results = try host.lookup(rt, &results_buf, .{ .port = 80, .family = .ipv4 });
+    var iter = try host.lookup(rt, .{ .port = 80, .family = .ipv4 });
+    defer iter.deinit();
 
-    for (results) |result| {
+    while (iter.next()) |result| {
         switch (result) {
             .address => |addr| {
                 try std.testing.expectEqual(IpAddress.Family.ipv4, addr.getFamily());
             },
-            .canonical_name => {},
+            .canonical_name => unreachable,
         }
     }
 }
@@ -1446,13 +1420,12 @@ test "IpAddress: getFamily" {
     try std.testing.expectEqual(IpAddress.Family.ipv6, ipv6.getFamily());
 }
 
-test "lookupHost: localhost" {
-    const allocator = std.testing.allocator;
-
-    const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
+test "HostName: lookup localhost" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    var iter = try lookupHost(rt, "localhost", 80, null);
+    const host = try HostName.init("localhost");
+    var iter = try host.lookup(rt, .{ .port = 80 });
     defer iter.deinit();
 
     var count: usize = 0;
@@ -1462,20 +1435,24 @@ test "lookupHost: localhost" {
     try std.testing.expect(count > 0);
 }
 
-test "lookupHost: numeric IP" {
-    const allocator = std.testing.allocator;
-
-    const rt = try Runtime.init(allocator, .{ .thread_pool = .{} });
+test "HostName: lookup numeric IP" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    var iter = try lookupHost(rt, "127.0.0.1", 8080, null);
+    const host = try HostName.init("127.0.0.1");
+    var iter = try host.lookup(rt, .{ .port = 8080 });
     defer iter.deinit();
 
     var count: usize = 0;
     var first_addr: ?IpAddress = null;
-    while (iter.next()) |addr| {
-        if (first_addr == null) first_addr = addr;
-        count += 1;
+    while (iter.next()) |result| {
+        switch (result) {
+            .address => |addr| {
+                if (first_addr == null) first_addr = addr;
+                count += 1;
+            },
+            .canonical_name => unreachable,
+        }
     }
     try std.testing.expectEqual(1, count);
     try std.testing.expectEqual(8080, first_addr.?.getPort());
