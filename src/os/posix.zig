@@ -24,6 +24,10 @@ pub const MINSIGSTKSZ = sys.MINSIGSTKSZ;
 pub const SIGSTKSZ = sys.SIGSTKSZ;
 pub const stack_t = sys.stack_t;
 pub const PATH_MAX = std.posix.PATH_MAX;
+pub const SO = system.SO;
+pub const SOL = system.SOL;
+pub const IPPROTO = system.IPPROTO;
+pub const TCP = system.TCP;
 
 pub const timespec = sys.timespec;
 
