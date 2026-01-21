@@ -10,7 +10,7 @@ const log = std.log.scoped(.zio_socket);
 
 // Windows addrinfo definitions
 const windows_addrinfo = if (builtin.os.tag == .windows) extern struct {
-    flags: i32,
+    flags: AI,
     family: i32,
     socktype: i32,
     protocol: i32,
