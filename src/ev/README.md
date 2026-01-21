@@ -26,7 +26,8 @@ pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
 
-    var loop: ev.Loop = try .init(gpa.allocator(), .{});
+    var loop: ev.Loop = undefined;
+    try loop.init(.{ .allocator = gpa.allocator() });
     defer loop.deinit();
 
     var timer: ev.Timer = .init(.fromSeconds(1));
