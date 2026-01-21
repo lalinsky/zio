@@ -345,9 +345,7 @@ pub const Group = struct {
     }
 
     /// Add a completion to this group. Must be called before submitting the group.
-    /// Nested groups are not supported.
     pub fn add(self: *Group, c: *Completion) void {
-        std.debug.assert(c.op != .group); // Nested groups are not supported
         std.debug.assert(c.state == .new);
         std.debug.assert(self.c.state == .new); // Group must not be submitted yet
         std.debug.assert(c.group.owner == null);

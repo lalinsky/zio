@@ -278,3 +278,142 @@ test "group: race mode with single child" {
     // Group should succeed
     try group.getResult();
 }
+
+test "group: nested gather inside race (timeout pattern) - ops complete first" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    // Timeout timer (slow)
+    var timeout: Timer = .init(.fromMilliseconds(1000));
+
+    // Operations (fast)
+    var op1: Timer = .init(.fromMilliseconds(10));
+    var op2: Timer = .init(.fromMilliseconds(20));
+
+    // Inner gather group for operations
+    var ops: Group = .init(.gather);
+    ops.add(&op1.c);
+    ops.add(&op2.c);
+
+    // Outer race group: timeout vs operations
+    var race: Group = .init(.race);
+    race.add(&timeout.c);
+    race.add(&ops.c);
+
+    loop.add(&race.c);
+    try loop.run(.until_done);
+
+    // Operations should complete successfully
+    try op1.getResult();
+    try op2.getResult();
+    try ops.getResult();
+
+    // Timeout should be canceled (operations won the race)
+    try std.testing.expectError(error.Canceled, timeout.getResult());
+
+    // Outer race should succeed
+    try race.getResult();
+}
+
+test "group: nested gather inside race (timeout pattern) - timeout fires first" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    // Timeout timer (fast)
+    var timeout: Timer = .init(.fromMilliseconds(10));
+
+    // Operations (slow)
+    var op1: Timer = .init(.fromMilliseconds(1000));
+    var op2: Timer = .init(.fromMilliseconds(1000));
+
+    // Inner gather group for operations
+    var ops: Group = .init(.gather);
+    ops.add(&op1.c);
+    ops.add(&op2.c);
+
+    // Outer race group: timeout vs operations
+    var race: Group = .init(.race);
+    race.add(&timeout.c);
+    race.add(&ops.c);
+
+    loop.add(&race.c);
+    try loop.run(.until_done);
+
+    // Timeout should complete successfully (it won the race)
+    try timeout.getResult();
+
+    // Operations should be canceled
+    try std.testing.expectError(error.Canceled, op1.getResult());
+    try std.testing.expectError(error.Canceled, op2.getResult());
+    try std.testing.expectError(error.Canceled, ops.getResult());
+
+    // Outer race should succeed
+    try race.getResult();
+}
+
+test "group: nested gather inside gather" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var op1: Timer = .init(.fromMilliseconds(10));
+    var op2: Timer = .init(.fromMilliseconds(20));
+    var op3: Timer = .init(.fromMilliseconds(30));
+
+    // Inner gather
+    var inner: Group = .init(.gather);
+    inner.add(&op1.c);
+    inner.add(&op2.c);
+
+    // Outer gather
+    var outer: Group = .init(.gather);
+    outer.add(&inner.c);
+    outer.add(&op3.c);
+
+    loop.add(&outer.c);
+    try loop.run(.until_done);
+
+    // All should complete successfully
+    try op1.getResult();
+    try op2.getResult();
+    try op3.getResult();
+    try inner.getResult();
+    try outer.getResult();
+}
+
+test "group: nested race inside gather" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    // Inner race: fast vs slow
+    var fast: Timer = .init(.fromMilliseconds(10));
+    var slow: Timer = .init(.fromMilliseconds(1000));
+    var inner: Group = .init(.race);
+    inner.add(&fast.c);
+    inner.add(&slow.c);
+
+    // Another op in outer gather
+    var op: Timer = .init(.fromMilliseconds(50));
+
+    // Outer gather waits for both inner race and op
+    var outer: Group = .init(.gather);
+    outer.add(&inner.c);
+    outer.add(&op.c);
+
+    loop.add(&outer.c);
+    try loop.run(.until_done);
+
+    // Fast wins inner race, slow is canceled
+    try fast.getResult();
+    try std.testing.expectError(error.Canceled, slow.getResult());
+    try inner.getResult();
+
+    // Op completes normally
+    try op.getResult();
+
+    // Outer gather succeeds
+    try outer.getResult();
+}
