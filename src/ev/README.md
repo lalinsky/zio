@@ -9,12 +9,11 @@ Callback-based async I/O event loop, similar to [libuv] or [libxev].
 
 - Support for Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and many other systems (`poll`).
 - Asynchronous network I/O on all systems.
-- Asynchronous file and directory I/O on Linux and Windows, simulated using auxiliary thread pool on other systems.
-- Timers, async notifications, and thread pool work items.
+- Asynchronous file-system I/O on Linux and Windows, simulated using auxiliary thread pool on other systems.
+- Timers, cross-thread notifications, and thread pool work items.
 - Cancellation support for all operations.
-- Structured concurrency using groups.
+- Structured concurrency using operation groups.
 - Zero-allocation intrusive data structures.
-- Thread-safe cancellation and cross-thread waking.
 
 ## Usage
 
