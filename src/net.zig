@@ -648,6 +648,7 @@ pub const Address = extern union {
     unix: UnixAddress,
 
     pub const Type = enum { ip, unix };
+    pub const Family = enum { ipv4, ipv6, unix };
 
     pub fn getType(self: Address) Type {
         return switch (self.any.family) {
@@ -657,12 +658,21 @@ pub const Address = extern union {
         };
     }
 
+    pub fn getFamily(self: Address) Family {
+        return switch (self.any.family) {
+            os.net.AF.INET => .ipv4,
+            os.net.AF.INET6 => .ipv6,
+            os.net.AF.UNIX => .unix,
+            else => unreachable,
+        };
+    }
+
     /// Convert to std.net.Address
     pub fn toStd(self: *const Address) std.net.Address {
         return switch (self.any.family) {
-            os.net.AF.INET => std.net.Address{ .in = .{ .sa = self.ip.in } },
-            os.net.AF.INET6 => std.net.Address{ .in6 = .{ .sa = self.ip.in6 } },
-            os.net.AF.UNIX => if (has_unix_sockets) std.net.Address{ .un = self.unix.un } else unreachable,
+            os.net.AF.INET => .{ .in = .{ .sa = self.ip.in } },
+            os.net.AF.INET6 => .{ .in6 = .{ .sa = self.ip.in6 } },
+            os.net.AF.UNIX => if (has_unix_sockets) .{ .un = self.unix.un } else unreachable,
             else => unreachable,
         };
     }
@@ -670,9 +680,9 @@ pub const Address = extern union {
     /// Convert from std.net.Address
     pub fn fromStd(addr: std.net.Address) Address {
         return switch (addr.any.family) {
-            os.net.AF.INET => Address{ .ip = .{ .in = addr.in.sa } },
-            os.net.AF.INET6 => Address{ .ip = .{ .in6 = addr.in6.sa } },
-            os.net.AF.UNIX => if (has_unix_sockets) Address{ .unix = .{ .un = addr.un } } else unreachable,
+            os.net.AF.INET => .{ .ip = .{ .in = addr.in.sa } },
+            os.net.AF.INET6 => .{ .ip = .{ .in6 = addr.in6.sa } },
+            os.net.AF.UNIX => if (has_unix_sockets) .{ .unix = .{ .un = addr.un } } else unreachable,
             else => unreachable,
         };
     }
@@ -701,7 +711,7 @@ pub const Address = extern union {
     fn fromStorage(data: []const u8) Address {
         const sockaddr: *align(1) const os.net.sockaddr = @ptrCast(data.ptr);
         return switch (sockaddr.family) {
-            os.net.AF.INET, os.net.AF.INET6 => Address{ .ip = fromStorageIp(data) },
+            os.net.AF.INET, os.net.AF.INET6 => .{ .ip = fromStorageIp(data) },
             os.net.AF.UNIX => blk: {
                 if (!has_unix_sockets) unreachable;
                 var addr: Address = .{ .unix = .{ .un = undefined } };
@@ -731,14 +741,14 @@ pub const Address = extern union {
     /// Supports both IPv4 and IPv6 addresses.
     /// Examples: parseIp("127.0.0.1", 8080), parseIp("::1", 8080)
     pub fn parseIp(ip: []const u8, port: u16) !Address {
-        return .{ .ip = try IpAddress.parseIp(ip, port) };
+        return .{ .ip = try .parseIp(ip, port) };
     }
 
     /// Parse an IP address with port from a single string.
     /// IPv4 format: "127.0.0.1:8080"
     /// IPv6 format: "[::1]:8080"
     pub fn parseIpAndHost(addr: []const u8) !Address {
-        return .{ .ip = try IpAddress.parseIpAndPort(addr) };
+        return .{ .ip = try .parseIpAndPort(addr) };
     }
 };
 
@@ -754,11 +764,7 @@ pub const Socket = struct {
     /// Enable or disable address reuse (SO_REUSEADDR)
     /// Allows binding to an address in TIME_WAIT state
     pub fn setReuseAddress(self: Socket, enabled: bool) !void {
-        if (builtin.os.tag == .windows) {
-            try self.setBoolOptionWindows(os.windows.SOL.SOCKET, os.windows.SO.REUSEADDR, enabled);
-        } else {
-            try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, enabled);
-        }
+        try self.setBoolOption(os.posix.SOL.SOCKET, os.posix.SO.REUSEADDR, enabled);
     }
 
     /// Enable or disable port reuse (SO_REUSEPORT)
@@ -768,42 +774,33 @@ pub const Socket = struct {
         if (builtin.os.tag == .windows) {
             return error.Unsupported;
         }
-        try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, enabled);
+        try self.setBoolOption(os.posix.SOL.SOCKET, os.posix.SO.REUSEPORT, enabled);
     }
 
     /// Enable or disable TCP keepalive (SO_KEEPALIVE)
     /// Periodically sends keepalive probes to detect dead connections
     pub fn setKeepAlive(self: Socket, enabled: bool) !void {
-        if (builtin.os.tag == .windows) {
-            try self.setBoolOptionWindows(os.windows.SOL.SOCKET, os.windows.SO.KEEPALIVE, enabled);
-        } else {
-            try self.setBoolOption(std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, enabled);
-        }
+        try self.setBoolOption(os.posix.SOL.SOCKET, os.posix.SO.KEEPALIVE, enabled);
     }
 
     /// Enable or disable Nagle's algorithm (TCP_NODELAY)
     /// When enabled (true), disables buffering for low-latency communication
     pub fn setNoDelay(self: Socket, enabled: bool) !void {
-        if (builtin.os.tag == .windows) {
-            try self.setBoolOptionWindows(os.windows.IPPROTO.TCP, os.windows.TCP.NODELAY, enabled);
-        } else {
-            try self.setBoolOption(std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, enabled);
-        }
+        try self.setBoolOption(os.posix.IPPROTO.TCP, os.posix.TCP.NODELAY, enabled);
     }
 
     /// Helper function to set a boolean socket option (POSIX)
     fn setBoolOption(self: Socket, level: i32, optname: u32, enabled: bool) !void {
-        const value: c_int = if (enabled) 1 else 0;
-        const bytes = std.mem.asBytes(&value);
-        try std.posix.setsockopt(self.handle, level, optname, bytes);
-    }
-
-    /// Helper function to set a boolean socket option (Windows)
-    fn setBoolOptionWindows(self: Socket, level: i32, optname: i32, enabled: bool) !void {
-        const value: c_int = if (enabled) 1 else 0;
-        const rc = os.windows.setsockopt(self.handle, level, optname, std.mem.asBytes(&value).ptr, @sizeOf(c_int));
-        if (rc == os.windows.SOCKET_ERROR) {
-            return error.Unexpected;
+        if (builtin.os.tag == .windows) {
+            const value: c_int = if (enabled) 1 else 0;
+            const rc = os.windows.setsockopt(self.handle, level, optname, std.mem.asBytes(&value).ptr, @sizeOf(c_int));
+            if (rc == os.windows.SOCKET_ERROR) {
+                return error.Unexpected;
+            }
+        } else {
+            const value: c_int = if (enabled) 1 else 0;
+            const bytes = std.mem.asBytes(&value);
+            try std.posix.setsockopt(self.handle, level, optname, bytes);
         }
     }
 
@@ -847,44 +844,23 @@ pub const Socket = struct {
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
     pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        // All backends use the same implementation with ev
-        return try self.receiveFromRecvfrom(rt, buf);
-    }
-
-    fn receiveFromRecvfrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
         var storage: [1]os.iovec = undefined;
         var result: ReceiveFromResult = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
-
         var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
         try runIo(rt, &op.c);
         result.len = try op.getResult();
         return result;
     }
 
-    fn receiveFromRecvmsg(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
-        // ev handles this the same way as recvfrom
-        return self.receiveFromRecvfrom(rt, buf);
-    }
-
     /// Sends a datagram to the specified address.
     /// Used for UDP and other datagram-based protocols.
     pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        // All backends use the same implementation with ev
-        return try self.sendToSendto(rt, addr, data);
-    }
-
-    fn sendToSendto(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
         var storage: [1]os.iovec_const = undefined;
         const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
         try runIo(rt, &op.c);
         return try op.getResult();
-    }
-
-    fn sendToSendmsg(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
-        // ev handles this the same way as sendto
-        return self.sendToSendto(rt, addr, data);
     }
 
     pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
