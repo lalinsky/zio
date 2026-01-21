@@ -1383,6 +1383,31 @@ test "HostName: lookup with family filter" {
     }
 }
 
+test "HostName: lookup with canonical name" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const host = try HostName.init("localhost");
+    var iter = try host.lookup(rt, .{ .port = 80, .canonical_name = true });
+    defer iter.deinit();
+
+    var has_canonical_name = false;
+    var has_address = false;
+    while (iter.next()) |result| {
+        switch (result) {
+            .address => {
+                has_address = true;
+            },
+            .canonical_name => |name| {
+                has_canonical_name = true;
+                try std.testing.expect(name.bytes.len > 0);
+            },
+        }
+    }
+    try std.testing.expect(has_canonical_name);
+    try std.testing.expect(has_address);
+}
+
 test "HostName: connect" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
 
