@@ -22,13 +22,20 @@ pub const Timeoutable = error{
 pub fn runIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     const task = rt.getCurrentTask();
 
-    c.userdata = task;
-    c.callback = struct {
+    const Context = struct {
+        task: *AnyTask,
+        completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
         fn callback(_: *ev.Loop, completion: *ev.Completion) void {
-            const t: *AnyTask = @ptrCast(@alignCast(completion.userdata.?));
-            t.wake();
+            const ctx: *@This() = @ptrCast(@alignCast(completion.userdata.?));
+            ctx.completed.store(true, .release);
+            ctx.task.wake();
         }
-    }.callback;
+    };
+
+    var ctx = Context{ .task = task };
+    c.userdata = &ctx;
+    c.callback = Context.callback;
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;
@@ -47,7 +54,7 @@ pub fn runIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
         }
 
         executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
-            if (c.isCompleted()) {
+            if (ctx.completed.load(.acquire)) {
                 // IO completed before we could cancel - restore the pending cancel
                 task.recancel();
                 return;
@@ -57,7 +64,7 @@ pub fn runIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
             canceling = true;
             continue;
         };
-        std.debug.assert(c.isCompleted());
+        std.debug.assert(ctx.completed.load(.acquire));
         break;
     }
 
