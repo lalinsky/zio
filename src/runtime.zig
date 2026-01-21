@@ -36,7 +36,7 @@ const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
-const runIo = @import("io.zig").runIo;
+const runIo = @import("common.zig").runIo;
 
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u6) {
