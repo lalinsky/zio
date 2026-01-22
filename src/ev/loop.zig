@@ -224,7 +224,9 @@ pub const LoopState = struct {
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
         const was_active = timer.deadline.ns > 0;
-        timer.deadline = self.now.addDuration(timer.delay);
+        if (timer.delay.ns > 0) {
+            timer.deadline = self.now.addDuration(timer.delay);
+        }
         timer.c.state = .running;
         if (was_active) {
             self.timers.remove(timer);

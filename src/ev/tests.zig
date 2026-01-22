@@ -58,7 +58,7 @@ test "Loop: timer basic" {
     defer loop.deinit();
 
     const timeout_ms = 50;
-    var timer: Timer = .init(.fromMilliseconds(timeout_ms));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(timeout_ms) });
     loop.add(&timer.c);
 
     var wall_timer = time.Stopwatch.start();

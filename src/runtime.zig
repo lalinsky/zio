@@ -907,7 +907,7 @@ pub const Runtime = struct {
     /// Sleep for the specified number of milliseconds.
     /// Returns error.Canceled if the task was canceled during sleep.
     pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
-        var timer = ev.Timer.init(duration);
+        var timer = ev.Timer.init(.{ .duration = duration });
         try waitForIo(self, &timer.c);
     }
 

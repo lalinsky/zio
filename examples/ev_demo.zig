@@ -59,13 +59,13 @@ pub fn main() !void {
     var fast_timer: RepeatingTimer = .{
         .name = "fast",
         .count = 5,
-        .timer = .init(.fromMilliseconds(500)),
+        .timer = .init(.{ .duration = .fromMilliseconds(500) }),
     };
 
     var slow_timer: RepeatingTimer = .{
         .name = "slow",
         .count = 5,
-        .timer = .init(.fromMilliseconds(1000)),
+        .timer = .init(.{ .duration = .fromMilliseconds(1000) }),
     };
 
     fast_timer.start(&loop);

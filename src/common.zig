@@ -5,6 +5,7 @@ const std = @import("std");
 
 const ev = @import("ev/root.zig");
 const Duration = @import("time.zig").Duration;
+const Timeout = @import("time.zig").Timeout;
 const Runtime = @import("runtime.zig").Runtime;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 
@@ -83,7 +84,12 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
 
 /// Runs an I/O operation to completion with a timeout.
 /// If the timeout expires before the I/O completes, returns `error.Timeout`.
-pub fn timedWaitForIo(rt: *Runtime, c: *ev.Completion, timeout: Duration) (Timeoutable || Cancelable)!void {
+/// If the timeout is `.none`, waits indefinitely (just calls `waitForIo`).
+pub fn timedWaitForIo(rt: *Runtime, c: *ev.Completion, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    if (timeout == .none) {
+        return waitForIo(rt, c);
+    }
+
     var group = ev.Group.init(.race);
     var timer = ev.Timer.init(timeout);
 
@@ -105,7 +111,7 @@ test "waitForIo: basic timer completion" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var timer = ev.Timer.init(.fromMilliseconds(10));
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     try waitForIo(rt, &timer.c);
 }
 
@@ -114,8 +120,8 @@ test "timedWaitForIo: timeout interrupts long operation" {
     defer rt.deinit();
 
     // Long timer (1 second) with short timeout (10ms)
-    var timer = ev.Timer.init(.fromSeconds(1));
-    try std.testing.expectError(error.Timeout, timedWaitForIo(rt, &timer.c, .fromMilliseconds(10)));
+    var timer = ev.Timer.init(.{ .duration = .fromSeconds(1) });
+    try std.testing.expectError(error.Timeout, timedWaitForIo(rt, &timer.c, .{ .duration = .fromMilliseconds(10) }));
 }
 
 test "timedWaitForIo: completes before timeout" {
@@ -123,6 +129,6 @@ test "timedWaitForIo: completes before timeout" {
     defer rt.deinit();
 
     // Short timer (10ms) with long timeout (1 second)
-    var timer = ev.Timer.init(.fromMilliseconds(10));
-    try timedWaitForIo(rt, &timer.c, .fromSeconds(1));
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
+    try timedWaitForIo(rt, &timer.c, .{ .duration = .fromSeconds(1) });
 }
