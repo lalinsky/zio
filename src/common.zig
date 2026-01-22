@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const ev = @import("ev/root.zig");
+const Duration = @import("time.zig").Duration;
 const Runtime = @import("runtime.zig").Runtime;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 
@@ -78,4 +79,50 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
         // IO completed successfully despite cancel request - restore the pending cancel
         task.recancel();
     }
+}
+
+/// Runs an I/O operation to completion with a timeout.
+/// If the timeout expires before the I/O completes, returns `error.Timeout`.
+pub fn timedWaitForIo(rt: *Runtime, c: *ev.Completion, timeout: Duration) (Timeoutable || Cancelable)!void {
+    var group = ev.Group.init(.race);
+    var timer = ev.Timer.init(timeout);
+
+    group.add(c);
+    group.add(&timer.c);
+
+    try waitForIo(rt, &group.c);
+
+    // Check if the IO was cancelled by the timeout
+    // (both could complete in a race, so check if IO was actually cancelled)
+    if (c.err) |err| {
+        if (err == error.Canceled) {
+            return error.Timeout;
+        }
+    }
+}
+
+test "waitForIo: basic timer completion" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timer = ev.Timer.init(.fromMilliseconds(10));
+    try waitForIo(rt, &timer.c);
+}
+
+test "timedWaitForIo: timeout interrupts long operation" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Long timer (1 second) with short timeout (10ms)
+    var timer = ev.Timer.init(.fromSeconds(1));
+    try std.testing.expectError(error.Timeout, timedWaitForIo(rt, &timer.c, .fromMilliseconds(10)));
+}
+
+test "timedWaitForIo: completes before timeout" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Short timer (10ms) with long timeout (1 second)
+    var timer = ev.Timer.init(.fromMilliseconds(10));
+    try timedWaitForIo(rt, &timer.c, .fromSeconds(1));
 }
