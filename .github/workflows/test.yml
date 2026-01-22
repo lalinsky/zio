@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, zig-0.16 ]
     tags:
   pull_request:
 
