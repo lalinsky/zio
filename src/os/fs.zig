@@ -63,6 +63,7 @@ pub const iovec_const = @import("base.zig").iovec_const;
 
 pub const mode_t = std.posix.mode_t;
 pub const ino_t = std.posix.ino_t;
+pub const nlink_t = std.posix.nlink_t;
 
 pub const FileKind = enum {
     block_device,
@@ -80,6 +81,7 @@ pub const FileKind = enum {
 
 pub const FileStatInfo = struct {
     inode: ino_t,
+    nlink: nlink_t,
     size: u64,
     mode: mode_t,
     kind: FileKind,
@@ -89,6 +91,8 @@ pub const FileStatInfo = struct {
     mtime: i64,
     /// Change time (POSIX) / Creation time (Windows) in nanoseconds since Unix epoch
     ctime: i64,
+    /// Block size for file system I/O
+    block_size: u32,
 };
 
 pub const FileOpenMode = enum {
@@ -1427,18 +1431,20 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 
         return .{
             .inode = inode,
+            .nlink = info.nNumberOfLinks,
             .size = size,
             .mode = 0, // Windows doesn't have POSIX modes
             .kind = kind,
             .atime = w.fileTimeToNanos(info.ftLastAccessTime),
             .mtime = w.fileTimeToNanos(info.ftLastWriteTime),
             .ctime = w.fileTimeToNanos(info.ftCreationTime),
+            .block_size = 4096, // Standard Windows cluster size
         };
     }
 
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
-        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
+        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .BLOCKS = true, .ATIME = true, .MTIME = true, .CTIME = true };
         var statx_buf: linux.Statx = undefined;
         while (true) {
             const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, mask, &statx_buf);
@@ -1496,7 +1502,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileSt
 
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
-        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
+        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .BLOCKS = true, .ATIME = true, .MTIME = true, .CTIME = true };
         var statx_buf: linux.Statx = undefined;
         while (true) {
             const rc = linux.statx(dir, path_z.ptr, 0, mask, &statx_buf);
@@ -1534,12 +1540,14 @@ fn statToFileStat(stat_buf: posix.system.Stat) FileStatInfo {
 
     return .{
         .inode = stat_buf.ino,
+        .nlink = stat_buf.nlink,
         .size = @intCast(stat_buf.size),
         .mode = stat_buf.mode,
         .kind = kind,
         .atime = timespecToNanos(stat_buf.atime()),
         .mtime = timespecToNanos(stat_buf.mtime()),
         .ctime = timespecToNanos(stat_buf.ctime()),
+        .block_size = @intCast(stat_buf.blksize),
     };
 }
 
@@ -1562,12 +1570,14 @@ fn statxToFileStat(statx_buf: std.os.linux.Statx) FileStatInfo {
 
     return .{
         .inode = statx_buf.ino,
+        .nlink = statx_buf.nlink,
         .size = statx_buf.size,
         .mode = statx_buf.mode,
         .kind = kind,
         .atime = statxTimeToNanos(statx_buf.atime),
         .mtime = statxTimeToNanos(statx_buf.mtime),
         .ctime = statxTimeToNanos(statx_buf.ctime),
+        .block_size = statx_buf.blksize,
     };
 }
 

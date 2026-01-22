@@ -275,7 +275,7 @@ pub const OpenFlags = packed struct {
 };
 
 pub const OpenError = error{
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     ProtocolNotSupported,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
@@ -352,7 +352,7 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
 pub const BindError = error{
     AddressInUse,
     AddressNotAvailable,
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     AccessDenied,
     FileDescriptorNotASocket,
     SymLinkLoop,
@@ -372,7 +372,7 @@ pub fn errnoToBindError(err: E) BindError {
             return switch (err) {
                 .EADDRINUSE => error.AddressInUse,
                 .EADDRNOTAVAIL => error.AddressNotAvailable,
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EACCES => error.AccessDenied,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ENETDOWN => error.NetworkDown,
@@ -386,7 +386,7 @@ pub fn errnoToBindError(err: E) BindError {
                 .ACCES, .PERM => error.AccessDenied,
                 .ADDRINUSE => error.AddressInUse,
                 .NOTSOCK => error.FileDescriptorNotASocket,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .ADDRNOTAVAIL => error.AddressNotAvailable,
                 .LOOP => error.SymLinkLoop,
                 .NAMETOOLONG => error.NameTooLong,
@@ -487,7 +487,7 @@ pub const ConnectError = error{
     AccessDenied,
     AddressInUse,
     AddressNotAvailable,
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     WouldBlock,
     AlreadyConnected,
     ConnectionPending,
@@ -673,7 +673,7 @@ pub fn errnoToConnectError(err: E) ConnectError {
                 .EACCES => error.AccessDenied,
                 .EADDRINUSE => error.AddressInUse,
                 .EADDRNOTAVAIL => error.AddressNotAvailable,
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EISCONN => error.AlreadyConnected,
                 .EALREADY => error.ConnectionPending,
                 .EWOULDBLOCK => error.WouldBlock,
@@ -694,7 +694,7 @@ pub fn errnoToConnectError(err: E) ConnectError {
                 .ACCES, .PERM => error.AccessDenied,
                 .ADDRINUSE => error.AddressInUse,
                 .ADDRNOTAVAIL => error.AddressNotAvailable,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .ISCONN => error.AlreadyConnected,
                 .ALREADY, .INPROGRESS => error.ConnectionPending,
                 .AGAIN => error.WouldBlock, // Also: insufficient routing cache or no auto-assigned ports
@@ -856,7 +856,7 @@ pub fn errnoToOpenError(err: E) OpenError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EPROTONOSUPPORT => error.ProtocolNotSupported,
                 .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS => error.SystemResources,
@@ -868,7 +868,7 @@ pub fn errnoToOpenError(err: E) OpenError {
             return switch (err) {
                 .SUCCESS => unreachable,
                 .ACCES => error.PermissionDenied,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .MFILE => error.ProcessFdQuotaExceeded,
                 .NFILE => error.SystemFdQuotaExceeded,
                 .NOBUFS, .NOMEM => error.SystemResources,
@@ -1406,13 +1406,9 @@ pub const AI = switch (builtin.os.tag) {
 };
 
 pub const GetAddrInfoError = error{
-    AddressFamilyNotSupported,
-    TemporaryNameServerFailure,
-    InvalidFlags,
+    AddressFamilyUnsupported,
     NameServerFailure,
     UnknownHostName,
-    ServiceNotAvailable,
-    SocketTypeNotSupported,
     SystemResources,
     Unexpected,
 };
@@ -1456,14 +1452,14 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
         .windows => {
             const wsa_err: windows.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
             return switch (wsa_err) {
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
-                .EINVAL => error.InvalidFlags,
-                .ESOCKTNOSUPPORT => error.SocketTypeNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
+                .EINVAL => error.Unexpected,
+                .ESOCKTNOSUPPORT => error.Unexpected,
                 .NO_DATA => error.UnknownHostName,
                 .NO_RECOVERY => error.NameServerFailure,
                 .NOTINITIALISED => error.SystemResources,
-                .TRY_AGAIN => error.TemporaryNameServerFailure,
-                .TYPE_NOT_FOUND => error.ServiceNotAvailable,
+                .TRY_AGAIN => error.NameServerFailure,
+                .TYPE_NOT_FOUND => error.NameServerFailure,
                 .NOT_ENOUGH_MEMORY => error.SystemResources,
                 else => unexpectedError(wsa_err),
             };
@@ -1471,16 +1467,16 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
         else => {
             // EAI_* error codes - err is std.c.EAI
             return switch (err) {
-                .ADDRFAMILY => error.AddressFamilyNotSupported,
-                .AGAIN => error.TemporaryNameServerFailure,
-                .BADFLAGS => error.InvalidFlags,
+                .ADDRFAMILY => error.AddressFamilyUnsupported,
+                .AGAIN => error.NameServerFailure,
+                .BADFLAGS => error.Unexpected,
                 .FAIL => error.NameServerFailure,
-                .FAMILY => error.AddressFamilyNotSupported,
+                .FAMILY => error.AddressFamilyUnsupported,
                 .MEMORY => error.SystemResources,
                 .NODATA => error.UnknownHostName,
                 .NONAME => error.UnknownHostName,
-                .SERVICE => error.ServiceNotAvailable,
-                .SOCKTYPE => error.SocketTypeNotSupported,
+                .SERVICE => error.NameServerFailure,
+                .SOCKTYPE => error.Unexpected,
                 .SYSTEM => {
                     // EAI.SYSTEM means we need to check errno
                     const errno_val: posix.system.E = @enumFromInt(std.c._errno().*);

@@ -645,7 +645,9 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .TYPE = true,
                 .MODE = true,
                 .INO = true,
+                .NLINK = true,
                 .SIZE = true,
+                .BLOCKS = true,
                 .ATIME = true,
                 .MTIME = true,
                 .CTIME = true,
@@ -1230,12 +1232,14 @@ fn statxToFileStat(statx: linux.Statx) fs.FileStatInfo {
 
     return .{
         .inode = statx.ino,
+        .nlink = statx.nlink,
         .size = statx.size,
         .mode = statx.mode,
         .kind = kind,
         .atime = statxTimeToNanos(statx.atime),
         .mtime = statxTimeToNanos(statx.mtime),
         .ctime = statxTimeToNanos(statx.ctime),
+        .block_size = statx.blksize,
     };
 }
 

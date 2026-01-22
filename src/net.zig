@@ -161,10 +161,7 @@ pub const HostName = struct {
         var task = spawnBlocking(
             lookupHostBlocking,
             .{ self.bytes, options.port, options.family, options.canonical_name },
-        ) catch |err| switch (err) {
-            error.ResultTooLarge, error.ContextTooLarge => unreachable,
-            else => |e| return @as(LookupError, e),
-        };
+        ) catch return error.Unexpected;
         defer task.cancel();
 
         const res = try task.join();
@@ -1290,17 +1287,10 @@ pub const Stream = struct {
 };
 
 pub const LookupHostError = error{
-    HostLacksNetworkAddresses,
-    TemporaryNameServerFailure,
     NameServerFailure,
-    AddressFamilyNotSupported,
-    OutOfMemory,
+    AddressFamilyUnsupported,
     UnknownHostName,
-    ServiceUnavailable,
     Unexpected,
-    RuntimeShutdown,
-    Closed,
-    NoThreadPool,
     ProcessFdQuotaExceeded,
     SystemResources,
 } || std.posix.UnexpectedError;
@@ -1316,8 +1306,8 @@ fn lookupHostBlocking(
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
 
-    const name_c = try allocator.dupeZ(u8, name);
-    const port_c = try std.fmt.allocPrintSentinel(allocator, "{d}", .{port}, 0);
+    const name_c = allocator.dupeZ(u8, name) catch return error.Unexpected;
+    const port_c = std.fmt.allocPrintSentinel(allocator, "{d}", .{port}, 0) catch return error.Unexpected;
 
     var hints: os.net.addrinfo = std.mem.zeroes(os.net.addrinfo);
     hints.family = if (family) |f| switch (f) {
@@ -1332,14 +1322,7 @@ fn lookupHostBlocking(
 
     var res: ?*os.net.addrinfo = null;
 
-    os.net.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res) catch |err| {
-        return switch (err) {
-            error.ServiceNotAvailable => error.ServiceUnavailable,
-            error.InvalidFlags => unreachable,
-            error.SocketTypeNotSupported => unreachable,
-            else => |e| e,
-        };
-    };
+    try os.net.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res);
 
     return res;
 }
