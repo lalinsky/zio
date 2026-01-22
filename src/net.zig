@@ -8,7 +8,7 @@ const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
 
-const runIo = @import("common.zig").runIo;
+const waitForIo = @import("common.zig").waitForIo;
 const fillBuf = @import("utils/writer.zig").fillBuf;
 
 const Handle = ev.Backend.NetHandle;
@@ -811,14 +811,14 @@ pub const Socket = struct {
         var addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&self.address.any));
 
         var op = ev.NetBind.init(self.handle, &self.address.any, &addr_len);
-        try runIo(rt, &op.c);
+        try waitForIo(rt, &op.c);
         try op.getResult();
     }
 
     /// Mark the socket as a listening socket
     pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
         var op = ev.NetListen.init(self.handle, backlog);
-        try runIo(rt, &op.c);
+        try waitForIo(rt, &op.c);
         try op.getResult();
     }
 
@@ -848,7 +848,7 @@ pub const Socket = struct {
         var result: ReceiveFromResult = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
         var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
-        try runIo(rt, &op.c);
+        try waitForIo(rt, &op.c);
         result.len = try op.getResult();
         return result;
     }
@@ -859,7 +859,7 @@ pub const Socket = struct {
         var storage: [1]os.iovec_const = undefined;
         const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
-        try runIo(rt, &op.c);
+        try waitForIo(rt, &op.c);
         return try op.getResult();
     }
 
@@ -904,7 +904,7 @@ pub const Stream = struct {
     /// A return value of 0 indicates end-of-stream.
     pub fn readBuf(self: Stream, rt: *Runtime, buffers: []ev.ReadBuf) !usize {
         var op = ev.NetRecv.init(self.socket.handle, buffers, .{});
-        try runIo(rt, &op.c);
+        try waitForIo(rt, &op.c);
         return op.getResult() catch |err| switch (err) {
             error.EOF => 0, // EOF is not an error for streams
             else => err,
@@ -933,7 +933,7 @@ pub const Stream = struct {
     /// Returns the number of bytes written, which may be less than requested.
     pub fn writeBuf(self: Stream, rt: *Runtime, buffers: []const ev.WriteBuf) !usize {
         var op = ev.NetSend.init(self.socket.handle, buffers, .{});
-        try runIo(rt, &op.c);
+        try waitForIo(rt, &op.c);
         return try op.getResult();
     }
 
@@ -1052,13 +1052,13 @@ pub const Stream = struct {
 
 fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
     var op = ev.NetOpen.init(@enumFromInt(family), .stream, .{});
-    try runIo(rt, &op.c);
+    try waitForIo(rt, &op.c);
     return try op.getResult();
 }
 
 fn createDatagramSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
     var op = ev.NetOpen.init(@enumFromInt(family), .dgram, .{});
-    try runIo(rt, &op.c);
+    try waitForIo(rt, &op.c);
     return try op.getResult();
 }
 
@@ -1160,7 +1160,7 @@ pub fn netRead(rt: *Runtime, fd: Handle, bufs: []const []u8) !usize {
     const read_bufs = ev.ReadBuf.fromSlices(bufs, &storage);
 
     var op = ev.NetRecv.init(fd, read_bufs, .{});
-    try runIo(rt, &op.c);
+    try waitForIo(rt, &op.c);
     return try op.getResult();
 }
 
@@ -1171,7 +1171,7 @@ pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []co
 
     var storage: [16]os.iovec_const = undefined;
     var op = ev.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage), .{});
-    try runIo(rt, &op.c);
+    try waitForIo(rt, &op.c);
     return try op.getResult();
 }
 
@@ -1180,7 +1180,7 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
     var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
 
     var op = ev.NetAccept.init(fd, &peer_addr.any, &peer_addr_len);
-    try runIo(rt, &op.c);
+    try waitForIo(rt, &op.c);
     const handle = try op.getResult();
     return .{ .socket = .{ .handle = handle, .address = peer_addr } };
 }
@@ -1190,13 +1190,13 @@ pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address) !void {
     const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
 
     var op = ev.NetConnect.init(fd, &addr_copy.any, addr_len);
-    try runIo(rt, &op.c);
+    try waitForIo(rt, &op.c);
     try op.getResult();
 }
 
 pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
     var op = ev.NetShutdown.init(fd, how);
-    try runIo(rt, &op.c);
+    try waitForIo(rt, &op.c);
     try op.getResult();
 }
 
@@ -1204,7 +1204,7 @@ pub fn netClose(rt: *Runtime, fd: Handle) void {
     var op = ev.NetClose.init(fd);
     rt.beginShield();
     defer rt.endShield();
-    runIo(rt, &op.c) catch {};
+    waitForIo(rt, &op.c) catch {};
     _ = op.getResult() catch {};
 }
 

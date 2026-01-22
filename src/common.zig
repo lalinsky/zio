@@ -19,7 +19,7 @@ pub const Timeoutable = error{
 
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
-pub fn runIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
+pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     const task = rt.getCurrentTask();
 
     const Context = struct {

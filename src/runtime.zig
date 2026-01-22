@@ -36,7 +36,7 @@ const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
-const runIo = @import("common.zig").runIo;
+const waitForIo = @import("common.zig").waitForIo;
 
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u6) {
@@ -908,7 +908,7 @@ pub const Runtime = struct {
     /// Returns error.Canceled if the task was canceled during sleep.
     pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
         var timer = ev.Timer.init(duration);
-        try runIo(self, &timer.c);
+        try waitForIo(self, &timer.c);
     }
 
     /// Begin a cancellation shield to prevent being canceled during critical sections.
