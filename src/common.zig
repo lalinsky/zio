@@ -45,14 +45,24 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     };
 
     var canceling = false;
+    var submitted = false;
     while (true) {
         task.state.store(.preparing_to_wait, .release);
         var executor = task.getExecutor();
 
         if (canceling) {
             executor.loop.cancel(c);
-        } else {
+        } else if (!submitted) {
             executor.loop.add(c);
+            submitted = true;
+        }
+
+        // Check completion after setting state to handle the race where
+        // completion happens while we're in .ready state (e.g., after spurious wakeup).
+        // If completed, the callback already ran and won't wake us again.
+        if (ctx.completed.load(.acquire)) {
+            task.state.store(.ready, .release);
+            break;
         }
 
         executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
@@ -66,8 +76,12 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
             canceling = true;
             continue;
         };
-        std.debug.assert(ctx.completed.load(.acquire));
-        break;
+
+        // Check completion - if not done, it was a spurious wakeup (e.g., cancel while shielded)
+        if (ctx.completed.load(.acquire)) {
+            break;
+        }
+        // Spurious wakeup - loop and wait again
     }
 
     if (canceling) {
