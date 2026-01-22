@@ -1167,6 +1167,38 @@ test "runtime: sleep is cancelable" {
     try std.testing.expect(timer.read().toMilliseconds() <= 500);
 }
 
+test "runtime: shielded sleep is not cancelable" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const shieldedSleepTask = struct {
+        fn call(rt: *Runtime) !void {
+            rt.beginShield();
+            defer rt.endShield();
+            // This sleep should complete even when canceled because it's shielded
+            try rt.sleep(.fromMilliseconds(50));
+        }
+    }.call;
+
+    var timer = time.Stopwatch.start();
+
+    var handle = try runtime.spawn(shieldedSleepTask, .{runtime});
+    defer handle.cancel(runtime);
+
+    // Wait a bit to ensure the task is actually in the waiting state
+    try runtime.sleep(.fromMilliseconds(10));
+
+    // Try to cancel the sleeping task
+    handle.cancel(runtime);
+
+    // Should complete successfully (not canceled) because the sleep was shielded
+    const result = handle.join(runtime);
+    try std.testing.expectEqual({}, result);
+
+    // Ensure the sleep completed (took at least 50ms)
+    try std.testing.expect(timer.read().toMilliseconds() >= 40);
+}
+
 test "runtime: yield from main allows tasks to run" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
