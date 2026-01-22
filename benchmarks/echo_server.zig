@@ -15,9 +15,9 @@ fn handleClient(rt: *zio.Runtime, in_stream: zio.net.Stream) !void {
     var buffer: [MESSAGE_SIZE]u8 = undefined;
 
     while (true) {
-        const n = try stream.read(rt, &buffer);
+        const n = try stream.read(rt, &buffer, .none);
         if (n == 0) break;
-        try stream.writeAll(rt, buffer[0..n]);
+        try stream.writeAll(rt, buffer[0..n], .none);
     }
 }
 
@@ -65,11 +65,11 @@ fn clientTask(
 
     var i: usize = 0;
     while (i < MESSAGES_PER_CLIENT) : (i += 1) {
-        try stream.writeAll(rt, &send_buffer);
+        try stream.writeAll(rt, &send_buffer, .none);
 
         var bytes_received: usize = 0;
         while (bytes_received < MESSAGE_SIZE) {
-            const n = try stream.read(rt, recv_buffer[bytes_received..]);
+            const n = try stream.read(rt, recv_buffer[bytes_received..], .none);
             if (n == 0) return error.UnexpectedEndOfStream;
             bytes_received += n;
         }

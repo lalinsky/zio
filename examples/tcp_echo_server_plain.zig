@@ -18,11 +18,11 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     var buffer: [1024]u8 = undefined;
 
     while (true) {
-        const n = try stream.read(rt, &buffer);
+        const n = try stream.read(rt, &buffer, .none);
         if (n == 0) break;
 
         std.log.info("Received: {s}", .{buffer[0..n]});
-        try stream.writeAll(rt, buffer[0..n]);
+        try stream.writeAll(rt, buffer[0..n], .none);
     }
 
     std.log.info("Client disconnected", .{});
