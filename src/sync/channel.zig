@@ -101,9 +101,6 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
-            const task = rt.getCurrentTask();
-            const executor = task.getExecutor();
-
             // Stack-allocated waiter - separates operation wait node from task wait node
             var waiter: Waiter = .init(rt);
 
@@ -132,19 +129,21 @@ pub fn Channel(comptime T: type) type {
                 }
 
                 // Slow path: empty, need to wait
-                task.state.store(.preparing_to_wait, .release);
                 self.receiver_queue.push(&waiter.wait_node);
                 self.mutex.unlock();
 
-                // Yield with cancellation support
-                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-                    // Cancelled - try to remove from queue
+                // Wait for signal, handling spurious wakeups internally
+                waiter.wait() catch |err| {
+                    // On cancellation, try to remove from queue
                     self.mutex.lock();
                     const was_in_queue = self.receiver_queue.remove(&waiter.wait_node);
                     if (!was_in_queue) {
-                        // We were already removed by a sender who will wake us.
+                        // Removed by sender - wait for signal to complete before destroying waiter
+                        self.mutex.unlock();
+                        waiter.waitUncancelable();
                         // Since we're being cancelled and won't consume the item,
                         // wake another receiver to consume it instead.
+                        self.mutex.lock();
                         const next_receiver = self.receiver_queue.pop();
                         self.mutex.unlock();
                         if (next_receiver) |node| {
@@ -196,9 +195,6 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            const task = rt.getCurrentTask();
-            const executor = task.getExecutor();
-
             // Stack-allocated waiter - separates operation wait node from task wait node
             var waiter: Waiter = .init(rt);
 
@@ -226,19 +222,21 @@ pub fn Channel(comptime T: type) type {
                 }
 
                 // Slow path: full, need to wait
-                task.state.store(.preparing_to_wait, .release);
                 self.sender_queue.push(&waiter.wait_node);
                 self.mutex.unlock();
 
-                // Yield with cancellation support
-                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-                    // Cancelled - try to remove from queue
+                // Wait for signal, handling spurious wakeups internally
+                waiter.wait() catch |err| {
+                    // On cancellation, try to remove from queue
                     self.mutex.lock();
                     const was_in_queue = self.sender_queue.remove(&waiter.wait_node);
                     if (!was_in_queue) {
-                        // We were already removed by a receiver who will wake us.
+                        // Removed by receiver - wait for signal to complete before destroying waiter
+                        self.mutex.unlock();
+                        waiter.waitUncancelable();
                         // Since we're being cancelled and won't send the item,
                         // wake another sender to use the buffer slot instead.
+                        self.mutex.lock();
                         const next_sender = self.sender_queue.pop();
                         self.mutex.unlock();
                         if (next_sender) |node| {

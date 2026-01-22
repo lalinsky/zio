@@ -159,9 +159,6 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// Returns `error.Closed` if the channel is closed and no more messages are available.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, runtime: *Runtime, consumer: *Consumer) !T {
-            const task = runtime.getCurrentTask();
-            const executor = task.getExecutor();
-
             // Stack-allocated waiter - separates operation wait node from task wait node
             var waiter: Waiter = .init(runtime);
 
@@ -193,19 +190,21 @@ pub fn BroadcastChannel(comptime T: type) type {
                 }
 
                 // Slow path: need to wait
-                task.state.store(.preparing_to_wait, .release);
                 self.wait_queue.push(&waiter.wait_node);
                 self.mutex.unlock();
 
-                // Yield with cancellation support
-                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-                    // Cancelled - try to remove from queue
+                // Wait for signal, handling spurious wakeups internally
+                waiter.wait() catch |err| {
+                    // On cancellation, try to remove from queue
                     self.mutex.lock();
                     const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
                     if (!was_in_queue) {
-                        // We were already removed by a sender who will wake us.
+                        // Removed by sender - wait for signal to complete before destroying waiter
+                        self.mutex.unlock();
+                        waiter.waitUncancelable();
                         // Since we're being cancelled and won't consume the message,
                         // wake another consumer to receive it instead.
+                        self.mutex.lock();
                         const next_consumer = self.wait_queue.pop();
                         self.mutex.unlock();
                         if (next_consumer) |node| {
