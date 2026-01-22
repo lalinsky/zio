@@ -61,7 +61,7 @@ const Mutex = @import("Mutex.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
-const Waiter = @import("common.zig").Waiter;
+const Waiter = @import("../common.zig").Waiter;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
 
@@ -90,14 +90,8 @@ pub const init: Condition = .{};
 /// Returns `error.Canceled` if the task is cancelled while waiting. The mutex
 /// will still be held when returning with an error.
 pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
-    const task = runtime.getCurrentTask();
-    const executor = task.getExecutor();
-
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(&task.awaitable);
-
-    // Transition to preparing_to_wait state before adding to queue
-    task.state.store(.preparing_to_wait, .release);
+    var waiter: Waiter = .init(runtime);
 
     // Add to wait queue before releasing mutex
     self.wait_queue.push(&waiter.wait_node);
@@ -105,13 +99,13 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     // Atomically release mutex
     mutex.unlock(runtime);
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+    // Wait for signal, handling spurious wakeups internally
+    waiter.wait() catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
-            // We were already removed by signal() which will wake us.
+            // We were already removed by signal() - wait for signal to complete
+            waiter.waitUncancelable();
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
@@ -167,7 +161,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Du
     const executor = task.getExecutor();
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(&task.awaitable);
+    var waiter: Waiter = .init(runtime);
 
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);

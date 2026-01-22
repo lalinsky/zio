@@ -7,7 +7,7 @@ const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const select = @import("../select.zig").select;
-const Waiter = @import("common.zig").Waiter;
+const Waiter = @import("../common.zig").Waiter;
 
 /// Specifies how a channel should be closed.
 pub const CloseMode = enum {
@@ -105,7 +105,7 @@ pub fn Channel(comptime T: type) type {
             const executor = task.getExecutor();
 
             // Stack-allocated waiter - separates operation wait node from task wait node
-            var waiter: Waiter = .init(&task.awaitable);
+            var waiter: Waiter = .init(rt);
 
             while (true) {
                 self.mutex.lock();
@@ -200,7 +200,7 @@ pub fn Channel(comptime T: type) type {
             const executor = task.getExecutor();
 
             // Stack-allocated waiter - separates operation wait node from task wait node
-            var waiter: Waiter = .init(&task.awaitable);
+            var waiter: Waiter = .init(rt);
 
             while (true) {
                 self.mutex.lock();

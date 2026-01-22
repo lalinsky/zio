@@ -12,7 +12,7 @@ const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");
 const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
-const Waiter = @import("sync/common.zig").Waiter;
+const Waiter = @import("common.zig").Waiter;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -280,23 +280,20 @@ pub const Signal = struct {
             return;
         }
 
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         // Stack-allocated waiter - separates operation wait node from task wait node
-        var waiter: Waiter = .init(&task.awaitable);
-
-        // Transition to preparing_to_wait state before adding to queue
-        task.state.store(.preparing_to_wait, .release);
+        var waiter: Waiter = .init(rt);
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.wait_node);
 
-        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-        // If signal arrives before the yield, the CAS inside yield() will fail and we won't suspend
-        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-            // On cancellation, remove from queue
-            _ = self.entry.waiters.remove(&waiter.wait_node);
+        // Wait for signal, handling spurious wakeups internally
+        waiter.wait() catch |err| {
+            // On cancellation, try to remove from queue
+            const was_in_queue = self.entry.waiters.remove(&waiter.wait_node);
+            if (!was_in_queue) {
+                // Already removed by signal delivery - wait for signal to complete
+                waiter.waitUncancelable();
+            }
             return err;
         };
 
@@ -323,14 +320,8 @@ pub const Signal = struct {
             return;
         }
 
-        const task = rt.getCurrentTask();
-        const executor = task.getExecutor();
-
         // Stack-allocated waiter - separates operation wait node from task wait node
-        var waiter: Waiter = .init(&task.awaitable);
-
-        // Transition to preparing_to_wait state before adding to queue
-        task.state.store(.preparing_to_wait, .release);
+        var waiter: Waiter = .init(rt);
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.wait_node);
@@ -340,11 +331,14 @@ pub const Signal = struct {
         defer timer.clear(rt);
         timer.set(rt, timeout);
 
-        // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-        // If signal arrives before the yield, the CAS inside yield() will fail and we won't suspend
-        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-            // Try to remove from queue
-            _ = self.entry.waiters.remove(&waiter.wait_node);
+        // Wait for signal, handling spurious wakeups internally
+        waiter.wait() catch |err| {
+            // On cancellation, try to remove from queue
+            const was_in_queue = self.entry.waiters.remove(&waiter.wait_node);
+            if (!was_in_queue) {
+                // Already removed by signal delivery - wait for signal to complete
+                waiter.waitUncancelable();
+            }
 
             // Check if this auto-cancel triggered, otherwise it was user cancellation
             if (timer.check(rt, err)) return error.Timeout;

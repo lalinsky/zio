@@ -8,6 +8,8 @@ const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
 const Runtime = @import("runtime.zig").Runtime;
 const AnyTask = @import("runtime/task.zig").AnyTask;
+const Executor = @import("runtime.zig").Executor;
+const WaitNode = @import("runtime/WaitNode.zig");
 
 /// Error set for operations that can be cancelled
 pub const Cancelable = error{
@@ -19,81 +21,137 @@ pub const Timeoutable = error{
     Timeout,
 };
 
+/// Stack-allocated waiter for async operations.
+///
+/// This provides a common pattern for waiting with spurious wakeup handling.
+/// Tracks a signaled state that is atomically set before waking the task.
+///
+/// For sync primitives, the wait_node is used in wait queues.
+/// For I/O operations, only the signaled field is used.
+///
+/// Usage:
+/// ```zig
+/// var waiter: Waiter = .init(task);
+/// // Setup operation (e.g., push to queue, submit I/O)
+/// try waiter.wait();
+/// ```
+pub const Waiter = struct {
+    wait_node: WaitNode,
+    task: *AnyTask,
+    signaled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    const vtable: WaitNode.VTable = .{
+        .wake = wakeImpl,
+    };
+
+    pub fn init(runtime: *Runtime) Waiter {
+        return .{
+            .wait_node = .{ .vtable = &vtable },
+            .task = runtime.getCurrentTask(),
+            .signaled = std.atomic.Value(bool).init(false),
+        };
+    }
+
+    /// Signal this waiter and wake the task.
+    /// Must be called by the signaler after removing from queue or completing I/O.
+    pub fn signal(self: *Waiter) void {
+        self.signaled.store(true, .release);
+        self.task.wake();
+    }
+
+    fn wakeImpl(wait_node: *WaitNode) void {
+        const self: *Waiter = @fieldParentPtr("wait_node", wait_node);
+        self.signal();
+    }
+
+    /// Wait for the signal, handling spurious wakeups internally.
+    pub fn wait(self: *Waiter) Cancelable!void {
+        const task = self.task;
+
+        while (true) {
+            task.state.store(.preparing_to_wait, .release);
+
+            // Check after setting state to handle the race where
+            // signal happens while we're in .ready state (e.g., after spurious wakeup).
+            if (self.signaled.load(.acquire)) {
+                task.state.store(.ready, .release);
+                return;
+            }
+
+            // Get executor fresh each time - may change after cancel/reschedule
+            const executor = task.getExecutor();
+            try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+
+            // Check completion - if not signaled, it was a spurious wakeup
+            if (self.signaled.load(.acquire)) {
+                return;
+            }
+            // Spurious wakeup - loop and wait again
+        }
+    }
+
+    /// Wait for the signal with cancellation shielded.
+    /// Used when waiting for a signal that is guaranteed to arrive (e.g., after being removed from queue).
+    pub fn waitUncancelable(self: *Waiter) void {
+        const task = self.task;
+
+        while (true) {
+            task.state.store(.preparing_to_wait, .release);
+
+            if (self.signaled.load(.acquire)) {
+                task.state.store(.ready, .release);
+                return;
+            }
+
+            const executor = task.getExecutor();
+            executor.yield(.preparing_to_wait, .waiting, .no_cancel);
+
+            if (self.signaled.load(.acquire)) {
+                return;
+            }
+        }
+    }
+};
+
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
 pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
-    const task = rt.getCurrentTask();
+    var waiter = Waiter.init(rt);
 
-    const Context = struct {
-        task: *AnyTask,
-        completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-        fn callback(_: *ev.Loop, completion: *ev.Completion) void {
-            const ctx: *@This() = @ptrCast(@alignCast(completion.userdata.?));
-            ctx.completed.store(true, .release);
-            ctx.task.wake();
+    const Callback = struct {
+        fn call(_: *ev.Loop, completion: *ev.Completion) void {
+            const w: *Waiter = @ptrCast(@alignCast(completion.userdata.?));
+            w.signal();
         }
     };
 
-    var ctx = Context{ .task = task };
-    c.userdata = &ctx;
-    c.callback = Context.callback;
+    c.userdata = &waiter;
+    c.callback = Callback.call;
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;
         c.userdata = null;
     };
 
-    var canceling = false;
-    var submitted = false;
-    while (true) {
-        task.state.store(.preparing_to_wait, .release);
-        var executor = task.getExecutor();
+    // Submit to the event loop and wait for completion
+    waiter.task.getExecutor().loop.add(c);
+    waiter.wait() catch |err| switch (err) {
+        error.Canceled => {
+            // On cancellation, cancel the I/O and wait for completion
+            waiter.task.getExecutor().loop.cancel(c);
+            waiter.waitUncancelable();
 
-        if (canceling) {
-            executor.loop.cancel(c);
-        } else if (!submitted) {
-            executor.loop.add(c);
-            submitted = true;
-        }
-
-        // Check completion after setting state to handle the race where
-        // completion happens while we're in .ready state (e.g., after spurious wakeup).
-        // If completed, the callback already ran and won't wake us again.
-        if (ctx.completed.load(.acquire)) {
-            task.state.store(.ready, .release);
-            break;
-        }
-
-        executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch {
-            if (ctx.completed.load(.acquire)) {
-                // IO completed before we could cancel - restore the pending cancel
-                task.recancel();
-                return;
+            // Check if I/O was actually canceled
+            if (c.err) |io_err| {
+                if (io_err == error.Canceled) {
+                    return error.Canceled;
+                }
             }
-            std.debug.assert(!canceling);
-            rt.beginShield();
-            canceling = true;
-            continue;
-        };
-
-        // Check completion - if not done, it was a spurious wakeup (e.g., cancel while shielded)
-        if (ctx.completed.load(.acquire)) {
-            break;
-        }
-        // Spurious wakeup - loop and wait again
-    }
-
-    if (canceling) {
-        rt.endShield();
-        if (c.err) |err| {
-            if (err == error.Canceled) {
-                return error.Canceled;
-            }
-        }
-        // IO completed successfully despite cancel request - restore the pending cancel
-        task.recancel();
-    }
+            // IO completed successfully despite cancel request - restore the pending cancel
+            waiter.task.recancel();
+            return;
+        },
+    };
 }
 
 /// Runs an I/O operation to completion with a timeout.
@@ -115,8 +173,8 @@ pub fn timedWaitForIo(rt: *Runtime, c: *ev.Completion, timeout: Timeout) (Timeou
     // Check if the IO was cancelled by the timeout
     // (both could complete in a race, so check if I/O was actually cancelled)
     if (timer.c.err == null) {
-        if (c.err) |err| {
-            if (err == error.Canceled) {
+        if (c.err) |io_err| {
+            if (io_err == error.Canceled) {
                 return error.Timeout;
             }
         }

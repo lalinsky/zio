@@ -8,7 +8,7 @@ const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Barrier = @import("Barrier.zig");
 const select = @import("../select.zig").select;
-const Waiter = @import("common.zig").Waiter;
+const Waiter = @import("../common.zig").Waiter;
 
 /// A broadcast channel for sending values to multiple consumers.
 ///
@@ -163,7 +163,7 @@ pub fn BroadcastChannel(comptime T: type) type {
             const executor = task.getExecutor();
 
             // Stack-allocated waiter - separates operation wait node from task wait node
-            var waiter: Waiter = .init(&task.awaitable);
+            var waiter: Waiter = .init(runtime);
 
             while (true) {
                 self.mutex.lock();

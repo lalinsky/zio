@@ -56,7 +56,7 @@ const AnyTask = @import("../runtime.zig").AnyTask;
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
-const Waiter = @import("common.zig").Waiter;
+const Waiter = @import("../common.zig").Waiter;
 
 wait_queue: CompactWaitQueue(WaitNode) = .empty,
 
@@ -122,11 +122,8 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
         return;
     }
 
-    // Add to wait queue and suspend
-    const task = runtime.getCurrentTask();
-
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(&task.awaitable);
+    var waiter: Waiter = .init(runtime);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
@@ -173,7 +170,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Duration) (Timeo
     const executor = task.getExecutor();
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(&task.awaitable);
+    var waiter: Waiter = .init(runtime);
 
     // Transition to preparing_to_wait state before adding to queue
     task.state.store(.preparing_to_wait, .release);
