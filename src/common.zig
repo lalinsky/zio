@@ -111,22 +111,36 @@ pub const Waiter = struct {
             }
         }
     }
+
+    /// Wait for the signal with a timeout.
+    /// Returns error.Timeout if the timeout expires before signal() is called.
+    /// The caller must check their condition to determine if timeout actually won
+    /// (e.g., by trying to remove from a wait queue).
+    pub fn timedWait(self: *Waiter, timeout: Duration) (Timeoutable || Cancelable)!void {
+        var timer: ev.Timer = .init(.{ .duration = .zero });
+        timer.c.userdata = self;
+        timer.c.callback = callback;
+
+        self.task.getExecutor().loop.setTimer(&timer, timeout);
+        defer timer.c.loop.?.clearTimer(&timer);
+
+        try self.wait();
+    }
+
+    /// Callback for ev.Completion - signals this waiter.
+    /// Use with: completion.userdata = &waiter; completion.callback = Waiter.callback;
+    pub fn callback(_: *ev.Loop, c: *ev.Completion) void {
+        const self: *Waiter = @ptrCast(@alignCast(c.userdata.?));
+        self.signal();
+    }
 };
 
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
 pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     var waiter = Waiter.init(rt);
-
-    const Callback = struct {
-        fn call(_: *ev.Loop, completion: *ev.Completion) void {
-            const w: *Waiter = @ptrCast(@alignCast(completion.userdata.?));
-            w.signal();
-        }
-    };
-
     c.userdata = &waiter;
-    c.callback = Callback.call;
+    c.callback = Waiter.callback;
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;
