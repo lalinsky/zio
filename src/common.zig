@@ -99,10 +99,12 @@ pub fn timedWaitForIo(rt: *Runtime, c: *ev.Completion, timeout: Timeout) (Timeou
     try waitForIo(rt, &group.c);
 
     // Check if the IO was cancelled by the timeout
-    // (both could complete in a race, so check if IO was actually cancelled)
-    if (c.err) |err| {
-        if (err == error.Canceled) {
-            return error.Timeout;
+    // (both could complete in a race, so check if I/O was actually cancelled)
+    if (timer.c.err == null) {
+        if (c.err) |err| {
+            if (err == error.Canceled) {
+                return error.Timeout;
+            }
         }
     }
 }
