@@ -195,7 +195,7 @@ pub const ShutdownHow = os.net.ShutdownHow;
 
 /// Get the socket address length for a given sockaddr.
 /// Determines the appropriate length based on the address family.
-fn getSockAddrLen(addr: *const os.net.sockaddr) usize {
+fn getSockAddrLen(addr: *const os.net.sockaddr) os.net.socklen_t {
     return switch (addr.family) {
         os.net.AF.INET => @sizeOf(os.net.sockaddr.in),
         os.net.AF.INET6 => @sizeOf(os.net.sockaddr.in6),
@@ -593,15 +593,38 @@ pub const IpAddress = extern union {
     };
 
     pub fn bind(self: IpAddress, rt: *Runtime, options: BindOptions) !Socket {
-        return netBindIp(rt, self, options);
+        var socket = try Socket.open(rt, .dgram, @enumFromInt(self.any.family));
+        errdefer socket.close(rt);
+
+        if (options.reuse_address) {
+            try socket.setReuseAddress(true);
+        }
+
+        try socket.bind(rt, .{ .ip = self });
+
+        return socket;
     }
 
     pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
-        return netListenIp(rt, self, options);
+        var socket = try Socket.open(rt, .stream, @enumFromInt(self.any.family));
+        errdefer socket.close(rt);
+
+        if (options.reuse_address) {
+            try socket.setReuseAddress(true);
+        }
+
+        try socket.bind(rt, .{ .ip = self });
+        try socket.listen(rt, options.kernel_backlog);
+
+        return .{ .socket = socket };
     }
 
     pub fn connect(self: IpAddress, rt: *Runtime, options: ConnectOptions) !Stream {
-        return netConnectIp(rt, self, options);
+        var socket = try Socket.open(rt, .stream, @enumFromInt(self.any.family));
+        errdefer socket.close(rt);
+
+        try socket.connect(rt, .{ .ip = self }, .{ .timeout = options.timeout });
+        return .{ .socket = socket };
     }
 };
 
@@ -641,15 +664,40 @@ pub const UnixAddress = extern union {
     }
 
     pub fn bind(self: UnixAddress, rt: *Runtime, options: BindOptions) !Socket {
-        return netBindUnix(rt, self, options);
+        if (!has_unix_sockets) unreachable;
+
+        var socket = try Socket.open(rt, .dgram, .unix);
+        errdefer socket.close(rt);
+
+        if (options.reuse_address) {
+            try socket.setReuseAddress(true);
+        }
+
+        try socket.bind(rt, .{ .unix = self });
+
+        return socket;
     }
 
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
-        return netListenUnix(rt, self, options);
+        if (!has_unix_sockets) unreachable;
+
+        var socket = try Socket.open(rt, .stream, .unix);
+        errdefer socket.close(rt);
+
+        try socket.bind(rt, .{ .unix = self });
+        try socket.listen(rt, options.kernel_backlog);
+
+        return .{ .socket = socket };
     }
 
     pub fn connect(self: UnixAddress, rt: *Runtime, options: ConnectOptions) !Stream {
-        return netConnectUnix(rt, self, options);
+        if (!has_unix_sockets) unreachable;
+
+        var socket = try Socket.open(rt, .stream, .unix);
+        errdefer socket.close(rt);
+
+        try socket.connect(rt, .{ .unix = self }, .{ .timeout = options.timeout });
+        return .{ .socket = socket };
     }
 };
 
@@ -776,6 +824,21 @@ pub const Socket = struct {
     handle: Handle,
     address: Address,
 
+    pub fn open(rt: *Runtime, sock_type: os.net.Type, domain: os.net.Domain) !Socket {
+        var op = ev.NetOpen.init(domain, sock_type, .{});
+        try waitForIo(rt, &op.c);
+        const handle = try op.getResult();
+        return .{ .handle = handle, .address = undefined };
+    }
+
+    pub fn close(self: Socket, rt: *Runtime) void {
+        var op = ev.NetClose.init(self.handle);
+        rt.beginShield();
+        defer rt.endShield();
+        waitForIo(rt, &op.c) catch {};
+        _ = op.getResult() catch {};
+    }
+
     /// Enable or disable address reuse (SO_REUSEADDR)
     /// Allows binding to an address in TIME_WAIT state
     pub fn setReuseAddress(self: Socket, enabled: bool) !void {
@@ -823,7 +886,7 @@ pub const Socket = struct {
     pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
         // Copy addr to self.address so NetBind can update it with actual bound address
         self.address = addr;
-        var addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&self.address.any));
+        var addr_len = getSockAddrLen(&self.address.any);
 
         var op = ev.NetBind.init(self.handle, &self.address.any, &addr_len);
         try waitForIo(rt, &op.c);
@@ -842,8 +905,13 @@ pub const Socket = struct {
     };
 
     /// Connect the socket to a remote address
-    pub fn connect(self: Socket, rt: *Runtime, addr: Address, options: ConnectOptions) !void {
-        try netConnect(rt, self.handle, addr, options);
+    pub fn connect(self: *Socket, rt: *Runtime, addr: Address, options: ConnectOptions) !void {
+        self.address = addr;
+        const addr_len = getSockAddrLen(&self.address.any);
+
+        var op = ev.NetConnect.init(self.handle, &self.address.any, addr_len);
+        try timedWaitForIo(rt, &op.c, options.timeout);
+        try op.getResult();
     }
 
     /// Receives data from the socket into the provided buffer.
@@ -876,18 +944,16 @@ pub const Socket = struct {
     /// Used for UDP and other datagram-based protocols.
     pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
         var storage: [1]os.iovec_const = undefined;
-        const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr.any));
+        const addr_len = getSockAddrLen(&addr.any);
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
         try waitForIo(rt, &op.c);
         return try op.getResult();
     }
 
     pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
-        return netShutdown(rt, self.handle, how);
-    }
-
-    pub fn close(self: Socket, rt: *Runtime) void {
-        return netClose(rt, self.handle);
+        var op = ev.NetShutdown.init(self.handle, how);
+        try waitForIo(rt, &op.c);
+        try op.getResult();
     }
 };
 
@@ -895,7 +961,13 @@ pub const Server = struct {
     socket: Socket,
 
     pub fn accept(self: Server, rt: *Runtime) !Stream {
-        return netAccept(rt, self.socket.handle);
+        var peer_addr: Address = undefined;
+        var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
+
+        var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
+        try waitForIo(rt, &op.c);
+        const handle = try op.getResult();
+        return .{ .socket = .{ .handle = handle, .address = peer_addr } };
     }
 
     pub fn shutdown(self: Server, rt: *Runtime, how: ShutdownHow) !void {
@@ -1069,110 +1141,6 @@ pub const Stream = struct {
     }
 };
 
-fn createStreamSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
-    var op = ev.NetOpen.init(@enumFromInt(family), .stream, .{});
-    try waitForIo(rt, &op.c);
-    return try op.getResult();
-}
-
-fn createDatagramSocket(rt: *Runtime, family: std.posix.sa_family_t) !Handle {
-    var op = ev.NetOpen.init(@enumFromInt(family), .dgram, .{});
-    try waitForIo(rt, &op.c);
-    return try op.getResult();
-}
-
-pub fn netListenIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ListenOptions) !Server {
-    const fd = try createStreamSocket(rt, addr.any.family);
-    errdefer netClose(rt, fd);
-
-    var socket: Socket = .{
-        .handle = fd,
-        .address = .{ .ip = addr },
-    };
-
-    if (options.reuse_address) {
-        try socket.setReuseAddress(true);
-    }
-
-    try socket.bind(rt, .{ .ip = addr });
-    try socket.listen(rt, options.kernel_backlog);
-
-    return .{ .socket = socket };
-}
-
-pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ListenOptions) !Server {
-    if (!has_unix_sockets) unreachable;
-
-    const fd = try createStreamSocket(rt, addr.any.family);
-    errdefer netClose(rt, fd);
-
-    var socket: Socket = .{
-        .handle = fd,
-        .address = .{ .unix = addr },
-    };
-
-    try socket.bind(rt, .{ .unix = addr });
-    try socket.listen(rt, options.kernel_backlog);
-
-    return .{ .socket = socket };
-}
-
-pub fn netConnectIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ConnectOptions) !Stream {
-    const fd = try createStreamSocket(rt, addr.any.family);
-    errdefer netClose(rt, fd);
-
-    try netConnect(rt, fd, .{ .ip = addr }, .{ .timeout = options.timeout });
-    return .{ .socket = .{ .handle = fd, .address = .{ .ip = addr } } };
-}
-
-pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ConnectOptions) !Stream {
-    if (!has_unix_sockets) unreachable;
-
-    const fd = try createStreamSocket(rt, addr.any.family);
-    errdefer netClose(rt, fd);
-
-    try netConnect(rt, fd, .{ .unix = addr }, .{ .timeout = options.timeout });
-    return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
-}
-
-pub fn netBindIp(rt: *Runtime, addr: IpAddress, options: IpAddress.BindOptions) !Socket {
-    const fd = try createDatagramSocket(rt, addr.any.family);
-    errdefer netClose(rt, fd);
-
-    var socket: Socket = .{
-        .handle = fd,
-        .address = .{ .ip = addr },
-    };
-
-    if (options.reuse_address) {
-        try socket.setReuseAddress(true);
-    }
-
-    try socket.bind(rt, .{ .ip = addr });
-
-    return socket;
-}
-
-pub fn netBindUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.BindOptions) !Socket {
-    if (!has_unix_sockets) unreachable;
-
-    const fd = try createDatagramSocket(rt, addr.any.family);
-    errdefer netClose(rt, fd);
-
-    var socket: Socket = .{
-        .handle = fd,
-        .address = .{ .unix = addr },
-    };
-
-    if (options.reuse_address) {
-        try socket.setReuseAddress(true);
-    }
-
-    try socket.bind(rt, .{ .unix = addr });
-
-    return socket;
-}
-
 pub fn netRead(rt: *Runtime, fd: Handle, bufs: []const []u8) !usize {
     // Convert []const []u8 to ReadBuf
     var storage: [16]os.iovec = undefined;
@@ -1192,39 +1160,6 @@ pub fn netWrite(rt: *Runtime, fd: Handle, header: []const u8, data: []const []co
     var op = ev.NetSend.init(fd, .fromSlices(slices[0..buf_len], &storage), .{});
     try waitForIo(rt, &op.c);
     return try op.getResult();
-}
-
-pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
-    var peer_addr: Address = undefined;
-    var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
-
-    var op = ev.NetAccept.init(fd, &peer_addr.any, &peer_addr_len);
-    try waitForIo(rt, &op.c);
-    const handle = try op.getResult();
-    return .{ .socket = .{ .handle = handle, .address = peer_addr } };
-}
-
-pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address, options: Socket.ConnectOptions) !void {
-    var addr_copy = addr;
-    const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
-
-    var op = ev.NetConnect.init(fd, &addr_copy.any, addr_len);
-    try timedWaitForIo(rt, &op.c, options.timeout);
-    try op.getResult();
-}
-
-pub fn netShutdown(rt: *Runtime, fd: Handle, how: ShutdownHow) !void {
-    var op = ev.NetShutdown.init(fd, how);
-    try waitForIo(rt, &op.c);
-    try op.getResult();
-}
-
-pub fn netClose(rt: *Runtime, fd: Handle) void {
-    var op = ev.NetClose.init(fd);
-    rt.beginShield();
-    defer rt.endShield();
-    waitForIo(rt, &op.c) catch {};
-    _ = op.getResult() catch {};
 }
 
 pub const LookupHostError = error{
