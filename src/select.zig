@@ -268,7 +268,6 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Multi-wait path: Create separate waiter awaitables for each handle
     // We can't add the same awaitable to multiple lists (next/prev pointers conflict)
     const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
 
     // Self-wait detection: check all futures for self-wait
     inline for (fields) |field| {
@@ -329,12 +328,29 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         }
     }
 
-    // Yield and wait for one to complete
-    try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+    // Wait for one to complete, handling spurious wakeups
+    while (true) {
+        task.state.store(.preparing_to_wait, .release);
+
+        // Check after setting state to handle race where winner was set
+        // while we were in .ready state
+        if (winner.load(.acquire) != NO_WINNER) {
+            break;
+        }
+
+        // Get executor fresh each time - may change after cancel/reschedule
+        const executor = task.getExecutor();
+        try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+
+        // Check if actually signaled
+        if (winner.load(.acquire) != NO_WINNER) {
+            break;
+        }
+        // Spurious wakeup - loop and wait again
+    }
 
     // O(1) winner lookup
     const winner_index = winner.load(.acquire);
-    std.debug.assert(winner_index != NO_WINNER);
 
     // Return result from winner
     inline for (fields, 0..) |field, i| {
@@ -358,7 +374,6 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
     }
 
     const task = rt.getCurrentTask();
-    const executor = task.getExecutor();
 
     task.state.store(.preparing_to_wait, .release);
     defer {
@@ -393,11 +408,24 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         }
     }
 
-    try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+    // Wait for one to complete, handling spurious wakeups
+    while (true) {
+        task.state.store(.preparing_to_wait, .release);
 
-    const winner_index = winner.load(.acquire);
-    std.debug.assert(winner_index != NO_WINNER);
-    return winner_index;
+        if (winner.load(.acquire) != NO_WINNER) {
+            break;
+        }
+
+        // Get executor fresh each time - may change after cancel/reschedule
+        const executor = task.getExecutor();
+        try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+
+        if (winner.load(.acquire) != NO_WINNER) {
+            break;
+        }
+    }
+
+    return winner.load(.acquire);
 }
 
 /// Internal wait implementation with configurable cancellation behavior.
@@ -445,36 +473,53 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
         }
     }
 
-    const executor = task.getExecutor();
-
     if (flags.on_cancel == .cancel_and_continue) {
         // Stay subscribed to wait queue during cancel-and-retry
         var shielded = false;
         defer if (shielded) rt.endShield();
 
         while (true) {
+            task.state.store(.preparing_to_wait, .release);
+
+            if (winner.load(.acquire) != NO_WINNER) {
+                break;
+            }
+
+            // Get executor fresh each time - may change after cancel/reschedule
+            const executor = task.getExecutor();
             executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     if (shielded) unreachable;
                     rt.beginShield();
                     shielded = true;
                     fut.cancel();
-                    // Reset state before next yield - wakeup set it to .ready but we need
-                    // .preparing_to_wait for yield's CAS to work correctly
-                    const prev = task.state.swap(.preparing_to_wait, .release);
-                    std.debug.assert(prev == .ready);
                     continue;
                 },
             };
-            break;
+
+            if (winner.load(.acquire) != NO_WINNER) {
+                break;
+            }
+            // Spurious wakeup - loop and wait again
         }
     } else {
-        // Propagate cancellation to caller
-        try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
-    }
+        // Propagate cancellation to caller, handling spurious wakeups
+        while (true) {
+            task.state.store(.preparing_to_wait, .release);
 
-    // We should have been signaled
-    std.debug.assert(winner.load(.acquire) == 0);
+            if (winner.load(.acquire) != NO_WINNER) {
+                break;
+            }
+
+            // Get executor fresh each time - may change after cancel/reschedule
+            const executor = task.getExecutor();
+            try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+
+            if (winner.load(.acquire) != NO_WINNER) {
+                break;
+            }
+        }
+    }
 
     return .{ .value = fut.getResult() };
 }
