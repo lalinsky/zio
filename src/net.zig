@@ -170,7 +170,7 @@ pub const HostName = struct {
     }
 
     /// Resolves the hostname and connects to the first successful address.
-    pub fn connect(self: HostName, rt: *Runtime, port: u16, timeout: Timeout) !Stream {
+    pub fn connect(self: HostName, rt: *Runtime, port: u16, options: IpAddress.ConnectOptions) !Stream {
         var iter = try self.lookup(rt, .{ .port = port });
         defer iter.deinit();
 
@@ -178,7 +178,7 @@ pub const HostName = struct {
         while (iter.next()) |result| {
             switch (result) {
                 .address => |addr| {
-                    return addr.connect(rt, timeout) catch |err| {
+                    return addr.connect(rt, .{ .timeout = options.timeout }) catch |err| {
                         last_err = err;
                         continue;
                     };
@@ -588,6 +588,10 @@ pub const IpAddress = extern union {
         reuse_address: bool = false,
     };
 
+    pub const ConnectOptions = struct {
+        timeout: Timeout = .none,
+    };
+
     pub fn bind(self: IpAddress, rt: *Runtime, options: BindOptions) !Socket {
         return netBindIp(rt, self, options);
     }
@@ -596,8 +600,8 @@ pub const IpAddress = extern union {
         return netListenIp(rt, self, options);
     }
 
-    pub fn connect(self: IpAddress, rt: *Runtime, timeout: Timeout) !Stream {
-        return netConnectIp(rt, self, timeout);
+    pub fn connect(self: IpAddress, rt: *Runtime, options: ConnectOptions) !Stream {
+        return netConnectIp(rt, self, options);
     }
 };
 
@@ -624,6 +628,10 @@ pub const UnixAddress = extern union {
         reuse_address: bool = false,
     };
 
+    pub const ConnectOptions = struct {
+        timeout: Timeout = .none,
+    };
+
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
@@ -640,8 +648,8 @@ pub const UnixAddress = extern union {
         return netListenUnix(rt, self, options);
     }
 
-    pub fn connect(self: UnixAddress, rt: *Runtime, timeout: Timeout) !Stream {
-        return netConnectUnix(rt, self, timeout);
+    pub fn connect(self: UnixAddress, rt: *Runtime, options: ConnectOptions) !Stream {
+        return netConnectUnix(rt, self, options);
     }
 };
 
@@ -726,6 +734,10 @@ pub const Address = extern union {
         };
     }
 
+    pub const ConnectOptions = struct {
+        timeout: Timeout = .none,
+    };
+
     pub fn format(self: Address, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.getType()) {
             .ip => return self.ip.format(w),
@@ -733,10 +745,10 @@ pub const Address = extern union {
         }
     }
 
-    pub fn connect(self: Address, rt: *Runtime, timeout: Timeout) !Stream {
+    pub fn connect(self: Address, rt: *Runtime, options: ConnectOptions) !Stream {
         switch (self.getType()) {
-            .ip => return self.ip.connect(rt, timeout),
-            .unix => return self.unix.connect(rt, timeout),
+            .ip => return self.ip.connect(rt, .{ .timeout = options.timeout }),
+            .unix => return self.unix.connect(rt, .{ .timeout = options.timeout }),
         }
     }
 
@@ -825,9 +837,13 @@ pub const Socket = struct {
         try op.getResult();
     }
 
+    pub const ConnectOptions = struct {
+        timeout: Timeout = .none,
+    };
+
     /// Connect the socket to a remote address
-    pub fn connect(self: Socket, rt: *Runtime, addr: Address, timeout: Timeout) !void {
-        try netConnect(rt, self.handle, addr, timeout);
+    pub fn connect(self: Socket, rt: *Runtime, addr: Address, options: ConnectOptions) !void {
+        try netConnect(rt, self.handle, addr, options);
     }
 
     /// Receives data from the socket into the provided buffer.
@@ -1101,21 +1117,21 @@ pub fn netListenUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.Liste
     return .{ .socket = socket };
 }
 
-pub fn netConnectIp(rt: *Runtime, addr: IpAddress, timeout: Timeout) !Stream {
+pub fn netConnectIp(rt: *Runtime, addr: IpAddress, options: IpAddress.ConnectOptions) !Stream {
     const fd = try createStreamSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
-    try netConnect(rt, fd, .{ .ip = addr }, timeout);
+    try netConnect(rt, fd, .{ .ip = addr }, .{ .timeout = options.timeout });
     return .{ .socket = .{ .handle = fd, .address = .{ .ip = addr } } };
 }
 
-pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress, timeout: Timeout) !Stream {
+pub fn netConnectUnix(rt: *Runtime, addr: UnixAddress, options: UnixAddress.ConnectOptions) !Stream {
     if (!has_unix_sockets) unreachable;
 
     const fd = try createStreamSocket(rt, addr.any.family);
     errdefer netClose(rt, fd);
 
-    try netConnect(rt, fd, .{ .unix = addr }, timeout);
+    try netConnect(rt, fd, .{ .unix = addr }, .{ .timeout = options.timeout });
     return .{ .socket = .{ .handle = fd, .address = .{ .unix = addr } } };
 }
 
@@ -1188,12 +1204,12 @@ pub fn netAccept(rt: *Runtime, fd: Handle) !Stream {
     return .{ .socket = .{ .handle = handle, .address = peer_addr } };
 }
 
-pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address, timeout: Timeout) !void {
+pub fn netConnect(rt: *Runtime, fd: Handle, addr: Address, options: Socket.ConnectOptions) !void {
     var addr_copy = addr;
     const addr_len: os.net.socklen_t = @intCast(getSockAddrLen(&addr_copy.any));
 
     var op = ev.NetConnect.init(fd, &addr_copy.any, addr_len);
-    try timedWaitForIo(rt, &op.c, timeout);
+    try timedWaitForIo(rt, &op.c, options.timeout);
     try op.getResult();
 }
 
@@ -1270,14 +1286,14 @@ pub fn tcpConnectToHost(
     rt: *Runtime,
     name: []const u8,
     port: u16,
-    timeout: Timeout,
+    options: IpAddress.ConnectOptions,
 ) !Stream {
     const host = try HostName.init(name);
-    return host.connect(rt, port, timeout);
+    return host.connect(rt, port, options);
 }
 
-pub fn tcpConnectToAddress(rt: *Runtime, addr: IpAddress, timeout: Timeout) !Stream {
-    return addr.connect(rt, timeout);
+pub fn tcpConnectToAddress(rt: *Runtime, addr: IpAddress, options: IpAddress.ConnectOptions) !Stream {
+    return addr.connect(rt, options);
 }
 
 test {
@@ -1405,7 +1421,7 @@ test "HostName: connect" {
 
             // Connect via HostName
             const host = try HostName.init("localhost");
-            var stream = try host.connect(runtime, port, .none);
+            var stream = try host.connect(runtime, port, .{});
             defer stream.close(runtime);
 
             try stream.writeAll(runtime, "hello");
@@ -1491,7 +1507,7 @@ test "tcpConnectToAddress: basic" {
             const port = try server_port.receive(rt);
             const addr = try IpAddress.parseIp4("127.0.0.1", port);
 
-            var stream = try tcpConnectToAddress(rt, addr, .none);
+            var stream = try tcpConnectToAddress(rt, addr, .{});
             defer stream.close(rt);
 
             var write_buffer: [256]u8 = undefined;
@@ -1546,7 +1562,7 @@ test "tcpConnectToHost: basic" {
             const port = try server_port.receive(rt);
             std.log.info("Client connecting to port {}\n", .{port});
 
-            var stream = try tcpConnectToHost(rt, "localhost", port, .none);
+            var stream = try tcpConnectToHost(rt, "localhost", port, .{});
             defer stream.close(rt);
 
             var write_buffer: [256]u8 = undefined;
@@ -1904,7 +1920,7 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
         }
 
         pub fn clientFn(rt: *Runtime, server: Server, write_buffer_inner: []u8) !void {
-            const client = try server.socket.address.connect(rt, .none);
+            const client = try server.socket.address.connect(rt, .{});
             defer client.close(rt);
 
             var writer = client.writer(rt, write_buffer_inner);
@@ -1995,7 +2011,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
         }
 
         pub fn clientFn(rt: *Runtime, server: Server) !void {
-            const client = try server.socket.address.connect(rt, .none);
+            const client = try server.socket.address.connect(rt, .{});
             defer client.close(rt);
 
             var buf: [32]u8 = undefined;

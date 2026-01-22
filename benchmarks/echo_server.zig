@@ -50,7 +50,7 @@ fn clientTask(
     try ready.wait(rt);
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
-    var stream = try addr.connect(rt, .none);
+    var stream = try addr.connect(rt, .{});
     defer stream.close(rt);
     defer stream.shutdown(rt, .both) catch {};
     try stream.socket.setNoDelay(true);

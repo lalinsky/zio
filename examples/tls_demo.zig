@@ -12,7 +12,7 @@ fn runTlsTask(rt: *zio.Runtime) !void {
     const addr = try zio.net.IpAddress.parseIp4("52.2.107.230", 443); // httpbin.org
     std.log.info("Attempting TCP connection to httpbin.org:443...", .{});
 
-    var stream = try addr.connect(rt, .none);
+    var stream = try addr.connect(rt, .{});
     defer stream.close(rt);
 
     std.log.info("TCP connected to httpbin.org:443 successfully!", .{});
