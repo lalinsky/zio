@@ -14,7 +14,7 @@ const AnyTask = @import("task.zig").AnyTask;
 /// When the timeout expires, operations return error.Canceled and the `triggered` field is set to true,
 /// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
 pub const AutoCancel = struct {
-    timer: ev.Timer = .init(.zero),
+    timer: ev.Timer = .init(.{ .duration = .zero }),
     triggered: bool = false,
     task: ?*AnyTask = null,
 

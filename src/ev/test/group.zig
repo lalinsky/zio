@@ -25,7 +25,7 @@ test "group: single completion" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(10));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(10) });
     var group: Group = .init(.gather);
 
     group.add(&timer.c);
@@ -44,9 +44,9 @@ test "group: multiple completions" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer1: Timer = .init(.fromMilliseconds(10));
-    var timer2: Timer = .init(.fromMilliseconds(20));
-    var timer3: Timer = .init(.fromMilliseconds(30));
+    var timer1: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var timer2: Timer = .init(.{ .duration = .fromMilliseconds(20) });
+    var timer3: Timer = .init(.{ .duration = .fromMilliseconds(30) });
     var group: Group = .init(.gather);
 
     group.add(&timer1.c);
@@ -99,11 +99,11 @@ test "group: callback invoked when all complete" {
 
     var ctx: Ctx = .{};
 
-    var timer1: Timer = .init(.fromMilliseconds(10));
+    var timer1: Timer = .init(.{ .duration = .fromMilliseconds(10) });
     timer1.c.userdata = &ctx;
     timer1.c.callback = Ctx.timer1Callback;
 
-    var timer2: Timer = .init(.fromMilliseconds(20));
+    var timer2: Timer = .init(.{ .duration = .fromMilliseconds(20) });
     timer2.c.userdata = &ctx;
     timer2.c.callback = Ctx.timer2Callback;
 
@@ -127,9 +127,9 @@ test "group: cancel cancels all children" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer1: Timer = .init(.fromMilliseconds(1000));
-    var timer2: Timer = .init(.fromMilliseconds(1000));
-    var timer3: Timer = .init(.fromMilliseconds(1000));
+    var timer1: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
+    var timer2: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
+    var timer3: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
     var group: Group = .init(.gather);
 
     group.add(&timer1.c);
@@ -156,8 +156,8 @@ test "group: child error does not affect group result" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer1: Timer = .init(.fromMilliseconds(10));
-    var timer2: Timer = .init(.fromMilliseconds(1000)); // Will be canceled
+    var timer1: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var timer2: Timer = .init(.{ .duration = .fromMilliseconds(1000) }); // Will be canceled
     var group: Group = .init(.gather);
 
     group.add(&timer1.c);
@@ -184,7 +184,7 @@ test "group: mixed completion types" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(10));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(10) });
     var async_handle: Async = .init();
     var group: Group = .init(.gather);
 
@@ -211,8 +211,8 @@ test "group: race mode first completer wins" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var fast_timer: Timer = .init(.fromMilliseconds(10));
-    var slow_timer: Timer = .init(.fromMilliseconds(1000));
+    var fast_timer: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var slow_timer: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
     var group: Group = .init(.race);
 
     group.add(&fast_timer.c);
@@ -236,9 +236,9 @@ test "group: race mode cancels siblings" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer1: Timer = .init(.fromMilliseconds(10));
-    var timer2: Timer = .init(.fromMilliseconds(1000));
-    var timer3: Timer = .init(.fromMilliseconds(1000));
+    var timer1: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var timer2: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
+    var timer3: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
     var group: Group = .init(.race);
 
     group.add(&timer1.c);
@@ -264,7 +264,7 @@ test "group: race mode with single child" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(10));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(10) });
     var group: Group = .init(.race);
 
     group.add(&timer.c);
@@ -285,11 +285,11 @@ test "group: nested gather inside race (timeout pattern) - ops complete first" {
     defer loop.deinit();
 
     // Timeout timer (slow)
-    var timeout: Timer = .init(.fromMilliseconds(1000));
+    var timeout: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
 
     // Operations (fast)
-    var op1: Timer = .init(.fromMilliseconds(10));
-    var op2: Timer = .init(.fromMilliseconds(20));
+    var op1: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var op2: Timer = .init(.{ .duration = .fromMilliseconds(20) });
 
     // Inner gather group for operations
     var ops: Group = .init(.gather);
@@ -322,11 +322,11 @@ test "group: nested gather inside race (timeout pattern) - timeout fires first" 
     defer loop.deinit();
 
     // Timeout timer (fast)
-    var timeout: Timer = .init(.fromMilliseconds(10));
+    var timeout: Timer = .init(.{ .duration = .fromMilliseconds(10) });
 
     // Operations (slow)
-    var op1: Timer = .init(.fromMilliseconds(1000));
-    var op2: Timer = .init(.fromMilliseconds(1000));
+    var op1: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
+    var op2: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
 
     // Inner gather group for operations
     var ops: Group = .init(.gather);
@@ -358,9 +358,9 @@ test "group: nested gather inside gather" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var op1: Timer = .init(.fromMilliseconds(10));
-    var op2: Timer = .init(.fromMilliseconds(20));
-    var op3: Timer = .init(.fromMilliseconds(30));
+    var op1: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var op2: Timer = .init(.{ .duration = .fromMilliseconds(20) });
+    var op3: Timer = .init(.{ .duration = .fromMilliseconds(30) });
 
     // Inner gather
     var inner: Group = .init(.gather);
@@ -389,14 +389,14 @@ test "group: nested race inside gather" {
     defer loop.deinit();
 
     // Inner race: fast vs slow
-    var fast: Timer = .init(.fromMilliseconds(10));
-    var slow: Timer = .init(.fromMilliseconds(1000));
+    var fast: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var slow: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
     var inner: Group = .init(.race);
     inner.add(&fast.c);
     inner.add(&slow.c);
 
     // Another op in outer gather
-    var op: Timer = .init(.fromMilliseconds(50));
+    var op: Timer = .init(.{ .duration = .fromMilliseconds(50) });
 
     // Outer gather waits for both inner race and op
     var outer: Group = .init(.gather);

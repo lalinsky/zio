@@ -22,7 +22,7 @@ test "cancel: timer with loop.cancel()" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(100));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(100) });
     loop.add(&timer.c);
 
     loop.cancel(&timer.c);
@@ -41,7 +41,7 @@ test "cancel: double cancel is idempotent" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(100));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(100) });
     loop.add(&timer.c);
 
     // Both cancels succeed (idempotent)
@@ -57,7 +57,7 @@ test "cancel: cancel completed operation is no-op" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(1));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(1) });
     loop.add(&timer.c);
 
     // Wait for timer to complete
@@ -74,7 +74,7 @@ test "cancel: cancel not-started operation marks for cancel on add" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(100));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(100) });
     // Don't add to loop yet
 
     // Cancel before adding - marks the completion
@@ -232,7 +232,7 @@ test "cancel: cancel_state.requested flag is set on completion" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer: Timer = .init(.fromMilliseconds(100));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(100) });
     loop.add(&timer.c);
 
     try std.testing.expect(!timer.c.cancel_state.load(.acquire).requested);
@@ -262,7 +262,7 @@ test "cancel: callback is invoked on canceled operation" {
     };
 
     var ctx: Ctx = .{};
-    var timer: Timer = .init(.fromMilliseconds(100));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(100) });
     timer.c.userdata = &ctx;
     timer.c.callback = Ctx.callback;
     loop.add(&timer.c);
@@ -281,7 +281,7 @@ test "cancel: race - operation completes before cancel" {
     defer loop.deinit();
 
     // Use very short timer to simulate race
-    var timer: Timer = .init(.fromMilliseconds(1));
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(1) });
     loop.add(&timer.c);
 
     // Wait for it to complete
@@ -298,9 +298,9 @@ test "cancel: multiple timers, cancel one" {
     try loop.init(.{});
     defer loop.deinit();
 
-    var timer1: Timer = .init(.fromMilliseconds(100));
-    var timer2: Timer = .init(.fromMilliseconds(200));
-    var timer3: Timer = .init(.fromMilliseconds(300));
+    var timer1: Timer = .init(.{ .duration = .fromMilliseconds(100) });
+    var timer2: Timer = .init(.{ .duration = .fromMilliseconds(200) });
+    var timer3: Timer = .init(.{ .duration = .fromMilliseconds(300) });
 
     loop.add(&timer1.c);
     loop.add(&timer2.c);
@@ -555,7 +555,7 @@ test "cancel: cross-thread cancellation" {
     defer loop1.deinit();
 
     // Create a timer on loop1 that will be cancelled from another thread
-    var timer: Timer = .init(.fromMilliseconds(5000)); // Long timeout
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(5000) }); // Long timeout
     var completed = std.atomic.Value(bool).init(false);
     timer.c.userdata = &completed;
     timer.c.callback = struct {

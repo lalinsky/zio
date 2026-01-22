@@ -29,7 +29,7 @@ pub fn main() !void {
     try loop.init(.{ .allocator = gpa.allocator() });
     defer loop.deinit();
 
-    var timer: ev.Timer = .init(.fromSeconds(1));
+    var timer: ev.Timer = .init(.{ .duration = .fromSeconds(1) });
     timer.c.callback = timerCallback;
     loop.add(&timer.c);
 

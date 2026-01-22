@@ -9,6 +9,7 @@ const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 const Duration = @import("../time.zig").Duration;
 const Timestamp = @import("../time.zig").Timestamp;
+const Timeout = @import("../time.zig").Timeout;
 
 pub const BackendCapabilities = struct {
     file_read: bool = false,
@@ -363,16 +364,27 @@ pub const Group = struct {
 pub const Timer = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    delay: Duration,
+    delay: Duration = .zero,
     deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
 
     pub const Error = Cancelable;
 
-    pub fn init(delay: Duration) Timer {
-        return .{
-            .c = .init(.timer),
-            .delay = delay,
+    pub fn init(timeout: Timeout) Timer {
+        return switch (timeout) {
+            .none => .{
+                .c = .init(.timer),
+                .delay = .max,
+            },
+            .duration => |d| .{
+                .c = .init(.timer),
+                .delay = d,
+            },
+            .deadline => |ts| .{
+                .c = .init(.timer),
+                .delay = .zero,
+                .deadline = ts,
+            },
         };
     }
 
