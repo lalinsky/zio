@@ -15,7 +15,7 @@ pub fn main() !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
     std.log.info("Connecting to {f}...", .{&addr});
 
-    var stream = try addr.connect(rt);
+    var stream = try addr.connect(rt, .none);
     defer stream.close(rt);
 
     var read_buffer: [4096]u8 = undefined;
