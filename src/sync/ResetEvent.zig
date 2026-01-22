@@ -124,27 +124,25 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 
     // Add to wait queue and suspend
     const task = runtime.getCurrentTask();
-    const executor = task.getExecutor();
 
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init(&task.awaitable);
-
-    // Transition to preparing_to_wait state before adding to queue
-    task.state.store(.preparing_to_wait, .release);
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     if (!self.wait_queue.pushUnless(is_set, &waiter.wait_node)) {
         // Event was set, return immediately
-        task.state.store(.ready, .release);
         return;
     }
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // On cancellation, remove from queue
-        _ = self.wait_queue.remove(&waiter.wait_node);
+    // Wait for signal, handling spurious wakeups internally
+    waiter.wait() catch |err| {
+        // On cancellation, try to remove from queue
+        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        if (!was_in_queue) {
+            // Removed by set() - wait for signal to complete before destroying waiter
+            waiter.waitUncancelable();
+        }
         return err;
     };
 
