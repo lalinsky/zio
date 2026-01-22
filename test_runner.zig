@@ -91,6 +91,9 @@ pub fn main() !void {
     var log_buffer: std.Io.Writer.Allocating = .init(allocator);
     defer log_buffer.deinit();
 
+    var failed_tests: std.ArrayList([]const u8) = .empty;
+    defer failed_tests.deinit(allocator);
+
     Printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
 
     for (builtin.test_functions) |t| {
@@ -169,6 +172,7 @@ pub fn main() !void {
                 status = .fail;
                 fail += 1;
                 fail_err = err;
+                failed_tests.append(allocator, friendly_name) catch {};
             },
         }
 
@@ -229,6 +233,13 @@ pub fn main() !void {
     }
     if (leak > 0) {
         Printer.status(.fail, "{d} test{s} leaked\n", .{ leak, if (leak != 1) "s" else "" });
+    }
+    if (failed_tests.items.len > 0) {
+        Printer.fmt("\n", .{});
+        Printer.fmt("Failed tests:\n", .{});
+        for (failed_tests.items) |name| {
+            Printer.fmt("  {s}\n", .{name});
+        }
     }
     Printer.fmt("\n", .{});
     try slowest.display();
