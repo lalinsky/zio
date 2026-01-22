@@ -247,15 +247,20 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
     if (entry.completions.head == null) {
         // No more completions - remove from epoll and poll queue
         const del_rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
-        switch (posix.errno(del_rc)) {
+        const err = posix.errno(del_rc);
+
+        // Always remove from poll_queue when list is empty to avoid stale entries
+        // (fd will be auto-removed from epoll when closed anyway)
+        const was_removed = self.poll_queue.remove(fd);
+        std.debug.assert(was_removed);
+
+        switch (err) {
             .SUCCESS, .NOENT => {
                 // SUCCESS: successfully removed
                 // NOENT: fd was not registered (already removed or never added) - safe to proceed
             },
-            else => |err| return unexpectedError(err),
+            else => return unexpectedError(err),
         }
-        const was_removed = self.poll_queue.remove(fd);
-        std.debug.assert(was_removed);
         return;
     }
 
@@ -395,13 +400,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Try to remove from queue
     const fd = getHandle(target);
-    self.removeFromPollQueue(fd, target) catch {
-        // Removal failed - target is still in queue, let it complete naturally
-        log.err("Failed to remove completion from poll queue during cancel", .{});
-        return;
+    self.removeFromPollQueue(fd, target) catch |err| {
+        // Removal from epoll failed, but completion was already removed from
+        // the poll queue linked list. Log the error but continue to complete
+        // the target to avoid leaving it stuck in running state.
+        log.err("Failed to remove completion from poll queue during cancel: {}", .{err});
     };
 
-    // Successfully removed - complete target with error.Canceled
+    // Always complete target with error.Canceled
     target.setError(error.Canceled);
     state.markCompletedFromBackend(target);
 }
