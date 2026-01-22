@@ -2,7 +2,7 @@ name: Test ev
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, zig-0.16 ]
     paths:
       - 'src/ev/**'
       - 'src/os/**'
