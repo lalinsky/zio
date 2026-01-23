@@ -102,25 +102,26 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
-            var recv = self.asyncReceive();
+            const recv = self.asyncReceive();
+            var ctx: AsyncReceive(T).WaitContext = .{};
             var waiter = Waiter.init(rt);
 
-            if (!recv.asyncWait(rt, &waiter.wait_node)) {
-                return recv.getResult();
+            if (!recv.asyncWait(rt, &waiter.wait_node, &ctx)) {
+                return recv.getResult(&ctx);
             }
 
             waiter.wait(1, .allow_cancel) catch |err| {
-                const was_removed = recv.asyncCancelWait(rt, &waiter.wait_node);
+                const was_removed = recv.asyncCancelWait(rt, &waiter.wait_node, &ctx);
                 if (!was_removed) {
                     // Sender claimed us, wait for wake to complete
                     waiter.wait(1, .no_cancel);
                     // Return result (operation completed despite cancel)
-                    return recv.getResult();
+                    return recv.getResult(&ctx);
                 }
                 return err;
             };
 
-            return recv.getResult();
+            return recv.getResult(&ctx);
         }
 
         /// Tries to receive a value without blocking.
@@ -140,9 +141,9 @@ pub fn Channel(comptime T: type) type {
             // Try direct transfer from waiting sender (for unbuffered channels)
             while (self.sender_queue.pop()) |node| {
                 if (SelectWaiter.tryClaim(node)) {
-                    const send_op: *AsyncSend(T) = @ptrFromInt(node.userdata);
-                    const item = send_op.item;
-                    send_op.result = {};
+                    const send_ctx: *AsyncSend(T).WaitContext = @ptrFromInt(node.userdata);
+                    const item = send_ctx.self_ptr.item;
+                    send_ctx.succeeded = true;
                     self.mutex.unlock();
                     node.wake();
                     return item;
@@ -167,12 +168,12 @@ pub fn Channel(comptime T: type) type {
             // If sender waiting, claim it and have it put its item in buffer
             while (self.sender_queue.pop()) |node| {
                 if (SelectWaiter.tryClaim(node)) {
-                    const send_op: *AsyncSend(T) = @ptrFromInt(node.userdata);
+                    const send_ctx: *AsyncSend(T).WaitContext = @ptrFromInt(node.userdata);
                     // Put sender's item in buffer (direct transfer to buffer)
-                    self.buffer[self.tail] = send_op.item;
+                    self.buffer[self.tail] = send_ctx.self_ptr.item;
                     self.tail = (self.tail + 1) % self.buffer.len;
                     self.count += 1;
-                    send_op.result = {};
+                    send_ctx.succeeded = true;
                     self.mutex.unlock();
                     node.wake();
                     return item;
@@ -191,25 +192,26 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            var send_op = self.asyncSend(item);
+            const send_op = self.asyncSend(item);
+            var ctx: AsyncSend(T).WaitContext = .{};
             var waiter = Waiter.init(rt);
 
-            if (!send_op.asyncWait(rt, &waiter.wait_node)) {
-                return send_op.getResult();
+            if (!send_op.asyncWait(rt, &waiter.wait_node, &ctx)) {
+                return send_op.getResult(&ctx);
             }
 
             waiter.wait(1, .allow_cancel) catch |err| {
-                const was_removed = send_op.asyncCancelWait(rt, &waiter.wait_node);
+                const was_removed = send_op.asyncCancelWait(rt, &waiter.wait_node, &ctx);
                 if (!was_removed) {
                     // Receiver claimed us, wait for wake to complete
                     waiter.wait(1, .no_cancel);
                     // Return result (operation completed despite cancel)
-                    return send_op.getResult();
+                    return send_op.getResult(&ctx);
                 }
                 return err;
             };
 
-            return send_op.getResult();
+            return send_op.getResult(&ctx);
         }
 
         /// Tries to send a value without blocking.
@@ -229,8 +231,8 @@ pub fn Channel(comptime T: type) type {
             // Try direct transfer to waiting receiver first
             while (self.receiver_queue.pop()) |node| {
                 if (SelectWaiter.tryClaim(node)) {
-                    const recv_op: *AsyncReceive(T) = @ptrFromInt(node.userdata);
-                    recv_op.result = item;
+                    const recv_ctx: *AsyncReceive(T).WaitContext = @ptrFromInt(node.userdata);
+                    recv_ctx.result = item;
                     self.mutex.unlock();
                     node.wake();
                     return;
@@ -337,11 +339,14 @@ pub fn Channel(comptime T: type) type {
 pub fn AsyncReceive(comptime T: type) type {
     return struct {
         channel: *Channel(T),
-        result: ?Result = null,
 
         const Self = @This();
 
         pub const Result = error{ChannelClosed}!T;
+
+        pub const WaitContext = struct {
+            result: ?Result = null,
+        };
 
         fn init(channel: *Channel(T)) Self {
             return .{ .channel = channel };
@@ -349,22 +354,22 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
             self.channel.mutex.lock();
 
             // Fast path: items in buffer
             if (self.channel.count > 0) {
-                self.result = self.channel.takeItemAndWakeSender();
+                ctx.result = self.channel.takeItemAndWakeSender();
                 return false;
             }
 
             // Fast path: try direct transfer from waiting sender (for unbuffered channels)
             while (self.channel.sender_queue.pop()) |node| {
                 if (SelectWaiter.tryClaim(node)) {
-                    const send_op: *AsyncSend(T) = @ptrFromInt(node.userdata);
+                    const send_ctx: *AsyncSend(T).WaitContext = @ptrFromInt(node.userdata);
                     // Direct transfer from sender
-                    self.result = send_op.item;
-                    send_op.result = {};
+                    ctx.result = send_ctx.self_ptr.item;
+                    send_ctx.succeeded = true;
                     self.channel.mutex.unlock();
                     node.wake();
                     return false;
@@ -375,12 +380,12 @@ pub fn AsyncReceive(comptime T: type) type {
             // Fast path: channel closed and empty
             if (self.channel.closed) {
                 self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
+                ctx.result = error.ChannelClosed;
                 return false;
             }
 
             // Slow path: enqueue and wait
-            wait_node.userdata = @intFromPtr(self);
+            wait_node.userdata = @intFromPtr(ctx);
             self.channel.receiver_queue.push(wait_node);
             self.channel.mutex.unlock();
             return true;
@@ -388,7 +393,8 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncCancelWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            _ = ctx;
             self.channel.mutex.lock();
             const was_in_queue = self.channel.receiver_queue.remove(wait_node);
             self.channel.mutex.unlock();
@@ -404,9 +410,9 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Get the result of the receive operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
-        pub fn getResult(self: *Self) Result {
+        pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
             // Result should already be set by direct transfer or fast path
-            if (self.result) |r| {
+            if (ctx.result) |r| {
                 return r;
             }
 
@@ -441,11 +447,15 @@ pub fn AsyncSend(comptime T: type) type {
     return struct {
         channel: *Channel(T),
         item: T,
-        result: ?Result = null,
 
         const Self = @This();
 
         pub const Result = error{ChannelClosed}!void;
+
+        pub const WaitContext = struct {
+            self_ptr: *const Self = undefined,
+            succeeded: bool = false,
+        };
 
         fn init(channel: *Channel(T), item: T) Self {
             return .{
@@ -456,22 +466,23 @@ pub fn AsyncSend(comptime T: type) type {
 
         /// Register for notification when send can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            ctx.self_ptr = self;
+
             self.channel.mutex.lock();
 
             if (self.channel.closed) {
                 self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
                 return false;
             }
 
             // Fast path: try direct transfer to waiting receiver
             while (self.channel.receiver_queue.pop()) |node| {
                 if (SelectWaiter.tryClaim(node)) {
-                    const recv_op: *AsyncReceive(T) = @ptrFromInt(node.userdata);
+                    const recv_ctx: *AsyncReceive(T).WaitContext = @ptrFromInt(node.userdata);
                     // Direct transfer to receiver
-                    recv_op.result = self.item;
-                    self.result = {};
+                    recv_ctx.result = self.item;
+                    ctx.succeeded = true;
                     self.channel.mutex.unlock();
                     node.wake();
                     return false;
@@ -484,13 +495,13 @@ pub fn AsyncSend(comptime T: type) type {
                 self.channel.buffer[self.channel.tail] = self.item;
                 self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
                 self.channel.count += 1;
-                self.result = {};
+                ctx.succeeded = true;
                 self.channel.mutex.unlock();
                 return false;
             }
 
             // Slow path: buffer full, enqueue and wait
-            wait_node.userdata = @intFromPtr(self);
+            wait_node.userdata = @intFromPtr(ctx);
             self.channel.sender_queue.push(wait_node);
             self.channel.mutex.unlock();
             return true;
@@ -498,7 +509,8 @@ pub fn AsyncSend(comptime T: type) type {
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncCancelWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            _ = ctx;
             self.channel.mutex.lock();
             const was_in_queue = self.channel.sender_queue.remove(wait_node);
             self.channel.mutex.unlock();
@@ -514,13 +526,10 @@ pub fn AsyncSend(comptime T: type) type {
 
         /// Get the result of the send operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
-        pub fn getResult(self: *Self) Result {
-            // Result should already be set by direct transfer or fast path
-            if (self.result) |r| {
-                return r;
+        pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
+            if (ctx.succeeded) {
+                return {};
             }
-
-            // Woken by close without result set
             std.debug.assert(self.channel.closed);
             return error.ChannelClosed;
         }
@@ -861,6 +870,39 @@ test "Channel: asyncReceive with select - basic" {
         fn receiver(rt: *Runtime, ch: *Channel(u32)) !void {
             var recv = ch.asyncReceive();
             const result = try select(rt, .{ .recv = &recv });
+            switch (result) {
+                .recv => |val| {
+                    try std.testing.expectEqual(42, try val);
+                },
+            }
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+}
+
+test "Channel: asyncReceive with select - value types" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    // Unbuffered channel - sender blocks until receiver ready
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            try ch.send(rt, 42);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32)) !void {
+            // Pass asyncReceive() directly by value, no intermediate variable
+            const result = try select(rt, .{ .recv = ch.asyncReceive() });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);

@@ -64,7 +64,8 @@ const NO_WINNER = std.math.maxInt(usize);
 //       - Thread-safe: can be called from any thread
 //       - Safe to call even if asyncWait() returned false (returns false, no-op)
 //
-//   fn getResult(self: *Self) Result
+//   fn getResult(self: *const Self) Result                                        // if WaitContext == void
+//   fn getResult(self: *const Self, ctx: *WaitContext) Result                      // if WaitContext != void
 //     Retrieve the result of the completed operation.
 //
 //     Must only be called after asyncWait() returns false or after wait_node.wake() is called.
@@ -76,18 +77,21 @@ const NO_WINNER = std.math.maxInt(usize);
 //       - All side effects from the operation that produced the result are visible
 //       - Thread-safe: can be called from any thread after completion
 
-/// Extract the Future type from a pointer type
-/// Enforces that T must be a pointer
+/// Extract the Future type from a pointer or value type
 fn FutureType(comptime T: type) type {
     const type_info = @typeInfo(T);
-    if (type_info != .pointer) {
-        @compileError("Future must be a pointer type, got: " ++ @typeName(T) ++
-            ". Use '&' to pass by pointer (e.g., &future instead of future)");
+    if (type_info == .pointer) {
+        return type_info.pointer.child;
     }
-    return type_info.pointer.child;
+    return T;
 }
 
-/// Extract the Result type from a future pointer
+/// Check if the future type is passed by pointer
+fn isPointerFuture(comptime T: type) bool {
+    return @typeInfo(T) == .pointer;
+}
+
+/// Extract the Result type from a future (pointer or value)
 fn FutureResult(comptime future_type: type) type {
     const Future = FutureType(future_type);
     return Future.Result;
@@ -260,11 +264,10 @@ pub const SelectWaiter = struct {
 
 /// Wait for multiple futures simultaneously and return whichever completes first.
 ///
-/// **Important**: All futures MUST be passed as pointers (use `&` prefix).
-/// This ensures consistent behavior and prevents accidental copies.
+/// `futures` is a struct with each field being either:
+/// - A pointer to a future (e.g., `*JoinHandle(T)`) for futures that mutate self
+/// - A value future (e.g., `channel.asyncReceive()`) for futures using WaitContext
 ///
-/// `futures` is a struct with each field a pointer to a future (e.g., `*JoinHandle(T)`),
-/// where `T` can be different for each field.
 /// Returns a tagged union with the same field names, containing the result of whichever completed first.
 ///
 /// When multiple handles complete at the same time, fields are checked in declaration order
@@ -272,12 +275,12 @@ pub const SelectWaiter = struct {
 ///
 /// Example:
 /// ```
+/// // JoinHandles must be passed by pointer (they mutate self)
 /// var h1 = try rt.spawn(task1, .{});
-/// var h2 = try rt.spawn(task2, .{});
-/// const result = rt.select(.{ .first = &h1, .second = &h2 });
+/// const result = try select(rt, .{ .task = &h1, .recv = channel.asyncReceive() });
 /// switch (result) {
-///     .first => |val| ...,
-///     .second => |val| ...,
+///     .task => |val| ...,
+///     .recv => |val| ...,
 /// }
 /// ```
 pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
@@ -340,7 +343,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 
     // Add waiters to all waiting lists - fast path: return immediately if already complete
     inline for (fields, 0..) |field, i| {
-        var future = @field(futures, field.name);
+        const future = @field(futures, field.name);
         const waiting = if (comptime hasWaitContext(field.type))
             future.asyncWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name))
         else
@@ -348,7 +351,11 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 
         if (!waiting) {
             winner.store(i, .release);
-            return @unionInit(U, field.name, future.getResult());
+            const result = if (comptime hasWaitContext(field.type))
+                future.getResult(&@field(contexts, field.name))
+            else
+                future.getResult();
+            return @unionInit(U, field.name, result);
         }
 
         registered_count += 1;
@@ -363,8 +370,12 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Return result from winner
     inline for (fields, 0..) |field, i| {
         if (i == winner_index) {
-            var future = @field(futures, field.name);
-            return @unionInit(U, field.name, future.getResult());
+            const future = @field(futures, field.name);
+            const result = if (comptime hasWaitContext(field.type))
+                future.getResult(&@field(contexts, field.name))
+            else
+                future.getResult();
+            return @unionInit(U, field.name, result);
         }
     }
 
@@ -455,7 +466,8 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
 
     if (!added) {
         winner.store(0, .release);
-        return .{ .value = fut.getResult() };
+        const result = if (has_context) fut.getResult(&context) else fut.getResult();
+        return .{ .value = result };
     }
 
     // Clean up waiter on exit
@@ -480,7 +492,8 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
                 // On cancellation, cancel child and wait for completion
                 fut.cancel();
                 waiter.wait(1, .no_cancel);
-                return .{ .value = fut.getResult() };
+                const result = if (has_context) fut.getResult(&context) else fut.getResult();
+                return .{ .value = result };
             },
         };
     } else {
@@ -488,7 +501,8 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
         try waiter.wait(1, .allow_cancel);
     }
 
-    return .{ .value = fut.getResult() };
+    const result = if (has_context) fut.getResult(&context) else fut.getResult();
+    return .{ .value = result };
 }
 
 /// Wait for a single future to complete.
