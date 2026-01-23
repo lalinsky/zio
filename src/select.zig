@@ -210,7 +210,7 @@ pub const SelectWaiter = struct {
     winner: *std.atomic.Value(usize),
     index: usize,
 
-    const wait_node_vtable = WaitNode.VTable{
+    pub const wait_node_vtable = WaitNode.VTable{
         .wake = waitNodeWake,
     };
 
@@ -225,11 +225,22 @@ pub const SelectWaiter = struct {
         };
     }
 
+    /// Try to claim this select slot. Returns true if successfully claimed.
+    /// Used by channel operations to atomically claim a waiting receiver/sender.
+    pub fn tryClaim(self: *SelectWaiter) bool {
+        return self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire) == null;
+    }
+
+    /// Check if this select slot won (was claimed).
+    pub fn didWin(self: *SelectWaiter) bool {
+        return self.winner.load(.acquire) == self.index;
+    }
+
     fn waitNodeWake(wait_node: *WaitNode) void {
         const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
 
-        // Try to claim winner slot with our index
-        _ = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
+        // Try to claim winner slot with our index (may already be claimed by channel)
+        _ = self.tryClaim();
 
         // Always signal parent - needed for both winner notification and
         // cleanup synchronization (waiting for in-flight wakes to complete)

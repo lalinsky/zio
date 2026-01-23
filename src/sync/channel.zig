@@ -6,8 +6,9 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
+const SelectWaiter = @import("../select.zig").SelectWaiter;
 const select = @import("../select.zig").select;
-const Waiter = @import("../common.zig").Waiter;
+const wait = @import("../select.zig").wait;
 
 /// Specifies how a channel should be closed.
 pub const CloseMode = enum {
@@ -70,21 +71,13 @@ pub fn Channel(comptime T: type) type {
 
         closed: bool = false,
 
-        /// Number of items available for immediate consumption (not reserved for woken receivers).
-        /// Invariant: items_available <= count
-        items_available: usize = 0,
-
-        /// Number of slots available for immediate send (not reserved for woken senders).
-        /// Invariant: slots_available <= buffer.len - count
-        slots_available: usize,
-
         const Self = @This();
 
         /// Initializes a channel with the provided buffer.
         /// The buffer's length determines the channel capacity.
         pub fn init(buffer: []T) Self {
             std.debug.assert(buffer.len > 0);
-            return .{ .buffer = buffer, .slots_available = buffer.len };
+            return .{ .buffer = buffer };
         }
 
         /// Checks if the channel is empty.
@@ -109,92 +102,8 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
-            var waiter: Waiter = .init(rt);
-
-            self.mutex.lock();
-
-            // Check if closed and empty
-            if (self.closed and self.count == 0) {
-                self.mutex.unlock();
-                return error.ChannelClosed;
-            }
-
-            // Fast path: unreserved items available
-            if (self.items_available > 0) {
-                self.items_available -= 1;
-                return self.takeItem();
-            }
-
-            // Slow path: need to wait
-            waiter.wait_node.userdata = 0; // No reservation yet
-            self.receiver_queue.push(&waiter.wait_node);
-            self.mutex.unlock();
-
-            waiter.wait(1, .allow_cancel) catch |err| {
-                self.mutex.lock();
-                const was_in_queue = self.receiver_queue.remove(&waiter.wait_node);
-                if (!was_in_queue) {
-                    const has_reservation = waiter.wait_node.userdata == 1;
-                    self.mutex.unlock();
-                    waiter.wait(1, .no_cancel);
-
-                    if (has_reservation) {
-                        // Transfer or release reservation
-                        self.mutex.lock();
-                        if (self.receiver_queue.pop()) |node| {
-                            node.userdata = 1;
-                            self.mutex.unlock();
-                            node.wake();
-                        } else {
-                            self.items_available += 1; // Release reservation
-                            self.mutex.unlock();
-                        }
-                    }
-                } else {
-                    self.mutex.unlock();
-                }
-                return err;
-            };
-
-            // Woken up
-            self.mutex.lock();
-            const has_reservation = waiter.wait_node.userdata == 1;
-
-            if (has_reservation) {
-                // Sender reserved an item for us, just take it
-                return self.takeItem();
-            }
-
-            // Woken by close - try to get an available item
-            if (self.items_available > 0) {
-                self.items_available -= 1;
-                return self.takeItem();
-            }
-
-            std.debug.assert(self.closed);
-            self.mutex.unlock();
-            return error.ChannelClosed;
-        }
-
-        /// Takes an item from the buffer. Must be called with mutex held.
-        /// Unlocks the mutex before returning.
-        fn takeItem(self: *Self) T {
-            std.debug.assert(self.count > 0);
-            const item = self.buffer[self.head];
-            self.head = (self.head + 1) % self.buffer.len;
-            self.count -= 1;
-
-            if (self.sender_queue.pop()) |node| {
-                // Slot reserved for this sender (don't increment slots_available)
-                node.userdata = 1;
-                self.mutex.unlock();
-                node.wake();
-            } else {
-                // No sender waiting, slot is available for fast-path
-                self.slots_available += 1;
-                self.mutex.unlock();
-            }
-            return item;
+            var recv = self.asyncReceive();
+            return (try wait(rt, &recv)).value;
         }
 
         /// Tries to receive a value without blocking.
@@ -206,14 +115,42 @@ pub fn Channel(comptime T: type) type {
         pub fn tryReceive(self: *Self) !T {
             self.mutex.lock();
 
-            if (self.items_available == 0) {
-                const is_closed = self.closed and self.count == 0;
+            if (self.count == 0) {
+                const is_closed = self.closed;
                 self.mutex.unlock();
                 return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
             }
 
-            self.items_available -= 1;
-            return self.takeItem();
+            return self.takeItemAndWakeSender();
+        }
+
+        /// Takes an item from buffer and wakes a waiting sender if any.
+        /// Must be called with mutex held. Unlocks mutex before returning.
+        fn takeItemAndWakeSender(self: *Self) T {
+            std.debug.assert(self.count > 0);
+
+            const item = self.buffer[self.head];
+            self.head = (self.head + 1) % self.buffer.len;
+            self.count -= 1;
+
+            // If sender waiting, claim it and have it put its item in buffer
+            while (self.sender_queue.pop()) |node| {
+                const send_op: *AsyncSend(T) = @fieldParentPtr("channel_wait_node", node);
+                if (send_op.tryClaim()) {
+                    // Put sender's item in buffer (direct transfer to buffer)
+                    self.buffer[self.tail] = send_op.item;
+                    self.tail = (self.tail + 1) % self.buffer.len;
+                    self.count += 1;
+                    send_op.result = {};
+                    self.mutex.unlock();
+                    node.wake();
+                    return item;
+                }
+                // CAS failed, sender was cancelled, try next
+            }
+
+            self.mutex.unlock();
+            return item;
         }
 
         /// Sends a value to the channel, blocking if full.
@@ -223,85 +160,8 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            var waiter: Waiter = .init(rt);
-
-            self.mutex.lock();
-
-            if (self.closed) {
-                self.mutex.unlock();
-                return error.ChannelClosed;
-            }
-
-            // Fast path: unreserved slots available
-            if (self.slots_available > 0) {
-                self.slots_available -= 1;
-                return self.putItem(item);
-            }
-
-            // Slow path: need to wait
-            waiter.wait_node.userdata = 0; // No reservation yet
-            self.sender_queue.push(&waiter.wait_node);
-            self.mutex.unlock();
-
-            waiter.wait(1, .allow_cancel) catch |err| {
-                self.mutex.lock();
-                const was_in_queue = self.sender_queue.remove(&waiter.wait_node);
-                if (!was_in_queue) {
-                    const has_reservation = waiter.wait_node.userdata == 1;
-                    self.mutex.unlock();
-                    waiter.wait(1, .no_cancel);
-
-                    if (has_reservation) {
-                        // Transfer or release reservation
-                        self.mutex.lock();
-                        if (self.sender_queue.pop()) |node| {
-                            node.userdata = 1;
-                            self.mutex.unlock();
-                            node.wake();
-                        } else {
-                            self.slots_available += 1; // Release reservation
-                            self.mutex.unlock();
-                        }
-                    }
-                } else {
-                    self.mutex.unlock();
-                }
-                return err;
-            };
-
-            // Woken up
-            self.mutex.lock();
-            const has_reservation = waiter.wait_node.userdata == 1;
-
-            if (has_reservation) {
-                // Receiver reserved a slot for us, just put the item
-                return self.putItem(item);
-            }
-
-            // Woken by close
-            std.debug.assert(self.closed);
-            self.mutex.unlock();
-            return error.ChannelClosed;
-        }
-
-        /// Puts an item into the buffer. Must be called with mutex held.
-        /// Unlocks the mutex before returning.
-        fn putItem(self: *Self, item: T) void {
-            std.debug.assert(self.count < self.buffer.len);
-            self.buffer[self.tail] = item;
-            self.tail = (self.tail + 1) % self.buffer.len;
-            self.count += 1;
-
-            if (self.receiver_queue.pop()) |node| {
-                // Item reserved for this receiver (don't increment items_available)
-                node.userdata = 1;
-                self.mutex.unlock();
-                node.wake();
-            } else {
-                // No receiver waiting, item is available for fast-path
-                self.items_available += 1;
-                self.mutex.unlock();
-            }
+            var send_op = self.asyncSend(item);
+            return (try wait(rt, &send_op)).value;
         }
 
         /// Tries to send a value without blocking.
@@ -318,13 +178,28 @@ pub fn Channel(comptime T: type) type {
                 return error.ChannelClosed;
             }
 
-            if (self.slots_available == 0) {
+            // Try direct transfer to waiting receiver first
+            while (self.receiver_queue.pop()) |node| {
+                const recv_op: *AsyncReceive(T) = @fieldParentPtr("channel_wait_node", node);
+                if (recv_op.tryClaim()) {
+                    recv_op.result = item;
+                    self.mutex.unlock();
+                    node.wake();
+                    return;
+                }
+                // CAS failed, receiver was cancelled, try next
+            }
+
+            // No receiver, try to put in buffer
+            if (self.count == self.buffer.len) {
                 self.mutex.unlock();
                 return error.ChannelFull;
             }
 
-            self.slots_available -= 1;
-            self.putItem(item);
+            self.buffer[self.tail] = item;
+            self.tail = (self.tail + 1) % self.buffer.len;
+            self.count += 1;
+            self.mutex.unlock();
         }
 
         /// Closes the channel.
@@ -345,8 +220,6 @@ pub fn Channel(comptime T: type) type {
                 self.head = 0;
                 self.tail = 0;
                 self.count = 0;
-                self.items_available = 0;
-                self.slots_available = self.buffer.len;
             }
 
             var receivers = self.receiver_queue.popAll();
@@ -354,15 +227,12 @@ pub fn Channel(comptime T: type) type {
 
             self.mutex.unlock();
 
-            // Wake all receivers (no reservation - userdata = 0)
+            // Wake all waiters - they will check closed flag
             while (receivers.pop()) |node| {
-                node.userdata = 0;
                 node.wake();
             }
 
-            // Wake all senders (no reservation - userdata = 0)
             while (senders.pop()) |node| {
-                node.userdata = 0;
                 node.wake();
             }
         }
@@ -440,6 +310,29 @@ pub fn AsyncReceive(comptime T: type) type {
             };
         }
 
+        /// Try to claim this operation via the parent SelectWaiter.
+        /// Returns true if claimed (or not in a select), false if another op won.
+        fn tryClaim(self: *Self) bool {
+            if (self.parent_wait_node) |parent| {
+                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
+                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
+                    return sw.tryClaim();
+                }
+            }
+            return true; // Not in a select, always claimable
+        }
+
+        /// Check if this operation won the select (was claimed).
+        fn didWin(self: *Self) bool {
+            if (self.parent_wait_node) |parent| {
+                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
+                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
+                    return sw.didWin();
+                }
+            }
+            return true; // Not in a select, always won
+        }
+
         fn waitNodeWake(wait_node: *WaitNode) void {
             const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
 
@@ -453,8 +346,6 @@ pub fn AsyncReceive(comptime T: type) type {
             self.channel.mutex.unlock();
 
             // Wake the parent (SelectWaiter or task wait node)
-            // Item consumption is deferred to getResult() so we don't consume
-            // before knowing if we won the select race
             if (parent) |p| {
                 p.wake();
             }
@@ -467,22 +358,20 @@ pub fn AsyncReceive(comptime T: type) type {
 
             self.channel.mutex.lock();
 
-            // Fast path: unreserved items available
-            if (self.channel.items_available > 0) {
-                self.channel.items_available -= 1;
-                self.result = self.channel.takeItem();
+            // Fast path: items in buffer
+            if (self.channel.count > 0) {
+                self.result = self.channel.takeItemAndWakeSender();
                 return false;
             }
 
             // Fast path: channel closed and empty
-            if (self.channel.closed and self.channel.count == 0) {
+            if (self.channel.closed) {
                 self.channel.mutex.unlock();
                 self.result = error.ChannelClosed;
                 return false;
             }
 
             // Slow path: enqueue and wait
-            self.channel_wait_node.userdata = 0;
             self.channel.receiver_queue.push(&self.channel_wait_node);
             self.channel.mutex.unlock();
             return true;
@@ -499,46 +388,32 @@ pub fn AsyncReceive(comptime T: type) type {
             }
 
             const was_in_queue = self.channel.receiver_queue.remove(&self.channel_wait_node);
-            if (!was_in_queue) {
-                const has_reservation = self.channel_wait_node.userdata == 1;
-                if (has_reservation) {
-                    if (self.channel.receiver_queue.pop()) |node| {
-                        node.userdata = 1;
-                        self.channel.mutex.unlock();
-                        node.wake();
-                    } else {
-                        self.channel.items_available += 1;
-                        self.channel.mutex.unlock();
-                    }
-                } else {
-                    self.channel.mutex.unlock();
-                }
-            } else {
-                self.channel.mutex.unlock();
+            self.channel.mutex.unlock();
+
+            if (was_in_queue) {
+                return true; // Removed, no wake coming
             }
-            return was_in_queue;
+
+            // Not in queue. Either we won (sender claimed us and will wake)
+            // or we were orphaned (sender popped us but CAS failed).
+            // Check if we actually won.
+            return !self.didWin();
         }
 
         /// Get the result of the receive operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
         pub fn getResult(self: *Self) Result {
+            // Result should already be set by direct transfer or fast path
             if (self.result) |r| {
                 return r;
             }
 
+            // Woken by close without result set
             self.channel.mutex.lock();
 
-            const has_reservation = self.channel_wait_node.userdata == 1;
-
-            if (has_reservation) {
-                // Sender reserved for us, just take
-                return self.channel.takeItem();
-            }
-
-            // Woken by close - try to get available item
-            if (self.channel.items_available > 0) {
-                self.channel.items_available -= 1;
-                return self.channel.takeItem();
+            // Try to get from buffer (graceful close may have items)
+            if (self.channel.count > 0) {
+                return self.channel.takeItemAndWakeSender();
             }
 
             std.debug.assert(self.channel.closed);
@@ -586,6 +461,29 @@ pub fn AsyncSend(comptime T: type) type {
             };
         }
 
+        /// Try to claim this operation via the parent SelectWaiter.
+        /// Returns true if claimed (or not in a select), false if another op won.
+        fn tryClaim(self: *Self) bool {
+            if (self.parent_wait_node) |parent| {
+                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
+                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
+                    return sw.tryClaim();
+                }
+            }
+            return true; // Not in a select, always claimable
+        }
+
+        /// Check if this operation won the select (was claimed).
+        fn didWin(self: *Self) bool {
+            if (self.parent_wait_node) |parent| {
+                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
+                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
+                    return sw.didWin();
+                }
+            }
+            return true; // Not in a select, always won
+        }
+
         fn waitNodeWake(wait_node: *WaitNode) void {
             const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
 
@@ -599,8 +497,6 @@ pub fn AsyncSend(comptime T: type) type {
             self.channel.mutex.unlock();
 
             // Wake the parent (SelectWaiter or task wait node)
-            // Item sending is deferred to getResult() so we don't send
-            // before knowing if we won the select race
             if (parent) |p| {
                 p.wake();
             }
@@ -619,16 +515,31 @@ pub fn AsyncSend(comptime T: type) type {
                 return false;
             }
 
-            // Fast path: unreserved slots available
-            if (self.channel.slots_available > 0) {
-                self.channel.slots_available -= 1;
-                self.channel.putItem(self.item);
+            // Fast path: try direct transfer to waiting receiver
+            while (self.channel.receiver_queue.pop()) |node| {
+                const recv_op: *AsyncReceive(T) = @fieldParentPtr("channel_wait_node", node);
+                if (recv_op.tryClaim()) {
+                    // Direct transfer to receiver
+                    recv_op.result = self.item;
+                    self.result = {};
+                    self.channel.mutex.unlock();
+                    node.wake();
+                    return false;
+                }
+                // CAS failed, receiver was cancelled, try next
+            }
+
+            // Fast path: space in buffer
+            if (self.channel.count < self.channel.buffer.len) {
+                self.channel.buffer[self.channel.tail] = self.item;
+                self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
+                self.channel.count += 1;
                 self.result = {};
+                self.channel.mutex.unlock();
                 return false;
             }
 
-            // Slow path: enqueue and wait
-            self.channel_wait_node.userdata = 0;
+            // Slow path: buffer full, enqueue and wait
             self.channel.sender_queue.push(&self.channel_wait_node);
             self.channel.mutex.unlock();
             return true;
@@ -645,46 +556,26 @@ pub fn AsyncSend(comptime T: type) type {
             }
 
             const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
-            if (!was_in_queue) {
-                const has_reservation = self.channel_wait_node.userdata == 1;
-                if (has_reservation) {
-                    if (self.channel.sender_queue.pop()) |node| {
-                        node.userdata = 1;
-                        self.channel.mutex.unlock();
-                        node.wake();
-                    } else {
-                        self.channel.slots_available += 1;
-                        self.channel.mutex.unlock();
-                    }
-                } else {
-                    self.channel.mutex.unlock();
-                }
-            } else {
-                self.channel.mutex.unlock();
+            self.channel.mutex.unlock();
+
+            if (was_in_queue) {
+                return true; // Removed, no wake coming
             }
-            return was_in_queue;
+
+            // Not in queue. Check if we actually won.
+            return !self.didWin();
         }
 
         /// Get the result of the send operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
         pub fn getResult(self: *Self) Result {
+            // Result should already be set by direct transfer or fast path
             if (self.result) |r| {
                 return r;
             }
 
-            self.channel.mutex.lock();
-
-            const has_reservation = self.channel_wait_node.userdata == 1;
-
-            if (has_reservation) {
-                // Receiver reserved a slot for us, just put the item
-                self.channel.putItem(self.item);
-                return {};
-            }
-
-            // Woken by close
+            // Woken by close without result set
             std.debug.assert(self.channel.closed);
-            self.channel.mutex.unlock();
             return error.ChannelClosed;
         }
     };
@@ -1103,8 +994,8 @@ test "Channel: asyncSend with select - basic" {
     const TestFn = struct {
         fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
             try rt.yield(); // Let receiver start
-            var send = ch.asyncSend(42);
-            const result = try select(rt, .{ .send = &send });
+            var send_op = ch.asyncSend(42);
+            const result = try select(rt, .{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try res;
@@ -1140,8 +1031,8 @@ test "Channel: asyncSend with select - already ready" {
     const TestFn = struct {
         fn test_ready(rt: *Runtime, ch: *Channel(u32)) !void {
             // Channel has space, send should complete immediately
-            var send = ch.asyncSend(123);
-            const result = try select(rt, .{ .send = &send });
+            var send_op = ch.asyncSend(123);
+            const result = try select(rt, .{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try res;
@@ -1169,8 +1060,8 @@ test "Channel: asyncSend with select - closed channel" {
         fn test_closed(rt: *Runtime, ch: *Channel(u32)) !void {
             ch.close(.graceful);
 
-            var send = ch.asyncSend(42);
-            const result = try select(rt, .{ .send = &send });
+            var send_op = ch.asyncSend(42);
+            const result = try select(rt, .{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try std.testing.expectError(error.ChannelClosed, res);
@@ -1215,9 +1106,9 @@ test "Channel: select on both send and receive" {
 
         fn selectTask(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32), which: *u8) !void {
             var recv = ch1.asyncReceive();
-            var send = ch2.asyncSend(99);
+            var send_op = ch2.asyncSend(99);
 
-            const result = try select(rt, .{ .recv = &recv, .send = &send });
+            const result = try select(rt, .{ .recv = &recv, .send = &send_op });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
