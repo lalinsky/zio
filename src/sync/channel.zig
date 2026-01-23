@@ -71,8 +71,12 @@ pub fn Channel(comptime T: type) type {
         closed: bool = false,
 
         /// Number of items available for immediate consumption (not reserved for woken receivers).
-        /// Invariant: available <= count
-        available: usize = 0,
+        /// Invariant: items_available <= count
+        items_available: usize = 0,
+
+        /// Number of slots available for immediate send (not reserved for woken senders).
+        /// Invariant: slots_available <= buffer.len - count
+        slots_available: usize,
 
         const Self = @This();
 
@@ -80,7 +84,7 @@ pub fn Channel(comptime T: type) type {
         /// The buffer's length determines the channel capacity.
         pub fn init(buffer: []T) Self {
             std.debug.assert(buffer.len > 0);
-            return .{ .buffer = buffer };
+            return .{ .buffer = buffer, .slots_available = buffer.len };
         }
 
         /// Checks if the channel is empty.
@@ -116,8 +120,8 @@ pub fn Channel(comptime T: type) type {
             }
 
             // Fast path: unreserved items available
-            if (self.available > 0) {
-                self.available -= 1;
+            if (self.items_available > 0) {
+                self.items_available -= 1;
                 return self.takeItem();
             }
 
@@ -142,7 +146,7 @@ pub fn Channel(comptime T: type) type {
                             self.mutex.unlock();
                             node.wake();
                         } else {
-                            self.available += 1; // Release reservation
+                            self.items_available += 1; // Release reservation
                             self.mutex.unlock();
                         }
                     }
@@ -162,8 +166,8 @@ pub fn Channel(comptime T: type) type {
             }
 
             // Woken by close - try to get an available item
-            if (self.available > 0) {
-                self.available -= 1;
+            if (self.items_available > 0) {
+                self.items_available -= 1;
                 return self.takeItem();
             }
 
@@ -180,10 +184,15 @@ pub fn Channel(comptime T: type) type {
             self.head = (self.head + 1) % self.buffer.len;
             self.count -= 1;
 
-            const sender_node = self.sender_queue.pop();
-            self.mutex.unlock();
-            if (sender_node) |node| {
+            if (self.sender_queue.pop()) |node| {
+                // Slot reserved for this sender (don't increment slots_available)
+                node.userdata = 1;
+                self.mutex.unlock();
                 node.wake();
+            } else {
+                // No sender waiting, slot is available for fast-path
+                self.slots_available += 1;
+                self.mutex.unlock();
             }
             return item;
         }
@@ -197,13 +206,13 @@ pub fn Channel(comptime T: type) type {
         pub fn tryReceive(self: *Self) !T {
             self.mutex.lock();
 
-            if (self.available == 0) {
+            if (self.items_available == 0) {
                 const is_closed = self.closed and self.count == 0;
                 self.mutex.unlock();
                 return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
             }
 
-            self.available -= 1;
+            self.items_available -= 1;
             return self.takeItem();
         }
 
@@ -216,54 +225,82 @@ pub fn Channel(comptime T: type) type {
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
             var waiter: Waiter = .init(rt);
 
-            while (true) {
-                self.mutex.lock();
+            self.mutex.lock();
 
-                if (self.closed) {
-                    self.mutex.unlock();
-                    return error.ChannelClosed;
-                }
-
-                // Fast path: space available
-                if (self.count < self.buffer.len) {
-                    self.buffer[self.tail] = item;
-                    self.tail = (self.tail + 1) % self.buffer.len;
-                    self.count += 1;
-
-                    if (self.receiver_queue.pop()) |node| {
-                        // Item reserved for this receiver (don't increment available)
-                        node.userdata = 1;
-                        self.mutex.unlock();
-                        node.wake();
-                    } else {
-                        // No receiver waiting, item is available for fast-path
-                        self.available += 1;
-                        self.mutex.unlock();
-                    }
-                    return;
-                }
-
-                // Slow path: full, need to wait
-                self.sender_queue.push(&waiter.wait_node);
+            if (self.closed) {
                 self.mutex.unlock();
+                return error.ChannelClosed;
+            }
 
-                waiter.wait(1, .allow_cancel) catch |err| {
-                    self.mutex.lock();
-                    const was_in_queue = self.sender_queue.remove(&waiter.wait_node);
-                    if (!was_in_queue) {
-                        self.mutex.unlock();
-                        waiter.wait(1, .no_cancel);
+            // Fast path: unreserved slots available
+            if (self.slots_available > 0) {
+                self.slots_available -= 1;
+                return self.putItem(item);
+            }
+
+            // Slow path: need to wait
+            waiter.wait_node.userdata = 0; // No reservation yet
+            self.sender_queue.push(&waiter.wait_node);
+            self.mutex.unlock();
+
+            waiter.wait(1, .allow_cancel) catch |err| {
+                self.mutex.lock();
+                const was_in_queue = self.sender_queue.remove(&waiter.wait_node);
+                if (!was_in_queue) {
+                    const has_reservation = waiter.wait_node.userdata == 1;
+                    self.mutex.unlock();
+                    waiter.wait(1, .no_cancel);
+
+                    if (has_reservation) {
+                        // Transfer or release reservation
                         self.mutex.lock();
-                        const next_sender = self.sender_queue.pop();
-                        self.mutex.unlock();
-                        if (next_sender) |node| {
+                        if (self.sender_queue.pop()) |node| {
+                            node.userdata = 1;
+                            self.mutex.unlock();
                             node.wake();
+                        } else {
+                            self.slots_available += 1; // Release reservation
+                            self.mutex.unlock();
                         }
-                    } else {
-                        self.mutex.unlock();
                     }
-                    return err;
-                };
+                } else {
+                    self.mutex.unlock();
+                }
+                return err;
+            };
+
+            // Woken up
+            self.mutex.lock();
+            const has_reservation = waiter.wait_node.userdata == 1;
+
+            if (has_reservation) {
+                // Receiver reserved a slot for us, just put the item
+                return self.putItem(item);
+            }
+
+            // Woken by close
+            std.debug.assert(self.closed);
+            self.mutex.unlock();
+            return error.ChannelClosed;
+        }
+
+        /// Puts an item into the buffer. Must be called with mutex held.
+        /// Unlocks the mutex before returning.
+        fn putItem(self: *Self, item: T) void {
+            std.debug.assert(self.count < self.buffer.len);
+            self.buffer[self.tail] = item;
+            self.tail = (self.tail + 1) % self.buffer.len;
+            self.count += 1;
+
+            if (self.receiver_queue.pop()) |node| {
+                // Item reserved for this receiver (don't increment items_available)
+                node.userdata = 1;
+                self.mutex.unlock();
+                node.wake();
+            } else {
+                // No receiver waiting, item is available for fast-path
+                self.items_available += 1;
+                self.mutex.unlock();
             }
         }
 
@@ -281,23 +318,13 @@ pub fn Channel(comptime T: type) type {
                 return error.ChannelClosed;
             }
 
-            if (self.count == self.buffer.len) {
+            if (self.slots_available == 0) {
                 self.mutex.unlock();
                 return error.ChannelFull;
             }
 
-            self.buffer[self.tail] = item;
-            self.tail = (self.tail + 1) % self.buffer.len;
-            self.count += 1;
-
-            if (self.receiver_queue.pop()) |node| {
-                node.userdata = 1;
-                self.mutex.unlock();
-                node.wake();
-            } else {
-                self.available += 1;
-                self.mutex.unlock();
-            }
+            self.slots_available -= 1;
+            self.putItem(item);
         }
 
         /// Closes the channel.
@@ -318,7 +345,8 @@ pub fn Channel(comptime T: type) type {
                 self.head = 0;
                 self.tail = 0;
                 self.count = 0;
-                self.available = 0;
+                self.items_available = 0;
+                self.slots_available = self.buffer.len;
             }
 
             var receivers = self.receiver_queue.popAll();
@@ -332,7 +360,9 @@ pub fn Channel(comptime T: type) type {
                 node.wake();
             }
 
+            // Wake all senders (no reservation - userdata = 0)
             while (senders.pop()) |node| {
+                node.userdata = 0;
                 node.wake();
             }
         }
@@ -438,8 +468,8 @@ pub fn AsyncReceive(comptime T: type) type {
             self.channel.mutex.lock();
 
             // Fast path: unreserved items available
-            if (self.channel.available > 0) {
-                self.channel.available -= 1;
+            if (self.channel.items_available > 0) {
+                self.channel.items_available -= 1;
                 self.result = self.channel.takeItem();
                 return false;
             }
@@ -477,7 +507,7 @@ pub fn AsyncReceive(comptime T: type) type {
                         self.channel.mutex.unlock();
                         node.wake();
                     } else {
-                        self.channel.available += 1;
+                        self.channel.items_available += 1;
                         self.channel.mutex.unlock();
                     }
                 } else {
@@ -506,8 +536,8 @@ pub fn AsyncReceive(comptime T: type) type {
             }
 
             // Woken by close - try to get available item
-            if (self.channel.available > 0) {
-                self.channel.available -= 1;
+            if (self.channel.items_available > 0) {
+                self.channel.items_available -= 1;
                 return self.channel.takeItem();
             }
 
@@ -561,32 +591,16 @@ pub fn AsyncSend(comptime T: type) type {
 
             self.channel.mutex.lock();
 
+            // Read and clear parent_wait_node while holding the lock to prevent
+            // race with cancellation (which could free/reuse the parent)
             const parent = self.parent_wait_node;
             self.parent_wait_node = null;
 
-            if (self.channel.closed) {
-                self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
-            } else if (self.channel.count < self.channel.buffer.len) {
-                self.channel.buffer[self.channel.tail] = self.item;
-                self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
-                self.channel.count += 1;
+            self.channel.mutex.unlock();
 
-                if (self.channel.receiver_queue.pop()) |node| {
-                    node.userdata = 1;
-                    self.channel.mutex.unlock();
-                    self.result = {};
-                    node.wake();
-                } else {
-                    self.channel.available += 1;
-                    self.channel.mutex.unlock();
-                    self.result = {};
-                }
-            } else {
-                self.channel.mutex.unlock();
-                unreachable;
-            }
-
+            // Wake the parent (SelectWaiter or task wait node)
+            // Item sending is deferred to getResult() so we don't send
+            // before knowing if we won the select race
             if (parent) |p| {
                 p.wake();
             }
@@ -605,24 +619,16 @@ pub fn AsyncSend(comptime T: type) type {
                 return false;
             }
 
-            if (self.channel.count < self.channel.buffer.len) {
-                self.channel.buffer[self.channel.tail] = self.item;
-                self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
-                self.channel.count += 1;
-
-                if (self.channel.receiver_queue.pop()) |node| {
-                    node.userdata = 1;
-                    self.channel.mutex.unlock();
-                    self.result = {};
-                    node.wake();
-                } else {
-                    self.channel.available += 1;
-                    self.channel.mutex.unlock();
-                    self.result = {};
-                }
+            // Fast path: unreserved slots available
+            if (self.channel.slots_available > 0) {
+                self.channel.slots_available -= 1;
+                self.channel.putItem(self.item);
+                self.result = {};
                 return false;
             }
 
+            // Slow path: enqueue and wait
+            self.channel_wait_node.userdata = 0;
             self.channel.sender_queue.push(&self.channel_wait_node);
             self.channel.mutex.unlock();
             return true;
@@ -633,9 +639,6 @@ pub fn AsyncSend(comptime T: type) type {
         pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             self.channel.mutex.lock();
 
-            // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
-            // If waitNodeWake already cleared it, parent_wait_node will be null.
-            // If it's something else, that's a bug (wrong wait_node passed).
             if (self.parent_wait_node) |parent| {
                 std.debug.assert(parent == wait_node);
                 self.parent_wait_node = null;
@@ -643,13 +646,18 @@ pub fn AsyncSend(comptime T: type) type {
 
             const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
             if (!was_in_queue) {
-                // We were already removed by a receiver who will wake us.
-                // Since we're being cancelled and won't send the item,
-                // wake another sender to use the buffer slot instead.
-                const next_sender = self.channel.sender_queue.pop();
-                self.channel.mutex.unlock();
-                if (next_sender) |node| {
-                    node.wake();
+                const has_reservation = self.channel_wait_node.userdata == 1;
+                if (has_reservation) {
+                    if (self.channel.sender_queue.pop()) |node| {
+                        node.userdata = 1;
+                        self.channel.mutex.unlock();
+                        node.wake();
+                    } else {
+                        self.channel.slots_available += 1;
+                        self.channel.mutex.unlock();
+                    }
+                } else {
+                    self.channel.mutex.unlock();
                 }
             } else {
                 self.channel.mutex.unlock();
@@ -660,7 +668,24 @@ pub fn AsyncSend(comptime T: type) type {
         /// Get the result of the send operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
         pub fn getResult(self: *Self) Result {
-            return self.result.?;
+            if (self.result) |r| {
+                return r;
+            }
+
+            self.channel.mutex.lock();
+
+            const has_reservation = self.channel_wait_node.userdata == 1;
+
+            if (has_reservation) {
+                // Receiver reserved a slot for us, just put the item
+                self.channel.putItem(self.item);
+                return {};
+            }
+
+            // Woken by close
+            std.debug.assert(self.channel.closed);
+            self.channel.mutex.unlock();
+            return error.ChannelClosed;
         }
     };
 }
