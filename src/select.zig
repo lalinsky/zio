@@ -324,7 +324,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     }
 
     // Wait for one to complete (Waiter.wait handles spurious wakeups)
-    try waiter.wait();
+    try waiter.wait(1, .allow_cancel);
 
     // O(1) winner lookup
     const winner_index = winner.load(.acquire);
@@ -379,7 +379,7 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
     }
 
     // Wait for one to complete (Waiter.wait handles spurious wakeups)
-    try waiter.wait();
+    try waiter.wait(1, .allow_cancel);
 
     return winner.load(.acquire);
 }
@@ -425,17 +425,17 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
 
     if (flags.on_cancel == .cancel_and_continue) {
         // Wait with cancellation enabled first
-        waiter.wait() catch |err| switch (err) {
+        waiter.wait(1, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {
                 // On cancellation, cancel child and wait for completion
                 fut.cancel();
-                waiter.waitUncancelable();
+                waiter.wait(1, .no_cancel);
                 return .{ .value = fut.getResult() };
             },
         };
     } else {
         // Propagate cancellation to caller (Waiter.wait handles spurious wakeups)
-        try waiter.wait();
+        try waiter.wait(1, .allow_cancel);
     }
 
     return .{ .value = fut.getResult() };

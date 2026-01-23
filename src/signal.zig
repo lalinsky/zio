@@ -287,12 +287,12 @@ pub const Signal = struct {
         self.entry.waiters.push(&waiter.wait_node);
 
         // Wait for signal, handling spurious wakeups internally
-        waiter.wait() catch |err| {
+        waiter.wait(1, .allow_cancel) catch |err| {
             // On cancellation, try to remove from queue
             const was_in_queue = self.entry.waiters.remove(&waiter.wait_node);
             if (!was_in_queue) {
                 // Already removed by signal delivery - wait for signal to complete
-                waiter.waitUncancelable();
+                waiter.wait(1, .no_cancel);
             }
             return err;
         };
@@ -332,12 +332,12 @@ pub const Signal = struct {
         timer.set(rt, timeout);
 
         // Wait for signal, handling spurious wakeups internally
-        waiter.wait() catch |err| {
+        waiter.wait(1, .allow_cancel) catch |err| {
             // On cancellation, try to remove from queue
             const was_in_queue = self.entry.waiters.remove(&waiter.wait_node);
             if (!was_in_queue) {
                 // Already removed by signal delivery - wait for signal to complete
-                waiter.waitUncancelable();
+                waiter.wait(1, .no_cancel);
             }
 
             // Check if this auto-cancel triggered, otherwise it was user cancellation

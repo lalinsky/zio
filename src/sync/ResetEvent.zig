@@ -132,12 +132,12 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     }
 
     // Wait for signal, handling spurious wakeups internally
-    waiter.wait() catch |err| {
+    waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // Removed by set() - wait for signal to complete before destroying waiter
-            waiter.waitUncancelable();
+            waiter.wait(1, .no_cancel);
         }
         return err;
     };
@@ -175,12 +175,12 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Duration) (Timeo
     }
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    waiter.timedWait(timeout) catch |err| {
+    waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // Removed by set() - wait for signal to complete before destroying waiter
-            waiter.waitUncancelable();
+            waiter.wait(1, .no_cancel);
         }
         return err;
     };

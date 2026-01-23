@@ -87,11 +87,11 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     }
 
     // Wait for lock, handling spurious wakeups internally
-    waiter.wait() catch |err| {
+    waiter.wait(1, .allow_cancel) catch |err| {
         // Cancellation - try to remove ourselves from queue
         if (!self.queue.remove(&waiter.wait_node)) {
             // Already inherited the lock - wait for signal to complete, then unlock
-            waiter.waitUncancelable();
+            waiter.wait(1, .no_cancel);
             self.unlock(runtime);
         }
         return err;

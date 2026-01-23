@@ -113,12 +113,12 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
     self.wait_queue.push(&waiter.wait_node);
 
     // Wait for signal, handling spurious wakeups internally
-    waiter.wait() catch |err| {
+    waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // We were already removed by signal() - wait for signal to complete
-            waiter.waitUncancelable();
+            waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
@@ -148,12 +148,12 @@ pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Duration) (Timeoutab
     self.wait_queue.push(&waiter.wait_node);
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    waiter.timedWait(timeout) catch |err| {
+    waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
             // Removed by signal() - wait for signal to complete before destroying waiter
-            waiter.waitUncancelable();
+            waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {

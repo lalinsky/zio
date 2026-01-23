@@ -24,21 +24,21 @@ pub const Timeoutable = error{
 /// Stack-allocated waiter for async operations.
 ///
 /// This provides a common pattern for waiting with spurious wakeup handling.
-/// Tracks a signaled state that is atomically set before waking the task.
+/// Tracks a signal count that is atomically incremented before waking the task.
 ///
 /// For sync primitives, the wait_node is used in wait queues.
 /// For I/O operations, only the signaled field is used.
 ///
 /// Usage:
 /// ```zig
-/// var waiter: Waiter = .init(task);
+/// var waiter: Waiter = .init(runtime);
 /// // Setup operation (e.g., push to queue, submit I/O)
-/// try waiter.wait();
+/// try waiter.wait(1, .allow_cancel);
 /// ```
 pub const Waiter = struct {
     wait_node: WaitNode,
     task: *AnyTask,
-    signaled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    signaled: std.atomic.Value(u32) = .init(0),
 
     const vtable: WaitNode.VTable = .{
         .wake = wakeImpl,
@@ -48,14 +48,13 @@ pub const Waiter = struct {
         return .{
             .wait_node = .{ .vtable = &vtable },
             .task = runtime.getCurrentTask(),
-            .signaled = std.atomic.Value(bool).init(false),
         };
     }
 
     /// Signal this waiter and wake the task.
-    /// Must be called by the signaler after removing from queue or completing I/O.
+    /// Increments the signal count and wakes the task.
     pub fn signal(self: *Waiter) void {
-        self.signaled.store(true, .release);
+        _ = self.signaled.fetchAdd(1, .release);
         self.task.wake();
     }
 
@@ -64,8 +63,8 @@ pub const Waiter = struct {
         self.signal();
     }
 
-    /// Wait for the signal, handling spurious wakeups internally.
-    pub fn wait(self: *Waiter) Cancelable!void {
+    /// Wait for at least `expected` signals, handling spurious wakeups internally.
+    pub fn wait(self: *Waiter, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const task = self.task;
 
         while (true) {
@@ -73,50 +72,32 @@ pub const Waiter = struct {
 
             // Check after setting state to handle the race where
             // signal happens while we're in .ready state (e.g., after spurious wakeup).
-            if (self.signaled.load(.acquire)) {
+            if (self.signaled.load(.acquire) >= expected) {
                 task.state.store(.ready, .release);
                 return;
             }
 
             // Get executor fresh each time - may change after cancel/reschedule
             const executor = task.getExecutor();
-            try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+            if (cancel_mode == .allow_cancel) {
+                try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+            } else {
+                executor.yield(.preparing_to_wait, .waiting, .no_cancel);
+            }
 
-            // Check completion - if not signaled, it was a spurious wakeup
-            if (self.signaled.load(.acquire)) {
+            // Check completion - if not enough signals, it was a spurious wakeup
+            if (self.signaled.load(.acquire) >= expected) {
                 return;
             }
             // Spurious wakeup - loop and wait again
         }
     }
 
-    /// Wait for the signal with cancellation shielded.
-    /// Used when waiting for a signal that is guaranteed to arrive (e.g., after being removed from queue).
-    pub fn waitUncancelable(self: *Waiter) void {
-        const task = self.task;
-
-        while (true) {
-            task.state.store(.preparing_to_wait, .release);
-
-            if (self.signaled.load(.acquire)) {
-                task.state.store(.ready, .release);
-                return;
-            }
-
-            const executor = task.getExecutor();
-            executor.yield(.preparing_to_wait, .waiting, .no_cancel);
-
-            if (self.signaled.load(.acquire)) {
-                return;
-            }
-        }
-    }
-
-    /// Wait for the signal with a timeout.
-    /// Returns error.Timeout if the timeout expires before signal() is called.
+    /// Wait for at least `expected` signals with a timeout.
+    /// Returns error.Timeout if the timeout expires before enough signals arrive.
     /// The caller must check their condition to determine if timeout actually won
     /// (e.g., by trying to remove from a wait queue).
-    pub fn timedWait(self: *Waiter, timeout: Duration) (Timeoutable || Cancelable)!void {
+    pub fn timedWait(self: *Waiter, expected: u32, timeout: Duration, comptime cancel_mode: Executor.YieldCancelMode) !void {
         var timer: ev.Timer = .init(.{ .duration = .zero });
         timer.c.userdata = self;
         timer.c.callback = callback;
@@ -124,7 +105,7 @@ pub const Waiter = struct {
         self.task.getExecutor().loop.setTimer(&timer, timeout);
         defer timer.c.loop.?.clearTimer(&timer);
 
-        try self.wait();
+        return self.wait(expected, cancel_mode);
     }
 
     /// Callback for ev.Completion - signals this waiter.
@@ -149,11 +130,11 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
 
     // Submit to the event loop and wait for completion
     waiter.task.getExecutor().loop.add(c);
-    waiter.wait() catch |err| switch (err) {
+    waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
             // On cancellation, cancel the I/O and wait for completion
             waiter.task.getExecutor().loop.cancel(c);
-            waiter.waitUncancelable();
+            waiter.wait(1, .no_cancel);
 
             // Check if I/O was actually canceled
             if (c.err) |io_err| {

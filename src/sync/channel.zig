@@ -133,14 +133,14 @@ pub fn Channel(comptime T: type) type {
                 self.mutex.unlock();
 
                 // Wait for signal, handling spurious wakeups internally
-                waiter.wait() catch |err| {
+                waiter.wait(1, .allow_cancel) catch |err| {
                     // On cancellation, try to remove from queue
                     self.mutex.lock();
                     const was_in_queue = self.receiver_queue.remove(&waiter.wait_node);
                     if (!was_in_queue) {
                         // Removed by sender - wait for signal to complete before destroying waiter
                         self.mutex.unlock();
-                        waiter.waitUncancelable();
+                        waiter.wait(1, .no_cancel);
                         // Since we're being cancelled and won't consume the item,
                         // wake another receiver to consume it instead.
                         self.mutex.lock();
@@ -226,14 +226,14 @@ pub fn Channel(comptime T: type) type {
                 self.mutex.unlock();
 
                 // Wait for signal, handling spurious wakeups internally
-                waiter.wait() catch |err| {
+                waiter.wait(1, .allow_cancel) catch |err| {
                     // On cancellation, try to remove from queue
                     self.mutex.lock();
                     const was_in_queue = self.sender_queue.remove(&waiter.wait_node);
                     if (!was_in_queue) {
                         // Removed by receiver - wait for signal to complete before destroying waiter
                         self.mutex.unlock();
-                        waiter.waitUncancelable();
+                        waiter.wait(1, .no_cancel);
                         // Since we're being cancelled and won't send the item,
                         // wake another sender to use the buffer slot instead.
                         self.mutex.lock();

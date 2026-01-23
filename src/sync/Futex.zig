@@ -109,12 +109,12 @@ pub fn wait(runtime: *Runtime, ptr: *const u32, expect: u32) Cancelable!void {
     bucket.mutex.unlock();
 
     // Wait for signal, handling spurious wakeups internally
-    futex_waiter.waiter.wait() catch |err| {
+    futex_waiter.waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = removeFromBucket(bucket, &futex_waiter);
         if (!was_in_queue) {
             // Removed by wake() - wait for signal to complete before destroying waiter
-            futex_waiter.waiter.waitUncancelable();
+            futex_waiter.waiter.wait(1, .no_cancel);
         }
         return err;
     };
@@ -164,12 +164,12 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Durat
     bucket.mutex.unlock();
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    futex_waiter.waiter.timedWait(timeout) catch |err| {
+    futex_waiter.waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = removeFromBucket(bucket, &futex_waiter);
         if (!was_in_queue) {
             // Removed by wake() - wait for signal to complete before destroying waiter
-            futex_waiter.waiter.waitUncancelable();
+            futex_waiter.waiter.wait(1, .no_cancel);
         }
         return err;
     };
