@@ -9,6 +9,9 @@
 
 const std = @import("std");
 const os = @import("os/root.zig");
+const ev = @import("ev/root.zig");
+const Runtime = @import("runtime.zig").Runtime;
+const WaitNode = @import("runtime/WaitNode.zig");
 
 pub const Clock = enum {
     monotonic,
@@ -332,6 +335,50 @@ pub const Timeout = union(enum) {
     none,
     duration: Duration,
     deadline: Timestamp,
+
+    // Future protocol implementation for use with select()
+
+    pub const Result = void;
+
+    pub const WaitContext = struct {
+        timer: ev.Timer = ev.Timer.init(.{ .duration = .zero }),
+        wait_node: ?*WaitNode = null,
+    };
+
+    pub fn asyncWait(self: *const Timeout, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+        // Timeout.none means wait forever - never completes
+        if (self.* == .none) {
+            return true;
+        }
+
+        ctx.timer = ev.Timer.init(self.*);
+        ctx.wait_node = wait_node;
+        ctx.timer.c.userdata = ctx;
+        ctx.timer.c.callback = timerCallback;
+
+        const executor = rt.getCurrentTask().getExecutor();
+        executor.loop.add(&ctx.timer.c);
+        return true;
+    }
+
+    fn timerCallback(_: *ev.Loop, c: *ev.Completion) void {
+        const ctx: *WaitContext = @ptrCast(@alignCast(c.userdata.?));
+        if (ctx.wait_node) |node| {
+            node.wake();
+        }
+    }
+
+    pub fn asyncCancelWait(self: *const Timeout, _: *Runtime, _: *WaitNode, ctx: *WaitContext) bool {
+        _ = self;
+        const loop = ctx.timer.c.loop orelse return true;
+        loop.clearTimer(&ctx.timer);
+        return true; // Timer operations don't have values to re-add if we lost the race
+    }
+
+    pub fn getResult(self: *const Timeout, ctx: *WaitContext) void {
+        _ = self;
+        _ = ctx;
+    }
 };
 
 /// A monotonic, high performance stopwatch for measuring elapsed time.
@@ -512,4 +559,33 @@ test "Stopwatch: start, read, lap, reset" {
     _ = timer.lap();
     timer.reset();
     _ = timer.read();
+}
+
+test "Timeout future: timeout wins select" {
+    const Channel = @import("sync/channel.zig").Channel;
+    const Group = @import("runtime/group.zig").Group;
+    const select = @import("select.zig").select;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn run(rt: *Runtime, ch: *Channel(u32)) !void {
+            const result = try select(rt, .{
+                .recv = ch.asyncReceive(),
+                .timeout = Timeout{ .duration = .fromMilliseconds(10) },
+            });
+            switch (result) {
+                .recv => try std.testing.expect(false),
+                .timeout => {},
+            }
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+    try group.spawn(runtime, TestFn.run, .{ runtime, &channel });
+    try group.wait(runtime);
 }
