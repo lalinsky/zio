@@ -131,10 +131,11 @@ fn WaitContextsType(comptime futures_type: type) type {
     inline for (fields) |field| {
         const WaitCtx = FutureWaitContext(field.type);
         if (WaitCtx != void) {
+            const default_value: WaitCtx = .{};
             const ctx_field = std.builtin.Type.StructField{
                 .name = field.name,
                 .type = WaitCtx,
-                .default_value_ptr = null,
+                .default_value_ptr = @ptrCast(&default_value),
                 .is_comptime = false,
                 .alignment = @alignOf(WaitCtx),
             };
@@ -302,7 +303,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 
     // Allocate WaitContext struct on stack for futures that need per-wait state
     const ContextsType = WaitContextsType(S);
-    var contexts: ContextsType = undefined;
+    var contexts: ContextsType = .{};
 
     // Create waiter structures on the stack
     var select_waiters: [fields.len]SelectWaiter = undefined;
@@ -454,7 +455,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
 
     // Allocate WaitContext if needed
     const WaitCtx = FutureWaitContext(@TypeOf(future));
-    var context: WaitCtx = undefined;
+    var context: WaitCtx = if (WaitCtx == void) {} else .{};
     const has_context = comptime (WaitCtx != void);
 
     // Fast path: check if already complete

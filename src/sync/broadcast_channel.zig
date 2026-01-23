@@ -335,81 +335,34 @@ pub fn BroadcastChannel(comptime T: type) type {
 /// channel.subscribe(&consumer1);
 /// channel.subscribe(&consumer2);
 ///
-/// var recv1 = channel.asyncReceive(&consumer1);
-/// var recv2 = other_channel.asyncReceive(&consumer2);
-/// const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
+/// const result = try select(rt, .{
+///     .ch1 = channel.asyncReceive(&consumer1),
+///     .ch2 = other_channel.asyncReceive(&consumer2),
+/// });
 /// ```
 pub fn AsyncReceive(comptime T: type) type {
     return struct {
-        channel_wait_node: WaitNode,
-        parent_wait_node: ?*WaitNode = null,
         channel: *BroadcastChannel(T),
         consumer: *BroadcastChannel(T).Consumer,
-        result: ?Result = null,
 
         const Self = @This();
 
         pub const Result = error{ Closed, Lagged }!T;
 
-        const wait_node_vtable = WaitNode.VTable{
-            .wake = waitNodeWake,
+        pub const WaitContext = struct {
+            result: ?Result = null,
         };
 
         fn init(channel: *BroadcastChannel(T), consumer: *BroadcastChannel(T).Consumer) Self {
             return .{
-                .channel_wait_node = .{
-                    .vtable = &wait_node_vtable,
-                },
                 .channel = channel,
                 .consumer = consumer,
             };
         }
 
-        fn waitNodeWake(wait_node: *WaitNode) void {
-            const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
-
-            // Perform the receive operation under lock
-            self.channel.mutex.lock();
-
-            // Read and clear parent_wait_node while holding the lock to prevent
-            // race with cancellation (which could free/reuse the parent)
-            const parent = self.parent_wait_node;
-            self.parent_wait_node = null;
-
-            // Use wrapping subtraction to handle counter overflow correctly
-            const unread = self.channel.write_pos -% self.consumer.read_pos;
-
-            // Check if we've been lapped
-            if (unread > self.channel.buffer.len) {
-                self.consumer.read_pos = self.channel.write_pos -% self.channel.buffer.len;
-                self.channel.mutex.unlock();
-                self.result = error.Lagged;
-            } else if (unread > 0) {
-                // Take item from buffer
-                const item = self.channel.buffer[self.consumer.read_pos % self.channel.buffer.len];
-                self.consumer.read_pos +%= 1;
-                self.channel.mutex.unlock();
-                self.result = item;
-            } else if (self.channel.closed) {
-                self.channel.mutex.unlock();
-                self.result = error.Closed;
-            } else {
-                // Should never happen - woken but nothing available and not closed
-                self.channel.mutex.unlock();
-                unreachable;
-            }
-
-            // Wake the parent (SelectWaiter or task wait node)
-            if (parent) |p| {
-                p.wake();
-            }
-        }
-
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
-            self.parent_wait_node = wait_node;
-
+        pub fn asyncWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
             self.channel.mutex.lock();
 
             // Use wrapping subtraction to handle counter overflow correctly
@@ -419,7 +372,7 @@ pub fn AsyncReceive(comptime T: type) type {
             if (unread > self.channel.buffer.len) {
                 self.consumer.read_pos = self.channel.write_pos -% self.channel.buffer.len;
                 self.channel.mutex.unlock();
-                self.result = error.Lagged;
+                ctx.result = error.Lagged;
                 return false; // Already ready (with error)
             }
 
@@ -428,56 +381,69 @@ pub fn AsyncReceive(comptime T: type) type {
                 const item = self.channel.buffer[self.consumer.read_pos % self.channel.buffer.len];
                 self.consumer.read_pos +%= 1;
                 self.channel.mutex.unlock();
-                self.result = item;
+                ctx.result = item;
                 return false; // Already ready
             }
 
             // Fast path: channel closed
             if (self.channel.closed) {
                 self.channel.mutex.unlock();
-                self.result = error.Closed;
+                ctx.result = error.Closed;
                 return false; // Already ready (with error)
             }
 
             // Slow path: enqueue and wait
-            self.channel.wait_queue.push(&self.channel_wait_node);
+            self.channel.wait_queue.push(wait_node);
             self.channel.mutex.unlock();
             return true; // Need to wait
         }
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncCancelWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            _ = ctx;
             self.channel.mutex.lock();
-
-            // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
-            // If waitNodeWake already cleared it, parent_wait_node will be null.
-            // If it's something else, that's a bug (wrong wait_node passed).
-            if (self.parent_wait_node) |parent| {
-                std.debug.assert(parent == wait_node);
-                self.parent_wait_node = null;
-            }
-
-            const was_in_queue = self.channel.wait_queue.remove(&self.channel_wait_node);
-            if (!was_in_queue) {
-                // We were already removed by a sender who will wake us.
-                // Since we're being cancelled and won't consume the message,
-                // wake another consumer to receive it instead.
-                const next_consumer = self.channel.wait_queue.pop();
-                self.channel.mutex.unlock();
-                if (next_consumer) |node| {
-                    node.wake();
-                }
-            } else {
-                self.channel.mutex.unlock();
-            }
+            const was_in_queue = self.channel.wait_queue.remove(wait_node);
+            self.channel.mutex.unlock();
             return was_in_queue;
         }
 
         /// Get the result of the receive operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
-        pub fn getResult(self: *Self) Result {
-            return self.result.?;
+        pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
+            // Fast path: result already set
+            if (ctx.result) |r| {
+                return r;
+            }
+
+            // Slow path: woken from wait, read from buffer now
+            self.channel.mutex.lock();
+
+            const unread = self.channel.write_pos -% self.consumer.read_pos;
+
+            // Check if we've been lapped
+            if (unread > self.channel.buffer.len) {
+                self.consumer.read_pos = self.channel.write_pos -% self.channel.buffer.len;
+                self.channel.mutex.unlock();
+                return error.Lagged;
+            }
+
+            // Message available
+            if (unread > 0) {
+                const item = self.channel.buffer[self.consumer.read_pos % self.channel.buffer.len];
+                self.consumer.read_pos +%= 1;
+                self.channel.mutex.unlock();
+                return item;
+            }
+
+            // Channel closed
+            if (self.channel.closed) {
+                self.channel.mutex.unlock();
+                return error.Closed;
+            }
+
+            // Should never happen - woken but nothing available and not closed
+            unreachable;
         }
     };
 }
@@ -896,8 +862,7 @@ test "BroadcastChannel: asyncReceive with select - basic" {
             defer ch.unsubscribe(consumer);
             _ = try b.wait(rt);
 
-            var recv = ch.asyncReceive(consumer);
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(rt, .{ .recv = ch.asyncReceive(consumer) });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
