@@ -6,8 +6,9 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
+const SelectWaiter = @import("../select.zig").SelectWaiter;
 const select = @import("../select.zig").select;
-const Waiter = @import("common.zig").Waiter;
+const Waiter = @import("../common.zig").Waiter;
 
 /// Specifies how a channel should be closed.
 pub const CloseMode = enum {
@@ -74,8 +75,8 @@ pub fn Channel(comptime T: type) type {
 
         /// Initializes a channel with the provided buffer.
         /// The buffer's length determines the channel capacity.
+        /// Use an empty buffer for an unbuffered (synchronous) channel.
         pub fn init(buffer: []T) Self {
-            std.debug.assert(buffer.len > 0);
             return .{ .buffer = buffer };
         }
 
@@ -101,91 +102,86 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
-            const task = rt.getCurrentTask();
-            const executor = task.getExecutor();
+            const recv = self.asyncReceive();
+            var ctx: AsyncReceive(T).WaitContext = .{};
+            var waiter = Waiter.init(rt);
 
-            // Stack-allocated waiter - separates operation wait node from task wait node
-            var waiter: Waiter = .init(&task.awaitable);
-
-            while (true) {
-                self.mutex.lock();
-
-                // Check if closed and empty
-                if (self.closed and self.count == 0) {
-                    self.mutex.unlock();
-                    return error.ChannelClosed;
-                }
-
-                // Fast path: item available
-                if (self.count > 0) {
-                    const item = self.buffer[self.head];
-                    self.head = (self.head + 1) % self.buffer.len;
-                    self.count -= 1;
-
-                    // Wake one sender if any
-                    const sender_node = self.sender_queue.pop();
-                    self.mutex.unlock();
-                    if (sender_node) |node| {
-                        node.wake();
-                    }
-                    return item;
-                }
-
-                // Slow path: empty, need to wait
-                task.state.store(.preparing_to_wait, .release);
-                self.receiver_queue.push(&waiter.wait_node);
-                self.mutex.unlock();
-
-                // Yield with cancellation support
-                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-                    // Cancelled - try to remove from queue
-                    self.mutex.lock();
-                    const was_in_queue = self.receiver_queue.remove(&waiter.wait_node);
-                    if (!was_in_queue) {
-                        // We were already removed by a sender who will wake us.
-                        // Since we're being cancelled and won't consume the item,
-                        // wake another receiver to consume it instead.
-                        const next_receiver = self.receiver_queue.pop();
-                        self.mutex.unlock();
-                        if (next_receiver) |node| {
-                            node.wake();
-                        }
-                    } else {
-                        self.mutex.unlock();
-                    }
-                    return err;
-                };
-
-                // Woken up, loop to try again
+            if (!recv.asyncWait(rt, &waiter.wait_node, &ctx)) {
+                return recv.getResult(&ctx);
             }
+
+            waiter.wait(1, .allow_cancel) catch |err| {
+                const was_removed = recv.asyncCancelWait(rt, &waiter.wait_node, &ctx);
+                if (!was_removed) {
+                    // Sender claimed us, wait for wake to complete
+                    waiter.wait(1, .no_cancel);
+                    // Return result (operation completed despite cancel)
+                    return recv.getResult(&ctx);
+                }
+                return err;
+            };
+
+            return recv.getResult(&ctx);
         }
 
         /// Tries to receive a value without blocking.
         ///
         /// Returns immediately with a value if available, otherwise returns an error.
         ///
-        /// Returns `error.ChannelEmpty` if the channel is empty.
+        /// Returns `error.ChannelEmpty` if the channel is empty and no sender waiting.
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         pub fn tryReceive(self: *Self) !T {
             self.mutex.lock();
 
-            if (self.count == 0) {
-                const is_closed = self.closed;
-                self.mutex.unlock();
-                return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
+            // Fast path: items in buffer
+            if (self.count > 0) {
+                return self.takeItemAndWakeSender();
             }
+
+            // Try direct transfer from waiting sender (for unbuffered channels)
+            while (self.sender_queue.pop()) |node| {
+                if (SelectWaiter.tryClaim(node)) {
+                    const send_ctx: *AsyncSend(T).WaitContext = @ptrFromInt(node.userdata);
+                    const item = send_ctx.self_ptr.item;
+                    send_ctx.succeeded = true;
+                    self.mutex.unlock();
+                    node.wake();
+                    return item;
+                }
+                // CAS failed, sender was cancelled, try next
+            }
+
+            const is_closed = self.closed;
+            self.mutex.unlock();
+            return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
+        }
+
+        /// Takes an item from buffer and wakes a waiting sender if any.
+        /// Must be called with mutex held. Unlocks mutex before returning.
+        fn takeItemAndWakeSender(self: *Self) T {
+            std.debug.assert(self.count > 0);
 
             const item = self.buffer[self.head];
             self.head = (self.head + 1) % self.buffer.len;
             self.count -= 1;
 
-            // Pop sender node while holding lock, wake after unlock
-            const sender_node = self.sender_queue.pop();
-            self.mutex.unlock();
-            if (sender_node) |node| {
-                node.wake();
+            // If sender waiting, claim it and have it put its item in buffer
+            while (self.sender_queue.pop()) |node| {
+                if (SelectWaiter.tryClaim(node)) {
+                    const send_ctx: *AsyncSend(T).WaitContext = @ptrFromInt(node.userdata);
+                    // Put sender's item in buffer (direct transfer to buffer)
+                    self.buffer[self.tail] = send_ctx.self_ptr.item;
+                    self.tail = (self.tail + 1) % self.buffer.len;
+                    self.count += 1;
+                    send_ctx.succeeded = true;
+                    self.mutex.unlock();
+                    node.wake();
+                    return item;
+                }
+                // CAS failed, sender was cancelled, try next
             }
 
+            self.mutex.unlock();
             return item;
         }
 
@@ -196,62 +192,26 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            const task = rt.getCurrentTask();
-            const executor = task.getExecutor();
+            const send_op = self.asyncSend(item);
+            var ctx: AsyncSend(T).WaitContext = .{};
+            var waiter = Waiter.init(rt);
 
-            // Stack-allocated waiter - separates operation wait node from task wait node
-            var waiter: Waiter = .init(&task.awaitable);
-
-            while (true) {
-                self.mutex.lock();
-
-                if (self.closed) {
-                    self.mutex.unlock();
-                    return error.ChannelClosed;
-                }
-
-                // Fast path: space available
-                if (self.count < self.buffer.len) {
-                    self.buffer[self.tail] = item;
-                    self.tail = (self.tail + 1) % self.buffer.len;
-                    self.count += 1;
-
-                    // Wake one receiver if any
-                    const receiver_node = self.receiver_queue.pop();
-                    self.mutex.unlock();
-                    if (receiver_node) |node| {
-                        node.wake();
-                    }
-                    return;
-                }
-
-                // Slow path: full, need to wait
-                task.state.store(.preparing_to_wait, .release);
-                self.sender_queue.push(&waiter.wait_node);
-                self.mutex.unlock();
-
-                // Yield with cancellation support
-                executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-                    // Cancelled - try to remove from queue
-                    self.mutex.lock();
-                    const was_in_queue = self.sender_queue.remove(&waiter.wait_node);
-                    if (!was_in_queue) {
-                        // We were already removed by a receiver who will wake us.
-                        // Since we're being cancelled and won't send the item,
-                        // wake another sender to use the buffer slot instead.
-                        const next_sender = self.sender_queue.pop();
-                        self.mutex.unlock();
-                        if (next_sender) |node| {
-                            node.wake();
-                        }
-                    } else {
-                        self.mutex.unlock();
-                    }
-                    return err;
-                };
-
-                // Woken up, loop to check condition and try again
+            if (!send_op.asyncWait(rt, &waiter.wait_node, &ctx)) {
+                return send_op.getResult(&ctx);
             }
+
+            waiter.wait(1, .allow_cancel) catch |err| {
+                const was_removed = send_op.asyncCancelWait(rt, &waiter.wait_node, &ctx);
+                if (!was_removed) {
+                    // Receiver claimed us, wait for wake to complete
+                    waiter.wait(1, .no_cancel);
+                    // Return result (operation completed despite cancel)
+                    return send_op.getResult(&ctx);
+                }
+                return err;
+            };
+
+            return send_op.getResult(&ctx);
         }
 
         /// Tries to send a value without blocking.
@@ -268,6 +228,19 @@ pub fn Channel(comptime T: type) type {
                 return error.ChannelClosed;
             }
 
+            // Try direct transfer to waiting receiver first
+            while (self.receiver_queue.pop()) |node| {
+                if (SelectWaiter.tryClaim(node)) {
+                    const recv_ctx: *AsyncReceive(T).WaitContext = @ptrFromInt(node.userdata);
+                    recv_ctx.result = item;
+                    self.mutex.unlock();
+                    node.wake();
+                    return;
+                }
+                // CAS failed, receiver was cancelled, try next
+            }
+
+            // No receiver, try to put in buffer
             if (self.count == self.buffer.len) {
                 self.mutex.unlock();
                 return error.ChannelFull;
@@ -276,13 +249,7 @@ pub fn Channel(comptime T: type) type {
             self.buffer[self.tail] = item;
             self.tail = (self.tail + 1) % self.buffer.len;
             self.count += 1;
-
-            // Pop receiver node while holding lock, wake after unlock
-            const receiver_node = self.receiver_queue.pop();
             self.mutex.unlock();
-            if (receiver_node) |node| {
-                node.wake();
-            }
         }
 
         /// Closes the channel.
@@ -300,24 +267,21 @@ pub fn Channel(comptime T: type) type {
             self.closed = true;
 
             if (mode == .immediate) {
-                // Clear the buffer
                 self.head = 0;
                 self.tail = 0;
                 self.count = 0;
             }
 
-            // Swap out the wait queues while holding the lock
             var receivers = self.receiver_queue.popAll();
             var senders = self.sender_queue.popAll();
 
             self.mutex.unlock();
 
-            // Wake all receivers so they can see the channel is closed
+            // Wake all waiters - they will check closed flag
             while (receivers.pop()) |node| {
                 node.wake();
             }
 
-            // Wake all senders so they can see the channel is closed
             while (senders.pop()) |node| {
                 node.wake();
             }
@@ -374,136 +338,95 @@ pub fn Channel(comptime T: type) type {
 /// ```
 pub fn AsyncReceive(comptime T: type) type {
     return struct {
-        channel_wait_node: WaitNode,
-        parent_wait_node: ?*WaitNode = null,
         channel: *Channel(T),
-        result: ?Result = null,
 
         const Self = @This();
 
         pub const Result = error{ChannelClosed}!T;
 
-        const wait_node_vtable = WaitNode.VTable{
-            .wake = waitNodeWake,
+        pub const WaitContext = struct {
+            result: ?Result = null,
         };
 
         fn init(channel: *Channel(T)) Self {
-            return .{
-                .channel_wait_node = .{
-                    .vtable = &wait_node_vtable,
-                },
-                .channel = channel,
-            };
-        }
-
-        fn waitNodeWake(wait_node: *WaitNode) void {
-            const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
-
-            // Perform the receive operation under lock
-            self.channel.mutex.lock();
-
-            // Read and clear parent_wait_node while holding the lock to prevent
-            // race with cancellation (which could free/reuse the parent)
-            const parent = self.parent_wait_node;
-            self.parent_wait_node = null;
-
-            if (self.channel.count > 0) {
-                // Take item from buffer
-                const item = self.channel.buffer[self.channel.head];
-                self.channel.head = (self.channel.head + 1) % self.channel.buffer.len;
-                self.channel.count -= 1;
-
-                // Wake one sender if any
-                const sender_node = self.channel.sender_queue.pop();
-                self.channel.mutex.unlock();
-
-                self.result = item;
-                if (sender_node) |node| {
-                    node.wake();
-                }
-            } else if (self.channel.closed) {
-                self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
-            } else {
-                // Should never happen - woken but nothing available and not closed
-                self.channel.mutex.unlock();
-                unreachable;
-            }
-
-            // Wake the parent (SelectWaiter or task wait node)
-            if (parent) |p| {
-                p.wake();
-            }
+            return .{ .channel = channel };
         }
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
-            self.parent_wait_node = wait_node;
-
+        pub fn asyncWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
             self.channel.mutex.lock();
 
-            // Fast path: item available
+            // Fast path: items in buffer
             if (self.channel.count > 0) {
-                const item = self.channel.buffer[self.channel.head];
-                self.channel.head = (self.channel.head + 1) % self.channel.buffer.len;
-                self.channel.count -= 1;
-
-                // Wake one sender if any
-                const sender_node = self.channel.sender_queue.pop();
-                self.channel.mutex.unlock();
-
-                self.result = item;
-                if (sender_node) |node| {
-                    node.wake();
-                }
-                return false; // Already ready
+                ctx.result = self.channel.takeItemAndWakeSender();
+                return false;
             }
 
-            // Fast path: channel closed
+            // Fast path: try direct transfer from waiting sender (for unbuffered channels)
+            while (self.channel.sender_queue.pop()) |node| {
+                if (SelectWaiter.tryClaim(node)) {
+                    const send_ctx: *AsyncSend(T).WaitContext = @ptrFromInt(node.userdata);
+                    // Direct transfer from sender
+                    ctx.result = send_ctx.self_ptr.item;
+                    send_ctx.succeeded = true;
+                    self.channel.mutex.unlock();
+                    node.wake();
+                    return false;
+                }
+                // CAS failed, sender was cancelled, try next
+            }
+
+            // Fast path: channel closed and empty
             if (self.channel.closed) {
                 self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
-                return false; // Already ready (with error)
+                ctx.result = error.ChannelClosed;
+                return false;
             }
 
             // Slow path: enqueue and wait
-            self.channel.receiver_queue.push(&self.channel_wait_node);
+            wait_node.userdata = @intFromPtr(ctx);
+            self.channel.receiver_queue.push(wait_node);
             self.channel.mutex.unlock();
-            return true; // Need to wait
+            return true;
         }
 
         /// Cancel a pending wait operation.
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
+        /// Returns true if removed, false if already removed by completion (wake in-flight).
+        pub fn asyncCancelWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            _ = ctx;
             self.channel.mutex.lock();
+            const was_in_queue = self.channel.receiver_queue.remove(wait_node);
+            self.channel.mutex.unlock();
 
-            // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
-            // If waitNodeWake already cleared it, parent_wait_node will be null.
-            // If it's something else, that's a bug (wrong wait_node passed).
-            if (self.parent_wait_node) |parent| {
-                std.debug.assert(parent == wait_node);
-                self.parent_wait_node = null;
+            if (was_in_queue) {
+                return true; // Removed, no wake coming
             }
 
-            const was_in_queue = self.channel.receiver_queue.remove(&self.channel_wait_node);
-            if (!was_in_queue) {
-                // We were already removed by a sender who will wake us.
-                // Since we're being cancelled and won't consume the item,
-                // wake another receiver to consume it instead.
-                const next_receiver = self.channel.receiver_queue.pop();
-                self.channel.mutex.unlock();
-                if (next_receiver) |node| {
-                    node.wake();
-                }
-            } else {
-                self.channel.mutex.unlock();
-            }
+            // Not in queue - sender claimed us. Check if we won (for select)
+            // or if wake is in-flight.
+            return !SelectWaiter.didWin(wait_node);
         }
 
         /// Get the result of the receive operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
-        pub fn getResult(self: *Self) Result {
-            return self.result.?;
+        pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
+            // Result should already be set by direct transfer or fast path
+            if (ctx.result) |r| {
+                return r;
+            }
+
+            // Woken by close without result set
+            self.channel.mutex.lock();
+
+            // Try to get from buffer (graceful close may have items)
+            if (self.channel.count > 0) {
+                return self.channel.takeItemAndWakeSender();
+            }
+
+            std.debug.assert(self.channel.closed);
+            self.channel.mutex.unlock();
+            return error.ChannelClosed;
         }
     };
 }
@@ -522,138 +445,93 @@ pub fn AsyncReceive(comptime T: type) type {
 /// ```
 pub fn AsyncSend(comptime T: type) type {
     return struct {
-        channel_wait_node: WaitNode,
-        parent_wait_node: ?*WaitNode = null,
         channel: *Channel(T),
         item: T,
-        result: ?Result = null,
 
         const Self = @This();
 
         pub const Result = error{ChannelClosed}!void;
 
-        const wait_node_vtable = WaitNode.VTable{
-            .wake = waitNodeWake,
+        pub const WaitContext = struct {
+            self_ptr: *const Self = undefined,
+            succeeded: bool = false,
         };
 
         fn init(channel: *Channel(T), item: T) Self {
             return .{
-                .channel_wait_node = .{
-                    .vtable = &wait_node_vtable,
-                },
                 .channel = channel,
                 .item = item,
             };
         }
 
-        fn waitNodeWake(wait_node: *WaitNode) void {
-            const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
-
-            // Perform the send operation under lock
-            self.channel.mutex.lock();
-
-            // Read and clear parent_wait_node while holding the lock to prevent
-            // race with cancellation (which could free/reuse the parent)
-            const parent = self.parent_wait_node;
-            self.parent_wait_node = null;
-
-            if (self.channel.closed) {
-                self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
-            } else if (self.channel.count < self.channel.buffer.len) {
-                // Space available - perform send
-                self.channel.buffer[self.channel.tail] = self.item;
-                self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
-                self.channel.count += 1;
-
-                // Wake one receiver if any
-                const receiver_node = self.channel.receiver_queue.pop();
-                self.channel.mutex.unlock();
-
-                self.result = {};
-                if (receiver_node) |node| {
-                    node.wake();
-                }
-            } else {
-                // Should never happen - woken but no space and not closed
-                self.channel.mutex.unlock();
-                unreachable;
-            }
-
-            // Wake the parent (SelectWaiter or task wait node)
-            if (parent) |p| {
-                p.wake();
-            }
-        }
-
         /// Register for notification when send can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
-            self.parent_wait_node = wait_node;
+        pub fn asyncWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            ctx.self_ptr = self;
 
             self.channel.mutex.lock();
 
-            // Fast path: channel closed
             if (self.channel.closed) {
                 self.channel.mutex.unlock();
-                self.result = error.ChannelClosed;
-                return false; // Already ready (with error)
+                return false;
             }
 
-            // Fast path: space available
+            // Fast path: try direct transfer to waiting receiver
+            while (self.channel.receiver_queue.pop()) |node| {
+                if (SelectWaiter.tryClaim(node)) {
+                    const recv_ctx: *AsyncReceive(T).WaitContext = @ptrFromInt(node.userdata);
+                    // Direct transfer to receiver
+                    recv_ctx.result = self.item;
+                    ctx.succeeded = true;
+                    self.channel.mutex.unlock();
+                    node.wake();
+                    return false;
+                }
+                // CAS failed, receiver was cancelled, try next
+            }
+
+            // Fast path: space in buffer
             if (self.channel.count < self.channel.buffer.len) {
                 self.channel.buffer[self.channel.tail] = self.item;
                 self.channel.tail = (self.channel.tail + 1) % self.channel.buffer.len;
                 self.channel.count += 1;
-
-                // Wake one receiver if any
-                const receiver_node = self.channel.receiver_queue.pop();
+                ctx.succeeded = true;
                 self.channel.mutex.unlock();
-
-                self.result = {};
-                if (receiver_node) |node| {
-                    node.wake();
-                }
-                return false; // Already ready
+                return false;
             }
 
-            // Slow path: enqueue and wait
-            self.channel.sender_queue.push(&self.channel_wait_node);
+            // Slow path: buffer full, enqueue and wait
+            wait_node.userdata = @intFromPtr(ctx);
+            self.channel.sender_queue.push(wait_node);
             self.channel.mutex.unlock();
-            return true; // Need to wait
+            return true;
         }
 
         /// Cancel a pending wait operation.
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
+        /// Returns true if removed, false if already removed by completion (wake in-flight).
+        pub fn asyncCancelWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            _ = ctx;
             self.channel.mutex.lock();
+            const was_in_queue = self.channel.sender_queue.remove(wait_node);
+            self.channel.mutex.unlock();
 
-            // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
-            // If waitNodeWake already cleared it, parent_wait_node will be null.
-            // If it's something else, that's a bug (wrong wait_node passed).
-            if (self.parent_wait_node) |parent| {
-                std.debug.assert(parent == wait_node);
-                self.parent_wait_node = null;
+            if (was_in_queue) {
+                return true; // Removed, no wake coming
             }
 
-            const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
-            if (!was_in_queue) {
-                // We were already removed by a receiver who will wake us.
-                // Since we're being cancelled and won't send the item,
-                // wake another sender to use the buffer slot instead.
-                const next_sender = self.channel.sender_queue.pop();
-                self.channel.mutex.unlock();
-                if (next_sender) |node| {
-                    node.wake();
-                }
-            } else {
-                self.channel.mutex.unlock();
-            }
+            // Not in queue - receiver claimed us. Check if we won (for select)
+            // or if wake is in-flight.
+            return !SelectWaiter.didWin(wait_node);
         }
 
         /// Get the result of the send operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
-        pub fn getResult(self: *Self) Result {
-            return self.result.?;
+        pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
+            if (ctx.succeeded) {
+                return {};
+            }
+            std.debug.assert(self.channel.closed);
+            return error.ChannelClosed;
         }
     };
 }
@@ -1010,6 +888,39 @@ test "Channel: asyncReceive with select - basic" {
     try std.testing.expect(!group.hasFailed());
 }
 
+test "Channel: asyncReceive with select - value types" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    // Unbuffered channel - sender blocks until receiver ready
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            try ch.send(rt, 42);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32)) !void {
+            // Pass asyncReceive() directly by value, no intermediate variable
+            const result = try select(rt, .{ .recv = ch.asyncReceive() });
+            switch (result) {
+                .recv => |val| {
+                    try std.testing.expectEqual(42, try val);
+                },
+            }
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+}
+
 test "Channel: asyncReceive with select - already ready" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
@@ -1071,8 +982,8 @@ test "Channel: asyncSend with select - basic" {
     const TestFn = struct {
         fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
             try rt.yield(); // Let receiver start
-            var send = ch.asyncSend(42);
-            const result = try select(rt, .{ .send = &send });
+            var send_op = ch.asyncSend(42);
+            const result = try select(rt, .{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try res;
@@ -1108,8 +1019,8 @@ test "Channel: asyncSend with select - already ready" {
     const TestFn = struct {
         fn test_ready(rt: *Runtime, ch: *Channel(u32)) !void {
             // Channel has space, send should complete immediately
-            var send = ch.asyncSend(123);
-            const result = try select(rt, .{ .send = &send });
+            var send_op = ch.asyncSend(123);
+            const result = try select(rt, .{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try res;
@@ -1137,8 +1048,8 @@ test "Channel: asyncSend with select - closed channel" {
         fn test_closed(rt: *Runtime, ch: *Channel(u32)) !void {
             ch.close(.graceful);
 
-            var send = ch.asyncSend(42);
-            const result = try select(rt, .{ .send = &send });
+            var send_op = ch.asyncSend(42);
+            const result = try select(rt, .{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try std.testing.expectError(error.ChannelClosed, res);
@@ -1183,9 +1094,9 @@ test "Channel: select on both send and receive" {
 
         fn selectTask(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32), which: *u8) !void {
             var recv = ch1.asyncReceive();
-            var send = ch2.asyncSend(99);
+            var send_op = ch2.asyncSend(99);
 
-            const result = try select(rt, .{ .recv = &recv, .send = &send });
+            const result = try select(rt, .{ .recv = &recv, .send = &send_op });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
@@ -1255,4 +1166,280 @@ test "Channel: select with multiple receivers" {
 
     // ch2 should win
     try std.testing.expectEqual(2, which);
+}
+
+test "Channel: unbuffered - basic synchronous transfer" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    // Unbuffered channel - sender and receiver must rendezvous
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            // This will block until receiver is ready
+            try ch.send(rt, 42);
+            try ch.send(rt, 99);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32), results: *[2]u32) !void {
+            // Each receive unblocks a waiting sender
+            results[0] = try ch.receive(rt);
+            results[1] = try ch.receive(rt);
+        }
+    };
+
+    var results: [2]u32 = undefined;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &results });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expectEqual(42, results[0]);
+    try std.testing.expectEqual(99, results[1]);
+}
+
+test "Channel: unbuffered - trySend fails without receiver" {
+    var channel = Channel(u32).init(&.{});
+
+    // trySend should fail immediately - no buffer space and no receiver
+    const err = channel.trySend(42);
+    try std.testing.expectError(error.ChannelFull, err);
+}
+
+test "Channel: unbuffered - tryReceive fails without sender" {
+    var channel = Channel(u32).init(&.{});
+
+    // tryReceive should fail immediately - no buffer and no sender
+    const err = channel.tryReceive();
+    try std.testing.expectError(error.ChannelEmpty, err);
+}
+
+test "Channel: unbuffered - sender blocks until receiver ready" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Record that sender started
+            order[idx.*] = 'S';
+            idx.* += 1;
+            // This blocks until receiver calls receive
+            try ch.send(rt, 42);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Give sender time to block
+            try rt.yield();
+            try rt.yield();
+            // Record that receiver started receiving
+            order[idx.*] = 'R';
+            idx.* += 1;
+            _ = try ch.receive(rt);
+        }
+    };
+
+    var order: [2]u8 = undefined;
+    var idx: u8 = 0;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &order, &idx });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    // Sender should start first, then receiver
+    try std.testing.expectEqualStrings("SR", &order);
+}
+
+test "Channel: unbuffered - receiver blocks until sender ready" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn receiver(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Record that receiver started
+            order[idx.*] = 'R';
+            idx.* += 1;
+            // This blocks until sender calls send
+            _ = try ch.receive(rt);
+        }
+
+        fn sender(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Give receiver time to block
+            try rt.yield();
+            try rt.yield();
+            // Record that sender started sending
+            order[idx.*] = 'S';
+            idx.* += 1;
+            try ch.send(rt, 42);
+        }
+    };
+
+    var order: [2]u8 = undefined;
+    var idx: u8 = 0;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &order, &idx });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    // Receiver should start first, then sender
+    try std.testing.expectEqualStrings("RS", &order);
+}
+
+test "Channel: unbuffered - multiple senders and receivers" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32), value: u32) !void {
+            try ch.send(rt, value);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32), sum: *u32) !void {
+            const val = try ch.receive(rt);
+            sum.* += val;
+        }
+    };
+
+    var sum: u32 = 0;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    // Spawn senders and receivers - they will pair up
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 10 });
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 20 });
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 30 });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    // All values should be received
+    try std.testing.expectEqual(60, sum);
+}
+
+test "Channel: unbuffered - close wakes blocked sender" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32), got_closed: *bool) !void {
+            ch.send(rt, 42) catch |err| {
+                got_closed.* = (err == error.ChannelClosed);
+                return;
+            };
+        }
+
+        fn closer(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try rt.yield();
+            ch.close(.graceful);
+        }
+    };
+
+    var got_closed: bool = false;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &got_closed });
+    try group.spawn(runtime, TestFn.closer, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expect(got_closed);
+}
+
+test "Channel: unbuffered - close wakes blocked receiver" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn receiver(rt: *Runtime, ch: *Channel(u32), got_error: *bool) !void {
+            _ = ch.receive(rt) catch |err| {
+                got_error.* = (err == error.ChannelClosed);
+                return;
+            };
+        }
+
+        fn closer(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try rt.yield();
+            ch.close(.graceful);
+        }
+    };
+
+    var got_error: bool = false;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &got_error });
+    try group.spawn(runtime, TestFn.closer, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expect(got_error);
+}
+
+test "Channel: unbuffered - select with direct transfer" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try ch.send(rt, 42);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32)) !void {
+            var recv = ch.asyncReceive();
+            const result = try select(rt, .{ .recv = &recv });
+            switch (result) {
+                .recv => |val| {
+                    try std.testing.expectEqual(42, try val);
+                },
+            }
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
 }

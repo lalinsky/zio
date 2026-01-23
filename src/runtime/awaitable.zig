@@ -79,8 +79,9 @@ pub const Awaitable = struct {
 
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
-    pub fn asyncCancelWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) void {
-        _ = self.waiting_list.remove(wait_node);
+    /// Returns true if removed, false if already removed by completion (wake in-flight).
+    pub fn asyncCancelWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
+        return self.waiting_list.remove(wait_node);
     }
 
     /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).

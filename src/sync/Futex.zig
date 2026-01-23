@@ -29,11 +29,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Runtime = @import("../runtime.zig").Runtime;
-const AnyTask = @import("../runtime/task.zig").AnyTask;
-const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 const Cancelable = @import("../common.zig").Cancelable;
+const Timeoutable = @import("../common.zig").Timeoutable;
+const Waiter = @import("../common.zig").Waiter;
 const Duration = @import("../time.zig").Duration;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
+const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 
 const Futex = @This();
 
@@ -79,45 +80,17 @@ fn getBucket(table: *Table, address: usize) *Bucket {
 /// - The caller is unblocked spuriously.
 /// - The caller's task is cancelled, in which case `error.Canceled` is returned.
 pub fn wait(runtime: *Runtime, ptr: *const u32, expect: u32) Cancelable!void {
-    return timedWait(runtime, ptr, expect, Duration.max) catch |err| switch (err) {
-        error.Timeout => unreachable,
-        error.Canceled => error.Canceled,
-    };
-}
-
-/// Stack-allocated waiter for futex operations.
-const FutexWaiter = struct {
-    // Linked list fields for SimpleWaitQueue
-    next: ?*FutexWaiter = null,
-    prev: ?*FutexWaiter = null,
-    in_list: bool = false,
-    task: *AnyTask,
-    address: usize,
-
-    /// Pad to cache line to prevent false sharing.
-    _: void align(std.atomic.cache_line) = {},
-};
-
-/// Like `wait`, but also returns `error.Timeout` if the timeout elapses.
-pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Duration) (Cancelable || error{Timeout})!void {
     // Fast path: check if value already changed
     if (@atomicLoad(u32, ptr, .acquire) != expect) {
         return;
     }
 
-    const task = runtime.getCurrentTask();
-    const executor = task.getExecutor();
     const address = @intFromPtr(ptr);
     const bucket = getBucket(&runtime.futex_table, address);
 
-    // Set up timeout timer
-    var timer: AutoCancel = .{};
-    defer timer.clear(runtime);
-    timer.set(runtime, timeout);
-
-    // Use a stack-allocated waiter with its own WaitNode
-    var waiter = FutexWaiter{
-        .task = task,
+    // Use a stack-allocated waiter
+    var futex_waiter = FutexWaiter{
+        .waiter = Waiter.init(runtime),
         .address = address,
     };
 
@@ -130,33 +103,90 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Durat
         return;
     }
 
-    // Prepare to wait - set state before adding to queue
-    task.state.store(.preparing_to_wait, .release);
-
     // Add waiter to queue
-    bucket.waiters.push(&waiter);
+    bucket.waiters.push(&futex_waiter);
 
     bucket.mutex.unlock();
 
-    // Yield to scheduler
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // On cancellation, remove from queue
-        removeFromBucket(bucket, &waiter);
+    // Wait for signal, handling spurious wakeups internally
+    futex_waiter.waiter.wait(1, .allow_cancel) catch |err| {
+        // On cancellation, try to remove from queue
+        const was_in_queue = removeFromBucket(bucket, &futex_waiter);
+        if (!was_in_queue) {
+            // Removed by wake() - wait for signal to complete before destroying waiter
+            futex_waiter.waiter.wait(1, .no_cancel);
+        }
+        return err;
+    };
+}
 
-        // Check if this auto-cancel triggered, otherwise it was user cancellation
-        if (timer.check(runtime, err)) return error.Timeout;
+/// Stack-allocated waiter for futex operations.
+const FutexWaiter = struct {
+    // Linked list fields for SimpleWaitQueue
+    next: ?*FutexWaiter = null,
+    prev: ?*FutexWaiter = null,
+    in_list: bool = false,
+    waiter: Waiter,
+    address: usize,
+
+    /// Pad to cache line to prevent false sharing.
+    _: void align(std.atomic.cache_line) = {},
+};
+
+/// Like `wait`, but also returns `error.Timeout` if the timeout elapses.
+pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Duration) (Timeoutable || Cancelable)!void {
+    // Fast path: check if value already changed
+    if (@atomicLoad(u32, ptr, .acquire) != expect) {
+        return;
+    }
+
+    const address = @intFromPtr(ptr);
+    const bucket = getBucket(&runtime.futex_table, address);
+
+    // Use a stack-allocated waiter with its own WaitNode
+    var futex_waiter = FutexWaiter{
+        .waiter = Waiter.init(runtime),
+        .address = address,
+    };
+
+    // Add to bucket under lock
+    bucket.mutex.lock();
+
+    // Double-check under lock to avoid lost wakeups
+    if (@atomicLoad(u32, ptr, .monotonic) != expect) {
+        bucket.mutex.unlock();
+        return;
+    }
+
+    // Add waiter to queue
+    bucket.waiters.push(&futex_waiter);
+
+    bucket.mutex.unlock();
+
+    // Wait for signal or timeout, handling spurious wakeups internally
+    futex_waiter.waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
+        // On cancellation, try to remove from queue
+        const was_in_queue = removeFromBucket(bucket, &futex_waiter);
+        if (!was_in_queue) {
+            // Removed by wake() - wait for signal to complete before destroying waiter
+            futex_waiter.waiter.wait(1, .no_cancel);
+        }
         return err;
     };
 
-    // If timeout fired, we should have received error.Canceled from yield
-    std.debug.assert(!timer.triggered);
+    // Determine winner: can we remove ourselves from queue?
+    if (removeFromBucket(bucket, &futex_waiter)) {
+        // We were still in queue - timer won
+        return error.Timeout;
+    }
 }
 
 /// Remove a waiter from its bucket (for cancellation/timeout).
-fn removeFromBucket(bucket: *Bucket, waiter: *FutexWaiter) void {
+/// Returns true if the waiter was in the queue, false if already removed by wake.
+fn removeFromBucket(bucket: *Bucket, waiter: *FutexWaiter) bool {
     bucket.mutex.lock();
     defer bucket.mutex.unlock();
-    _ = bucket.waiters.remove(waiter);
+    return bucket.waiters.remove(waiter);
 }
 
 /// Unblocks at most `max_waiters` callers blocked in a `wait()` call on `ptr`.
@@ -197,8 +227,8 @@ pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
         if (batch_count == 0) break;
 
         // Wake outside lock to avoid holding lock during resume
-        for (to_wake[0..batch_count]) |waiter| {
-            waiter.task.wake();
+        for (to_wake[0..batch_count]) |futex_waiter| {
+            futex_waiter.waiter.signal();
         }
 
         total_woken += batch_count;

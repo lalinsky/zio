@@ -49,14 +49,12 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
-const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
-const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
-const Waiter = @import("common.zig").Waiter;
+const Waiter = @import("../common.zig").Waiter;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
 
@@ -108,26 +106,19 @@ pub fn broadcast(self: *Notify) void {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
-    // Add to wait queue and suspend
-    const task = runtime.getCurrentTask();
-    const executor = task.getExecutor();
-
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(&task.awaitable);
-
-    // Transition to preparing_to_wait state before adding to queue
-    task.state.store(.preparing_to_wait, .release);
+    var waiter: Waiter = .init(runtime);
 
     // Push to wait queue
     self.wait_queue.push(&waiter.wait_node);
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
+    // Wait for signal, handling spurious wakeups internally
+    waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
-            // We were already removed by signal() which will wake us.
+            // We were already removed by signal() - wait for signal to complete
+            waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
@@ -150,49 +141,37 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
 /// Returns `error.Timeout` if the timeout expires before a signal is received.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
-    // Add to wait queue and wait with timeout
-    const task = runtime.getCurrentTask();
-    const executor = task.getExecutor();
-
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(&task.awaitable);
-
-    // Set up timeout timer
-    var timer = AutoCancel.init;
-    defer timer.clear(runtime);
-    timer.set(runtime, timeout);
-
-    // Transition to preparing_to_wait state before adding to queue
-    task.state.store(.preparing_to_wait, .release);
+    var waiter: Waiter = .init(runtime);
 
     // Push to wait queue
     self.wait_queue.push(&waiter.wait_node);
 
-    // Yield with atomic state transition (.preparing_to_wait -> .waiting)
-    // If someone wakes us before the yield, the CAS inside yield() will fail and we won't suspend
-    executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| {
-        // Try to remove from queue
+    // Wait for signal or timeout, handling spurious wakeups internally
+    waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
+        // On cancellation, try to remove from queue
         const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
         if (!was_in_queue) {
-            // We were already removed by signal() which will wake us.
+            // Removed by signal() - wait for signal to complete before destroying waiter
+            waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
                 next_waiter.wake();
             }
         }
-
-        // Check if this auto-cancel triggered, otherwise it was user cancellation
-        if (timer.check(runtime, err)) return error.Timeout;
         return err;
     };
+
+    // Determine winner: can we remove ourselves from queue?
+    if (self.wait_queue.remove(&waiter.wait_node)) {
+        // We were still in queue - timer won
+        return error.Timeout;
+    }
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
     // Ensures visibility of all writes made before signal() was called
     _ = self.wait_queue.getState();
-
-    // If timeout fired, we should have received error.Canceled from yield
-    std.debug.assert(!timer.triggered);
 }
 
 // Future protocol implementation for use with select()
@@ -215,7 +194,8 @@ pub fn asyncWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) bool {
 
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
-pub fn asyncCancelWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) void {
+/// Returns true if removed, false if already removed by completion (wake in-flight).
+pub fn asyncCancelWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) bool {
     const was_in_queue = self.wait_queue.remove(wait_node);
     if (!was_in_queue) {
         // We were already removed by signal() which will wake us.
@@ -225,6 +205,7 @@ pub fn asyncCancelWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) void {
             next_waiter.wake();
         }
     }
+    return was_in_queue;
 }
 
 test "Notify basic signal/wait" {

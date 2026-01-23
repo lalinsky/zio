@@ -145,10 +145,12 @@ pub fn JoinHandle(comptime T: type) type {
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(self: Self, rt: *Runtime, wait_node: *WaitNode) void {
+        /// Returns true if removed, false if already removed by completion (wake in-flight).
+        pub fn asyncCancelWait(self: Self, rt: *Runtime, wait_node: *WaitNode) bool {
             if (self.awaitable) |awaitable| {
-                awaitable.asyncCancelWait(rt, wait_node);
+                return awaitable.asyncCancelWait(rt, wait_node);
             }
+            return true; // No awaitable means already completed, no wake in-flight
         }
 
         /// Request cancellation and wait for the task to complete.
@@ -1165,6 +1167,38 @@ test "runtime: sleep is cancelable" {
 
     // Ensure the sleep was canceled before completion
     try std.testing.expect(timer.read().toMilliseconds() <= 500);
+}
+
+test "runtime: shielded sleep is not cancelable" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const shieldedSleepTask = struct {
+        fn call(rt: *Runtime) !void {
+            rt.beginShield();
+            defer rt.endShield();
+            // This sleep should complete even when canceled because it's shielded
+            try rt.sleep(.fromMilliseconds(50));
+        }
+    }.call;
+
+    var timer = time.Stopwatch.start();
+
+    var handle = try runtime.spawn(shieldedSleepTask, .{runtime});
+    defer handle.cancel(runtime);
+
+    // Wait a bit to ensure the task is actually in the waiting state
+    try runtime.sleep(.fromMilliseconds(10));
+
+    // Try to cancel the sleeping task
+    handle.cancel(runtime);
+
+    // Should complete successfully (not canceled) because the sleep was shielded
+    const result = handle.join(runtime);
+    try std.testing.expectEqual({}, result);
+
+    // Ensure the sleep completed (took at least 50ms)
+    try std.testing.expect(timer.read().toMilliseconds() >= 40);
 }
 
 test "runtime: yield from main allows tasks to run" {
