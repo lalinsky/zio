@@ -75,8 +75,8 @@ pub fn Channel(comptime T: type) type {
 
         /// Initializes a channel with the provided buffer.
         /// The buffer's length determines the channel capacity.
+        /// Use an empty buffer for an unbuffered (synchronous) channel.
         pub fn init(buffer: []T) Self {
-            std.debug.assert(buffer.len > 0);
             return .{ .buffer = buffer };
         }
 
@@ -110,18 +110,32 @@ pub fn Channel(comptime T: type) type {
         ///
         /// Returns immediately with a value if available, otherwise returns an error.
         ///
-        /// Returns `error.ChannelEmpty` if the channel is empty.
+        /// Returns `error.ChannelEmpty` if the channel is empty and no sender waiting.
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         pub fn tryReceive(self: *Self) !T {
             self.mutex.lock();
 
-            if (self.count == 0) {
-                const is_closed = self.closed;
-                self.mutex.unlock();
-                return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
+            // Fast path: items in buffer
+            if (self.count > 0) {
+                return self.takeItemAndWakeSender();
             }
 
-            return self.takeItemAndWakeSender();
+            // Try direct transfer from waiting sender (for unbuffered channels)
+            while (self.sender_queue.pop()) |node| {
+                const send_op: *AsyncSend(T) = @fieldParentPtr("channel_wait_node", node);
+                if (send_op.tryClaim()) {
+                    const item = send_op.item;
+                    send_op.result = {};
+                    self.mutex.unlock();
+                    node.wake();
+                    return item;
+                }
+                // CAS failed, sender was cancelled, try next
+            }
+
+            const is_closed = self.closed;
+            self.mutex.unlock();
+            return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
         }
 
         /// Takes an item from buffer and wakes a waiting sender if any.
@@ -362,6 +376,20 @@ pub fn AsyncReceive(comptime T: type) type {
             if (self.channel.count > 0) {
                 self.result = self.channel.takeItemAndWakeSender();
                 return false;
+            }
+
+            // Fast path: try direct transfer from waiting sender (for unbuffered channels)
+            while (self.channel.sender_queue.pop()) |node| {
+                const send_op: *AsyncSend(T) = @fieldParentPtr("channel_wait_node", node);
+                if (send_op.tryClaim()) {
+                    // Direct transfer from sender
+                    self.result = send_op.item;
+                    send_op.result = {};
+                    self.channel.mutex.unlock();
+                    node.wake();
+                    return false;
+                }
+                // CAS failed, sender was cancelled, try next
             }
 
             // Fast path: channel closed and empty
@@ -1178,4 +1206,280 @@ test "Channel: select with multiple receivers" {
 
     // ch2 should win
     try std.testing.expectEqual(2, which);
+}
+
+test "Channel: unbuffered - basic synchronous transfer" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    // Unbuffered channel - sender and receiver must rendezvous
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            // This will block until receiver is ready
+            try ch.send(rt, 42);
+            try ch.send(rt, 99);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32), results: *[2]u32) !void {
+            // Each receive unblocks a waiting sender
+            results[0] = try ch.receive(rt);
+            results[1] = try ch.receive(rt);
+        }
+    };
+
+    var results: [2]u32 = undefined;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &results });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expectEqual(42, results[0]);
+    try std.testing.expectEqual(99, results[1]);
+}
+
+test "Channel: unbuffered - trySend fails without receiver" {
+    var channel = Channel(u32).init(&.{});
+
+    // trySend should fail immediately - no buffer space and no receiver
+    const err = channel.trySend(42);
+    try std.testing.expectError(error.ChannelFull, err);
+}
+
+test "Channel: unbuffered - tryReceive fails without sender" {
+    var channel = Channel(u32).init(&.{});
+
+    // tryReceive should fail immediately - no buffer and no sender
+    const err = channel.tryReceive();
+    try std.testing.expectError(error.ChannelEmpty, err);
+}
+
+test "Channel: unbuffered - sender blocks until receiver ready" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Record that sender started
+            order[idx.*] = 'S';
+            idx.* += 1;
+            // This blocks until receiver calls receive
+            try ch.send(rt, 42);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Give sender time to block
+            try rt.yield();
+            try rt.yield();
+            // Record that receiver started receiving
+            order[idx.*] = 'R';
+            idx.* += 1;
+            _ = try ch.receive(rt);
+        }
+    };
+
+    var order: [2]u8 = undefined;
+    var idx: u8 = 0;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &order, &idx });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    // Sender should start first, then receiver
+    try std.testing.expectEqualStrings("SR", &order);
+}
+
+test "Channel: unbuffered - receiver blocks until sender ready" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn receiver(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Record that receiver started
+            order[idx.*] = 'R';
+            idx.* += 1;
+            // This blocks until sender calls send
+            _ = try ch.receive(rt);
+        }
+
+        fn sender(rt: *Runtime, ch: *Channel(u32), order: *[2]u8, idx: *u8) !void {
+            // Give receiver time to block
+            try rt.yield();
+            try rt.yield();
+            // Record that sender started sending
+            order[idx.*] = 'S';
+            idx.* += 1;
+            try ch.send(rt, 42);
+        }
+    };
+
+    var order: [2]u8 = undefined;
+    var idx: u8 = 0;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &order, &idx });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    // Receiver should start first, then sender
+    try std.testing.expectEqualStrings("RS", &order);
+}
+
+test "Channel: unbuffered - multiple senders and receivers" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32), value: u32) !void {
+            try ch.send(rt, value);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32), sum: *u32) !void {
+            const val = try ch.receive(rt);
+            sum.* += val;
+        }
+    };
+
+    var sum: u32 = 0;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    // Spawn senders and receivers - they will pair up
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 10 });
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 20 });
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 30 });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    // All values should be received
+    try std.testing.expectEqual(60, sum);
+}
+
+test "Channel: unbuffered - close wakes blocked sender" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32), got_closed: *bool) !void {
+            ch.send(rt, 42) catch |err| {
+                got_closed.* = (err == error.ChannelClosed);
+                return;
+            };
+        }
+
+        fn closer(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try rt.yield();
+            ch.close(.graceful);
+        }
+    };
+
+    var got_closed: bool = false;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &got_closed });
+    try group.spawn(runtime, TestFn.closer, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expect(got_closed);
+}
+
+test "Channel: unbuffered - close wakes blocked receiver" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn receiver(rt: *Runtime, ch: *Channel(u32), got_error: *bool) !void {
+            _ = ch.receive(rt) catch |err| {
+                got_error.* = (err == error.ChannelClosed);
+                return;
+            };
+        }
+
+        fn closer(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try rt.yield();
+            ch.close(.graceful);
+        }
+    };
+
+    var got_error: bool = false;
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &got_error });
+    try group.spawn(runtime, TestFn.closer, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expect(got_error);
+}
+
+test "Channel: unbuffered - select with direct transfer" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(rt: *Runtime, ch: *Channel(u32)) !void {
+            try rt.yield();
+            try ch.send(rt, 42);
+        }
+
+        fn receiver(rt: *Runtime, ch: *Channel(u32)) !void {
+            var recv = ch.asyncReceive();
+            const result = try select(rt, .{ .recv = &recv });
+            switch (result) {
+                .recv => |val| {
+                    try std.testing.expectEqual(42, try val);
+                },
+            }
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel(runtime);
+
+    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+
+    try group.wait(runtime);
+    try std.testing.expect(!group.hasFailed());
 }
