@@ -433,6 +433,7 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
         fut.asyncWait(rt, &select_waiter.wait_node);
 
     if (!added) {
+        winner.store(0, .release);
         return .{ .value = fut.getResult() };
     }
 
