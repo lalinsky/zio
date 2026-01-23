@@ -225,22 +225,32 @@ pub const SelectWaiter = struct {
         };
     }
 
-    /// Try to claim this select slot. Returns true if successfully claimed.
+    /// Try to claim a wait node via its SelectWaiter (if any).
+    /// Returns true if claimed (or not in a select), false if another op won.
     /// Used by channel operations to atomically claim a waiting receiver/sender.
-    pub fn tryClaim(self: *SelectWaiter) bool {
-        return self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire) == null;
+    pub fn tryClaim(node: *WaitNode) bool {
+        if (node.vtable == &wait_node_vtable) {
+            const self: *SelectWaiter = @fieldParentPtr("wait_node", node);
+            return self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire) == null;
+        }
+        return true; // Not in a select, always claimable
     }
 
-    /// Check if this select slot won (was claimed).
-    pub fn didWin(self: *SelectWaiter) bool {
-        return self.winner.load(.acquire) == self.index;
+    /// Check if a wait node won its select (was claimed).
+    /// Returns true if won (or not in a select).
+    pub fn didWin(node: *WaitNode) bool {
+        if (node.vtable == &wait_node_vtable) {
+            const self: *SelectWaiter = @fieldParentPtr("wait_node", node);
+            return self.winner.load(.acquire) == self.index;
+        }
+        return true; // Not in a select, always won
     }
 
     fn waitNodeWake(wait_node: *WaitNode) void {
         const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
 
         // Try to claim winner slot with our index (may already be claimed by channel)
-        _ = self.tryClaim();
+        _ = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
 
         // Always signal parent - needed for both winner notification and
         // cleanup synchronization (waiting for in-flight wakes to complete)

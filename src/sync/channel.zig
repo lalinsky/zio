@@ -139,8 +139,8 @@ pub fn Channel(comptime T: type) type {
 
             // Try direct transfer from waiting sender (for unbuffered channels)
             while (self.sender_queue.pop()) |node| {
-                const send_op: *AsyncSend(T) = @fieldParentPtr("channel_wait_node", node);
-                if (send_op.tryClaim()) {
+                if (SelectWaiter.tryClaim(node)) {
+                    const send_op: *AsyncSend(T) = @ptrFromInt(node.userdata);
                     const item = send_op.item;
                     send_op.result = {};
                     self.mutex.unlock();
@@ -166,8 +166,8 @@ pub fn Channel(comptime T: type) type {
 
             // If sender waiting, claim it and have it put its item in buffer
             while (self.sender_queue.pop()) |node| {
-                const send_op: *AsyncSend(T) = @fieldParentPtr("channel_wait_node", node);
-                if (send_op.tryClaim()) {
+                if (SelectWaiter.tryClaim(node)) {
+                    const send_op: *AsyncSend(T) = @ptrFromInt(node.userdata);
                     // Put sender's item in buffer (direct transfer to buffer)
                     self.buffer[self.tail] = send_op.item;
                     self.tail = (self.tail + 1) % self.buffer.len;
@@ -228,8 +228,8 @@ pub fn Channel(comptime T: type) type {
 
             // Try direct transfer to waiting receiver first
             while (self.receiver_queue.pop()) |node| {
-                const recv_op: *AsyncReceive(T) = @fieldParentPtr("channel_wait_node", node);
-                if (recv_op.tryClaim()) {
+                if (SelectWaiter.tryClaim(node)) {
+                    const recv_op: *AsyncReceive(T) = @ptrFromInt(node.userdata);
                     recv_op.result = item;
                     self.mutex.unlock();
                     node.wake();
@@ -336,8 +336,6 @@ pub fn Channel(comptime T: type) type {
 /// ```
 pub fn AsyncReceive(comptime T: type) type {
     return struct {
-        channel_wait_node: WaitNode,
-        parent_wait_node: ?*WaitNode = null,
         channel: *Channel(T),
         result: ?Result = null,
 
@@ -345,55 +343,13 @@ pub fn AsyncReceive(comptime T: type) type {
 
         pub const Result = error{ChannelClosed}!T;
 
-        const wait_node_vtable = WaitNode.VTable{
-            .wake = waitNodeWake,
-        };
-
         fn init(channel: *Channel(T)) Self {
-            return .{
-                .channel_wait_node = .{
-                    .vtable = &wait_node_vtable,
-                },
-                .channel = channel,
-            };
-        }
-
-        /// Try to claim this operation via the parent SelectWaiter.
-        /// Returns true if claimed (or not in a select), false if another op won.
-        fn tryClaim(self: *Self) bool {
-            if (self.parent_wait_node) |parent| {
-                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
-                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
-                    return sw.tryClaim();
-                }
-            }
-            return true; // Not in a select, always claimable
-        }
-
-        /// Check if this operation won the select (was claimed).
-        fn didWin(self: *Self) bool {
-            if (self.parent_wait_node) |parent| {
-                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
-                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
-                    return sw.didWin();
-                }
-            }
-            return true; // Not in a select, always won
-        }
-
-        fn waitNodeWake(wait_node: *WaitNode) void {
-            const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
-
-            if (self.parent_wait_node) |p| {
-                p.wake();
-            }
+            return .{ .channel = channel };
         }
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
         pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
-            self.parent_wait_node = wait_node;
-
             self.channel.mutex.lock();
 
             // Fast path: items in buffer
@@ -404,8 +360,8 @@ pub fn AsyncReceive(comptime T: type) type {
 
             // Fast path: try direct transfer from waiting sender (for unbuffered channels)
             while (self.channel.sender_queue.pop()) |node| {
-                const send_op: *AsyncSend(T) = @fieldParentPtr("channel_wait_node", node);
-                if (send_op.tryClaim()) {
+                if (SelectWaiter.tryClaim(node)) {
+                    const send_op: *AsyncSend(T) = @ptrFromInt(node.userdata);
                     // Direct transfer from sender
                     self.result = send_op.item;
                     send_op.result = {};
@@ -424,7 +380,8 @@ pub fn AsyncReceive(comptime T: type) type {
             }
 
             // Slow path: enqueue and wait
-            self.channel.receiver_queue.push(&self.channel_wait_node);
+            wait_node.userdata = @intFromPtr(self);
+            self.channel.receiver_queue.push(wait_node);
             self.channel.mutex.unlock();
             return true;
         }
@@ -432,10 +389,8 @@ pub fn AsyncReceive(comptime T: type) type {
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
         pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
-            _ = wait_node;
-
             self.channel.mutex.lock();
-            const was_in_queue = self.channel.receiver_queue.remove(&self.channel_wait_node);
+            const was_in_queue = self.channel.receiver_queue.remove(wait_node);
             self.channel.mutex.unlock();
 
             if (was_in_queue) {
@@ -444,7 +399,7 @@ pub fn AsyncReceive(comptime T: type) type {
 
             // Not in queue - sender claimed us. Check if we won (for select)
             // or if wake is in-flight.
-            return !self.didWin();
+            return !SelectWaiter.didWin(wait_node);
         }
 
         /// Get the result of the receive operation.
@@ -484,8 +439,6 @@ pub fn AsyncReceive(comptime T: type) type {
 /// ```
 pub fn AsyncSend(comptime T: type) type {
     return struct {
-        channel_wait_node: WaitNode,
-        parent_wait_node: ?*WaitNode = null,
         channel: *Channel(T),
         item: T,
         result: ?Result = null,
@@ -494,56 +447,16 @@ pub fn AsyncSend(comptime T: type) type {
 
         pub const Result = error{ChannelClosed}!void;
 
-        const wait_node_vtable = WaitNode.VTable{
-            .wake = waitNodeWake,
-        };
-
         fn init(channel: *Channel(T), item: T) Self {
             return .{
-                .channel_wait_node = .{
-                    .vtable = &wait_node_vtable,
-                },
                 .channel = channel,
                 .item = item,
             };
         }
 
-        /// Try to claim this operation via the parent SelectWaiter.
-        /// Returns true if claimed (or not in a select), false if another op won.
-        fn tryClaim(self: *Self) bool {
-            if (self.parent_wait_node) |parent| {
-                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
-                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
-                    return sw.tryClaim();
-                }
-            }
-            return true; // Not in a select, always claimable
-        }
-
-        /// Check if this operation won the select (was claimed).
-        fn didWin(self: *Self) bool {
-            if (self.parent_wait_node) |parent| {
-                if (parent.vtable == &SelectWaiter.wait_node_vtable) {
-                    const sw: *SelectWaiter = @fieldParentPtr("wait_node", parent);
-                    return sw.didWin();
-                }
-            }
-            return true; // Not in a select, always won
-        }
-
-        fn waitNodeWake(wait_node: *WaitNode) void {
-            const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
-
-            if (self.parent_wait_node) |p| {
-                p.wake();
-            }
-        }
-
         /// Register for notification when send can complete.
         /// Returns false if operation completed immediately (fast path).
         pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
-            self.parent_wait_node = wait_node;
-
             self.channel.mutex.lock();
 
             if (self.channel.closed) {
@@ -554,8 +467,8 @@ pub fn AsyncSend(comptime T: type) type {
 
             // Fast path: try direct transfer to waiting receiver
             while (self.channel.receiver_queue.pop()) |node| {
-                const recv_op: *AsyncReceive(T) = @fieldParentPtr("channel_wait_node", node);
-                if (recv_op.tryClaim()) {
+                if (SelectWaiter.tryClaim(node)) {
+                    const recv_op: *AsyncReceive(T) = @ptrFromInt(node.userdata);
                     // Direct transfer to receiver
                     recv_op.result = self.item;
                     self.result = {};
@@ -577,7 +490,8 @@ pub fn AsyncSend(comptime T: type) type {
             }
 
             // Slow path: buffer full, enqueue and wait
-            self.channel.sender_queue.push(&self.channel_wait_node);
+            wait_node.userdata = @intFromPtr(self);
+            self.channel.sender_queue.push(wait_node);
             self.channel.mutex.unlock();
             return true;
         }
@@ -585,10 +499,8 @@ pub fn AsyncSend(comptime T: type) type {
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
         pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
-            _ = wait_node;
-
             self.channel.mutex.lock();
-            const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
+            const was_in_queue = self.channel.sender_queue.remove(wait_node);
             self.channel.mutex.unlock();
 
             if (was_in_queue) {
@@ -597,7 +509,7 @@ pub fn AsyncSend(comptime T: type) type {
 
             // Not in queue - receiver claimed us. Check if we won (for select)
             // or if wake is in-flight.
-            return !self.didWin();
+            return !SelectWaiter.didWin(wait_node);
         }
 
         /// Get the result of the send operation.
