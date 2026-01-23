@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
+const Waiter = @import("common.zig").Waiter;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Awaitable = @import("runtime/awaitable.zig").Awaitable;
 const WaitNode = @import("runtime/WaitNode.zig");
@@ -205,7 +206,7 @@ test "SelectResult: result types" {
 // SelectWaiter - used by Runtime.select to wait on multiple handles
 pub const SelectWaiter = struct {
     wait_node: WaitNode,
-    parent: *WaitNode,
+    parent: *Waiter,
     winner: *std.atomic.Value(usize),
     index: usize,
 
@@ -213,7 +214,7 @@ pub const SelectWaiter = struct {
         .wake = waitNodeWake,
     };
 
-    pub fn init(parent: *WaitNode, winner: *std.atomic.Value(usize), index: usize) SelectWaiter {
+    pub fn init(parent: *Waiter, winner: *std.atomic.Value(usize), index: usize) SelectWaiter {
         return .{
             .wait_node = .{
                 .vtable = &wait_node_vtable,
@@ -231,10 +232,10 @@ pub const SelectWaiter = struct {
         const prev = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
 
         if (prev == null) {
-            // We won! Wake parent task
-            self.parent.wake();
+            // We won! Signal parent waiter
+            self.parent.signal();
         }
-        // else: someone else already won, don't wake parent again
+        // else: someone else already won, don't signal parent again
     }
 };
 
@@ -265,32 +266,26 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     const U = SelectResult(S);
     const fields = @typeInfo(S).@"struct".fields;
 
-    // Multi-wait path: Create separate waiter awaitables for each handle
-    // We can't add the same awaitable to multiple lists (next/prev pointers conflict)
-    const task = rt.getCurrentTask();
-
     // Self-wait detection: check all futures for self-wait
+    const task = rt.getCurrentTask();
     inline for (fields) |field| {
         checkSelfWait(task, @field(futures, field.name));
     }
 
-    task.state.store(.preparing_to_wait, .release);
-    defer {
-        const prev = task.state.swap(.ready, .release);
-        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
-    }
-
     // Winner tracking: NO_WINNER means no winner yet
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+
+    // Parent waiter that SelectWaiters will signal when they win
+    var waiter = Waiter.init(rt);
 
     // Allocate WaitContext struct on stack for futures that need per-wait state
     const ContextsType = WaitContextsType(S);
     var contexts: ContextsType = undefined;
 
     // Create waiter structures on the stack
-    var waiters: [fields.len]SelectWaiter = undefined;
-    inline for (&waiters, 0..) |*waiter, i| {
-        waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &winner, i);
+    var select_waiters: [fields.len]SelectWaiter = undefined;
+    inline for (&select_waiters, 0..) |*sw, i| {
+        sw.* = SelectWaiter.init(&waiter, &winner, i);
     }
 
     // Track how many futures we've registered with (for cleanup)
@@ -304,9 +299,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
             if (i < registered_count and winner_index != i) {
                 var future = @field(futures, field.name);
                 if (comptime hasWaitContext(field.type)) {
-                    future.asyncCancelWait(rt, &waiters[i].wait_node, &@field(contexts, field.name));
+                    future.asyncCancelWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name));
                 } else {
-                    future.asyncCancelWait(rt, &waiters[i].wait_node);
+                    future.asyncCancelWait(rt, &select_waiters[i].wait_node);
                 }
             }
         }
@@ -316,9 +311,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     inline for (fields, 0..) |field, i| {
         var future = @field(futures, field.name);
         const waiting = if (comptime hasWaitContext(field.type))
-            future.asyncWait(rt, &waiters[i].wait_node, &@field(contexts, field.name))
+            future.asyncWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name))
         else
-            future.asyncWait(rt, &waiters[i].wait_node);
+            future.asyncWait(rt, &select_waiters[i].wait_node);
 
         registered_count += 1;
 
@@ -328,26 +323,8 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         }
     }
 
-    // Wait for one to complete, handling spurious wakeups
-    while (true) {
-        task.state.store(.preparing_to_wait, .release);
-
-        // Check after setting state to handle race where winner was set
-        // while we were in .ready state
-        if (winner.load(.acquire) != NO_WINNER) {
-            break;
-        }
-
-        // Get executor fresh each time - may change after cancel/reschedule
-        const executor = task.getExecutor();
-        try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
-
-        // Check if actually signaled
-        if (winner.load(.acquire) != NO_WINNER) {
-            break;
-        }
-        // Spurious wakeup - loop and wait again
-    }
+    // Wait for one to complete (Waiter.wait handles spurious wakeups)
+    try waiter.wait();
 
     // O(1) winner lookup
     const winner_index = winner.load(.acquire);
@@ -373,19 +350,12 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         @panic("selectAwaitables: too many awaitables (max 64)");
     }
 
-    const task = rt.getCurrentTask();
-
-    task.state.store(.preparing_to_wait, .release);
-    defer {
-        const prev = task.state.swap(.ready, .release);
-        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
-    }
-
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiters: [max_awaitables]SelectWaiter = undefined;
+    var waiter = Waiter.init(rt);
+    var select_waiters: [max_awaitables]SelectWaiter = undefined;
 
-    for (waiters[0..awaitables.len], 0..) |*waiter, i| {
-        waiter.* = SelectWaiter.init(&task.awaitable.wait_node, &winner, i);
+    for (select_waiters[0..awaitables.len], 0..) |*sw, i| {
+        sw.* = SelectWaiter.init(&waiter, &winner, i);
     }
 
     var registered_count: usize = 0;
@@ -393,13 +363,13 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         const winner_index = winner.load(.acquire);
         for (awaitables[0..registered_count], 0..) |awaitable, i| {
             if (winner_index != i) {
-                awaitable.asyncCancelWait(rt, &waiters[i].wait_node);
+                awaitable.asyncCancelWait(rt, &select_waiters[i].wait_node);
             }
         }
     }
 
     for (awaitables, 0..) |awaitable, i| {
-        const waiting = awaitable.asyncWait(rt, &waiters[i].wait_node);
+        const waiting = awaitable.asyncWait(rt, &select_waiters[i].wait_node);
         registered_count += 1;
 
         if (!waiting) {
@@ -408,22 +378,8 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         }
     }
 
-    // Wait for one to complete, handling spurious wakeups
-    while (true) {
-        task.state.store(.preparing_to_wait, .release);
-
-        if (winner.load(.acquire) != NO_WINNER) {
-            break;
-        }
-
-        // Get executor fresh each time - may change after cancel/reschedule
-        const executor = task.getExecutor();
-        try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
-
-        if (winner.load(.acquire) != NO_WINNER) {
-            break;
-        }
-    }
+    // Wait for one to complete (Waiter.wait handles spurious wakeups)
+    try waiter.wait();
 
     return winner.load(.acquire);
 }
@@ -431,20 +387,14 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
 /// Internal wait implementation with configurable cancellation behavior.
 fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
     const task = rt.getCurrentTask();
-    const wait_node = &task.awaitable.wait_node;
 
     // Self-wait detection: check if waiting on own task (would deadlock)
     checkSelfWait(task, future);
 
-    task.state.store(.preparing_to_wait, .release);
-    defer {
-        const prev = task.state.swap(.ready, .release);
-        std.debug.assert(prev == .preparing_to_wait or prev == .ready);
-    }
-
     // Winner tracking: for single future, winner is always 0 if signaled
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiter = SelectWaiter.init(wait_node, &winner, 0);
+    var waiter = Waiter.init(rt);
+    var select_waiter = SelectWaiter.init(&waiter, &winner, 0);
 
     // Allocate WaitContext if needed
     const WaitCtx = FutureWaitContext(@TypeOf(future));
@@ -454,9 +404,9 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     // Fast path: check if already complete
     var fut = future;
     const added = if (has_context)
-        fut.asyncWait(rt, &waiter.wait_node, &context)
+        fut.asyncWait(rt, &select_waiter.wait_node, &context)
     else
-        fut.asyncWait(rt, &waiter.wait_node);
+        fut.asyncWait(rt, &select_waiter.wait_node);
 
     if (!added) {
         return .{ .value = fut.getResult() };
@@ -466,59 +416,26 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     defer {
         if (winner.load(.acquire) == NO_WINNER) {
             if (has_context) {
-                fut.asyncCancelWait(rt, &waiter.wait_node, &context);
+                fut.asyncCancelWait(rt, &select_waiter.wait_node, &context);
             } else {
-                fut.asyncCancelWait(rt, &waiter.wait_node);
+                fut.asyncCancelWait(rt, &select_waiter.wait_node);
             }
         }
     }
 
     if (flags.on_cancel == .cancel_and_continue) {
-        // Stay subscribed to wait queue during cancel-and-retry
-        var shielded = false;
-        defer if (shielded) rt.endShield();
-
-        while (true) {
-            task.state.store(.preparing_to_wait, .release);
-
-            if (winner.load(.acquire) != NO_WINNER) {
-                break;
-            }
-
-            // Get executor fresh each time - may change after cancel/reschedule
-            const executor = task.getExecutor();
-            executor.yield(.preparing_to_wait, .waiting, .allow_cancel) catch |err| switch (err) {
-                error.Canceled => {
-                    if (shielded) unreachable;
-                    rt.beginShield();
-                    shielded = true;
-                    fut.cancel();
-                    continue;
-                },
-            };
-
-            if (winner.load(.acquire) != NO_WINNER) {
-                break;
-            }
-            // Spurious wakeup - loop and wait again
-        }
+        // Wait with cancellation enabled first
+        waiter.wait() catch |err| switch (err) {
+            error.Canceled => {
+                // On cancellation, cancel child and wait for completion
+                fut.cancel();
+                waiter.waitUncancelable();
+                return .{ .value = fut.getResult() };
+            },
+        };
     } else {
-        // Propagate cancellation to caller, handling spurious wakeups
-        while (true) {
-            task.state.store(.preparing_to_wait, .release);
-
-            if (winner.load(.acquire) != NO_WINNER) {
-                break;
-            }
-
-            // Get executor fresh each time - may change after cancel/reschedule
-            const executor = task.getExecutor();
-            try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
-
-            if (winner.load(.acquire) != NO_WINNER) {
-                break;
-            }
-        }
+        // Propagate cancellation to caller (Waiter.wait handles spurious wakeups)
+        try waiter.wait();
     }
 
     return .{ .value = fut.getResult() };
