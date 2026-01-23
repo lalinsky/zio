@@ -8,7 +8,7 @@ const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const SelectWaiter = @import("../select.zig").SelectWaiter;
 const select = @import("../select.zig").select;
-const wait = @import("../select.zig").wait;
+const Waiter = @import("../common.zig").Waiter;
 
 /// Specifies how a channel should be closed.
 pub const CloseMode = enum {
@@ -103,7 +103,24 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
             var recv = self.asyncReceive();
-            return (try wait(rt, &recv)).value;
+            var waiter = Waiter.init(rt);
+
+            if (!recv.asyncWait(rt, &waiter.wait_node)) {
+                return recv.getResult();
+            }
+
+            waiter.wait(1, .allow_cancel) catch |err| {
+                const was_removed = recv.asyncCancelWait(rt, &waiter.wait_node);
+                if (!was_removed) {
+                    // Sender claimed us, wait for wake to complete
+                    waiter.wait(1, .no_cancel);
+                    // Return result (operation completed despite cancel)
+                    return recv.getResult();
+                }
+                return err;
+            };
+
+            return recv.getResult();
         }
 
         /// Tries to receive a value without blocking.
@@ -175,7 +192,24 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
             var send_op = self.asyncSend(item);
-            return (try wait(rt, &send_op)).value;
+            var waiter = Waiter.init(rt);
+
+            if (!send_op.asyncWait(rt, &waiter.wait_node)) {
+                return send_op.getResult();
+            }
+
+            waiter.wait(1, .allow_cancel) catch |err| {
+                const was_removed = send_op.asyncCancelWait(rt, &waiter.wait_node);
+                if (!was_removed) {
+                    // Receiver claimed us, wait for wake to complete
+                    waiter.wait(1, .no_cancel);
+                    // Return result (operation completed despite cancel)
+                    return send_op.getResult();
+                }
+                return err;
+            };
+
+            return send_op.getResult();
         }
 
         /// Tries to send a value without blocking.
@@ -350,17 +384,7 @@ pub fn AsyncReceive(comptime T: type) type {
         fn waitNodeWake(wait_node: *WaitNode) void {
             const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
 
-            self.channel.mutex.lock();
-
-            // Read and clear parent_wait_node while holding the lock to prevent
-            // race with cancellation (which could free/reuse the parent)
-            const parent = self.parent_wait_node;
-            self.parent_wait_node = null;
-
-            self.channel.mutex.unlock();
-
-            // Wake the parent (SelectWaiter or task wait node)
-            if (parent) |p| {
+            if (self.parent_wait_node) |p| {
                 p.wake();
             }
         }
@@ -408,13 +432,9 @@ pub fn AsyncReceive(comptime T: type) type {
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
         pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+            _ = wait_node;
+
             self.channel.mutex.lock();
-
-            if (self.parent_wait_node) |parent| {
-                std.debug.assert(parent == wait_node);
-                self.parent_wait_node = null;
-            }
-
             const was_in_queue = self.channel.receiver_queue.remove(&self.channel_wait_node);
             self.channel.mutex.unlock();
 
@@ -422,9 +442,8 @@ pub fn AsyncReceive(comptime T: type) type {
                 return true; // Removed, no wake coming
             }
 
-            // Not in queue. Either we won (sender claimed us and will wake)
-            // or we were orphaned (sender popped us but CAS failed).
-            // Check if we actually won.
+            // Not in queue - sender claimed us. Check if we won (for select)
+            // or if wake is in-flight.
             return !self.didWin();
         }
 
@@ -515,17 +534,7 @@ pub fn AsyncSend(comptime T: type) type {
         fn waitNodeWake(wait_node: *WaitNode) void {
             const self: *Self = @fieldParentPtr("channel_wait_node", wait_node);
 
-            self.channel.mutex.lock();
-
-            // Read and clear parent_wait_node while holding the lock to prevent
-            // race with cancellation (which could free/reuse the parent)
-            const parent = self.parent_wait_node;
-            self.parent_wait_node = null;
-
-            self.channel.mutex.unlock();
-
-            // Wake the parent (SelectWaiter or task wait node)
-            if (parent) |p| {
+            if (self.parent_wait_node) |p| {
                 p.wake();
             }
         }
@@ -576,13 +585,9 @@ pub fn AsyncSend(comptime T: type) type {
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
         pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+            _ = wait_node;
+
             self.channel.mutex.lock();
-
-            if (self.parent_wait_node) |parent| {
-                std.debug.assert(parent == wait_node);
-                self.parent_wait_node = null;
-            }
-
             const was_in_queue = self.channel.sender_queue.remove(&self.channel_wait_node);
             self.channel.mutex.unlock();
 
@@ -590,7 +595,8 @@ pub fn AsyncSend(comptime T: type) type {
                 return true; // Removed, no wake coming
             }
 
-            // Not in queue. Check if we actually won.
+            // Not in queue - receiver claimed us. Check if we won (for select)
+            // or if wake is in-flight.
             return !self.didWin();
         }
 
