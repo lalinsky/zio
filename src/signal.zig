@@ -365,9 +365,10 @@ pub const Signal = struct {
 
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
-    pub fn asyncCancelWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) void {
+    /// Returns true if removed, false if already removed by completion (wake in-flight).
+    pub fn asyncCancelWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) bool {
         // Simply remove from queue - no need to wake another waiter since signals broadcast to all
-        _ = self.entry.waiters.remove(wait_node);
+        return self.entry.waiters.remove(wait_node);
     }
 
     /// Gets the result value.

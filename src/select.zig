@@ -45,24 +45,24 @@ const NO_WINNER = std.math.maxInt(usize);
 //       - Thread-safe: can be called from any thread
 //       - The ctx pointer (if present) remains valid until asyncCancelWait() or wait_node.wake()
 //
-//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) void     // if WaitContext == void
-//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) void  // if WaitContext != void
+//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) bool     // if WaitContext == void
+//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
 //     Cancel a pending wait operation by removing the wait_node from internal queues.
 //
 //     Must be called if asyncWait() returned true and the caller no longer wants to wait
 //     (e.g., select() chose a different future).
 //
-//     Behavior:
-//       - If wait_node is still queued: Removes it. The future will not wake this wait_node.
-//       - If wait_node was already removed (race with completion): The future has committed
-//         to waking this wait_node. For queuing operations (Channel, Notify), the
-//         implementation must transfer the wakeup to another waiter to avoid losing the
-//         signal/item.
+//     Returns:
+//       - true: Successfully removed from queue. The future will not wake this wait_node.
+//       - false: Already removed by completion. The future has committed to waking this
+//                wait_node (wake is in-flight or already happened).
+//
+//     For queuing operations (Channel, Notify), when returning false the implementation
+//     must transfer the wakeup to another waiter to avoid losing the signal/item.
 //
 //     Guarantees:
 //       - Thread-safe: can be called from any thread
-//       - Safe to call even if asyncWait() returned false (becomes a no-op)
-//       - After calling, wait_node.wake() will not be called (unless race occurred, see above)
+//       - Safe to call even if asyncWait() returned false (returns false, no-op)
 //
 //   fn getResult(self: *Self) Result
 //     Retrieve the result of the completed operation.
@@ -229,13 +229,11 @@ pub const SelectWaiter = struct {
         const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
 
         // Try to claim winner slot with our index
-        const prev = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
+        _ = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
 
-        if (prev == null) {
-            // We won! Signal parent waiter
-            self.parent.signal();
-        }
-        // else: someone else already won, don't signal parent again
+        // Always signal parent - needed for both winner notification and
+        // cleanup synchronization (waiting for in-flight wakes to complete)
+        self.parent.signal();
     }
 };
 
@@ -288,23 +286,35 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         sw.* = SelectWaiter.init(&waiter, &winner, i);
     }
 
-    // Track how many futures we've registered with (for cleanup)
+    // Track how many futures we've registered with (for cleanup).
+    // Only incremented when asyncWait returns true (future is pending).
     var registered_count: usize = 0;
 
     // Clean up waiters on all exit paths
     defer {
         const winner_index = winner.load(.acquire);
+
+        // Count expected signals: all registered futures will signal unless we cancel them.
+        // Successfully canceled futures (asyncCancelWait returns true) won't signal.
+        var expected: u32 = @intCast(registered_count);
         inline for (fields, 0..) |field, i| {
             // Only cancel if we registered and didn't win
             if (i < registered_count and winner_index != i) {
                 var future = @field(futures, field.name);
-                if (comptime hasWaitContext(field.type)) {
-                    future.asyncCancelWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name));
-                } else {
+                const was_removed = if (comptime hasWaitContext(field.type))
+                    future.asyncCancelWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name))
+                else
                     future.asyncCancelWait(rt, &select_waiters[i].wait_node);
+
+                if (was_removed) {
+                    // Successfully removed from queue - won't signal
+                    expected -= 1;
                 }
             }
         }
+
+        // Wait for all expected signals (winner + in-flight non-winners)
+        waiter.wait(expected, .no_cancel);
     }
 
     // Add waiters to all waiting lists - fast path: return immediately if already complete
@@ -315,12 +325,12 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
         else
             future.asyncWait(rt, &select_waiters[i].wait_node);
 
-        registered_count += 1;
-
         if (!waiting) {
             winner.store(i, .release);
             return @unionInit(U, field.name, future.getResult());
         }
+
+        registered_count += 1;
     }
 
     // Wait for one to complete (Waiter.wait handles spurious wakeups)
@@ -358,24 +368,38 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         sw.* = SelectWaiter.init(&waiter, &winner, i);
     }
 
+    // Only incremented when asyncWait returns true (future is pending).
     var registered_count: usize = 0;
+
     defer {
         const winner_index = winner.load(.acquire);
+
+        // Count expected signals: all registered futures will signal unless we cancel them.
+        // Successfully canceled futures (asyncCancelWait returns true) won't signal.
+        var expected: u32 = @intCast(registered_count);
         for (awaitables[0..registered_count], 0..) |awaitable, i| {
             if (winner_index != i) {
-                awaitable.asyncCancelWait(rt, &select_waiters[i].wait_node);
+                const was_removed = awaitable.asyncCancelWait(rt, &select_waiters[i].wait_node);
+                if (was_removed) {
+                    // Successfully removed from queue - won't signal
+                    expected -= 1;
+                }
             }
         }
+
+        // Wait for all expected signals (winner + in-flight non-winners)
+        waiter.wait(expected, .no_cancel);
     }
 
     for (awaitables, 0..) |awaitable, i| {
         const waiting = awaitable.asyncWait(rt, &select_waiters[i].wait_node);
-        registered_count += 1;
 
         if (!waiting) {
             winner.store(i, .release);
             return i;
         }
+
+        registered_count += 1;
     }
 
     // Wait for one to complete (Waiter.wait handles spurious wakeups)
@@ -415,10 +439,14 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     // Clean up waiter on exit
     defer {
         if (winner.load(.acquire) == NO_WINNER) {
-            if (has_context) {
-                fut.asyncCancelWait(rt, &select_waiter.wait_node, &context);
-            } else {
+            const was_removed = if (has_context)
+                fut.asyncCancelWait(rt, &select_waiter.wait_node, &context)
+            else
                 fut.asyncCancelWait(rt, &select_waiter.wait_node);
+
+            if (!was_removed) {
+                // Wake is in-flight, wait for it to complete (1 signal expected)
+                waiter.wait(1, .no_cancel);
             }
         }
     }

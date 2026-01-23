@@ -145,10 +145,12 @@ pub fn JoinHandle(comptime T: type) type {
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(self: Self, rt: *Runtime, wait_node: *WaitNode) void {
+        /// Returns true if removed, false if already removed by completion (wake in-flight).
+        pub fn asyncCancelWait(self: Self, rt: *Runtime, wait_node: *WaitNode) bool {
             if (self.awaitable) |awaitable| {
-                awaitable.asyncCancelWait(rt, wait_node);
+                return awaitable.asyncCancelWait(rt, wait_node);
             }
+            return true; // No awaitable means already completed, no wake in-flight
         }
 
         /// Request cancellation and wait for the task to complete.

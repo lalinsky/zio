@@ -133,8 +133,9 @@ pub fn Future(comptime T: type) type {
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
-            _ = self.wait_queue.remove(wait_node);
+        /// Returns true if removed, false if already removed by completion (wake in-flight).
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+            return self.wait_queue.remove(wait_node);
         }
     };
 }

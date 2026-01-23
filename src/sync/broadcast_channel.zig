@@ -446,7 +446,8 @@ pub fn AsyncReceive(comptime T: type) type {
         }
 
         /// Cancel a pending wait operation.
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) void {
+        /// Returns true if removed, false if already removed by completion (wake in-flight).
+        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
             self.channel.mutex.lock();
 
             // Defensively clear parent_wait_node under lock to prevent race with waitNodeWake.
@@ -470,6 +471,7 @@ pub fn AsyncReceive(comptime T: type) type {
             } else {
                 self.channel.mutex.unlock();
             }
+            return was_in_queue;
         }
 
         /// Get the result of the receive operation.
