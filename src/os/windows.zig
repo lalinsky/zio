@@ -542,7 +542,7 @@ pub const WSAMSG = extern struct {
 pub const WSAMSG_const = extern struct {
     name: ?*const sockaddr,
     namelen: i32,
-    lpBuffers: [*]WSABUF,
+    lpBuffers: [*]const WSABUF,
     dwBufferCount: u32,
     Control: WSABUF_nullable,
     dwFlags: u32,
