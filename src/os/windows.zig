@@ -784,11 +784,6 @@ pub const SOL = struct {
     pub const SOCKET: i32 = 0xffff;
 };
 
-// Protocol levels
-pub const IPPROTO = struct {
-    pub const TCP: i32 = 6;
-};
-
 // Socket options (SOL_SOCKET level)
 pub const SO = struct {
     pub const REUSEADDR: i32 = 0x0004;
