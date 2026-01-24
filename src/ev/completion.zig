@@ -748,7 +748,7 @@ pub const NetSendTo = struct {
 
 pub const NetRecvMsg = struct {
     c: Completion,
-    result_private_do_not_touch: Result = undefined,
+    result_private_do_not_touch: net.RecvMsgResult = undefined,
     internal: if (@hasDecl(Backend, "NetRecvMsgData")) Backend.NetRecvMsgData else struct {} = .{},
     handle: Backend.NetHandle,
     data: ReadBuf,
@@ -758,11 +758,7 @@ pub const NetRecvMsg = struct {
     control: ?[]u8,
 
     pub const Error = net.RecvError || Cancelable;
-
-    pub const Result = struct {
-        bytes_read: usize,
-        msg_flags: u32,
-    };
+    pub const Result = net.RecvMsgResult;
 
     pub fn init(
         handle: Backend.NetHandle,

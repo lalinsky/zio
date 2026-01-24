@@ -22,6 +22,8 @@ const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
+const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
+const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
@@ -144,6 +146,8 @@ fn getFilter(completion: *Completion) i16 {
         .net_send => std.c.EVFILT.WRITE,
         .net_recvfrom => std.c.EVFILT.READ,
         .net_sendto => std.c.EVFILT.WRITE,
+        .net_recvmsg => std.c.EVFILT.READ,
+        .net_sendmsg => std.c.EVFILT.WRITE,
         .net_poll => blk: {
             const poll_data = completion.cast(NetPoll);
             break :blk switch (poll_data.event) {
@@ -222,6 +226,8 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_send => completion.cast(NetSend).handle,
         .net_recvfrom => completion.cast(NetRecvFrom).handle,
         .net_sendto => completion.cast(NetSendTo).handle,
+        .net_recvmsg => completion.cast(NetRecvMsg).handle,
+        .net_sendmsg => completion.cast(NetSendMsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
         .file_stream_poll => completion.cast(FileStreamPoll).handle,
         .file_stream_read => completion.cast(FileStreamRead).handle,
@@ -299,6 +305,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
+            self.queueRegister(state, data.handle, c);
+        },
+        .net_recvmsg => {
+            const data = c.cast(NetRecvMsg);
+            self.queueRegister(state, data.handle, c);
+        },
+        .net_sendmsg => {
+            const data = c.cast(NetSendMsg);
             self.queueRegister(state, data.handle, c);
         },
         .net_poll => {
@@ -510,6 +524,40 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             }
             if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |n| {
                 comp.setResult(.net_sendto, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    comp.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .net_recvmsg => {
+            const data = comp.cast(NetRecvMsg);
+            if (handleKqueueError(event, net.errnoToRecvError)) |err| {
+                comp.setError(err);
+                return .completed;
+            }
+            if (net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |result| {
+                comp.setResult(.net_recvmsg, result);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    comp.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .net_sendmsg => {
+            const data = comp.cast(NetSendMsg);
+            if (handleKqueueError(event, net.errnoToSendError)) |err| {
+                comp.setError(err);
+                return .completed;
+            }
+            if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |n| {
+                comp.setResult(.net_sendmsg, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,

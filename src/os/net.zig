@@ -1203,6 +1203,106 @@ pub fn sendto(
     }
 }
 
+pub const RecvMsgResult = struct {
+    bytes_read: usize,
+    msg_flags: u32,
+};
+
+pub fn recvmsg(
+    fd: fd_t,
+    buffers: []iovec,
+    flags: RecvFlags,
+    addr: ?*sockaddr,
+    addr_len: ?*socklen_t,
+    control: ?[]u8,
+) RecvError!RecvMsgResult {
+    if (buffers.len == 0) return .{ .bytes_read = 0, .msg_flags = 0 };
+
+    var sys_flags: c_int = 0;
+    if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
+    if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
+
+    switch (builtin.os.tag) {
+        .windows => {
+            // Windows implementation should be handled in the backend
+            @panic("recvmsg not supported on Windows - use backend implementation");
+        },
+        else => {
+            var msg: posix.system.msghdr = .{
+                .name = @ptrCast(addr),
+                .namelen = if (addr_len) |len| len.* else 0,
+                .iov = buffers.ptr,
+                .iovlen = @intCast(buffers.len),
+                .control = if (control) |ctl| ctl.ptr else null,
+                .controllen = if (control) |ctl| @intCast(ctl.len) else 0,
+                .flags = 0,
+            };
+
+            while (true) {
+                const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
+
+                if (rc >= 0) {
+                    if (addr_len) |len| len.* = msg.namelen;
+                    return .{
+                        .bytes_read = @intCast(rc),
+                        .msg_flags = @intCast(msg.flags),
+                    };
+                }
+                switch (posix.errno(rc)) {
+                    .INTR => continue,
+                    else => |err| return errnoToRecvError(err),
+                }
+            }
+        },
+    }
+}
+
+pub fn sendmsg(
+    fd: fd_t,
+    buffers: []const iovec_const,
+    flags: SendFlags,
+    addr: ?*const sockaddr,
+    addr_len: socklen_t,
+    control: ?[]const u8,
+) SendError!usize {
+    if (buffers.len == 0) return 0;
+
+    var sys_flags: c_int = 0;
+    if (flags.no_signal and builtin.os.tag != .windows) {
+        sys_flags |= posix.system.MSG.NOSIGNAL;
+    }
+
+    switch (builtin.os.tag) {
+        .windows => {
+            // Windows implementation should be handled in the backend
+            @panic("sendmsg not supported on Windows - use backend implementation");
+        },
+        else => {
+            var msg: posix.system.msghdr_const = .{
+                .name = @ptrCast(addr),
+                .namelen = addr_len,
+                .iov = buffers.ptr,
+                .iovlen = @intCast(buffers.len),
+                .control = if (control) |ctl| ctl.ptr else null,
+                .controllen = if (control) |ctl| @intCast(ctl.len) else 0,
+                .flags = 0,
+            };
+
+            while (true) {
+                const rc = posix.system.sendmsg(fd, &msg, @intCast(sys_flags));
+
+                if (rc >= 0) {
+                    return @intCast(rc);
+                }
+                switch (posix.errno(rc)) {
+                    .INTR => continue,
+                    else => |err| return errnoToSendError(err),
+                }
+            }
+        },
+    }
+}
+
 /// Creates a connected socket pair using loopback connection (for Windows async wakeup)
 /// Returns [read_socket, write_socket] - writing to write_socket wakes up poll on read_socket
 pub const CreateLoopbackSocketPairError = OpenError || BindError || ListenError || ConnectError || AcceptError || GetSockNameError;
