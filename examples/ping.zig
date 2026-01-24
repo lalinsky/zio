@@ -72,7 +72,7 @@ pub fn main() !void {
     const socket = try zio.net.Socket.open(rt, .raw, .ipv4, .icmp);
     defer socket.close(rt);
 
-    const pid = @as(u16, @truncate(@as(u32, @bitCast(std.os.linux.getpid()))));
+    const pid: u16 = 1;
     var sequence: u16 = 1;
 
     // Send pings in a loop
@@ -123,7 +123,11 @@ pub fn main() !void {
         }
 
         // Skip IP header and read ICMP header
-        const ip_header_len = (recv_buf[0] & 0x0F) * 4;
+        const ip_header_len: usize = @intCast((recv_buf[0] & 0x0F) * 4);
+        if (ip_header_len < 20 or ip_header_len > result.len) {
+            std.log.err("Invalid IP header length: {d}", .{ip_header_len});
+            continue;
+        }
         var reader = std.Io.Reader.fixed(recv_buf[ip_header_len..result.len]);
         const icmp_reply = try reader.takeStruct(IcmpHeader, .big);
 

@@ -358,7 +358,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_recvmsg => {
             const data = c.cast(NetRecvMsg);
             data.internal.msg = .{
-                .name = @ptrCast(data.addr),
+                .name = if (data.addr) |addr| @ptrCast(addr) else null,
                 .namelen = if (data.addr_len) |len| len.* else 0,
                 .iov = data.data.iovecs.ptr,
                 .iovlen = data.data.iovecs.len,
@@ -378,7 +378,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_sendmsg => {
             const data = c.cast(NetSendMsg);
             data.internal.msg = .{
-                .name = @ptrCast(data.addr),
+                .name = if (data.addr) |addr| @ptrCast(addr) else null,
                 .namelen = data.addr_len,
                 .iov = data.data.iovecs.ptr,
                 .iovlen = data.data.iovecs.len,

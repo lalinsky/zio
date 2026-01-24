@@ -1274,7 +1274,7 @@ pub fn recvmsg(
         },
         else => {
             var msg: posix.system.msghdr = .{
-                .name = @ptrCast(addr),
+                .name = if (addr) |a| @ptrCast(a) else null,
                 .namelen = if (addr_len) |len| len.* else 0,
                 .iov = buffers.ptr,
                 .iovlen = @intCast(buffers.len),
@@ -1324,7 +1324,7 @@ pub fn sendmsg(
         },
         else => {
             var msg: posix.system.msghdr_const = .{
-                .name = @ptrCast(addr),
+                .name = if (addr) |a| @ptrCast(a) else null,
                 .namelen = addr_len,
                 .iov = buffers.ptr,
                 .iovlen = @intCast(buffers.len),
