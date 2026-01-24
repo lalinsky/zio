@@ -76,15 +76,7 @@ pub const POLL = switch (builtin.os.tag) {
 pub const sockaddr = posix.system.sockaddr;
 pub const AF = posix.system.AF;
 pub const SOCK = posix.system.SOCK;
-pub const IPPROTO = struct {
-    pub const IP: c_int = 0;
-    pub const ICMP: c_int = 1;
-    pub const TCP: c_int = 6;
-    pub const UDP: c_int = 17;
-    pub const IPV6: c_int = 41;
-    pub const ICMPV6: c_int = 58;
-    pub const RAW: c_int = 255;
-};
+pub const IPPROTO = posix.IPPROTO;
 pub const socklen_t = if (builtin.os.tag == .windows) i32 else posix.system.socklen_t;
 pub const SOL = posix.system.SOL;
 pub const SO = posix.system.SO;
