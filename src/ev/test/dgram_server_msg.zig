@@ -453,14 +453,20 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
 }
 
 test "Echo server and client - IPv4 UDP using NetRecvMsg/NetSendMsg" {
+    // Skip on Windows with poll backend (not yet implemented)
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
     try testEcho(.ipv4, net.sockaddr.in);
 }
 
 test "Echo server and client - IPv6 UDP using NetRecvMsg/NetSendMsg" {
+    // Skip on Windows with poll backend (not yet implemented)
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
     try testEcho(.ipv6, net.sockaddr.in6);
 }
 
 test "Echo server and client - Unix datagram using NetRecvMsg/NetSendMsg" {
     if (!net.has_unix_dgram_sockets) return error.SkipZigTest;
+    // Skip on Windows with poll backend (not yet implemented)
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
     try testEcho(.unix, net.sockaddr.un);
 }
