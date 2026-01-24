@@ -67,6 +67,8 @@ pub const Op = enum {
     net_send,
     net_recvfrom,
     net_sendto,
+    net_recvmsg,
+    net_sendmsg,
     net_poll,
     net_shutdown,
     net_close,
@@ -122,6 +124,8 @@ pub const Op = enum {
             .net_send => NetSend,
             .net_recvfrom => NetRecvFrom,
             .net_sendto => NetSendTo,
+            .net_recvmsg => NetRecvMsg,
+            .net_sendmsg => NetSendMsg,
             .net_poll => NetPoll,
             .net_close => NetClose,
             .net_shutdown => NetShutdown,
@@ -179,6 +183,8 @@ pub const Op = enum {
             NetSend => .net_send,
             NetRecvFrom => .net_recvfrom,
             NetSendTo => .net_sendto,
+            NetRecvMsg => .net_recvmsg,
+            NetSendMsg => .net_sendmsg,
             NetPoll => .net_poll,
             NetClose => .net_close,
             NetShutdown => .net_shutdown,
@@ -505,6 +511,7 @@ pub const NetOpen = struct {
     result_private_do_not_touch: Backend.NetHandle = undefined,
     domain: net.Domain,
     socket_type: net.Type,
+    protocol: net.Protocol = .ip,
     flags: net.OpenFlags = .{ .nonblocking = true },
 
     pub const Error = net.OpenError || Cancelable;
@@ -512,12 +519,14 @@ pub const NetOpen = struct {
     pub fn init(
         domain: net.Domain,
         socket_type: net.Type,
+        protocol: net.Protocol,
         flags: net.OpenFlags,
     ) NetOpen {
         return .{
             .c = .init(.net_open),
             .domain = domain,
             .socket_type = socket_type,
+            .protocol = protocol,
             .flags = flags,
         };
     }
@@ -737,6 +746,81 @@ pub const NetSendTo = struct {
 
     pub fn getResult(self: *const NetSendTo) Error!usize {
         return self.c.getResult(.net_sendto);
+    }
+};
+
+pub const NetRecvMsg = struct {
+    c: Completion,
+    result_private_do_not_touch: net.RecvMsgResult = undefined,
+    internal: if (@hasDecl(Backend, "NetRecvMsgData")) Backend.NetRecvMsgData else struct {} = .{},
+    handle: Backend.NetHandle,
+    data: ReadBuf,
+    flags: net.RecvFlags,
+    addr: ?*net.sockaddr,
+    addr_len: ?*net.socklen_t,
+    control: ?[]u8,
+
+    pub const Error = net.RecvError || Cancelable;
+    pub const Result = net.RecvMsgResult;
+
+    pub fn init(
+        handle: Backend.NetHandle,
+        data: ReadBuf,
+        flags: net.RecvFlags,
+        addr: ?*net.sockaddr,
+        addr_len: ?*net.socklen_t,
+        control: ?[]u8,
+    ) NetRecvMsg {
+        return .{
+            .c = .init(.net_recvmsg),
+            .handle = handle,
+            .data = data,
+            .flags = flags,
+            .addr = addr,
+            .addr_len = addr_len,
+            .control = control,
+        };
+    }
+
+    pub fn getResult(self: *const NetRecvMsg) Error!Result {
+        return self.c.getResult(.net_recvmsg);
+    }
+};
+
+pub const NetSendMsg = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: if (@hasDecl(Backend, "NetSendMsgData")) Backend.NetSendMsgData else struct {} = .{},
+    handle: Backend.NetHandle,
+    data: WriteBuf,
+    flags: net.SendFlags,
+    addr: ?*const net.sockaddr,
+    addr_len: net.socklen_t,
+    control: ?[]const u8,
+
+    pub const Error = net.SendError || Cancelable;
+
+    pub fn init(
+        handle: Backend.NetHandle,
+        data: WriteBuf,
+        flags: net.SendFlags,
+        addr: ?*const net.sockaddr,
+        addr_len: net.socklen_t,
+        control: ?[]const u8,
+    ) NetSendMsg {
+        return .{
+            .c = .init(.net_sendmsg),
+            .handle = handle,
+            .data = data,
+            .flags = flags,
+            .addr = addr,
+            .addr_len = addr_len,
+            .control = control,
+        };
+    }
+
+    pub fn getResult(self: *const NetSendMsg) Error!usize {
+        return self.c.getResult(.net_sendmsg);
     }
 };
 

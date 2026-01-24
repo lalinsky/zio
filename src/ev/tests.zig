@@ -22,6 +22,7 @@ test {
     _ = @import("test/stream_server.zig");
     _ = @import("test/poll_server.zig");
     _ = @import("test/dgram_server.zig");
+    _ = @import("test/dgram_server_msg.zig");
     _ = @import("test/fs.zig");
     _ = @import("test/timer.zig");
     _ = @import("test/cancel.zig");
@@ -77,7 +78,7 @@ test "Loop: close" {
     defer loop.deinit();
 
     // Create a socket first
-    var open: NetOpen = .init(.ipv4, .stream, .{});
+    var open: NetOpen = .init(.ipv4, .stream, .ip, .{});
     loop.add(&open.c);
     try loop.run(.until_done);
     const sock = try open.c.getResult(.net_open);
@@ -94,7 +95,7 @@ test "Loop: socket create and bind" {
     defer loop.deinit();
 
     // Create socket
-    var open: NetOpen = .init(.ipv4, .stream, .{});
+    var open: NetOpen = .init(.ipv4, .stream, .ip, .{});
     loop.add(&open.c);
     try loop.run(.until_done);
 

@@ -521,6 +521,32 @@ pub const sockaddr = extern struct {
 
 // Forward from std to maintain compatibility with std.Io.Reader
 pub const WSABUF = std.os.windows.ws2_32.WSABUF;
+pub const LPWSAOVERLAPPED_COMPLETION_ROUTINE = std.os.windows.ws2_32.LPWSAOVERLAPPED_COMPLETION_ROUTINE;
+
+// WSAMSG structures for WSARecvMsg/WSASendMsg
+// WSABUF with optional buf pointer for Control field
+pub const WSABUF_nullable = extern struct {
+    len: ULONG,
+    buf: ?[*]u8,
+};
+
+pub const WSAMSG = extern struct {
+    name: ?*sockaddr,
+    namelen: i32,
+    lpBuffers: [*]WSABUF,
+    dwBufferCount: u32,
+    Control: WSABUF_nullable,
+    dwFlags: u32,
+};
+
+pub const WSAMSG_const = extern struct {
+    name: ?*const sockaddr,
+    namelen: i32,
+    lpBuffers: [*]const WSABUF,
+    dwBufferCount: u32,
+    Control: WSABUF_nullable,
+    dwFlags: u32,
+};
 
 pub const pollfd = extern struct {
     fd: SOCKET,
@@ -745,11 +771,6 @@ pub const SOCK = struct {
 // Socket option levels
 pub const SOL = struct {
     pub const SOCKET: i32 = 0xffff;
-};
-
-// Protocol levels
-pub const IPPROTO = struct {
-    pub const TCP: i32 = 6;
 };
 
 // Socket options (SOL_SOCKET level)

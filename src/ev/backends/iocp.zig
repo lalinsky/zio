@@ -18,6 +18,8 @@ const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
+const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
+const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
@@ -49,6 +51,20 @@ const WSAID_CONNECTEX = windows.GUID{
     .Data2 = 0xddf3,
     .Data3 = 0x4660,
     .Data4 = .{ 0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e },
+};
+
+const WSAID_WSARECVMSG = windows.GUID{
+    .Data1 = 0xf689d7c8,
+    .Data2 = 0x6f1f,
+    .Data3 = 0x436b,
+    .Data4 = .{ 0x8a, 0x53, 0xe5, 0x4f, 0xe3, 0x51, 0xc3, 0x22 },
+};
+
+const WSAID_WSASENDMSG = windows.GUID{
+    .Data1 = 0xa441e712,
+    .Data2 = 0x754f,
+    .Data3 = 0x43ca,
+    .Data4 = .{ 0x84, 0xa7, 0x0d, 0xee, 0x44, 0xcf, 0x60, 0x6d },
 };
 
 const WSAID_GETACCEPTEXSOCKADDRS = windows.GUID{
@@ -90,6 +106,23 @@ const LPFN_GETACCEPTEXSOCKADDRS = *const fn (
     RemoteSockaddr: **windows.sockaddr,
     RemoteSockaddrLength: *c_int,
 ) callconv(.winapi) void;
+
+const LPFN_WSARECVMSG = *const fn (
+    s: windows.SOCKET,
+    lpMsg: *windows.WSAMSG,
+    lpdwNumberOfBytesRecvd: ?*windows.DWORD,
+    lpOverlapped: ?*windows.OVERLAPPED,
+    lpCompletionRoutine: ?windows.LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) callconv(.winapi) c_int;
+
+const LPFN_WSASENDMSG = *const fn (
+    s: windows.SOCKET,
+    lpMsg: *const windows.WSAMSG_const,
+    dwFlags: windows.DWORD,
+    lpdwNumberOfBytesSent: ?*windows.DWORD,
+    lpOverlapped: ?*windows.OVERLAPPED,
+    lpCompletionRoutine: ?windows.LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) callconv(.winapi) c_int;
 
 fn loadWinsockExtension(comptime T: type, sock: windows.SOCKET, guid: windows.GUID) !T {
     var func_ptr: T = undefined;
@@ -140,10 +173,22 @@ pub const NetAcceptData = struct {
     family: u16 = 0, // Socket family, stored from submitAccept
 };
 
+pub const NetRecvMsgData = struct {
+    msg: windows.WSAMSG = undefined,
+    control_buf: windows.WSABUF_nullable = undefined,
+};
+
+pub const NetSendMsgData = struct {
+    msg: windows.WSAMSG_const = undefined,
+    control_buf: windows.WSABUF_nullable = undefined,
+};
+
 const ExtensionFunctions = struct {
     acceptex: LPFN_ACCEPTEX,
     connectex: LPFN_CONNECTEX,
     getacceptexsockaddrs: LPFN_GETACCEPTEXSOCKADDRS,
+    wsarecvmsg: LPFN_WSARECVMSG,
+    wsasendmsg: LPFN_WSASENDMSG,
 };
 
 pub const SharedState = struct {
@@ -151,10 +196,8 @@ pub const SharedState = struct {
     refcount: usize = 0,
     iocp: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
 
-    // Cache of extension function pointers per address family
-    // Key: address family (AF_INET, AF_INET6), Value: ExtensionFunctions
-    // AcceptEx/ConnectEx are STREAM-only, so family is sufficient
-    extension_cache: std.AutoHashMapUnmanaged(u16, ExtensionFunctions) = .{},
+    // Extension functions loaded once globally (family-independent)
+    exts: ExtensionFunctions = undefined,
 
     pub fn acquire(self: *SharedState) !void {
         self.mutex.lock();
@@ -168,11 +211,24 @@ pub const SharedState = struct {
                 0,
                 0, // Use default number of concurrent threads
             ) orelse return error.Unexpected;
+
+            // Load all extension functions using a temporary socket
+            // Socket family/type doesn't matter - use AF_INET SOCK_STREAM
+            const sock = try net.socket(.ipv4, .stream, .ip, .{});
+            defer net.close(sock);
+
+            self.exts = ExtensionFunctions{
+                .acceptex = try loadWinsockExtension(LPFN_ACCEPTEX, sock, WSAID_ACCEPTEX),
+                .connectex = try loadWinsockExtension(LPFN_CONNECTEX, sock, WSAID_CONNECTEX),
+                .getacceptexsockaddrs = try loadWinsockExtension(LPFN_GETACCEPTEXSOCKADDRS, sock, WSAID_GETACCEPTEXSOCKADDRS),
+                .wsarecvmsg = try loadWinsockExtension(LPFN_WSARECVMSG, sock, WSAID_WSARECVMSG),
+                .wsasendmsg = try loadWinsockExtension(LPFN_WSASENDMSG, sock, WSAID_WSASENDMSG),
+            };
         }
         self.refcount += 1;
     }
 
-    pub fn release(self: *SharedState, allocator: std.mem.Allocator) void {
+    pub fn release(self: *SharedState) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -185,53 +241,7 @@ pub const SharedState = struct {
                 _ = windows.CloseHandle(self.iocp);
                 self.iocp = windows.INVALID_HANDLE_VALUE;
             }
-
-            // Clear extension function cache
-            self.extension_cache.deinit(allocator);
-            self.extension_cache = .{};
         }
-    }
-
-    /// Get extension functions for a given address family, loading on-demand if needed
-    pub fn getExtensions(self: *SharedState, allocator: std.mem.Allocator, family: u16) !ExtensionFunctions {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Check if already cached
-        if (self.extension_cache.get(family)) |funcs| {
-            return funcs;
-        }
-
-        // Not cached - load extension functions
-        const funcs = try self.loadExtensionFunctions(family);
-
-        // Cache for future use
-        try self.extension_cache.put(allocator, family, funcs);
-
-        return funcs;
-    }
-
-    fn loadExtensionFunctions(self: *SharedState, family: u16) !ExtensionFunctions {
-        _ = self;
-
-        // Create a temporary socket for the specified family
-        const sock = try net.socket(@enumFromInt(family), .stream, .{});
-        defer net.close(sock);
-
-        // Load AcceptEx
-        const acceptex = try loadWinsockExtension(LPFN_ACCEPTEX, sock, WSAID_ACCEPTEX);
-
-        // Load ConnectEx
-        const connectex = try loadWinsockExtension(LPFN_CONNECTEX, sock, WSAID_CONNECTEX);
-
-        // Load GetAcceptExSockaddrs
-        const getacceptexsockaddrs = try loadWinsockExtension(LPFN_GETACCEPTEXSOCKADDRS, sock, WSAID_GETACCEPTEXSOCKADDRS);
-
-        return .{
-            .acceptex = acceptex,
-            .connectex = connectex,
-            .getacceptexsockaddrs = getacceptexsockaddrs,
-        };
     }
 };
 
@@ -257,7 +267,7 @@ thread_handle: windows.HANDLE,
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     // Acquire reference to shared state (creates IOCP handle if first loop)
     try shared_state.acquire();
-    errdefer shared_state.release(allocator);
+    errdefer shared_state.release();
 
     const entries = try allocator.alloc(windows.OVERLAPPED_ENTRY, queue_size);
     errdefer allocator.free(entries);
@@ -294,7 +304,7 @@ pub fn deinit(self: *Self) void {
 
     self.allocator.free(self.entries);
     // Release reference to shared state (closes IOCP handle if last loop)
-    self.shared_state.release(self.allocator);
+    self.shared_state.release();
 }
 
 /// Post-process a file handle after it's been opened/created in the thread pool.
@@ -339,7 +349,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         // Synchronous operations - complete immediately
         .net_open => {
             const data = c.cast(NetOpen);
-            if (net.socket(data.domain, data.socket_type, data.flags)) |handle| {
+            if (net.socket(data.domain, data.socket_type, data.protocol, data.flags)) |handle| {
                 // Associate socket with IOCP
                 const iocp_result = windows.CreateIoCompletionPort(
                     @ptrCast(handle),
@@ -427,6 +437,22 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_sendto => {
             const data = c.cast(NetSendTo);
             self.submitSendTo(state, data) catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+            };
+        },
+
+        .net_recvmsg => {
+            const data = c.cast(NetRecvMsg);
+            self.submitRecvMsg(state, data) catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+            };
+        },
+
+        .net_sendmsg => {
+            const data = c.cast(NetSendMsg);
+            self.submitSendMsg(state, data) catch |err| {
                 c.setError(err);
                 state.markCompletedFromBackend(c);
             };
@@ -543,10 +569,10 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     data.internal.family = family;
 
     // Load AcceptEx extension function for this address family
-    const exts = try self.shared_state.getExtensions(self.allocator, family);
+    const exts = self.shared_state.exts;
 
     // Create new socket for the accepted connection (same family as listening socket)
-    const accept_socket = try net.socket(@enumFromInt(family), .stream, data.flags);
+    const accept_socket = try net.socket(@enumFromInt(family), .stream, .ip, data.flags);
     errdefer net.close(accept_socket);
 
     // Associate the accept socket with IOCP
@@ -801,12 +827,117 @@ fn submitSendTo(self: *Self, state: *LoopState, data: *NetSendTo) !void {
     // Operation will complete via IOCP (either immediate or async)
 }
 
+fn submitRecvMsg(self: *Self, state: *LoopState, data: *NetRecvMsg) !void {
+    // Load WSARecvMsg extension function
+    const exts = self.shared_state.exts;
+
+    // Initialize OVERLAPPED
+    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+
+    // Set up control buffer if provided
+    if (data.control) |ctl| {
+        data.internal.control_buf = .{
+            .len = @intCast(ctl.len),
+            .buf = ctl.ptr,
+        };
+    } else {
+        data.internal.control_buf = .{
+            .len = 0,
+            .buf = null,
+        };
+    }
+
+    // Initialize WSAMSG
+    data.internal.msg = .{
+        .name = if (data.addr) |addr| @ptrCast(addr) else null,
+        .namelen = if (data.addr_len) |len| @intCast(len.*) else 0,
+        .lpBuffers = data.data.iovecs.ptr,
+        .dwBufferCount = @intCast(data.data.iovecs.len),
+        .Control = data.internal.control_buf,
+        .dwFlags = recvFlagsToMsg(data.flags),
+    };
+
+    var bytes_received: windows.DWORD = 0;
+
+    const result = exts.wsarecvmsg(
+        data.handle,
+        &data.internal.msg,
+        &bytes_received,
+        &data.c.internal.overlapped,
+        null, // No completion routine
+    );
+
+    if (result == windows.SOCKET_ERROR) {
+        const err = windows.WSAGetLastError();
+        if (err != .IO_PENDING) {
+            log.err("WSARecvMsg failed: {}", .{err});
+            data.c.setError(net.errnoToRecvError(err));
+            state.markCompletedFromBackend(&data.c);
+            return;
+        }
+    }
+    // Operation will complete via IOCP (either immediate or async)
+}
+
+fn submitSendMsg(self: *Self, state: *LoopState, data: *NetSendMsg) !void {
+    // Initialize OVERLAPPED
+    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+
+    // Set up control buffer if provided
+    if (data.control) |ctl| {
+        data.internal.control_buf = .{
+            .len = @intCast(ctl.len),
+            .buf = @constCast(ctl.ptr),
+        };
+    } else {
+        data.internal.control_buf = .{
+            .len = 0,
+            .buf = null,
+        };
+    }
+
+    // Initialize WSAMSG_const
+    data.internal.msg = .{
+        .name = if (data.addr) |addr| @ptrCast(addr) else null,
+        .namelen = if (data.addr != null) @intCast(data.addr_len) else 0,
+        .lpBuffers = @constCast(data.data.iovecs.ptr),
+        .dwBufferCount = @intCast(data.data.iovecs.len),
+        .Control = data.internal.control_buf,
+        .dwFlags = sendFlagsToMsg(data.flags),
+    };
+
+    // Load WSASendMsg extension function
+    const exts = self.shared_state.exts;
+
+    var bytes_sent: windows.DWORD = 0;
+
+    const result = exts.wsasendmsg(
+        data.handle,
+        &data.internal.msg,
+        sendFlagsToMsg(data.flags),
+        &bytes_sent,
+        &data.c.internal.overlapped,
+        null, // No completion routine
+    );
+
+    if (result == windows.SOCKET_ERROR) {
+        const err = windows.WSAGetLastError();
+        if (err != .IO_PENDING) {
+            log.err("WSASendMsg failed: {}", .{err});
+            data.c.setError(net.errnoToSendError(err));
+            state.markCompletedFromBackend(&data.c);
+            return;
+        }
+    }
+    // Operation will complete via IOCP (either immediate or async)
+}
+
 fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
     // Get address family from the target address
     const family: u16 = @as(*const windows.sockaddr, @ptrCast(@alignCast(data.addr))).family;
 
     // Load ConnectEx extension function for this address family
-    const exts = try self.shared_state.getExtensions(self.allocator, family);
+    const exts = self.shared_state.exts;
 
     // ConnectEx requires the socket to be bound first (even to wildcard address)
     // Create a wildcard bind address
@@ -1033,6 +1164,8 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .net_send,
                 .net_recvfrom,
                 .net_sendto,
+                .net_recvmsg,
+                .net_sendmsg,
                 .net_poll,
                 => blk: {
                     // Get socket handle from the completion
@@ -1043,6 +1176,8 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                         .net_send => target.cast(NetSend).handle,
                         .net_recvfrom => target.cast(NetRecvFrom).handle,
                         .net_sendto => target.cast(NetSendTo).handle,
+                        .net_recvmsg => target.cast(NetRecvMsg).handle,
+                        .net_sendmsg => target.cast(NetSendMsg).handle,
                         .net_poll => target.cast(NetPoll).handle,
                         else => unreachable,
                     };
@@ -1192,12 +1327,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                     // Parse the address buffer to get the peer address
                     if (data.addr) |user_addr| {
                         // Load GetAcceptExSockaddrs extension function using the stored family
-                        const exts = self.shared_state.getExtensions(self.allocator, data.internal.family) catch |err| {
-                            net.close(data.result_private_do_not_touch);
-                            c.setError(err);
-                            state.markCompletedFromBackend(c);
-                            return;
-                        };
+                        const exts = self.shared_state.exts;
 
                         const addr_size: u32 = NetAcceptData.addr_slot_size;
                         var local_addr: *windows.sockaddr = undefined;
@@ -1327,6 +1457,59 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setError(net.errnoToSendError(err));
             } else {
                 c.setResult(.net_sendto, @intCast(bytes_transferred));
+            }
+
+            state.markCompletedFromBackend(c);
+        },
+
+        .net_recvmsg => {
+            const data = c.cast(NetRecvMsg);
+            var bytes_transferred: windows.DWORD = 0;
+            var flags: windows.DWORD = 0;
+
+            const result = windows.WSAGetOverlappedResult(
+                data.handle,
+                &data.c.internal.overlapped,
+                &bytes_transferred,
+                windows.FALSE,
+                &flags,
+            );
+
+            if (result == windows.FALSE) {
+                const err = windows.WSAGetLastError();
+                c.setError(net.errnoToRecvError(err));
+            } else {
+                // Update addr_len if address was provided
+                if (data.addr_len) |len| {
+                    len.* = @intCast(data.internal.msg.namelen);
+                }
+                c.setResult(.net_recvmsg, .{
+                    .len = @intCast(bytes_transferred),
+                    .flags = data.internal.msg.dwFlags,
+                });
+            }
+
+            state.markCompletedFromBackend(c);
+        },
+
+        .net_sendmsg => {
+            const data = c.cast(NetSendMsg);
+            var bytes_transferred: windows.DWORD = 0;
+            var flags: windows.DWORD = 0;
+
+            const result = windows.WSAGetOverlappedResult(
+                data.handle,
+                &data.c.internal.overlapped,
+                &bytes_transferred,
+                windows.FALSE,
+                &flags,
+            );
+
+            if (result == windows.FALSE) {
+                const err = windows.WSAGetLastError();
+                c.setError(net.errnoToSendError(err));
+            } else {
+                c.setResult(.net_sendmsg, @intCast(bytes_transferred));
             }
 
             state.markCompletedFromBackend(c);

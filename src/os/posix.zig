@@ -26,7 +26,15 @@ pub const stack_t = sys.stack_t;
 pub const PATH_MAX = std.posix.PATH_MAX;
 pub const SO = system.SO;
 pub const SOL = system.SOL;
-pub const IPPROTO = system.IPPROTO;
+pub const IPPROTO = struct {
+    pub const IP: c_int = 0;
+    pub const ICMP: c_int = 1;
+    pub const TCP: c_int = 6;
+    pub const UDP: c_int = 17;
+    pub const IPV6: c_int = 41;
+    pub const ICMPV6: c_int = 58;
+    pub const RAW: c_int = 255;
+};
 pub const TCP = system.TCP;
 
 pub const timespec = sys.timespec;

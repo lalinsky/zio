@@ -75,6 +75,8 @@ pub const POLL = switch (builtin.os.tag) {
 
 pub const sockaddr = posix.system.sockaddr;
 pub const AF = posix.system.AF;
+pub const SOCK = posix.system.SOCK;
+pub const IPPROTO = posix.IPPROTO;
 pub const socklen_t = if (builtin.os.tag == .windows) i32 else posix.system.socklen_t;
 pub const SOL = posix.system.SOL;
 pub const SO = posix.system.SO;
@@ -212,17 +214,60 @@ pub fn shutdown(fd: fd_t, how: ShutdownHow) ShutdownError!void {
 }
 
 pub const Domain = enum(c_int) {
-    ipv4 = posix.system.AF.INET,
-    ipv6 = posix.system.AF.INET6,
-    unix = posix.system.AF.UNIX,
+    unspec = AF.UNSPEC,
+    ipv4 = AF.INET,
+    ipv6 = AF.INET6,
+    unix = AF.UNIX,
     _,
+
+    /// Convert from POSIX address family constant
+    pub fn fromPosix(af: anytype) Domain {
+        return @enumFromInt(af);
+    }
+
+    /// Convert to POSIX address family constant
+    pub fn toPosix(self: Domain) c_int {
+        return @intFromEnum(self);
+    }
 };
 
 pub const Type = enum(c_int) {
-    stream = posix.system.SOCK.STREAM,
-    dgram = posix.system.SOCK.DGRAM,
-    seqpacket = posix.system.SOCK.SEQPACKET,
+    stream = SOCK.STREAM,
+    dgram = SOCK.DGRAM,
+    raw = SOCK.RAW,
+    seqpacket = SOCK.SEQPACKET,
     _,
+
+    /// Convert from POSIX socket type constant
+    pub fn fromPosix(sock_type: anytype) Type {
+        return @enumFromInt(sock_type);
+    }
+
+    /// Convert to POSIX socket type constant
+    pub fn toPosix(self: Type) c_int {
+        return @intFromEnum(self);
+    }
+};
+
+pub const Protocol = enum(c_int) {
+    ip = IPPROTO.IP,
+    icmp = IPPROTO.ICMP,
+    tcp = IPPROTO.TCP,
+    udp = IPPROTO.UDP,
+    ipv6 = IPPROTO.IPV6,
+    icmpv6 = IPPROTO.ICMPV6,
+    raw = IPPROTO.RAW,
+    _,
+
+    /// Convert from POSIX protocol constant
+    pub fn fromPosix(protocol: anytype) Protocol {
+        return @enumFromInt(protocol);
+    }
+
+    /// Convert to POSIX protocol constant
+    pub fn toPosix(self: Protocol) c_int {
+        return @intFromEnum(self);
+    }
 };
 
 pub const OpenFlags = packed struct {
@@ -241,13 +286,13 @@ pub const OpenError = error{
     Unexpected,
 };
 
-pub fn socket(domain: Domain, socket_type: Type, flags: OpenFlags) OpenError!fd_t {
+pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: OpenFlags) OpenError!fd_t {
     switch (builtin.os.tag) {
         .windows => {
             const sock = windows.WSASocketW(
-                @intFromEnum(domain),
-                @intFromEnum(socket_type),
-                0,
+                domain.toPosix(),
+                socket_type.toPosix(),
+                protocol.toPosix(),
                 null,
                 0,
                 windows.WSA_FLAG_OVERLAPPED,
@@ -263,23 +308,23 @@ pub fn socket(domain: Domain, socket_type: Type, flags: OpenFlags) OpenError!fd_
             return sock;
         },
         else => {
-            var sock_flags: c_int = @intFromEnum(socket_type);
+            var sock_flags: c_int = socket_type.toPosix();
             // Linux supports SOCK_NONBLOCK and SOCK_CLOEXEC flags in socket()
             // BSD (macOS, FreeBSD, etc.) requires fcntl() instead
             if (builtin.os.tag == .linux) {
                 if (flags.nonblocking) {
-                    sock_flags |= posix.system.SOCK.NONBLOCK;
+                    sock_flags |= SOCK.NONBLOCK;
                 }
                 if (flags.cloexec) {
-                    sock_flags |= posix.system.SOCK.CLOEXEC;
+                    sock_flags |= SOCK.CLOEXEC;
                 }
             }
 
             while (true) {
                 const rc = posix.system.socket(
-                    @intCast(@intFromEnum(domain)),
+                    @intCast(domain.toPosix()),
                     @intCast(sock_flags),
-                    0,
+                    @intCast(protocol.toPosix()),
                 );
                 switch (posix.errno(rc)) {
                     .SUCCESS => {
@@ -525,10 +570,10 @@ pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlag
             var accept_flags: c_int = 0;
             if (builtin.os.tag == .linux) {
                 if (flags.nonblocking) {
-                    accept_flags |= posix.system.SOCK.NONBLOCK;
+                    accept_flags |= SOCK.NONBLOCK;
                 }
                 if (flags.cloexec) {
-                    accept_flags |= posix.system.SOCK.CLOEXEC;
+                    accept_flags |= SOCK.CLOEXEC;
                 }
             }
 
@@ -1203,6 +1248,106 @@ pub fn sendto(
     }
 }
 
+pub const RecvMsgResult = struct {
+    len: usize,
+    flags: u32,
+};
+
+pub fn recvmsg(
+    fd: fd_t,
+    buffers: []iovec,
+    flags: RecvFlags,
+    addr: ?*sockaddr,
+    addr_len: ?*socklen_t,
+    control: ?[]u8,
+) RecvError!RecvMsgResult {
+    if (buffers.len == 0) return .{ .len = 0, .flags = 0 };
+
+    var sys_flags: c_int = 0;
+    if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
+    if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
+
+    switch (builtin.os.tag) {
+        .windows => {
+            // Windows implementation should be handled in the backend
+            @panic("recvmsg not supported on Windows - use backend implementation");
+        },
+        else => {
+            var msg: posix.system.msghdr = .{
+                .name = if (addr) |a| @ptrCast(a) else null,
+                .namelen = if (addr_len) |len| len.* else 0,
+                .iov = buffers.ptr,
+                .iovlen = @intCast(buffers.len),
+                .control = if (control) |ctl| ctl.ptr else null,
+                .controllen = if (control) |ctl| @intCast(ctl.len) else 0,
+                .flags = 0,
+            };
+
+            while (true) {
+                const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
+
+                if (rc >= 0) {
+                    if (addr_len) |len| len.* = msg.namelen;
+                    return .{
+                        .len = @intCast(rc),
+                        .flags = @intCast(msg.flags),
+                    };
+                }
+                switch (posix.errno(rc)) {
+                    .INTR => continue,
+                    else => |err| return errnoToRecvError(err),
+                }
+            }
+        },
+    }
+}
+
+pub fn sendmsg(
+    fd: fd_t,
+    buffers: []const iovec_const,
+    flags: SendFlags,
+    addr: ?*const sockaddr,
+    addr_len: socklen_t,
+    control: ?[]const u8,
+) SendError!usize {
+    if (buffers.len == 0) return 0;
+
+    var sys_flags: c_int = 0;
+    if (flags.no_signal and builtin.os.tag != .windows) {
+        sys_flags |= posix.system.MSG.NOSIGNAL;
+    }
+
+    switch (builtin.os.tag) {
+        .windows => {
+            // Windows implementation should be handled in the backend
+            @panic("sendmsg not supported on Windows - use backend implementation");
+        },
+        else => {
+            var msg: posix.system.msghdr_const = .{
+                .name = if (addr) |a| @ptrCast(a) else null,
+                .namelen = addr_len,
+                .iov = buffers.ptr,
+                .iovlen = @intCast(buffers.len),
+                .control = if (control) |ctl| ctl.ptr else null,
+                .controllen = if (control) |ctl| @intCast(ctl.len) else 0,
+                .flags = 0,
+            };
+
+            while (true) {
+                const rc = posix.system.sendmsg(fd, &msg, @intCast(sys_flags));
+
+                if (rc >= 0) {
+                    return @intCast(rc);
+                }
+                switch (posix.errno(rc)) {
+                    .INTR => continue,
+                    else => |err| return errnoToSendError(err),
+                }
+            }
+        },
+    }
+}
+
 /// Creates a connected socket pair using loopback connection (for Windows async wakeup)
 /// Returns [read_socket, write_socket] - writing to write_socket wakes up poll on read_socket
 pub const CreateLoopbackSocketPairError = OpenError || BindError || ListenError || ConnectError || AcceptError || GetSockNameError;
@@ -1211,7 +1356,7 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     ensureWSAInitialized();
 
     // Create a listening socket on loopback
-    const listen_sock = try socket(.ipv4, .stream, .{ .nonblocking = true });
+    const listen_sock = try socket(.ipv4, .stream, .ip, .{ .nonblocking = true });
     errdefer close(listen_sock);
 
     // Bind to 127.0.0.1:0 (any available port)
@@ -1232,7 +1377,7 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     try getsockname(listen_sock, &actual_addr, &addr_len);
 
     // Create connecting socket
-    const write_sock = try socket(.ipv4, .stream, .{ .nonblocking = true });
+    const write_sock = try socket(.ipv4, .stream, .ip, .{ .nonblocking = true });
     errdefer close(write_sock);
 
     // Connect to the listening socket
@@ -1380,4 +1525,52 @@ test "getaddrinfo - resolve example.com" {
         current = info.next;
     }
     try std.testing.expect(count > 0);
+}
+
+test "Domain, Type, and Protocol conversions" {
+    // Test raw socket type
+    const raw_type = Type.raw;
+    try std.testing.expectEqual(SOCK.RAW, raw_type.toPosix());
+
+    // Test unspec domain
+    const unspec_domain = Domain.unspec;
+    try std.testing.expectEqual(AF.UNSPEC, unspec_domain.toPosix());
+
+    // Test ICMP protocol
+    const icmp_proto = Protocol.icmp;
+    try std.testing.expectEqual(IPPROTO.ICMP, icmp_proto.toPosix());
+
+    // Test fromPosix roundtrip for Type
+    const t1 = Type.fromPosix(SOCK.STREAM);
+    const t2 = Type.fromPosix(SOCK.DGRAM);
+    const t3 = Type.fromPosix(SOCK.RAW);
+    try std.testing.expectEqual(Type.stream, t1);
+    try std.testing.expectEqual(Type.dgram, t2);
+    try std.testing.expectEqual(Type.raw, t3);
+
+    // Test fromPosix roundtrip for Domain
+    const d0 = Domain.fromPosix(AF.UNSPEC);
+    const d2 = Domain.fromPosix(AF.INET);
+    try std.testing.expectEqual(Domain.unspec, d0);
+    try std.testing.expectEqual(Domain.ipv4, d2);
+
+    // Test fromPosix roundtrip for Protocol
+    const p0 = Protocol.fromPosix(IPPROTO.IP);
+    const p1 = Protocol.fromPosix(IPPROTO.ICMP);
+    const p6 = Protocol.fromPosix(IPPROTO.TCP);
+    const p17 = Protocol.fromPosix(IPPROTO.UDP);
+    try std.testing.expectEqual(Protocol.ip, p0);
+    try std.testing.expectEqual(Protocol.icmp, p1);
+    try std.testing.expectEqual(Protocol.tcp, p6);
+    try std.testing.expectEqual(Protocol.udp, p17);
+
+    // Test unknown value uses catch-all _
+    const t_unknown = Type.fromPosix(999);
+    try std.testing.expectEqual(@as(c_int, 999), t_unknown.toPosix());
+
+    const d_unknown = Domain.fromPosix(999);
+    try std.testing.expectEqual(@as(c_int, 999), d_unknown.toPosix());
+
+    const p_unknown = Protocol.fromPosix(999);
+    try std.testing.expectEqual(@as(c_int, 999), p_unknown.toPosix());
 }

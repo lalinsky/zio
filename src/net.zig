@@ -595,7 +595,7 @@ pub const IpAddress = extern union {
     };
 
     pub fn bind(self: IpAddress, rt: *Runtime, options: BindOptions) !Socket {
-        var socket = try Socket.open(rt, .dgram, @enumFromInt(self.any.family));
+        var socket = try Socket.open(rt, .dgram, .fromPosix(self.any.family), .ip);
         errdefer socket.close(rt);
 
         if (options.reuse_address) {
@@ -608,7 +608,7 @@ pub const IpAddress = extern union {
     }
 
     pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
-        var socket = try Socket.open(rt, .stream, @enumFromInt(self.any.family));
+        var socket = try Socket.open(rt, .stream, .fromPosix(self.any.family), .ip);
         errdefer socket.close(rt);
 
         if (options.reuse_address) {
@@ -622,7 +622,7 @@ pub const IpAddress = extern union {
     }
 
     pub fn connect(self: IpAddress, rt: *Runtime, options: ConnectOptions) !Stream {
-        var socket = try Socket.open(rt, .stream, @enumFromInt(self.any.family));
+        var socket = try Socket.open(rt, .stream, .fromPosix(self.any.family), .ip);
         errdefer socket.close(rt);
 
         try socket.connect(rt, .{ .ip = self }, .{ .timeout = options.timeout });
@@ -668,7 +668,7 @@ pub const UnixAddress = extern union {
     pub fn bind(self: UnixAddress, rt: *Runtime, options: BindOptions) !Socket {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .dgram, .unix);
+        var socket = try Socket.open(rt, .dgram, .unix, .ip);
         errdefer socket.close(rt);
 
         if (options.reuse_address) {
@@ -683,7 +683,7 @@ pub const UnixAddress = extern union {
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .stream, .unix);
+        var socket = try Socket.open(rt, .stream, .unix, .ip);
         errdefer socket.close(rt);
 
         try socket.bind(rt, .{ .unix = self });
@@ -695,7 +695,7 @@ pub const UnixAddress = extern union {
     pub fn connect(self: UnixAddress, rt: *Runtime, options: ConnectOptions) !Stream {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .stream, .unix);
+        var socket = try Socket.open(rt, .stream, .unix, .ip);
         errdefer socket.close(rt);
 
         try socket.connect(rt, .{ .unix = self }, .{ .timeout = options.timeout });
@@ -822,12 +822,18 @@ pub const ReceiveFromResult = struct {
     len: usize,
 };
 
+pub const ReceiveMsgResult = struct {
+    from: Address,
+    len: usize,
+    flags: u32,
+};
+
 pub const Socket = struct {
     handle: Handle,
     address: Address,
 
-    pub fn open(rt: *Runtime, sock_type: os.net.Type, domain: os.net.Domain) !Socket {
-        var op = ev.NetOpen.init(domain, sock_type, .{});
+    pub fn open(rt: *Runtime, sock_type: os.net.Type, domain: os.net.Domain, protocol: os.net.Protocol) !Socket {
+        var op = ev.NetOpen.init(domain, sock_type, protocol, .{});
         try waitForIo(rt, &op.c);
         const handle = try op.getResult();
         return .{ .handle = handle, .address = undefined };
@@ -964,6 +970,45 @@ pub const Socket = struct {
         const addr_len = getSockAddrLen(&addr.any);
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
         try waitForIo(rt, &op.c);
+        return try op.getResult();
+    }
+
+    /// Receives a message with sender address and ancillary data (control messages).
+    /// The control buffer receives ancillary data (e.g., credentials, file descriptors).
+    /// Returns sender address, bytes read, and message flags.
+    pub fn receiveMsg(
+        self: Socket,
+        rt: *Runtime,
+        buf: ev.ReadBuf,
+        control: ?[]u8,
+        timeout: Timeout,
+    ) !ReceiveMsgResult {
+        var result: ReceiveMsgResult = undefined;
+        var addr_len: os.net.socklen_t = @sizeOf(Address);
+        var op = ev.NetRecvMsg.init(self.handle, buf, .{}, &result.from.any, &addr_len, control);
+        try timedWaitForIo(rt, &op.c, timeout);
+        const os_result = try op.getResult();
+        result.len = os_result.len;
+        result.flags = os_result.flags;
+        return result;
+    }
+
+    /// Sends a message with optional destination address and ancillary data (control messages).
+    /// If addr is null, the socket must be connected. If addr is provided, sends to that address.
+    /// The control buffer contains ancillary data to send (e.g., credentials, file descriptors).
+    /// Returns the number of bytes sent.
+    pub fn sendMsg(
+        self: Socket,
+        rt: *Runtime,
+        buf: ev.WriteBuf,
+        addr: ?Address,
+        control: ?[]const u8,
+        timeout: Timeout,
+    ) !usize {
+        const addr_ptr = if (addr) |a| &a.any else null;
+        const addr_len = if (addr) |a| getSockAddrLen(&a.any) else 0;
+        var op = ev.NetSendMsg.init(self.handle, buf, .{}, addr_ptr, addr_len, control);
+        try timedWaitForIo(rt, &op.c, timeout);
         return try op.getResult();
     }
 

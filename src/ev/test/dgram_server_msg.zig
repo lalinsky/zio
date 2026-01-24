@@ -23,8 +23,8 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
         comp: union {
             open: ev.NetOpen,
             bind: ev.NetBind,
-            recvfrom: ev.NetRecvFrom,
-            sendto: ev.NetSendTo,
+            recvmsg: ev.NetRecvMsg,
+            sendmsg: ev.NetSendMsg,
             close: ev.NetClose,
         },
 
@@ -33,6 +33,10 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
         recv_iov: [1]os.iovec = undefined,
         send_iov: [1]os.iovec_const = undefined,
         bytes_received: usize = 0,
+        msg_flags: u32 = 0,
+
+        // Control message buffer (not used in this test, but demonstrates the API)
+        control_buf: [256]u8 = undefined,
 
         pub const State = enum {
             init,
@@ -124,37 +128,54 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
                 return;
             };
 
-            // Start receiving
+            // Start receiving using NetRecvMsg
             self.state = .receiving;
             self.client_addr_len = @sizeOf(sockaddr);
-            self.comp = .{ .recvfrom = ev.NetRecvFrom.init(self.server_sock, .fromSlice(&self.recv_buf, &self.recv_iov), .{}, @ptrCast(&self.client_addr), &self.client_addr_len) };
-            self.comp.recvfrom.c.callback = recvCallback;
-            self.comp.recvfrom.c.userdata = self;
-            loop.add(&self.comp.recvfrom.c);
+            self.comp = .{ .recvmsg = ev.NetRecvMsg.init(
+                self.server_sock,
+                .fromSlice(&self.recv_buf, &self.recv_iov),
+                .{},
+                @ptrCast(&self.client_addr),
+                &self.client_addr_len,
+                &self.control_buf,
+            ) };
+            self.comp.recvmsg.c.callback = recvCallback;
+            self.comp.recvmsg.c.userdata = self;
+            loop.add(&self.comp.recvmsg.c);
         }
 
         fn recvCallback(loop: *ev.Loop, c: *ev.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
-            self.bytes_received = self.comp.recvfrom.getResult() catch {
+            const result = self.comp.recvmsg.getResult() catch {
                 self.state = .failed;
                 loop.stop();
                 return;
             };
 
-            // Echo back to sender
+            self.bytes_received = result.len;
+            self.msg_flags = result.flags;
+
+            // Echo back to sender using NetSendMsg
             self.state = .sending;
             const send_buf = self.recv_buf[0..self.bytes_received];
-            self.comp = .{ .sendto = ev.NetSendTo.init(self.server_sock, .fromSlice(send_buf, &self.send_iov), .{}, @ptrCast(&self.client_addr), self.client_addr_len) };
-            self.comp.sendto.c.callback = sendCallback;
-            self.comp.sendto.c.userdata = self;
-            loop.add(&self.comp.sendto.c);
+            self.comp = .{ .sendmsg = ev.NetSendMsg.init(
+                self.server_sock,
+                .fromSlice(send_buf, &self.send_iov),
+                .{},
+                @ptrCast(&self.client_addr),
+                self.client_addr_len,
+                null,
+            ) };
+            self.comp.sendmsg.c.callback = sendCallback;
+            self.comp.sendmsg.c.userdata = self;
+            loop.add(&self.comp.sendmsg.c);
         }
 
         fn sendCallback(loop: *ev.Loop, c: *ev.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
-            _ = self.comp.sendto.getResult() catch {
+            _ = self.comp.sendmsg.getResult() catch {
                 self.state = .failed;
                 loop.stop();
                 return;
@@ -196,8 +217,8 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
         comp: union {
             open: ev.NetOpen,
             bind: ev.NetBind,
-            sendto: ev.NetSendTo,
-            recvfrom: ev.NetRecvFrom,
+            sendmsg: ev.NetSendMsg,
+            recvmsg: ev.NetRecvMsg,
             close: ev.NetClose,
         },
 
@@ -209,6 +230,10 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
         recv_addr: sockaddr = undefined,
         recv_addr_len: net.socklen_t = undefined,
         bytes_received: usize = 0,
+        msg_flags: u32 = 0,
+
+        // Control message buffer
+        control_buf: [256]u8 = undefined,
 
         pub const State = enum {
             init,
@@ -275,12 +300,19 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
                 self.comp.bind.c.userdata = self;
                 loop.add(&self.comp.bind.c);
             } else {
-                // Start send directly for IP sockets
+                // Start send directly for IP sockets using NetSendMsg
                 self.state = .sending;
-                self.comp = .{ .sendto = ev.NetSendTo.init(self.client_sock, .fromSlice(self.send_buf, &self.send_iov), .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
-                self.comp.sendto.c.callback = sendCallback;
-                self.comp.sendto.c.userdata = self;
-                loop.add(&self.comp.sendto.c);
+                self.comp = .{ .sendmsg = ev.NetSendMsg.init(
+                    self.client_sock,
+                    .fromSlice(self.send_buf, &self.send_iov),
+                    .{},
+                    @ptrCast(&self.server_addr),
+                    @sizeOf(sockaddr),
+                    null,
+                ) };
+                self.comp.sendmsg.c.callback = sendCallback;
+                self.comp.sendmsg.c.userdata = self;
+                loop.add(&self.comp.sendmsg.c);
             }
         }
 
@@ -293,40 +325,57 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
                 return;
             };
 
-            // Start send
+            // Start send using NetSendMsg
             self.state = .sending;
-            self.comp = .{ .sendto = ev.NetSendTo.init(self.client_sock, .fromSlice(self.send_buf, &self.send_iov), .{}, @ptrCast(&self.server_addr), @sizeOf(sockaddr)) };
-            self.comp.sendto.c.callback = sendCallback;
-            self.comp.sendto.c.userdata = self;
-            loop.add(&self.comp.sendto.c);
+            self.comp = .{ .sendmsg = ev.NetSendMsg.init(
+                self.client_sock,
+                .fromSlice(self.send_buf, &self.send_iov),
+                .{},
+                @ptrCast(&self.server_addr),
+                @sizeOf(sockaddr),
+                null,
+            ) };
+            self.comp.sendmsg.c.callback = sendCallback;
+            self.comp.sendmsg.c.userdata = self;
+            loop.add(&self.comp.sendmsg.c);
         }
 
         fn sendCallback(loop: *ev.Loop, c: *ev.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
-            _ = self.comp.sendto.getResult() catch {
+            _ = self.comp.sendmsg.getResult() catch {
                 self.state = .failed;
                 loop.stop();
                 return;
             };
 
-            // Start recv
+            // Start recv using NetRecvMsg
             self.state = .receiving;
             self.recv_addr_len = @sizeOf(sockaddr);
-            self.comp = .{ .recvfrom = ev.NetRecvFrom.init(self.client_sock, .fromSlice(&self.recv_buf, &self.recv_iov), .{}, @ptrCast(&self.recv_addr), &self.recv_addr_len) };
-            self.comp.recvfrom.c.callback = recvCallback;
-            self.comp.recvfrom.c.userdata = self;
-            loop.add(&self.comp.recvfrom.c);
+            self.comp = .{ .recvmsg = ev.NetRecvMsg.init(
+                self.client_sock,
+                .fromSlice(&self.recv_buf, &self.recv_iov),
+                .{},
+                @ptrCast(&self.recv_addr),
+                &self.recv_addr_len,
+                &self.control_buf,
+            ) };
+            self.comp.recvmsg.c.callback = recvCallback;
+            self.comp.recvmsg.c.userdata = self;
+            loop.add(&self.comp.recvmsg.c);
         }
 
         fn recvCallback(loop: *ev.Loop, c: *ev.Completion) void {
             const self: *Self = @ptrCast(@alignCast(c.userdata.?));
 
-            self.bytes_received = self.comp.recvfrom.getResult() catch {
+            const result = self.comp.recvmsg.getResult() catch {
                 self.state = .failed;
                 loop.stop();
                 return;
             };
+
+            self.bytes_received = result.len;
+            self.msg_flags = result.flags;
 
             // Close socket
             self.state = .closing;
@@ -403,15 +452,21 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     try std.testing.expectEqualStrings(message, client.recv_buf[0..client.bytes_received]);
 }
 
-test "Echo server and client - IPv4 UDP" {
+test "Echo server and client - IPv4 UDP using NetRecvMsg/NetSendMsg" {
+    // Skip on Windows with poll backend (not yet implemented)
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
     try testEcho(.ipv4, net.sockaddr.in);
 }
 
-test "Echo server and client - IPv6 UDP" {
+test "Echo server and client - IPv6 UDP using NetRecvMsg/NetSendMsg" {
+    // Skip on Windows with poll backend (not yet implemented)
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
     try testEcho(.ipv6, net.sockaddr.in6);
 }
 
-test "Echo server and client - Unix datagram" {
+test "Echo server and client - Unix datagram using NetRecvMsg/NetSendMsg" {
     if (!net.has_unix_dgram_sockets) return error.SkipZigTest;
+    // Skip on Windows with poll backend (not yet implemented)
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
     try testEcho(.unix, net.sockaddr.un);
 }
