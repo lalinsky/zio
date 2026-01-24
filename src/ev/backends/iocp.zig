@@ -1145,6 +1145,8 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .net_send,
                 .net_recvfrom,
                 .net_sendto,
+                .net_recvmsg,
+                .net_sendmsg,
                 .net_poll,
                 => blk: {
                     // Get socket handle from the completion

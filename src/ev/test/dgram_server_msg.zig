@@ -153,8 +153,8 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
                 return;
             };
 
-            self.bytes_received = result.bytes_read;
-            self.msg_flags = result.msg_flags;
+            self.bytes_received = result.len;
+            self.msg_flags = result.flags;
 
             // Echo back to sender using NetSendMsg
             self.state = .sending;
@@ -374,8 +374,8 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
                 return;
             };
 
-            self.bytes_received = result.bytes_read;
-            self.msg_flags = result.msg_flags;
+            self.bytes_received = result.len;
+            self.msg_flags = result.flags;
 
             // Close socket
             self.state = .closing;
