@@ -1257,8 +1257,8 @@ pub fn sendto(
 }
 
 pub const RecvMsgResult = struct {
-    bytes_read: usize,
-    msg_flags: u32,
+    len: usize,
+    flags: u32,
 };
 
 pub fn recvmsg(
@@ -1269,7 +1269,7 @@ pub fn recvmsg(
     addr_len: ?*socklen_t,
     control: ?[]u8,
 ) RecvError!RecvMsgResult {
-    if (buffers.len == 0) return .{ .bytes_read = 0, .msg_flags = 0 };
+    if (buffers.len == 0) return .{ .len = 0, .flags = 0 };
 
     var sys_flags: c_int = 0;
     if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
@@ -1297,8 +1297,8 @@ pub fn recvmsg(
                 if (rc >= 0) {
                     if (addr_len) |len| len.* = msg.namelen;
                     return .{
-                        .bytes_read = @intCast(rc),
-                        .msg_flags = @intCast(msg.flags),
+                        .len = @intCast(rc),
+                        .flags = @intCast(msg.flags),
                     };
                 }
                 switch (posix.errno(rc)) {

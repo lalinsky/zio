@@ -1463,8 +1463,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                     len.* = @intCast(data.internal.msg.namelen);
                 }
                 c.setResult(.net_recvmsg, .{
-                    .bytes_read = @intCast(bytes_transferred),
-                    .msg_flags = data.internal.msg.dwFlags,
+                    .len = @intCast(bytes_transferred),
+                    .flags = data.internal.msg.dwFlags,
                 });
             }
 

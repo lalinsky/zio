@@ -104,12 +104,14 @@ pub fn main() !void {
         // Start timer
         var stopwatch = zio.time.Stopwatch.start();
 
-        // Send the ping
-        _ = try socket.sendTo(rt, addr, &packet);
+        // Send the ping using sendMsg
+        var send_storage: [1]zio.os.iovec_const = undefined;
+        _ = try socket.sendMsg(rt, .fromSlice(&packet, &send_storage), addr, null, .none);
 
-        // Wait for reply
+        // Wait for reply using receiveMsg
         var recv_buf: [1024]u8 = undefined;
-        const result = try socket.receiveFrom(rt, &recv_buf);
+        var recv_storage: [1]zio.os.iovec = undefined;
+        const result = try socket.receiveMsg(rt, .fromSlice(&recv_buf, &recv_storage), null, .none);
 
         // Stop timer
         const elapsed = stopwatch.read();

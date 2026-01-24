@@ -980,8 +980,8 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             } else {
                 const data = c.cast(NetRecvMsg);
                 c.setResult(.net_recvmsg, .{
-                    .bytes_read = @as(usize, @intCast(res)),
-                    .msg_flags = data.internal.msg.flags,
+                    .len = @as(usize, @intCast(res)),
+                    .flags = data.internal.msg.flags,
                 });
                 // Propagate the peer address length filled in by the kernel
                 if (data.addr_len) |len_ptr| {
