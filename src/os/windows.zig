@@ -716,23 +716,6 @@ pub extern "ws2_32" fn WSASendTo(
     lpCompletionRoutine: ?*anyopaque,
 ) callconv(.winapi) i32;
 
-pub extern "ws2_32" fn WSARecvMsg(
-    s: SOCKET,
-    lpMsg: *WSAMSG,
-    lpdwNumberOfBytesRecvd: ?*u32,
-    lpOverlapped: ?*OVERLAPPED,
-    lpCompletionRoutine: ?*anyopaque,
-) callconv(.winapi) i32;
-
-pub extern "ws2_32" fn WSASendMsg(
-    s: SOCKET,
-    lpMsg: *const WSAMSG_const,
-    dwFlags: u32,
-    lpNumberOfBytesSent: ?*u32,
-    lpOverlapped: ?*OVERLAPPED,
-    lpCompletionRoutine: ?*anyopaque,
-) callconv(.winapi) i32;
-
 pub extern "ws2_32" fn setsockopt(
     s: SOCKET,
     level: i32,
