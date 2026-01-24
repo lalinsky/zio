@@ -89,7 +89,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
 
         pub fn start(self: *Self) void {
             self.state = .opening;
-            self.comp = .{ .open = ev.NetOpen.init(domain, .dgram, .{}) };
+            self.comp = .{ .open = ev.NetOpen.init(domain, .dgram, .ip, .{}) };
             self.comp.open.c.callback = openCallback;
             self.comp.open.c.userdata = self;
             self.loop.add(&self.comp.open.c);
@@ -242,7 +242,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
                 self.client_addr_len = @sizeOf(sockaddr);
             }
 
-            self.comp = .{ .open = ev.NetOpen.init(domain, .dgram, .{}) };
+            self.comp = .{ .open = ev.NetOpen.init(domain, .dgram, .ip, .{}) };
 
             return self;
         }

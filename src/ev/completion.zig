@@ -511,6 +511,7 @@ pub const NetOpen = struct {
     result_private_do_not_touch: Backend.NetHandle = undefined,
     domain: net.Domain,
     socket_type: net.Type,
+    protocol: net.Protocol = .ip,
     flags: net.OpenFlags = .{ .nonblocking = true },
 
     pub const Error = net.OpenError || Cancelable;
@@ -518,12 +519,14 @@ pub const NetOpen = struct {
     pub fn init(
         domain: net.Domain,
         socket_type: net.Type,
+        protocol: net.Protocol,
         flags: net.OpenFlags,
     ) NetOpen {
         return .{
             .c = .init(.net_open),
             .domain = domain,
             .socket_type = socket_type,
+            .protocol = protocol,
             .flags = flags,
         };
     }

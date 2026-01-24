@@ -595,7 +595,7 @@ pub const IpAddress = extern union {
     };
 
     pub fn bind(self: IpAddress, rt: *Runtime, options: BindOptions) !Socket {
-        var socket = try Socket.open(rt, .dgram, @enumFromInt(self.any.family));
+        var socket = try Socket.open(rt, .dgram, .fromPosix(self.any.family), .ip);
         errdefer socket.close(rt);
 
         if (options.reuse_address) {
@@ -608,7 +608,7 @@ pub const IpAddress = extern union {
     }
 
     pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
-        var socket = try Socket.open(rt, .stream, @enumFromInt(self.any.family));
+        var socket = try Socket.open(rt, .stream, .fromPosix(self.any.family), .ip);
         errdefer socket.close(rt);
 
         if (options.reuse_address) {
@@ -622,7 +622,7 @@ pub const IpAddress = extern union {
     }
 
     pub fn connect(self: IpAddress, rt: *Runtime, options: ConnectOptions) !Stream {
-        var socket = try Socket.open(rt, .stream, @enumFromInt(self.any.family));
+        var socket = try Socket.open(rt, .stream, .fromPosix(self.any.family), .ip);
         errdefer socket.close(rt);
 
         try socket.connect(rt, .{ .ip = self }, .{ .timeout = options.timeout });
@@ -668,7 +668,7 @@ pub const UnixAddress = extern union {
     pub fn bind(self: UnixAddress, rt: *Runtime, options: BindOptions) !Socket {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .dgram, .unix);
+        var socket = try Socket.open(rt, .dgram, .unix, .ip);
         errdefer socket.close(rt);
 
         if (options.reuse_address) {
@@ -683,7 +683,7 @@ pub const UnixAddress = extern union {
     pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .stream, .unix);
+        var socket = try Socket.open(rt, .stream, .unix, .ip);
         errdefer socket.close(rt);
 
         try socket.bind(rt, .{ .unix = self });
@@ -695,7 +695,7 @@ pub const UnixAddress = extern union {
     pub fn connect(self: UnixAddress, rt: *Runtime, options: ConnectOptions) !Stream {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .stream, .unix);
+        var socket = try Socket.open(rt, .stream, .unix, .ip);
         errdefer socket.close(rt);
 
         try socket.connect(rt, .{ .unix = self }, .{ .timeout = options.timeout });
@@ -826,8 +826,8 @@ pub const Socket = struct {
     handle: Handle,
     address: Address,
 
-    pub fn open(rt: *Runtime, sock_type: os.net.Type, domain: os.net.Domain) !Socket {
-        var op = ev.NetOpen.init(domain, sock_type, .{});
+    pub fn open(rt: *Runtime, sock_type: os.net.Type, domain: os.net.Domain, protocol: os.net.Protocol) !Socket {
+        var op = ev.NetOpen.init(domain, sock_type, protocol, .{});
         try waitForIo(rt, &op.c);
         const handle = try op.getResult();
         return .{ .handle = handle, .address = undefined };

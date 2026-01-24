@@ -197,7 +197,7 @@ pub const SharedState = struct {
 
             // Load all extension functions using a temporary socket
             // Socket family/type doesn't matter - use AF_INET SOCK_STREAM
-            const sock = try net.socket(.ipv4, .stream, .{});
+            const sock = try net.socket(.ipv4, .stream, .ip, .{});
             defer net.close(sock);
 
             self.exts = ExtensionFunctions{
@@ -331,7 +331,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         // Synchronous operations - complete immediately
         .net_open => {
             const data = c.cast(NetOpen);
-            if (net.socket(data.domain, data.socket_type, data.flags)) |handle| {
+            if (net.socket(data.domain, data.socket_type, data.protocol, data.flags)) |handle| {
                 // Associate socket with IOCP
                 const iocp_result = windows.CreateIoCompletionPort(
                     @ptrCast(handle),
@@ -554,7 +554,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     const exts = self.shared_state.exts;
 
     // Create new socket for the accepted connection (same family as listening socket)
-    const accept_socket = try net.socket(@enumFromInt(family), .stream, data.flags);
+    const accept_socket = try net.socket(@enumFromInt(family), .stream, .ip, data.flags);
     errdefer net.close(accept_socket);
 
     // Associate the accept socket with IOCP

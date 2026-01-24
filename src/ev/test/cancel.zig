@@ -108,7 +108,7 @@ test "cancel: net_accept with loop.cancel()" {
     defer loop.deinit();
 
     // Create and bind server socket
-    var server_open: NetOpen = .init(.ipv4, .stream, .{});
+    var server_open: NetOpen = .init(.ipv4, .stream, .ip, .{});
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.getResult();
@@ -158,7 +158,7 @@ test "cancel: net_recv with loop.cancel()" {
     defer loop.deinit();
 
     // Create socket pair
-    var server_open: NetOpen = .init(.ipv4, .stream, .{});
+    var server_open: NetOpen = .init(.ipv4, .stream, .ip, .{});
     loop.add(&server_open.c);
     try loop.run(.until_done);
     const server_sock = try server_open.getResult();
@@ -184,7 +184,7 @@ test "cancel: net_recv with loop.cancel()" {
     try net.getsockname(server_sock, @ptrCast(&addr), &addr_len);
 
     // Connect client
-    var client_open: NetOpen = .init(.ipv4, .stream, .{});
+    var client_open: NetOpen = .init(.ipv4, .stream, .ip, .{});
     loop.add(&client_open.c);
     try loop.run(.until_done);
     const client_sock = try client_open.getResult();
