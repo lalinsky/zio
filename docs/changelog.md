@@ -2,29 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.5.0] - 2026-01-24
 
-## [Unreleased]
+This is a major release with many changes. It has been in development for a while, but I finally decided
+to release it.
 
-### Added
+First of all, the codebase has been relicensed under the MIT license.
 
-- Added `Channel.asyncSend()`, `Channel.asyncReceive()` and `BroadcastChannel.asyncReceive()` methods for using channels in `select()`
-- Added support for `Signal` to be used in `select()`
+I replaced `libxev` with a custom I/O event loop, that has better cross-platform support,
+natively supports multiple threads each running its own event loop, supports more filesystem operations,
+consistent timer behavior across platforms, grouped operations, and more. This is avialable in `zio.ev` and
+can be also used separately from the rest of the library. This switch was motivated by with Zig 0.16 which
+removed a lot of lower-level I/O APIs, so it was hard to upgrade `libxev`, but in the end, I'm glad I did it.
+The new event loop is more feature complete, more efficient, and more flexible.
 
-### Changed
+The coroutine library has also been restructured, and it's now available in `zio.coro`.
+I've added support for riscv64 and loongarch64 CPUs. Stack allocation has been completel rewritten,
+it now properly allocates vitual memory from the operating system, marks guard pages and we also have
+signal handlers for growing the virtual memory reservation on demand. Coroutines now start with 64KiB
+of stack space, and grow dynamically as needed.
 
-- Updated to Zig 0.15.2 (minimum required version)
-- `select()` and `wait()` now require futures to be passed as pointers (use `&future` instead of `future`)
-- Channel methods `isEmpty()`, `isFull()`, `tryReceive()`, `trySend()`, and `close()` no longer require a `*Runtime` parameter
-- `JoinHandle.deinit()` is now `JoinHandle.detach()`
-- `JoinHandle.cancel()` now waits for the task to complete, after requesting cancellation
-- `JoinHandle` methods `join()`, `cancel()`, and `detach()` now all requires a `*Runtime` parameter
-- Replaced `Socket.setOption()` with specific methods: `setReuseAddress()`, `setReusePort()`, `setKeepAlive()`, and `setNoDelay()`
+The `zio.select()` function has been completely rewritten, and now support comptime-based support
+for waiting on things other than tasks. For example, you can use it to race two channel reads,
+or add timeout support to any operation that doesn't handle timeouts natively.
 
-### Fixed
+There is now `zio.AutoCancel` for automatically cancelling the current task after a timeout.
+This is useful when you want to call an arbitrary function that may take a long time to complete,
+and you want to make sure it gets cancelled if it doesn't complete in a timely manner, for example,
+in HTTP request handlers.
 
-- Fixed EOF handling in socket read that got broken after refactoring in 0.4.0
+Many networking APIs now have direct timeout support. Additionally, in `zio.net.Stream.Reader` and
+`zio.net.Stream.Writer`, you can call `setTimeout()` and it will make sure the underlaying 
+`std.Io.Reader` or `std.Io.Writer` doesn't block for too long. This is similar to
+POSIX socket read/write timeouts, but also supports absolute deadlines.
+
+Many new APIs have been added, for compatibility with the future `std.Io` API.
+
+Internally, I've done a lot of refactoring to prepare for a future scheduler replacement.
+I've started with project with an event-loop-per-thread model, and I still think it's the better
+approach for servers, but I'm slowly migrating to a hybrid model, where tasks primarily stick to
+the thread they were created on, but also can be freely moved to other threads,
+when it's beneficial for load balancing.
 
 ## [0.4.0] - 2025-10-25
 
