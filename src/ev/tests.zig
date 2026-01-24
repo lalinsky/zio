@@ -22,6 +22,7 @@ test {
     _ = @import("test/stream_server.zig");
     _ = @import("test/poll_server.zig");
     _ = @import("test/dgram_server.zig");
+    _ = @import("test/dgram_server_msg.zig");
     _ = @import("test/fs.zig");
     _ = @import("test/timer.zig");
     _ = @import("test/cancel.zig");

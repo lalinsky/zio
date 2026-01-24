@@ -29,6 +29,8 @@ const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
+const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
+const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
@@ -88,6 +90,14 @@ pub const NetRecvFromData = struct {
 };
 
 pub const NetSendToData = struct {
+    msg: linux.msghdr_const = undefined,
+};
+
+pub const NetRecvMsgData = struct {
+    msg: linux.msghdr = undefined,
+};
+
+pub const NetSendMsgData = struct {
     msg: linux.msghdr_const = undefined,
 };
 
@@ -333,6 +343,46 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .iovlen = data.buffer.iovecs.len,
                 .control = null,
                 .controllen = 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for sendmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_recvmsg => {
+            const data = c.cast(NetRecvMsg);
+            data.internal.msg = .{
+                .name = @ptrCast(data.addr),
+                .namelen = if (data.addr_len) |len| len.* else 0,
+                .iov = data.data.iovecs.ptr,
+                .iovlen = data.data.iovecs.len,
+                .control = if (data.control) |ctl| ctl.ptr else null,
+                .controllen = if (data.control) |ctl| ctl.len else 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for recvmsg", .{});
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_sendmsg => {
+            const data = c.cast(NetSendMsg);
+            data.internal.msg = .{
+                .name = @ptrCast(data.addr),
+                .namelen = data.addr_len,
+                .iov = data.data.iovecs.ptr,
+                .iovlen = data.data.iovecs.len,
+                .control = if (data.control) |ctl| ctl.ptr else null,
+                .controllen = if (data.control) |ctl| ctl.len else 0,
                 .flags = 0,
             };
             const sqe = self.getSqe(state) catch {
@@ -921,6 +971,28 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(net.errnoToSendError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_sendto, @as(usize, @intCast(res)));
+            }
+        },
+        .net_recvmsg => {
+            if (res < 0) {
+                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+            } else {
+                const data = c.cast(NetRecvMsg);
+                c.setResult(.net_recvmsg, .{
+                    .bytes_read = @as(usize, @intCast(res)),
+                    .msg_flags = data.internal.msg.flags,
+                });
+                // Propagate the peer address length filled in by the kernel
+                if (data.addr_len) |len_ptr| {
+                    len_ptr.* = data.internal.msg.namelen;
+                }
+            }
+        },
+        .net_sendmsg => {
+            if (res < 0) {
+                c.setError(net.errnoToSendError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_sendmsg, @as(usize, @intCast(res)));
             }
         },
         .net_poll => {
