@@ -60,6 +60,13 @@ const WSAID_WSARECVMSG = windows.GUID{
     .Data4 = .{ 0x8a, 0x53, 0xe5, 0x4f, 0xe3, 0x51, 0xc3, 0x22 },
 };
 
+const WSAID_WSASENDMSG = windows.GUID{
+    .Data1 = 0xa441e712,
+    .Data2 = 0x754f,
+    .Data3 = 0x43ca,
+    .Data4 = .{ 0x84, 0xa7, 0x0d, 0xee, 0x44, 0xcf, 0x60, 0x6d },
+};
+
 const WSAID_GETACCEPTEXSOCKADDRS = windows.GUID{
     .Data1 = 0xb5367df2,
     .Data2 = 0xcbac,
@@ -104,6 +111,15 @@ const LPFN_WSARECVMSG = *const fn (
     s: windows.SOCKET,
     lpMsg: *windows.WSAMSG,
     lpdwNumberOfBytesRecvd: ?*windows.DWORD,
+    lpOverlapped: ?*windows.OVERLAPPED,
+    lpCompletionRoutine: ?windows.LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) callconv(.winapi) c_int;
+
+const LPFN_WSASENDMSG = *const fn (
+    s: windows.SOCKET,
+    lpMsg: *const windows.WSAMSG_const,
+    dwFlags: windows.DWORD,
+    lpdwNumberOfBytesSent: ?*windows.DWORD,
     lpOverlapped: ?*windows.OVERLAPPED,
     lpCompletionRoutine: ?windows.LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) callconv(.winapi) c_int;
@@ -159,12 +175,12 @@ pub const NetAcceptData = struct {
 
 pub const NetRecvMsgData = struct {
     msg: windows.WSAMSG = undefined,
-    control_buf: windows.WSABUF = undefined,
+    control_buf: windows.WSABUF_nullable = undefined,
 };
 
 pub const NetSendMsgData = struct {
     msg: windows.WSAMSG_const = undefined,
-    control_buf: windows.WSABUF = undefined,
+    control_buf: windows.WSABUF_nullable = undefined,
 };
 
 const ExtensionFunctions = struct {
@@ -172,6 +188,7 @@ const ExtensionFunctions = struct {
     connectex: LPFN_CONNECTEX,
     getacceptexsockaddrs: LPFN_GETACCEPTEXSOCKADDRS,
     wsarecvmsg: LPFN_WSARECVMSG,
+    wsasendmsg: LPFN_WSASENDMSG,
 };
 
 pub const SharedState = struct {
@@ -205,6 +222,7 @@ pub const SharedState = struct {
                 .connectex = try loadWinsockExtension(LPFN_CONNECTEX, sock, WSAID_CONNECTEX),
                 .getacceptexsockaddrs = try loadWinsockExtension(LPFN_GETACCEPTEXSOCKADDRS, sock, WSAID_GETACCEPTEXSOCKADDRS),
                 .wsarecvmsg = try loadWinsockExtension(LPFN_WSARECVMSG, sock, WSAID_WSARECVMSG),
+                .wsasendmsg = try loadWinsockExtension(LPFN_WSASENDMSG, sock, WSAID_WSASENDMSG),
             };
         }
         self.refcount += 1;
@@ -825,7 +843,7 @@ fn submitRecvMsg(self: *Self, state: *LoopState, data: *NetRecvMsg) !void {
     } else {
         data.internal.control_buf = .{
             .len = 0,
-            .buf = undefined,
+            .buf = null,
         };
     }
 
@@ -862,8 +880,6 @@ fn submitRecvMsg(self: *Self, state: *LoopState, data: *NetRecvMsg) !void {
 }
 
 fn submitSendMsg(self: *Self, state: *LoopState, data: *NetSendMsg) !void {
-    _ = self;
-
     // Initialize OVERLAPPED
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
@@ -876,23 +892,26 @@ fn submitSendMsg(self: *Self, state: *LoopState, data: *NetSendMsg) !void {
     } else {
         data.internal.control_buf = .{
             .len = 0,
-            .buf = undefined,
+            .buf = null,
         };
     }
 
     // Initialize WSAMSG_const
     data.internal.msg = .{
         .name = if (data.addr) |addr| @ptrCast(addr) else null,
-        .namelen = @intCast(data.addr_len),
+        .namelen = if (data.addr != null) @intCast(data.addr_len) else 0,
         .lpBuffers = @constCast(data.data.iovecs.ptr),
         .dwBufferCount = @intCast(data.data.iovecs.len),
         .Control = data.internal.control_buf,
         .dwFlags = sendFlagsToMsg(data.flags),
     };
 
+    // Load WSASendMsg extension function
+    const exts = self.shared_state.exts;
+
     var bytes_sent: windows.DWORD = 0;
 
-    const result = windows.WSASendMsg(
+    const result = exts.wsasendmsg(
         data.handle,
         &data.internal.msg,
         sendFlagsToMsg(data.flags),

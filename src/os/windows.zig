@@ -524,12 +524,18 @@ pub const WSABUF = std.os.windows.ws2_32.WSABUF;
 pub const LPWSAOVERLAPPED_COMPLETION_ROUTINE = std.os.windows.ws2_32.LPWSAOVERLAPPED_COMPLETION_ROUTINE;
 
 // WSAMSG structures for WSARecvMsg/WSASendMsg
+// WSABUF with optional buf pointer for Control field
+pub const WSABUF_nullable = extern struct {
+    len: ULONG,
+    buf: ?[*]u8,
+};
+
 pub const WSAMSG = extern struct {
     name: ?*sockaddr,
     namelen: i32,
     lpBuffers: [*]WSABUF,
     dwBufferCount: u32,
-    Control: WSABUF,
+    Control: WSABUF_nullable,
     dwFlags: u32,
 };
 
@@ -538,7 +544,7 @@ pub const WSAMSG_const = extern struct {
     namelen: i32,
     lpBuffers: [*]WSABUF,
     dwBufferCount: u32,
-    Control: WSABUF,
+    Control: WSABUF_nullable,
     dwFlags: u32,
 };
 
