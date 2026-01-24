@@ -521,6 +521,26 @@ pub const sockaddr = extern struct {
 
 // Forward from std to maintain compatibility with std.Io.Reader
 pub const WSABUF = std.os.windows.ws2_32.WSABUF;
+pub const LPWSAOVERLAPPED_COMPLETION_ROUTINE = std.os.windows.ws2_32.LPWSAOVERLAPPED_COMPLETION_ROUTINE;
+
+// WSAMSG structures for WSARecvMsg/WSASendMsg
+pub const WSAMSG = extern struct {
+    name: ?*sockaddr,
+    namelen: i32,
+    lpBuffers: [*]WSABUF,
+    dwBufferCount: u32,
+    Control: WSABUF,
+    dwFlags: u32,
+};
+
+pub const WSAMSG_const = extern struct {
+    name: ?*const sockaddr,
+    namelen: i32,
+    lpBuffers: [*]WSABUF,
+    dwBufferCount: u32,
+    Control: WSABUF,
+    dwFlags: u32,
+};
 
 pub const pollfd = extern struct {
     fd: SOCKET,
@@ -686,6 +706,23 @@ pub extern "ws2_32" fn WSASendTo(
     dwFlags: u32,
     lpTo: ?*const sockaddr,
     iToLen: i32,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?*anyopaque,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSARecvMsg(
+    s: SOCKET,
+    lpMsg: *WSAMSG,
+    lpdwNumberOfBytesRecvd: ?*u32,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?*anyopaque,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn WSASendMsg(
+    s: SOCKET,
+    lpMsg: *const WSAMSG_const,
+    dwFlags: u32,
+    lpNumberOfBytesSent: ?*u32,
     lpOverlapped: ?*OVERLAPPED,
     lpCompletionRoutine: ?*anyopaque,
 ) callconv(.winapi) i32;
