@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-01-25
+
+### Added
+
+- Added `readVec` and `writeVec` methods to `Stream` (#236)
+- Added custom panic handler to avoid stack overflow during panics (#237)
+
+### Changed
+
+- Made `ResetEvent.reset` idempotent (#235)
+
 ## [0.5.0] - 2026-01-24
 
 This is a major release with many changes. It has been in development for a while, but I finally decided
@@ -112,6 +123,7 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.5.1]: https://github.com/lalinsky/zio/releases/tag/v0.5.1
 [0.5.0]: https://github.com/lalinsky/zio/releases/tag/v0.5.0
 [0.4.0]: https://github.com/lalinsky/zio/releases/tag/v0.4.0
 [0.3.0]: https://github.com/lalinsky/zio/releases/tag/v0.3.0
