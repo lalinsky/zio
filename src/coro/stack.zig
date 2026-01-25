@@ -280,9 +280,9 @@ fn stackFreeWindows(info: StackInfo) void {
 }
 
 /// Windows handles stack growth automatically via PAGE_GUARD mechanism
-/// when using RtlCreateUserStack. This function should never be called.
+/// when using RtlCreateUserStack. This is a no-op for compatibility.
 fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
-    unreachable;
+    // PAGE_GUARD handles this automatically on Windows
 }
 
 /// Setup automatic stack growth via SIGSEGV handler for this thread.
