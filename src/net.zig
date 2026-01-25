@@ -198,7 +198,7 @@ pub const ShutdownHow = os.net.ShutdownHow;
 
 /// Get the socket address length for a given sockaddr.
 /// Determines the appropriate length based on the address family.
-fn getSockAddrLen(addr: *const os.net.sockaddr) os.net.socklen_t {
+pub fn getSockAddrLen(addr: *const os.net.sockaddr) os.net.socklen_t {
     return switch (addr.family) {
         os.net.AF.INET => @sizeOf(os.net.sockaddr.in),
         os.net.AF.INET6 => @sizeOf(os.net.sockaddr.in6),
