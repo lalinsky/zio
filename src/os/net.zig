@@ -101,10 +101,17 @@ pub inline fn iovecConstFromSlice(buffer: []const u8) iovec_const {
     };
 }
 
-pub const PollError = error{
+pub const CommonError = error{
+    HostUnreachable,
+    HostDown,
+    NetworkUnreachable,
+    NetworkDown,
     SystemResources,
+    Canceled,
     Unexpected,
 };
+
+pub const PollError = error{} || CommonError;
 
 pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
     switch (builtin.os.tag) {
@@ -277,11 +284,11 @@ pub const OpenFlags = packed struct {
 
 pub const OpenError = error{
     AddressFamilyUnsupported,
-    ProtocolNotSupported,
+    ProtocolUnsupportedBySystem,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
     SystemResources,
-    PermissionDenied,
+    AccessDenied,
     Canceled,
     Unexpected,
 };
@@ -429,7 +436,7 @@ pub fn bind(fd: fd_t, addr: *const sockaddr, addr_len: socklen_t) BindError!void
 pub const ListenError = error{
     AddressInUse,
     AlreadyConnected,
-    OperationNotSupported,
+    OperationUnsupported,
     FileDescriptorNotASocket,
     NetworkDown,
     SystemResources,
@@ -442,7 +449,7 @@ pub fn errnoToListenError(err: E) ListenError {
             return switch (err) {
                 .EADDRINUSE => error.AddressInUse,
                 .EISCONN => error.AlreadyConnected,
-                .EOPNOTSUPP => error.OperationNotSupported,
+                .EOPNOTSUPP => error.OperationUnsupported,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ENETDOWN => error.NetworkDown,
                 .ENOBUFS, .EMFILE => error.SystemResources,
@@ -453,7 +460,7 @@ pub fn errnoToListenError(err: E) ListenError {
             return switch (err) {
                 .SUCCESS => unreachable,
                 .ADDRINUSE => error.AddressInUse,
-                .OPNOTSUPP => error.OperationNotSupported,
+                .OPNOTSUPP => error.OperationUnsupported,
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .NETDOWN => error.NetworkDown,
                 else => |e| unexpectedError(e),
@@ -538,7 +545,7 @@ pub const AcceptError = error{
     SystemResources,
     FileDescriptorNotASocket,
     SocketNotListening,
-    OperationNotSupported,
+    OperationUnsupported,
     ProtocolFailure,
     BlockedByFirewall,
     NetworkDown,
@@ -740,7 +747,7 @@ pub fn errnoToAcceptError(err: E) AcceptError {
                 .NOMEM, .NOBUFS => error.SystemResources,
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .INVAL => error.SocketNotListening,
-                .OPNOTSUPP => error.OperationNotSupported,
+                .OPNOTSUPP => error.OperationUnsupported,
                 .PROTO => error.ProtocolFailure,
                 .PERM => error.BlockedByFirewall,
                 .NETDOWN => error.NetworkDown,
@@ -760,10 +767,10 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
                 .ECONNABORTED => error.ConnectionAborted,
                 .ETIMEDOUT => error.ConnectionTimedOut,
-                .ENOTCONN => error.SocketNotConnected,
+                .ENOTCONN => error.SocketUnconnected,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ESHUTDOWN => error.SocketShutdown,
-                .EOPNOTSUPP => error.OperationNotSupported,
+                .EOPNOTSUPP => error.OperationUnsupported,
                 .ENETDOWN => error.NetworkDown,
                 .ENOBUFS, .EINVAL => error.SystemResources,
                 .OPERATION_ABORTED => error.Canceled,
@@ -776,9 +783,37 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .AGAIN => error.WouldBlock,
                 .CONNREFUSED => error.ConnectionRefused,
                 .CONNRESET => error.ConnectionResetByPeer,
-                .NOTCONN => error.SocketNotConnected,
+                .NOTCONN => error.SocketUnconnected,
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .NOMEM => error.SystemResources,
+                .CANCELED => error.Canceled,
+                else => |e| unexpectedError(e),
+            };
+        },
+    }
+}
+
+pub fn errnoToCommonError(err: E) CommonError {
+    switch (builtin.os.tag) {
+        .windows => {
+            return switch (err) {
+                .EHOSTUNREACH => error.HostUnreachable,
+                .EHOSTDOWN => error.HostDown,
+                .ENETUNREACH => error.NetworkUnreachable,
+                .ENETDOWN => error.NetworkDown,
+                .ENOBUFS => error.SystemResources,
+                .OPERATION_ABORTED => error.Canceled,
+                else => unexpectedError(err),
+            };
+        },
+        else => {
+            return switch (err) {
+                .SUCCESS => unreachable,
+                .HOSTUNREACH => error.HostUnreachable,
+                .HOSTDOWN => error.HostDown,
+                .NETUNREACH => error.NetworkUnreachable,
+                .NETDOWN => error.NetworkDown,
+                .NOBUFS => error.SystemResources,
                 .CANCELED => error.Canceled,
                 else => |e| unexpectedError(e),
             };
@@ -791,35 +826,22 @@ pub fn errnoToSendError(err: E) SendError {
         .windows => {
             return switch (err) {
                 .EWOULDBLOCK => error.WouldBlock,
-                .EACCES => error.AccessDenied,
-                .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
-                .ECONNABORTED => error.ConnectionAborted,
-                .ETIMEDOUT => error.ConnectionTimedOut,
-                .ENOTCONN => error.SocketNotConnected,
+                .ECONNRESET, .ECONNABORTED, .ENETRESET, .ESHUTDOWN => error.ConnectionResetByPeer,
+                .ENOTCONN => error.SocketUnconnected,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .EMSGSIZE => error.MessageTooBig,
-                .ESHUTDOWN => error.BrokenPipe,
-                .EHOSTUNREACH, .ENETDOWN => error.NetworkUnreachable,
-                .EOPNOTSUPP => error.OperationNotSupported,
-                .ENOBUFS => error.SystemResources,
-                .OPERATION_ABORTED => error.Canceled,
-                else => unexpectedError(err),
+                else => errnoToCommonError(err),
             };
         },
         else => {
             return switch (err) {
                 .SUCCESS => unreachable,
                 .AGAIN => error.WouldBlock,
-                .ACCES => error.AccessDenied,
-                .CONNRESET => error.ConnectionResetByPeer,
-                .NOTCONN => error.SocketNotConnected,
+                .CONNRESET, .NETRESET, .SHUTDOWN => error.ConnectionResetByPeer,
+                .NOTCONN => error.SocketUnconnected,
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .MSGSIZE => error.MessageTooBig,
-                .PIPE => error.BrokenPipe,
-                .HOSTUNREACH, .HOSTDOWN, .NETDOWN => error.NetworkUnreachable,
-                .NOBUFS => error.SystemResources,
-                .CANCELED => error.Canceled,
-                else => |e| unexpectedError(e),
+                else => errnoToCommonError(err),
             };
         },
     }
@@ -858,7 +880,7 @@ pub fn errnoToOpenError(err: E) OpenError {
         .windows => {
             return switch (err) {
                 .EAFNOSUPPORT => error.AddressFamilyUnsupported,
-                .EPROTONOSUPPORT => error.ProtocolNotSupported,
+                .EPROTONOSUPPORT => error.ProtocolUnsupportedBySystem,
                 .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS => error.SystemResources,
                 .OPERATION_ABORTED => error.Canceled,
@@ -868,12 +890,12 @@ pub fn errnoToOpenError(err: E) OpenError {
         else => {
             return switch (err) {
                 .SUCCESS => unreachable,
-                .ACCES => error.PermissionDenied,
+                .ACCES => error.AccessDenied,
                 .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .MFILE => error.ProcessFdQuotaExceeded,
                 .NFILE => error.SystemFdQuotaExceeded,
                 .NOBUFS, .NOMEM => error.SystemResources,
-                .PROTONOSUPPORT => error.ProtocolNotSupported,
+                .PROTONOSUPPORT => error.ProtocolUnsupportedBySystem,
                 .CANCELED => error.Canceled,
                 else => |e| unexpectedError(e),
             };
@@ -892,10 +914,10 @@ pub const RecvError = error{
     ConnectionResetByPeer,
     ConnectionAborted,
     ConnectionTimedOut,
-    SocketNotConnected,
+    SocketUnconnected,
     FileDescriptorNotASocket,
     SocketShutdown,
-    OperationNotSupported,
+    OperationUnsupported,
     NetworkDown,
     SystemResources,
     Canceled,
@@ -980,21 +1002,12 @@ pub const SendFlags = packed struct {
 
 pub const SendError = error{
     WouldBlock,
-    AccessDenied,
-    ConnectionResetByPeer,
-    ConnectionAborted,
-    ConnectionTimedOut,
-    SocketNotConnected,
-    FileDescriptorNotASocket,
     MessageTooBig,
-    BrokenPipe,
-    NetworkUnreachable,
-    NetworkDown,
-    OperationNotSupported,
-    SystemResources,
-    Canceled,
-    Unexpected,
-};
+    ConnectionResetByPeer,
+    SocketUnconnected,
+    FileDescriptorNotASocket,
+    OperationUnsupported,
+} || CommonError;
 
 pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!usize {
     if (buffers.len == 0) return 0;
