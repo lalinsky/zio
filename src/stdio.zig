@@ -156,7 +156,7 @@ fn futexWaitImpl(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout:
     const duration = timeoutToDuration(rt, timeout);
 
     Futex.timedWait(rt, ptr, expected, duration) catch |err| switch (err) {
-        error.Timeout => return error.Canceled, // Io treats timeout as cancellation
+        error.Timeout => return, // Timeout is not an error, just return void
         error.Canceled => return error.Canceled,
     };
 }
