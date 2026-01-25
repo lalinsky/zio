@@ -1063,6 +1063,14 @@ pub const Stream = struct {
         }
     }
 
+    /// Reads data from the stream into multiple buffers using vectored I/O.
+    /// Returns the number of bytes read across all buffers, which may be less than the total capacity.
+    /// A return value of 0 indicates end-of-stream.
+    pub fn readVec(self: Stream, rt: *Runtime, bufs: [][]u8, timeout: Timeout) !usize {
+        var storage: [max_vecs]os.iovec = undefined;
+        return self.readBuf(rt, .fromSlices(bufs, &storage), timeout);
+    }
+
     /// Low-level read function that accepts ev.ReadBuf directly.
     /// Returns the number of bytes read, which may be less than requested.
     /// A return value of 0 indicates end-of-stream.
@@ -1085,6 +1093,13 @@ pub const Stream = struct {
             const n = try self.write(rt, buf[offset..], timeout);
             offset += n;
         }
+    }
+
+    /// Writes data from multiple buffers to the stream using vectored I/O.
+    /// Returns the number of bytes written across all buffers, which may be less than the total.
+    pub fn writeVec(self: Stream, rt: *Runtime, bufs: []const []const u8, timeout: Timeout) !usize {
+        var storage: [max_vecs]os.iovec_const = undefined;
+        return self.writeBuf(rt, .fromSlices(bufs, &storage), timeout);
     }
 
     /// Writes header followed by data slices, with optional splat (repeat) of the last slice.
