@@ -157,11 +157,18 @@ pub fn stackRecycle(info: StackInfo) void {
     posix.madvise(addr[0..committed_size], posix.MADV.FREE) catch {};
 }
 
-pub fn stackExtend(info: *StackInfo) error{StackOverflow}!void {
+pub const StackExtendMode = enum {
+    /// Grow by 1.5x the current committed size (default incremental growth)
+    grow,
+    /// Commit the entire remaining uncommitted stack
+    full,
+};
+
+pub fn stackExtend(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
     if (builtin.os.tag == .windows) {
         try stackExtendWindows(info);
     } else {
-        try stackExtendPosix(info);
+        try stackExtendPosix(info, mode);
     }
 
     if (builtin.mode == .Debug and builtin.valgrind_support) {
@@ -172,32 +179,44 @@ pub fn stackExtend(info: *StackInfo) error{StackOverflow}!void {
     }
 }
 
-/// Extend the committed stack region by a growth factor (1.5x current size).
-/// Commits in 64KB chunks.
-fn stackExtendPosix(info: *StackInfo) error{StackOverflow}!void {
-    const chunk_size = 64 * 1024;
-    const growth_factor_num = 3;
-    const growth_factor_den = 2;
+/// Extend the committed stack region.
+/// Mode .grow: Grow by 1.5x current size in 64KB chunks
+/// Mode .full: Commit all remaining uncommitted stack
+fn stackExtendPosix(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
+    const guard_end = @intFromPtr(info.allocation_ptr) + page_size;
 
-    // Calculate current committed size
-    const current_committed = info.base - info.limit;
+    // Calculate new limit based on mode
+    const new_limit = switch (mode) {
+        .grow => blk: {
+            const chunk_size = 64 * 1024;
+            const growth_factor_num = 3;
+            const growth_factor_den = 2;
 
-    // Calculate new committed size (1.5x current)
-    const new_committed_size = (current_committed * growth_factor_num) / growth_factor_den;
-    const additional_size = new_committed_size - current_committed;
-    const size_to_commit = std.mem.alignForward(usize, additional_size, chunk_size);
+            // Calculate current committed size
+            const current_committed = info.base - info.limit;
 
-    // Calculate new limit (stack grows downward from high to low address)
-    // Check if we have enough uncommitted space
-    if (size_to_commit > info.limit) {
-        return error.StackOverflow;
-    }
-    const new_limit = info.limit - size_to_commit;
+            // Calculate new committed size (1.5x current)
+            const new_committed_size = (current_committed * growth_factor_num) / growth_factor_den;
+            const additional_size = new_committed_size - current_committed;
+            const size_to_commit = std.mem.alignForward(usize, additional_size, chunk_size);
+
+            // Check if we have enough uncommitted space
+            if (size_to_commit > info.limit) {
+                return error.StackOverflow;
+            }
+            break :blk info.limit - size_to_commit;
+        },
+        .full => guard_end, // Commit all the way to guard page
+    };
 
     // Check we don't overflow into guard page
-    const guard_end = @intFromPtr(info.allocation_ptr) + page_size;
     if (new_limit < guard_end) {
         return error.StackOverflow;
+    }
+
+    // Already at or past target
+    if (new_limit >= info.limit) {
+        return;
     }
 
     // Commit the memory region
@@ -261,9 +280,9 @@ fn stackFreeWindows(info: StackInfo) void {
 }
 
 /// Windows handles stack growth automatically via PAGE_GUARD mechanism
-/// when using RtlCreateUserStack. This function should never be called.
+/// when using RtlCreateUserStack. This is a no-op for compatibility.
 fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
-    unreachable;
+    // PAGE_GUARD handles this automatically on Windows
 }
 
 /// Setup automatic stack growth via SIGSEGV handler for this thread.
@@ -443,7 +462,7 @@ fn stackFaultHandler(sig: SigInt, info: *const std.posix.siginfo_t, ctx: ?*anyop
     // Check if fault is in uncommitted region (automatic growth)
     if (fault_addr >= uncommitted_start and fault_addr < uncommitted_end) {
         // Fault is in uncommitted region - extend the stack
-        stackExtendPosix(stack_info) catch {
+        stackExtendPosix(stack_info, .grow) catch {
             // Extension failed - this is a stack overflow
             abortOnStackOverflow(fault_addr, stack_info);
         };
@@ -543,7 +562,7 @@ test "Stack: extend" {
     const initial_committed = stack.base - stack.limit;
 
     // Extend by growth factor (1.5x)
-    try stackExtend(&stack);
+    try stackExtend(&stack, .grow);
 
     // Verify limit moved down
     try std.testing.expect(stack.limit < initial_limit);
@@ -644,4 +663,21 @@ test "Stack: recycle" {
     // Stack info should remain unchanged
     try std.testing.expect(stack.limit == committed_start);
     try std.testing.expect(stack.base - stack.limit == committed_len);
+}
+
+/// Panic handler that ensures coroutine stacks are fully committed before unwinding.
+/// This prevents SIGSEGV during stack trace generation when the default panic handler
+/// resets signal handlers.
+///
+/// Usage in your root file:
+///   pub const panic = zio.coro.panicHandler;
+///
+pub fn panicHandler(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    _ = error_return_trace;
+
+    if (coroutines.current_context) |ctx| {
+        stackExtend(&ctx.stack_info, .full) catch {};
+    }
+
+    std.debug.defaultPanic(msg, ret_addr);
 }
