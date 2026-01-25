@@ -29,12 +29,14 @@ pub fn getCurrent() ?*Context {
 
 const stack = @import("stack.zig");
 pub const Stack = stack.StackInfo;
+pub const StackExtendMode = stack.StackExtendMode;
 pub const stackAlloc = stack.stackAlloc;
 pub const stackFree = stack.stackFree;
 pub const stackRecycle = stack.stackRecycle;
 pub const stackExtend = stack.stackExtend;
 pub const setupStackGrowth = stack.setupStackGrowth;
 pub const cleanupStackGrowth = stack.cleanupStackGrowth;
+pub const panicHandler = stack.panicHandler;
 
 pub const StackPool = @import("stack_pool.zig").StackPool;
 
