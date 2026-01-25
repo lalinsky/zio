@@ -102,9 +102,8 @@ pub fn set(self: *ResetEvent) void {
 /// on it again. It is undefined behavior to call `reset()` while tasks are waiting
 /// in `wait()` or `timedWait()`.
 pub fn reset(self: *ResetEvent) void {
-    // Transition from is_set to unset
     const success = self.wait_queue.tryTransition(is_set, unset);
-    std.debug.assert(success); // Must be in is_set state when reset() is called
+    std.debug.assert(success or self.wait_queue.getState() == unset);
 }
 
 /// Waits for the event to be set.
@@ -246,6 +245,10 @@ test "ResetEvent basic set/reset/isSet" {
     try std.testing.expect(reset_event.isSet());
 
     // Reset the event
+    reset_event.reset();
+    try std.testing.expect(!reset_event.isSet());
+
+    // Resetting again should be no-op
     reset_event.reset();
     try std.testing.expect(!reset_event.isSet());
 }
