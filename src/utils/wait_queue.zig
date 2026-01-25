@@ -261,7 +261,7 @@ pub fn WaitQueue(comptime T: type) type {
         /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization
         /// (both lock acquisition and unlock paths). Uses .acquire on failure to observe
         /// the current state.
-        fn tryTransitionEx(self: *Self, from: State, to: State) State {
+        pub fn tryTransitionEx(self: *Self, from: State, to: State) State {
             std.debug.assert(!from.isPointer() and !to.isPointer());
             // .acq_rel on success: acquires from prior unlock's .release AND releases for future operations
             // .acquire on failure: synchronizes-with prior .release to observe current state
@@ -699,7 +699,7 @@ pub fn CompactWaitQueue(comptime T: type) type {
         ///
         /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization.
         /// Uses .acquire on failure to observe the current state.
-        fn tryTransitionEx(self: *Self, from: State, to: State) State {
+        pub fn tryTransitionEx(self: *Self, from: State, to: State) State {
             std.debug.assert(!from.isPointer() and !to.isPointer());
             const result = self.head.cmpxchgStrong(
                 @intFromEnum(from),
