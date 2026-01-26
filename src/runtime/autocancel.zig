@@ -49,7 +49,7 @@ pub const AutoCancel = struct {
         self.timer.c.callback = autoCancelCallback;
 
         // Activate the timer
-        executor.loop.setTimer(&self.timer, timeout);
+        executor.loop.setTimer(&self.timer, .{ .duration = timeout });
     }
 
     /// Check if this auto-cancel triggered the cancellation and consume it.

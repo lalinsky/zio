@@ -102,7 +102,7 @@ pub const Waiter = struct {
         timer.c.userdata = self;
         timer.c.callback = callback;
 
-        self.task.getExecutor().loop.setTimer(&timer, timeout);
+        self.task.getExecutor().loop.setTimer(&timer, .{ .duration = timeout });
         defer timer.c.loop.?.clearTimer(&timer);
 
         return self.wait(expected, cancel_mode);

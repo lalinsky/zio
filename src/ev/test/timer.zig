@@ -11,7 +11,7 @@ test "setTimer and clearTimer basic" {
     var timer: Timer = .init(.{ .duration = .zero }); // delay_ms will be set by setTimer
 
     // Test setTimer
-    loop.setTimer(&timer, .fromMilliseconds(100));
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(100) });
     try std.testing.expectEqual(.running, timer.c.state);
 
     var wall_timer = time.Stopwatch.start();
@@ -32,7 +32,7 @@ test "clearTimer before expiration" {
     var timer: Timer = .init(.{ .duration = .zero });
 
     // Set a timer with a long delay
-    loop.setTimer(&timer, .fromMilliseconds(1000));
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(1000) });
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Clear it immediately
@@ -58,11 +58,11 @@ test "setTimer multiple times" {
     var timer: Timer = .init(.{ .duration = .zero });
 
     // Set timer with a long delay
-    loop.setTimer(&timer, .fromMilliseconds(2000));
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(2000) });
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Reset it with a short delay
-    loop.setTimer(&timer, .fromMilliseconds(10));
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(10) });
     try std.testing.expectEqual(.running, timer.c.state);
 
     // Should complete after ~10ms, not 2000ms
@@ -84,12 +84,12 @@ test "clearTimer and reuse timer" {
     var timer: Timer = .init(.{ .duration = .zero });
 
     // Set and clear
-    loop.setTimer(&timer, .fromMilliseconds(200));
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(200) });
     loop.clearTimer(&timer);
     try std.testing.expectEqual(.new, timer.c.state);
 
     // Reuse the same timer
-    loop.setTimer(&timer, .fromMilliseconds(10));
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(10) });
     try std.testing.expectEqual(.running, timer.c.state);
 
     var wall_timer = time.Stopwatch.start();
@@ -100,4 +100,41 @@ test "clearTimer and reuse timer" {
     try std.testing.expect(elapsed.toMilliseconds() >= 5);
     try std.testing.expect(elapsed.toMilliseconds() <= 100);
     std.log.info("clearTimer reuse: expected=10ms, actual={f}", .{elapsed});
+}
+
+test "timer with zero duration completes immediately" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var timer: Timer = .init(.{ .duration = .zero });
+
+    var wall_timer = time.Stopwatch.start();
+    loop.add(&timer.c);
+    try loop.run(.until_done);
+    const elapsed = wall_timer.read();
+
+    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expect(elapsed.toMilliseconds() < 50);
+    std.log.info("zero duration timer: elapsed={f}", .{elapsed});
+}
+
+test "timer with explicit deadline" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    // Create a timer with an absolute deadline 100ms in the future
+    const deadline = loop.now().addDuration(.fromMilliseconds(100));
+    var timer: Timer = .init(.{ .deadline = deadline });
+
+    var wall_timer = time.Stopwatch.start();
+    loop.add(&timer.c);
+    try loop.run(.until_done);
+    const elapsed = wall_timer.read();
+
+    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expect(elapsed.toMilliseconds() >= 90);
+    try std.testing.expect(elapsed.toMilliseconds() <= 250);
+    std.log.info("deadline timer: expected=100ms, actual={f}", .{elapsed});
 }

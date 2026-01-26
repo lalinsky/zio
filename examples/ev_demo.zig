@@ -24,7 +24,7 @@ const RepeatingTimer = struct {
     timer: ev.Timer,
 
     fn start(self: *RepeatingTimer, loop: *ev.Loop) void {
-        std.log.info("[{s}] starting, will tick {} times every {f}", .{ self.name, self.count, self.timer.delay });
+        std.log.info("[{s}] starting, will tick {} times every {f}", .{ self.name, self.count, self.timer.timeout.duration });
         self.timer.c.userdata = self;
         self.timer.c.callback = onTick;
         loop.add(&self.timer.c);

@@ -9,6 +9,7 @@ const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
 const Duration = @import("../time.zig").Duration;
 const Timestamp = @import("../time.zig").Timestamp;
+const Timeout = @import("../time.zig").Timeout;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
@@ -223,25 +224,26 @@ pub const LoopState = struct {
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
-        const was_active = timer.deadline.ns > 0;
-        if (timer.delay.ns > 0) {
-            timer.deadline = self.now.addDuration(timer.delay);
-        }
-        timer.c.state = .running;
-        if (was_active) {
+        if (timer.deadline.ns > 0) {
             self.timers.remove(timer);
         } else {
             self.active += 1;
         }
+        switch (timer.timeout) {
+            .none => timer.deadline = .{ .ns = std.math.maxInt(u64) },
+            .duration => |d| timer.deadline = self.now.addDuration(d),
+            .deadline => |ts| timer.deadline = ts,
+        }
+        timer.c.state = .running;
         self.timers.insert(timer);
     }
 
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
         const was_active = timer.deadline.ns > 0;
-        timer.deadline = .zero;
         if (was_active) {
             self.timers.remove(timer);
         }
+        timer.deadline = .zero;
     }
 };
 
@@ -339,13 +341,13 @@ pub const Loop = struct {
         }
     }
 
-    /// Set or reset a timer with a new delay (works immediately, no completion required)
-    pub fn setTimer(self: *Loop, timer: *Timer, delay: Duration) void {
+    /// Set or reset a timer with a new timeout (works immediately, no completion required)
+    pub fn setTimer(self: *Loop, timer: *Timer, timeout: Timeout) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
         self.state.updateNow();
         timer.c.loop = self;
-        timer.delay = delay;
+        timer.timeout = timeout;
         self.state.setTimer(timer);
     }
 
