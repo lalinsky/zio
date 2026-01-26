@@ -7,6 +7,7 @@ const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Channel = @import("sync/channel.zig").Channel;
+const Group = @import("runtime/group.zig").Group;
 
 const common = @import("common.zig");
 const waitForIo = common.waitForIo;
@@ -1530,14 +1531,13 @@ test "tcpConnectToAddress: basic" {
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch });
-    defer server_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
-    defer client_task.cancel(runtime);
+    try group.spawn(runtime, ServerTask.run, .{ runtime, &server_port_ch });
+    try group.spawn(runtime, ClientTask.run, .{ runtime, &server_port_ch });
 
-    try server_task.join(runtime);
-    try client_task.join(runtime);
+    try group.wait(runtime);
 }
 
 test "tcpConnectToHost: basic" {
@@ -1588,14 +1588,13 @@ test "tcpConnectToHost: basic" {
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
-    var server_task = try runtime.spawn(ServerTask.run, .{ runtime, &server_port_ch });
-    defer server_task.cancel(runtime);
+    var group: Group = .init;
+    defer group.cancel(runtime);
 
-    var client_task = try runtime.spawn(ClientTask.run, .{ runtime, &server_port_ch });
-    defer client_task.cancel(runtime);
+    try group.spawn(runtime, ServerTask.run, .{ runtime, &server_port_ch });
+    try group.spawn(runtime, ClientTask.run, .{ runtime, &server_port_ch });
 
-    try server_task.join(runtime);
-    try client_task.join(runtime);
+    try group.wait(runtime);
 }
 
 test "IpAddress: initIp4" {
@@ -1901,16 +1900,13 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, server });
-            defer server_task.cancel(rt);
+            var group: Group = .init;
+            defer group.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, server, write_buffer_inner });
-            defer client_task.cancel(rt);
+            try group.spawn(rt, serverFn, .{ rt, server });
+            try group.spawn(rt, clientFn, .{ rt, server, write_buffer_inner });
 
-            // TODO use TaskGroup
-
-            try server_task.join(rt);
-            try client_task.join(rt);
+            try group.wait(rt);
         }
 
         pub fn serverFn(rt: *Runtime, server: Server) !void {
@@ -1952,14 +1948,13 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
             const socket = try server_addr_inner.bind(rt, .{});
             defer socket.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, socket });
-            defer server_task.cancel(rt);
+            var group: Group = .init;
+            defer group.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, socket, client_addr_inner });
-            defer client_task.cancel(rt);
+            try group.spawn(rt, serverFn, .{ rt, socket });
+            try group.spawn(rt, clientFn, .{ rt, socket, client_addr_inner });
 
-            try server_task.join(rt);
-            try client_task.join(rt);
+            try group.wait(rt);
         }
 
         pub fn serverFn(rt: *Runtime, socket: Socket) !void {
@@ -1999,16 +1994,13 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
             const server = try addr_inner.listen(rt, options_inner);
             defer server.close(rt);
 
-            var server_task = try rt.spawn(serverFn, .{ rt, server });
-            defer server_task.cancel(rt);
+            var group: Group = .init;
+            defer group.cancel(rt);
 
-            var client_task = try rt.spawn(clientFn, .{ rt, server });
-            defer client_task.cancel(rt);
+            try group.spawn(rt, serverFn, .{ rt, server });
+            try group.spawn(rt, clientFn, .{ rt, server });
 
-            // TODO use TaskGroup
-
-            try server_task.join(rt);
-            try client_task.join(rt);
+            try group.wait(rt);
         }
 
         pub fn serverFn(rt: *Runtime, server: Server) !void {

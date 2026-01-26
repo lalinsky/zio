@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
+const Group = @import("runtime/group.zig").Group;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Duration = @import("time.zig").Duration;
@@ -389,13 +390,13 @@ test "Signal: basic signal handling" {
         signal_received: bool = false,
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignal, .{ self, r });
-            defer h1.cancel(r);
-            var h2 = try r.spawn(sendSignal, .{r});
-            defer h2.cancel(r);
+            var group: Group = .init;
+            defer group.cancel(r);
 
-            try h1.join(r);
-            try h2.join(r);
+            try group.spawn(r, waitForSignal, .{ self, r });
+            try group.spawn(r, sendSignal, .{r});
+
+            try group.wait(r);
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
@@ -429,19 +430,15 @@ test "Signal: multiple handlers for same signal" {
         count: std.atomic.Value(usize) = .init(0),
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignal, .{ self, r });
-            defer h1.cancel(r);
-            var h2 = try r.spawn(waitForSignal, .{ self, r });
-            defer h2.cancel(r);
-            var h3 = try r.spawn(waitForSignal, .{ self, r });
-            defer h3.cancel(r);
-            var h4 = try r.spawn(sendSignal, .{r});
-            defer h4.cancel(r);
+            var group: Group = .init;
+            defer group.cancel(r);
 
-            try h1.join(r);
-            try h2.join(r);
-            try h3.join(r);
-            try h4.join(r);
+            try group.spawn(r, waitForSignal, .{ self, r });
+            try group.spawn(r, waitForSignal, .{ self, r });
+            try group.spawn(r, waitForSignal, .{ self, r });
+            try group.spawn(r, sendSignal, .{r});
+
+            try group.wait(r);
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
@@ -505,13 +502,13 @@ test "Signal: timedWait receives signal before timeout" {
         signal_received: bool = false,
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignalTimed, .{ self, r });
-            defer h1.cancel(r);
-            var h2 = try r.spawn(sendSignal, .{r});
-            defer h2.cancel(r);
+            var group: Group = .init;
+            defer group.cancel(r);
 
-            try h1.join(r);
-            try h2.join(r);
+            try group.spawn(r, waitForSignalTimed, .{ self, r });
+            try group.spawn(r, sendSignal, .{r});
+
+            try group.wait(r);
         }
 
         fn waitForSignalTimed(self: *@This(), r: *Runtime) !void {
@@ -547,13 +544,13 @@ test "Signal: select on multiple signals" {
         signal_received: std.atomic.Value(u8) = .init(0),
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
-            var h1 = try r.spawn(waitForSignals, .{ self, r });
-            defer h1.cancel(r);
-            var h2 = try r.spawn(sendSignal, .{r});
-            defer h2.cancel(r);
+            var group: Group = .init;
+            defer group.cancel(r);
 
-            try h1.join(r);
-            try h2.join(r);
+            try group.spawn(r, waitForSignals, .{ self, r });
+            try group.spawn(r, sendSignal, .{r});
+
+            try group.wait(r);
         }
 
         fn waitForSignals(self: *@This(), r: *Runtime) !void {

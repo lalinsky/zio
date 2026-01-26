@@ -1080,13 +1080,13 @@ test "Channel: select on both send and receive" {
             try ch2.send(rt, 2);
 
             var which: u8 = 0;
-            var select_task = try rt.spawn(selectTask, .{ rt, ch1, ch2, &which });
-            defer select_task.cancel(rt);
-            var sender_task = try rt.spawn(sender, .{ rt, ch1 });
-            defer sender_task.cancel(rt);
+            var group: Group = .init;
+            defer group.cancel(rt);
 
-            _ = try select_task.join(rt);
-            _ = try sender_task.join(rt);
+            try group.spawn(rt, selectTask, .{ rt, ch1, ch2, &which });
+            try group.spawn(rt, sender, .{ rt, ch1 });
+
+            try group.wait(rt);
 
             // Receive should win (sender provides value)
             try std.testing.expectEqual(1, which);
