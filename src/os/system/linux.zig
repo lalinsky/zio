@@ -19,6 +19,7 @@ pub const mode_t = linux.mode_t;
 pub const uid_t = linux.uid_t;
 pub const gid_t = linux.gid_t;
 pub const timespec = linux.timespec;
+pub const off_t = linux.off_t;
 
 /// Alternate signal stack flags
 /// Values from asm-generic/signal-defs.h
@@ -221,15 +222,55 @@ pub fn munmap(addr: [*]const u8, len: usize) usize {
 }
 
 pub fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: i32, offset: i64) usize {
-    return linux.syscall6(
-        .mmap,
-        @intFromPtr(addr),
-        len,
-        prot,
-        flags,
-        @as(usize, @bitCast(@as(isize, fd))),
-        @as(usize, @bitCast(offset)),
-    );
+    if (@hasField(linux.SYS, "mmap2")) {
+        return linux.syscall6(
+            .mmap2,
+            @intFromPtr(addr),
+            len,
+            prot,
+            flags,
+            @bitCast(@as(isize, fd)),
+            @truncate(@as(u64, @bitCast(offset)) / std.heap.pageSize()),
+        );
+    } else {
+        return linux.syscall6(
+            .mmap,
+            @intFromPtr(addr),
+            len,
+            prot,
+            flags,
+            @bitCast(@as(isize, fd)),
+            @as(u64, @bitCast(offset)),
+        );
+    }
+}
+
+pub fn lseek(fd: i32, offset: off_t, whence: u32) usize {
+    if (@sizeOf(usize) == 4) {
+        // 32-bit platforms use llseek which returns result via pointer
+        var result: u64 = undefined;
+        const rc = linux.syscall5(
+            .llseek,
+            @as(usize, @bitCast(@as(isize, fd))),
+            @as(usize, @intCast(@as(u64, @bitCast(offset)) >> 32)), // offset_high
+            @as(usize, @intCast(@as(u64, @bitCast(offset)) & 0xFFFFFFFF)), // offset_low
+            @intFromPtr(&result),
+            whence,
+        );
+        if (rc == 0) {
+            return @truncate(result); // TODO: do not truncate
+        } else {
+            return @bitCast(@as(isize, -1));
+        }
+    } else {
+        const rc = linux.syscall3(
+            .lseek,
+            @as(usize, @bitCast(@as(isize, fd))),
+            @as(usize, @bitCast(offset)),
+            whence,
+        );
+        return rc;
+    }
 }
 
 pub fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) usize {

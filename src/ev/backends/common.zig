@@ -256,14 +256,14 @@ pub fn fileCloseWork(work: *Work) void {
 /// Work function for FileRead - performs blocking preadv() syscall
 pub fn fileReadWork(work: *Work) void {
     const internal: *@FieldType(FileRead, "internal") = @fieldParentPtr("work", work);
-    const file_read: *FileRead = @fieldParentPtr("internal", internal);
+    const file_read: *FileRead = @alignCast(@fieldParentPtr("internal", internal));
     handleFileRead(&file_read.c);
 }
 
 /// Work function for FileWrite - performs blocking pwritev() syscall
 pub fn fileWriteWork(work: *Work) void {
     const internal: *@FieldType(FileWrite, "internal") = @fieldParentPtr("work", work);
-    const file_write: *FileWrite = @fieldParentPtr("internal", internal);
+    const file_write: *FileWrite = @alignCast(@fieldParentPtr("internal", internal));
     handleFileWrite(&file_write.c);
 }
 
@@ -277,7 +277,7 @@ pub fn fileSyncWork(work: *Work) void {
 /// Work function for FileSetSize - performs blocking ftruncate() syscall
 pub fn fileSetSizeWork(work: *Work) void {
     const internal: *@FieldType(FileSetSize, "internal") = @fieldParentPtr("work", work);
-    const file_set_size: *FileSetSize = @fieldParentPtr("internal", internal);
+    const file_set_size: *FileSetSize = @alignCast(@fieldParentPtr("internal", internal));
     handleFileSetSize(&file_set_size.c);
 }
 
@@ -621,7 +621,7 @@ pub fn handleFileSize(c: *Completion) void {
 /// Work function for FileSize - performs blocking fstat() syscall
 pub fn fileSizeWork(work: *Work) void {
     const internal: *@FieldType(FileSize, "internal") = @fieldParentPtr("work", work);
-    const file_size: *FileSize = @fieldParentPtr("internal", internal);
+    const file_size: *FileSize = @alignCast(@fieldParentPtr("internal", internal));
     handleFileSize(&file_size.c);
 }
 
@@ -645,7 +645,7 @@ pub fn handleFileStat(c: *Completion, allocator: std.mem.Allocator) void {
 /// Work function for FileStat - performs blocking fstat()/fstatat() syscall
 pub fn fileStatWork(work: *Work) void {
     const internal: *@FieldType(FileStat, "internal") = @fieldParentPtr("work", work);
-    const file_stat: *FileStat = @fieldParentPtr("internal", internal);
+    const file_stat: *FileStat = @alignCast(@fieldParentPtr("internal", internal));
     handleFileStat(&file_stat.c, file_stat.internal.allocator);
 }
 

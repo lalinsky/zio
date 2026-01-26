@@ -23,6 +23,7 @@ pub const fd_t = c.fd_t;
 pub const mode_t = c.mode_t;
 pub const uid_t = c.uid_t;
 pub const gid_t = c.gid_t;
+pub const off_t = c.off_t;
 
 pub const kinfo_file = c.kinfo_file;
 pub const KINFO_FILE_SIZE = c.KINFO_FILE_SIZE;
@@ -321,6 +322,7 @@ const libc = struct {
     extern "c" fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: fd_t, offset: c.off_t) *anyopaque;
     extern "c" fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
     extern "c" fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, flags: u32) c_int;
+    extern "c" fn lseek(fd: fd_t, offset: c.off_t, whence: c_int) c.off_t;
 };
 
 pub const fchmodat = libc.fchmodat;
@@ -336,3 +338,7 @@ pub const munmap = libc.munmap;
 pub const mmap = libc.mmap;
 pub const sigaltstack = libc.sigaltstack;
 pub const utimensat = libc.utimensat;
+
+pub fn lseek(fd: i32, offset: off_t, whence: u32) off_t {
+    return libc.lseek(fd, offset, @intCast(whence));
+}

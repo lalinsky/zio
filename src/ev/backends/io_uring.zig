@@ -880,7 +880,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         }
 
         // Extract completion pointer from user_data
-        const completion = @as(*Completion, @ptrFromInt(cqe.user_data));
+        const completion = @as(*Completion, @ptrFromInt(@as(usize, @intCast(cqe.user_data))));
 
         // Skip if already completed (can happen with cancellations)
         // When a target is canceled, it recursively completes the cancel operation

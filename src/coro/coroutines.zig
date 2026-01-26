@@ -36,6 +36,15 @@ pub const Context = switch (builtin.cpu.arch) {
 
         pub const stack_alignment = 16;
     },
+    .arm, .thumb => extern struct {
+        sp: u32,  // r13 (stack pointer)
+        fp: u32,  // r11 (frame pointer, r7 in Thumb)
+        lr: u32,  // r14 (link register)
+        pc: u32,  // r15 (program counter)
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 8;  // AAPCS requires 8-byte alignment
+    },
     .riscv64 => extern struct {
         sp: u64,
         fp: u64,
@@ -70,6 +79,12 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
             ctx.fp = 0;
             ctx.lr = 0;
             ctx.pc = @intFromPtr(entry_point);
+        },
+        .arm, .thumb => {
+            ctx.sp = @intCast(stack_ptr);
+            ctx.fp = 0;
+            ctx.lr = 0;
+            ctx.pc = @intCast(@intFromPtr(entry_point));
         },
         .riscv64 => {
             ctx.sp = stack_ptr;
@@ -328,6 +343,71 @@ pub inline fn switchContext(
               .ffr = true,
               .memory = true,
             }),
+        .arm, .thumb => asm volatile (
+            \\ adr r2, 0f
+            \\ str sp, [r0, #0]
+            \\ str r11, [r0, #4]
+            \\ str lr, [r0, #8]
+            \\ str r2, [r0, #12]
+            \\
+            \\ ldr sp, [r1, #0]
+            \\ ldr r11, [r1, #4]
+            \\ ldr lr, [r1, #8]
+            \\ ldr r2, [r1, #12]
+            \\ bx r2
+            \\0:
+            :
+            : [current] "{r0}" (current_context_param),
+              [new] "{r1}" (new_context),
+            : .{
+              .r0 = true,
+              .r1 = true,
+              .r2 = true,
+              .r3 = true,
+              .r4 = true,
+              .r5 = true,
+              .r6 = true,
+              .r7 = true,
+              .r8 = true,
+              .r9 = true,
+              .r10 = true,
+              // r11 explicitly saved/restored, not clobbered
+              .r12 = true,
+              .d0 = true,
+              .d1 = true,
+              .d2 = true,
+              .d3 = true,
+              .d4 = true,
+              .d5 = true,
+              .d6 = true,
+              .d7 = true,
+              .d8 = true,
+              .d9 = true,
+              .d10 = true,
+              .d11 = true,
+              .d12 = true,
+              .d13 = true,
+              .d14 = true,
+              .d15 = true,
+              .d16 = true,
+              .d17 = true,
+              .d18 = true,
+              .d19 = true,
+              .d20 = true,
+              .d21 = true,
+              .d22 = true,
+              .d23 = true,
+              .d24 = true,
+              .d25 = true,
+              .d26 = true,
+              .d27 = true,
+              .d28 = true,
+              .d29 = true,
+              .d30 = true,
+              .d31 = true,
+              .fpscr = true,
+              .memory = true,
+            }),
         .riscv64 => asm volatile (
             \\ lla t0, 0f
             \\ sd t0, 16(a0)
@@ -566,6 +646,30 @@ fn coroEntry() callconv(.naked) noreturn {
                     \\ mov x30, xzr
                     \\ ldp x2, x0, [sp, #16]
                     \\ br x2
+                );
+            }
+        },
+        .arm, .thumb => {
+            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+                asm volatile (
+                    \\ adr lr, 1f
+                    \\ ldr r0, [sp, #4]
+                    \\ ldr r2, [sp, #0]
+                    \\ bx r2
+                    \\1:
+                );
+            } else {
+                // Create sentinel frame for FP-based unwinding
+                asm volatile (
+                    \\ sub sp, sp, #8
+                    \\ mov r2, #0
+                    \\ str r2, [sp, #0]
+                    \\ str r2, [sp, #4]
+                    \\ add r11, sp, #8
+                    \\ mov lr, #0
+                    \\ ldr r2, [sp, #8]
+                    \\ ldr r0, [sp, #12]
+                    \\ bx r2
                 );
             }
         },

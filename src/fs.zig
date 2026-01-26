@@ -395,7 +395,7 @@ pub const FileReader = struct {
     }
 
     fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const r: *FileReader = @fieldParentPtr("interface", io_reader);
+        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
         const dest = limit.slice(try w.writableSliceGreedy(1));
 
         const n = r.file.read(r.runtime, dest, r.position) catch |err| {
@@ -411,7 +411,7 @@ pub const FileReader = struct {
     }
 
     fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-        const r: *FileReader = @fieldParentPtr("interface", io_reader);
+        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
         const to_discard = @intFromEnum(limit);
 
         // Nothing to discard
@@ -436,7 +436,7 @@ pub const FileReader = struct {
     }
 
     fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
-        const r: *FileReader = @fieldParentPtr("interface", io_reader);
+        const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
 
         var iovec_storage: [1 + max_vecs]os.iovec = undefined;
         const dest_n, const data_size = if (builtin.os.tag == .windows)
@@ -491,7 +491,7 @@ pub const FileWriter = struct {
     }
 
     fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const w: *FileWriter = @fieldParentPtr("interface", io_writer);
+        const w: *FileWriter = @alignCast(@fieldParentPtr("interface", io_writer));
         const buffered = io_writer.buffered();
 
         var splat_buf: [64]u8 = undefined;
@@ -510,7 +510,7 @@ pub const FileWriter = struct {
     }
 
     fn flush(io_writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const w: *FileWriter = @fieldParentPtr("interface", io_writer);
+        const w: *FileWriter = @alignCast(@fieldParentPtr("interface", io_writer));
 
         while (io_writer.end > 0) {
             const buffered = io_writer.buffered();

@@ -234,7 +234,8 @@ const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 
 comptime {
-    std.debug.assert(@alignOf(WaitNode) == 8);
+    // WaitNode needs at least 4-byte alignment for 2 spare bits in pointers
+    std.debug.assert(@alignOf(WaitNode) >= 4);
 }
 
 pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
@@ -306,7 +307,7 @@ pub const Executor = struct {
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
         const main_coro: *Coroutine = @fieldParentPtr("context", coro.parent_context_ptr);
         const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
-        return @fieldParentPtr("main_task", main_task);
+        return @alignCast(@fieldParentPtr("main_task", main_task));
     }
 
     pub fn init(self: *Executor, runtime: *Runtime, id: u6) !void {

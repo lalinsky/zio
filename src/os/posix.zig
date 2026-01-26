@@ -38,6 +38,7 @@ pub const IPPROTO = struct {
 pub const TCP = system.TCP;
 
 pub const timespec = sys.timespec;
+pub const off_t = sys.off_t;
 
 pub const errno = sys.errno;
 pub const fchmodat = sys.fchmodat;

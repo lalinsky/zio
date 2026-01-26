@@ -2157,7 +2157,7 @@ pub fn dirRead(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
 fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
     // Seek to beginning if restart requested
     if (restart) {
-        const rc = posix.system.lseek(handle, 0, posix.system.SEEK.SET);
+        const rc = posix.sys.lseek(handle, 0, posix.system.SEEK.SET);
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             .BADF => return error.Unexpected,
