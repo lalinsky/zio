@@ -226,7 +226,9 @@ pub fn groupSpawnBlockingTask(
 /// Returns error.Closed if group is closed.
 pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!void {
     if (group.isClosed()) return error.Closed;
-    _ = @atomicRmw(u32, group.getState(), .Add, 1, .acq_rel);
+    const prev_state = @atomicRmw(u32, group.getState(), .Add, 1, .acq_rel);
+    const prev_counter = prev_state & Group.counter_mask;
+    std.debug.assert(prev_counter < Group.counter_mask); // Check for overflow
     awaitable.group_node.group = group;
     if (!group.getTasks().pushUnless(.sentinel1, &awaitable.group_node)) {
         _ = @atomicRmw(u32, group.getState(), .Sub, 1, .acq_rel);
