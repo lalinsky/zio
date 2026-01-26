@@ -9,6 +9,7 @@ const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
 const Duration = @import("../time.zig").Duration;
 const Timestamp = @import("../time.zig").Timestamp;
+const Timeout = @import("../time.zig").Timeout;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
@@ -340,13 +341,13 @@ pub const Loop = struct {
         }
     }
 
-    /// Set or reset a timer with a new delay (works immediately, no completion required)
-    pub fn setTimer(self: *Loop, timer: *Timer, delay: Duration) void {
+    /// Set or reset a timer with a new timeout (works immediately, no completion required)
+    pub fn setTimer(self: *Loop, timer: *Timer, timeout: Timeout) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
         self.state.updateNow();
         timer.c.loop = self;
-        timer.timeout = .{ .duration = delay };
+        timer.timeout = timeout;
         self.state.setTimer(timer);
     }
 
