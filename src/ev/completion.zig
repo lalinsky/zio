@@ -370,27 +370,16 @@ pub const Group = struct {
 pub const Timer = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    delay: ?Duration = .zero,
+    timeout: Timeout,
     deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
 
     pub const Error = Cancelable;
 
     pub fn init(timeout: Timeout) Timer {
-        return switch (timeout) {
-            .none => .{
-                .c = .init(.timer),
-                .delay = .max,
-            },
-            .duration => |d| .{
-                .c = .init(.timer),
-                .delay = d,
-            },
-            .deadline => |ts| .{
-                .c = .init(.timer),
-                .delay = null,
-                .deadline = ts,
-            },
+        return .{
+            .c = .init(.timer),
+            .timeout = timeout,
         };
     }
 
