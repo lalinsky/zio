@@ -51,6 +51,7 @@ const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
+const Timeout = @import("../time.zig").Timeout;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
@@ -155,7 +156,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -292,7 +293,7 @@ test "ResetEvent timedWait timeout" {
     var reset_event = ResetEvent.init;
 
     // Should timeout after 10ms
-    try std.testing.expectError(error.Timeout, reset_event.timedWait(rt, .fromMilliseconds(10)));
+    try std.testing.expectError(error.Timeout, reset_event.timedWait(rt, .{ .duration = .fromMilliseconds(10) }));
     try std.testing.expect(!reset_event.isSet());
 }
 

@@ -336,6 +336,16 @@ pub const Timeout = union(enum) {
     duration: Duration,
     deadline: Timestamp,
 
+    /// Converts this timeout to a deadline-based timeout.
+    /// If already a deadline or none, returns self unchanged.
+    /// If a duration, converts to deadline using the current monotonic time.
+    pub fn toDeadline(self: Timeout) Timeout {
+        return switch (self) {
+            .none, .deadline => self,
+            .duration => |d| .{ .deadline = os.time.now(.monotonic).addDuration(d) },
+        };
+    }
+
     // Future protocol implementation for use with select()
 
     pub const Result = void;

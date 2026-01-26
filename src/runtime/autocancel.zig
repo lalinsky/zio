@@ -5,6 +5,7 @@ const std = @import("std");
 const ev = @import("../ev/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const Duration = @import("../time.zig").Duration;
+const Timeout = @import("../time.zig").Timeout;
 const AnyTask = @import("task.zig").AnyTask;
 
 /// Automatically cancels I/O operations on the current task after a timeout.
@@ -29,9 +30,9 @@ pub const AutoCancel = struct {
         self.task = null;
     }
 
-    pub fn set(self: *AutoCancel, rt: *Runtime, timeout: Duration) void {
+    pub fn set(self: *AutoCancel, rt: *Runtime, timeout: Timeout) void {
         // Disable timer if waiting forever
-        if (timeout.ns == Duration.max.ns) {
+        if (timeout == .none) {
             self.clear(rt);
             return;
         }
@@ -49,7 +50,7 @@ pub const AutoCancel = struct {
         self.timer.c.callback = autoCancelCallback;
 
         // Activate the timer
-        executor.loop.setTimer(&self.timer, .{ .duration = timeout });
+        executor.loop.setTimer(&self.timer, timeout);
     }
 
     /// Check if this auto-cancel triggered the cancellation and consume it.
@@ -93,7 +94,7 @@ test "AutoCancel: smoke test" {
     var timeout = AutoCancel.init;
     defer timeout.clear(rt);
 
-    timeout.set(rt, .fromMilliseconds(100));
+    timeout.set(rt, .{ .duration = .fromMilliseconds(100) });
 }
 
 test "AutoCancel: fires and returns error.Timeout" {
@@ -103,7 +104,7 @@ test "AutoCancel: fires and returns error.Timeout" {
     var timeout = AutoCancel.init;
     defer timeout.clear(rt);
 
-    timeout.set(rt, .fromMilliseconds(10));
+    timeout.set(rt, .{ .duration = .fromMilliseconds(10) });
 
     // Sleep longer than timeout
     rt.sleep(.fromMilliseconds(50)) catch |err| {
@@ -125,9 +126,9 @@ test "AutoCancel: nested timeouts - earliest fires first" {
     defer timeout2.clear(rt);
 
     // Set longer timeout first
-    timeout1.set(rt, .fromMilliseconds(50));
+    timeout1.set(rt, .{ .duration = .fromMilliseconds(50) });
     // Then shorter timeout
-    timeout2.set(rt, .fromMilliseconds(10));
+    timeout2.set(rt, .{ .duration = .fromMilliseconds(10) });
 
     // Sleep - should be interrupted by timeout2 (earliest)
     rt.sleep(.fromMilliseconds(100)) catch |err| {
@@ -144,7 +145,7 @@ test "AutoCancel: cleared before firing" {
     defer rt.deinit();
 
     var timeout = AutoCancel.init;
-    timeout.set(rt, .fromMilliseconds(50));
+    timeout.set(rt, .{ .duration = .fromMilliseconds(50) });
 
     // Clear timeout before it fires
     timeout.clear(rt);
@@ -159,7 +160,7 @@ test "AutoCancel: user cancel has priority over timeout" {
             var timeout = AutoCancel.init;
             defer timeout.clear(rt);
 
-            timeout.set(rt, .fromMilliseconds(50));
+            timeout.set(rt, .{ .duration = .fromMilliseconds(50) });
 
             // Sleep - will be canceled by user
             rt.sleep(.fromMilliseconds(100)) catch |err| {
@@ -203,9 +204,9 @@ test "AutoCancel: multiple timeouts with different deadlines" {
     var timeout3 = AutoCancel.init;
     defer timeout3.clear(rt);
 
-    timeout1.set(rt, .fromMilliseconds(200));
-    timeout2.set(rt, .fromMilliseconds(10)); // This should fire
-    timeout3.set(rt, .fromMilliseconds(100));
+    timeout1.set(rt, .{ .duration = .fromMilliseconds(200) });
+    timeout2.set(rt, .{ .duration = .fromMilliseconds(10) }); // This should fire
+    timeout3.set(rt, .{ .duration = .fromMilliseconds(100) });
 
     // Sleep - should be interrupted by timeout2 (earliest at 10ms)
     rt.sleep(.fromMilliseconds(1000)) catch |err| {
@@ -230,13 +231,13 @@ test "AutoCancel: set, clear, and re-set" {
     defer timeout.clear(rt);
 
     // Set timeout
-    timeout.set(rt, .fromMilliseconds(20));
+    timeout.set(rt, .{ .duration = .fromMilliseconds(20) });
 
     // Clear it
     timeout.clear(rt);
 
     // Re-set with shorter duration
-    timeout.set(rt, .fromMilliseconds(10));
+    timeout.set(rt, .{ .duration = .fromMilliseconds(10) });
 
     // Sleep - should be interrupted by new timeout
     rt.sleep(.fromMilliseconds(50)) catch |err| {
@@ -255,10 +256,10 @@ test "AutoCancel: set with Duration.max clears prior timer" {
     defer timeout.clear(rt);
 
     // Set a short timeout
-    timeout.set(rt, .fromMilliseconds(10));
+    timeout.set(rt, .{ .duration = .fromMilliseconds(10) });
 
     // Disable it with .max
-    timeout.set(rt, .max);
+    timeout.set(rt, .none);
 
     // Sleep longer than the original timeout - should NOT be canceled
     try rt.sleep(.fromMilliseconds(50));
@@ -279,7 +280,7 @@ test "AutoCancel: cancels spawned task via join" {
 
             var timeout = AutoCancel.init;
             defer timeout.clear(rt);
-            timeout.set(rt, .fromMilliseconds(10));
+            timeout.set(rt, .{ .duration = .fromMilliseconds(10) });
 
             // Join should be canceled by timeout
             handle.join(rt) catch |err| {

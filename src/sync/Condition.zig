@@ -54,6 +54,7 @@ const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
+const Timeout = @import("../time.zig").Timeout;
 const Mutex = @import("Mutex.zig");
 const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
@@ -152,7 +153,7 @@ pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void
 /// Returns `error.Canceled` if the task is cancelled while waiting. Cancellation
 /// takes priority over timeout - if both occur, `error.Canceled` is returned.
 /// The mutex will be held when returning with any error.
-pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Duration) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init(runtime);
 
@@ -292,7 +293,7 @@ test "Condition timedWait timeout" {
             defer mtx.unlock(rt);
 
             // Should timeout after 10ms
-            cond.timedWait(rt, mtx, .fromMilliseconds(10)) catch |err| {
+            cond.timedWait(rt, mtx, .{ .duration = .fromMilliseconds(10) }) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }

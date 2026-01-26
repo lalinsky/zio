@@ -47,6 +47,8 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const time = @import("../time.zig");
 const Duration = time.Duration;
+const Timeout = time.Timeout;
+const Timestamp = time.Timestamp;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
 mutex: Mutex = Mutex.init,
@@ -114,20 +116,18 @@ pub fn waitUncancelable(self: *Semaphore, rt: *Runtime) void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a permit becomes available.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
-    var timer = time.Stopwatch.start();
+pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    if (timeout == .none) {
+        return self.wait(rt);
+    }
+
+    const deadline = timeout.toDeadline();
 
     try self.mutex.lock(rt);
     defer self.mutex.unlock(rt);
 
     while (self.permits == 0) {
-        const elapsed = timer.read();
-        if (elapsed.ns >= timeout.ns) {
-            return error.Timeout;
-        }
-
-        const remaining = Duration.fromNanoseconds(timeout.ns - elapsed.ns);
-        self.cond.timedWait(rt, &self.mutex, remaining) catch |err| switch (err) {
+        self.cond.timedWait(rt, &self.mutex, deadline) catch |err| switch (err) {
             error.Timeout => return error.Timeout,
             error.Canceled => {
                 // Wake another waiter to handle any race with permit availability
@@ -197,7 +197,7 @@ test "Semaphore: timedWait timeout" {
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, s: *Semaphore, timeout_flag: *bool) void {
-            s.timedWait(rt, .fromMilliseconds(10)) catch |err| {
+            s.timedWait(rt, .{ .duration = .fromMilliseconds(10) }) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -221,7 +221,7 @@ test "Semaphore: timedWait success" {
 
     const TestFn = struct {
         fn waiter(rt: *Runtime, s: *Semaphore, flag: *bool) void {
-            s.timedWait(rt, .fromMilliseconds(100)) catch return;
+            s.timedWait(rt, .{ .duration = .fromMilliseconds(100) }) catch return;
             flag.* = true;
         }
 
