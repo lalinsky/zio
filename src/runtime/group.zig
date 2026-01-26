@@ -18,7 +18,7 @@ const Futex = @import("../sync/Futex.zig");
 /// Matches std.Io.Group layout exactly for future vtable compatibility.
 pub const IoGroup = extern struct {
     token: std.atomic.Value(?*anyopaque) = .init(null),
-    state: usize = 0,
+    state: u64 = 0,
 };
 
 pub const Group = struct {
@@ -38,7 +38,9 @@ pub const Group = struct {
     };
 
     comptime {
-        std.debug.assert(@sizeOf(State) == @sizeOf(usize));
+        if (builtin.zig_version.major == 0 and builtin.zig_version.minor >= 16) {
+            std.debug.assert(@sizeOf(State) == @sizeOf(usize));
+        }
     }
 
     const canceled_bit: u32 = 1 << 0;

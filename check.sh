@@ -12,10 +12,11 @@ TARGET=""
 BACKEND=""
 USE_WINE=false
 USE_QEMU=false
+NO_EXEC=false
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--ci] [--full] [--verbose]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--ci] [--full] [--verbose]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -41,6 +42,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --qemu)
             USE_QEMU=true
+            shift
+            ;;
+        --no-exec)
+            NO_EXEC=true
             shift
             ;;
         --ci)
@@ -91,6 +96,9 @@ if [ "$USE_WINE" = true ]; then
 fi
 if [ "$USE_QEMU" = true ]; then
     BUILD_ARGS="$BUILD_ARGS -fqemu"
+fi
+if [ "$NO_EXEC" = true ]; then
+    BUILD_ARGS="$BUILD_ARGS -Demit-test-bin"
 fi
 if [ "$VERBOSE" = true ]; then
     export TEST_VERBOSE=true
