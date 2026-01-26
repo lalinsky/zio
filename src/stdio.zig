@@ -508,12 +508,10 @@ fn dirRenameImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u
 }
 
 fn dirRenamePreserveImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8) Io.Dir.RenamePreserveError!void {
-    _ = userdata;
-    _ = old_dir;
-    _ = old_sub_path;
-    _ = new_dir;
-    _ = new_sub_path;
-    @panic("TODO");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var op = ev.DirRenamePreserve.init(old_dir.handle, old_sub_path, new_dir.handle, new_sub_path);
+    try waitForIo(rt, &op.c);
+    try op.getResult();
 }
 
 fn dirSymLinkImpl(userdata: ?*anyopaque, dir: Io.Dir, target_path: []const u8, sym_link_path: []const u8, flags: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
