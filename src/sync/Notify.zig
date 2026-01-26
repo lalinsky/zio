@@ -52,6 +52,7 @@ const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
+const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Waiter = @import("../common.zig").Waiter;
@@ -140,7 +141,7 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a signal is received.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init(runtime);
 
@@ -338,7 +339,7 @@ test "Notify timedWait timeout" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, n: *Notify, timeout_flag: *bool) !void {
             // Should timeout after 10ms
-            n.timedWait(rt, .fromMilliseconds(10)) catch |err| {
+            n.timedWait(rt, .{ .duration = .fromMilliseconds(10) }) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -362,7 +363,7 @@ test "Notify timedWait success" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, n: *Notify, success_flag: *bool) !void {
             // Should be signaled before timeout
-            try n.timedWait(rt, .fromSeconds(1));
+            try n.timedWait(rt, .{ .duration = .fromSeconds(1) });
             success_flag.* = true;
         }
 

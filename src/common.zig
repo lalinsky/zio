@@ -97,12 +97,16 @@ pub const Waiter = struct {
     /// Returns error.Timeout if the timeout expires before enough signals arrive.
     /// The caller must check their condition to determine if timeout actually won
     /// (e.g., by trying to remove from a wait queue).
-    pub fn timedWait(self: *Waiter, expected: u32, timeout: Duration, comptime cancel_mode: Executor.YieldCancelMode) !void {
-        var timer: ev.Timer = .init(.{ .duration = .zero });
+    pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) !void {
+        if (timeout == .none) {
+            return self.wait(expected, cancel_mode);
+        }
+
+        var timer: ev.Timer = .init(timeout);
         timer.c.userdata = self;
         timer.c.callback = callback;
 
-        self.task.getExecutor().loop.setTimer(&timer, .{ .duration = timeout });
+        self.task.getExecutor().loop.setTimer(&timer, timeout);
         defer timer.c.loop.?.clearTimer(&timer);
 
         return self.wait(expected, cancel_mode);

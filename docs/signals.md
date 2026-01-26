@@ -54,7 +54,7 @@ defer sigint.deinit();
 while (true) {
     // some other work
 
-    sigint.timedWait(rt, 100 * std.time.ns_per_ms) catch |err| {
+    sigint.timedWait(rt, .{ .duration = .fromMilliseconds(100) }) catch |err| {
         if (err == error.Timeout) {
             continue;
         }

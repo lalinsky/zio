@@ -16,7 +16,7 @@
 //! try Futex.wait(runtime, ptr, expect);
 //!
 //! // Wait with timeout
-//! Futex.timedWait(runtime, ptr, expect, timeout_ns) catch |err| switch (err) {
+//! Futex.timedWait(runtime, ptr, expect, .{ .duration = .fromMilliseconds(100) }) catch |err| switch (err) {
 //!     error.Timeout => // timed out,
 //!     error.Canceled => // task was cancelled,
 //! };
@@ -33,6 +33,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Waiter = @import("../common.zig").Waiter;
 const Duration = @import("../time.zig").Duration;
+const Timeout = @import("../time.zig").Timeout;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 
@@ -134,7 +135,7 @@ const FutexWaiter = struct {
 };
 
 /// Like `wait`, but also returns `error.Timeout` if the timeout elapses.
-pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Duration) (Timeoutable || Cancelable)!void {
+pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Fast path: check if value already changed
     if (@atomicLoad(u32, ptr, .acquire) != expect) {
         return;
@@ -261,7 +262,7 @@ test "Futex: basic wait/wake" {
 
             var timeout: AutoCancel = .init;
             defer timeout.clear(io);
-            timeout.set(io, .fromMilliseconds(10));
+            timeout.set(io, .{ .duration = .fromMilliseconds(10) });
 
             try waiter.join(io);
             try std.testing.expect(woken);
@@ -330,7 +331,7 @@ test "Futex: multiple waiters same address" {
 
             var timeout: AutoCancel = .init;
             defer timeout.clear(io);
-            timeout.set(io, .fromMilliseconds(10));
+            timeout.set(io, .{ .duration = .fromMilliseconds(10) });
 
             try waiter1.join(io);
             try waiter2.join(io);
@@ -374,7 +375,7 @@ test "Futex: multiple waiters different addresses" {
 
             var timeout: AutoCancel = .init;
             defer timeout.clear(io);
-            timeout.set(io, .fromMilliseconds(10));
+            timeout.set(io, .{ .duration = .fromMilliseconds(10) });
 
             try waiter1.join(io);
             waiter2.join(io) catch |err| {
@@ -395,4 +396,15 @@ test "Futex: multiple waiters different addresses" {
     // Only waiter1 should have completed - waiter2 was on a different address
     // and was canceled by the timeout
     try std.testing.expectEqual(1, woken);
+}
+
+test "Futex: timedWait timeout" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var value: u32 = 0;
+
+    // Wait with timeout, no one will wake it, so should timeout
+    const result = Futex.timedWait(rt, &value, 0, .{ .duration = .fromMilliseconds(10) });
+    try std.testing.expectError(error.Timeout, result);
 }

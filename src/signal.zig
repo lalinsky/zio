@@ -9,6 +9,7 @@ const Group = @import("runtime/group.zig").Group;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Duration = @import("time.zig").Duration;
+const Timeout = @import("time.zig").Timeout;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");
 const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
@@ -314,8 +315,8 @@ pub const Signal = struct {
     ///
     /// Arguments:
     /// - rt: Runtime context
-    /// - timeout: Timeout duration
-    pub fn timedWait(self: *Signal, rt: *Runtime, timeout: Duration) (Timeoutable || Cancelable)!void {
+    /// - timeout: Timeout
+    pub fn timedWait(self: *Signal, rt: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
@@ -475,7 +476,7 @@ test "Signal: timedWait timeout" {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            sig.timedWait(r, .fromMilliseconds(50)) catch |err| {
+            sig.timedWait(r, .{ .duration = .fromMilliseconds(50) }) catch |err| {
                 if (err == error.Timeout) {
                     self.timed_out = true;
                     return;
@@ -515,7 +516,7 @@ test "Signal: timedWait receives signal before timeout" {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.timedWait(r, .fromSeconds(1));
+            try sig.timedWait(r, .{ .duration = .fromSeconds(1) });
             self.signal_received = true;
         }
 
