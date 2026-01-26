@@ -23,6 +23,7 @@ pub const BackendCapabilities = struct {
     file_set_timestamps: bool = false,
     dir_create_dir: bool = false,
     dir_rename: bool = false,
+    dir_rename_preserve: bool = false,
     dir_delete_file: bool = false,
     dir_delete_dir: bool = false,
     file_size: bool = false,
@@ -83,6 +84,7 @@ pub const Op = enum {
     file_set_timestamps,
     dir_create_dir,
     dir_rename,
+    dir_rename_preserve,
     dir_delete_file,
     dir_delete_dir,
     file_size,
@@ -142,6 +144,7 @@ pub const Op = enum {
             .file_set_timestamps => FileSetTimestamps,
             .dir_create_dir => DirCreateDir,
             .dir_rename => DirRename,
+            .dir_rename_preserve => DirRenamePreserve,
             .dir_delete_file => DirDeleteFile,
             .dir_delete_dir => DirDeleteDir,
             .file_size => FileSize,
@@ -203,6 +206,7 @@ pub const Op = enum {
             FileSetTimestamps => .file_set_timestamps,
             DirCreateDir => .dir_create_dir,
             DirRename => .dir_rename,
+            DirRenamePreserve => .dir_rename_preserve,
             DirDeleteFile => .dir_delete_file,
             DirDeleteDir => .dir_delete_dir,
             FileSize => .file_size,
@@ -1533,6 +1537,35 @@ pub const DirRename = struct {
 
     pub fn getResult(self: *const DirRename) Error!void {
         return self.c.getResult(.dir_rename);
+    }
+};
+
+pub const DirRenamePreserve = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: switch (Backend.capabilities.dir_rename_preserve) {
+        true => if (@hasDecl(Backend, "DirRenamePreserveData")) Backend.DirRenamePreserveData else struct {},
+        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    old_dir: fs.fd_t,
+    old_path: []const u8,
+    new_dir: fs.fd_t,
+    new_path: []const u8,
+
+    pub const Error = fs.DirRenamePreserveError || Cancelable;
+
+    pub fn init(old_dir: fs.fd_t, old_path: []const u8, new_dir: fs.fd_t, new_path: []const u8) DirRenamePreserve {
+        return .{
+            .c = .init(.dir_rename_preserve),
+            .old_dir = old_dir,
+            .old_path = old_path,
+            .new_dir = new_dir,
+            .new_path = new_path,
+        };
+    }
+
+    pub fn getResult(self: *const DirRenamePreserve) Error!void {
+        return self.c.getResult(.dir_rename_preserve);
     }
 };
 

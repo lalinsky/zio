@@ -57,6 +57,7 @@ pub const FileSetOwner = completion.FileSetOwner;
 pub const FileSetTimestamps = completion.FileSetTimestamps;
 pub const DirCreateDir = completion.DirCreateDir;
 pub const DirRename = completion.DirRename;
+pub const DirRenamePreserve = completion.DirRenamePreserve;
 pub const DirDeleteFile = completion.DirDeleteFile;
 pub const DirDeleteDir = completion.DirDeleteDir;
 pub const FileSize = completion.FileSize;

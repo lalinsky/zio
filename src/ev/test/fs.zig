@@ -159,6 +159,80 @@ test "File: rename/delete" {
     try std.testing.expectError(error.FileNotFound, file_open_fail.getResult());
 }
 
+test "File: rename preserve" {
+    // Skip on Windows - rename preserve requires NtSetInformationFile which is not yet implemented
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: ev.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+
+    const cwd = os.fs.cwd();
+
+    // Create source file
+    var file_create1 = ev.FileCreate.init(cwd, "test-rename-preserve-src", .{ .read = true, .truncate = true, .mode = 0o664 });
+    loop.add(&file_create1.c);
+    try loop.run(.until_done);
+    const fd1 = try file_create1.getResult();
+    var file_close1 = ev.FileClose.init(fd1);
+    loop.add(&file_close1.c);
+    try loop.run(.until_done);
+
+    // Create destination file
+    var file_create2 = ev.FileCreate.init(cwd, "test-rename-preserve-dst", .{ .read = true, .truncate = true, .mode = 0o664 });
+    loop.add(&file_create2.c);
+    try loop.run(.until_done);
+    const fd2 = try file_create2.getResult();
+    var file_close2 = ev.FileClose.init(fd2);
+    loop.add(&file_close2.c);
+    try loop.run(.until_done);
+
+    // Try to rename preserve - should fail because destination exists
+    var file_rename_fail = ev.DirRenamePreserve.init(cwd, "test-rename-preserve-src", cwd, "test-rename-preserve-dst");
+    loop.add(&file_rename_fail.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.dead, file_rename_fail.c.state);
+    try std.testing.expectError(error.PathAlreadyExists, file_rename_fail.getResult());
+
+    // Delete the destination file
+    var file_delete1 = ev.DirDeleteFile.init(cwd, "test-rename-preserve-dst");
+    loop.add(&file_delete1.c);
+    try loop.run(.until_done);
+    try file_delete1.getResult();
+
+    // Now rename preserve should succeed
+    var file_rename_ok = ev.DirRenamePreserve.init(cwd, "test-rename-preserve-src", cwd, "test-rename-preserve-dst");
+    loop.add(&file_rename_ok.c);
+    try loop.run(.until_done);
+    try std.testing.expectEqual(.dead, file_rename_ok.c.state);
+    try file_rename_ok.getResult();
+
+    // Verify source is gone
+    var file_open_fail = ev.FileOpen.init(cwd, "test-rename-preserve-src", .{ .mode = .read_only });
+    loop.add(&file_open_fail.c);
+    try loop.run(.until_done);
+    try std.testing.expectError(error.FileNotFound, file_open_fail.getResult());
+
+    // Verify destination exists
+    var file_open_ok = ev.FileOpen.init(cwd, "test-rename-preserve-dst", .{ .mode = .read_only });
+    loop.add(&file_open_ok.c);
+    try loop.run(.until_done);
+    const fd3 = try file_open_ok.getResult();
+    var file_close3 = ev.FileClose.init(fd3);
+    loop.add(&file_close3.c);
+    try loop.run(.until_done);
+
+    // Clean up
+    var file_delete2 = ev.DirDeleteFile.init(cwd, "test-rename-preserve-dst");
+    loop.add(&file_delete2.c);
+    try loop.run(.until_done);
+    try file_delete2.getResult();
+}
+
 test "File: read EOF" {
     var thread_pool: ev.ThreadPool = undefined;
     try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });

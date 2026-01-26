@@ -797,7 +797,6 @@ pub fn errnoToCommonError(err: E) CommonError {
         .windows => {
             return switch (err) {
                 .EHOSTUNREACH => error.HostUnreachable,
-                .EHOSTDOWN => error.HostDown,
                 .ENETUNREACH => error.NetworkUnreachable,
                 .ENETDOWN => error.NetworkDown,
                 .ENOBUFS => error.SystemResources,

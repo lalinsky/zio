@@ -734,6 +734,7 @@ pub const Loop = struct {
                     .file_set_timestamps => common.fileSetTimestampsWork,
                     .dir_create_dir => common.dirCreateDirWork,
                     .dir_rename => common.dirRenameWork,
+                    .dir_rename_preserve => common.dirRenamePreserveWork,
                     .dir_delete_file => common.dirDeleteFileWork,
                     .dir_delete_dir => common.dirDeleteDirWork,
                     .file_size => common.fileSizeWork,

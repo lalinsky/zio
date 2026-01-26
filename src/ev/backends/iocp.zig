@@ -466,6 +466,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_set_timestamps,
         .dir_create_dir,
         .dir_rename,
+        .dir_rename_preserve,
         .dir_delete_file,
         .dir_delete_dir,
         .file_size,

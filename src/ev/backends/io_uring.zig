@@ -32,6 +32,7 @@ const FileOpen = @import("../completion.zig").FileOpen;
 const FileCreate = @import("../completion.zig").FileCreate;
 const DirCreateDir = @import("../completion.zig").DirCreateDir;
 const DirRename = @import("../completion.zig").DirRename;
+const DirRenamePreserve = @import("../completion.zig").DirRenamePreserve;
 const DirDeleteFile = @import("../completion.zig").DirDeleteFile;
 const DirDeleteDir = @import("../completion.zig").DirDeleteDir;
 const FileSize = @import("../completion.zig").FileSize;
@@ -62,6 +63,7 @@ pub const capabilities: BackendCapabilities = .{
     .file_set_size = true,
     .dir_create_dir = true,
     .dir_rename = true,
+    .dir_rename_preserve = true,
     .dir_delete_file = true,
     .dir_delete_dir = true,
     .file_size = true,
@@ -109,6 +111,11 @@ pub const DirCreateDirData = struct {
 };
 
 pub const DirRenameData = struct {
+    old_path: [:0]const u8 = "",
+    new_path: [:0]const u8 = "",
+};
+
+pub const DirRenamePreserveData = struct {
     old_path: [:0]const u8 = "",
     new_path: [:0]const u8 = "",
 };
@@ -583,6 +590,32 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 return;
             };
             sqe.prep_renameat(@intCast(data.old_dir), data.internal.old_path.ptr, @intCast(data.new_dir), data.internal.new_path.ptr, 0);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .dir_rename_preserve => {
+            const data = c.cast(DirRenamePreserve);
+            if (is_new) {
+                data.internal.old_path = self.allocator.dupeZ(u8, data.old_path) catch {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+                data.internal.new_path = self.allocator.dupeZ(u8, data.new_path) catch {
+                    self.allocator.free(data.internal.old_path);
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                    return;
+                };
+            }
+            const sqe = self.getSqe(state) catch {
+                self.allocator.free(data.internal.old_path);
+                self.allocator.free(data.internal.new_path);
+                log.err("Failed to get io_uring SQE for dir_rename_preserve", .{});
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            sqe.prep_renameat(@intCast(data.old_dir), data.internal.old_path.ptr, @intCast(data.new_dir), data.internal.new_path.ptr, @bitCast(linux.RENAME{ .NOREPLACE = true }));
             sqe.user_data = @intFromPtr(c);
         },
         .dir_delete_file => {
@@ -1123,6 +1156,17 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToDirRenameError(@enumFromInt(-res)));
             } else {
                 c.setResult(.dir_rename, {});
+            }
+        },
+
+        .dir_rename_preserve => {
+            const data = c.cast(DirRenamePreserve);
+            self.allocator.free(data.internal.old_path);
+            self.allocator.free(data.internal.new_path);
+            if (res < 0) {
+                c.setError(fs.errnoToDirRenamePreserveError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.dir_rename_preserve, {});
             }
         },
 

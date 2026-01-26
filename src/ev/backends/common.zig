@@ -18,6 +18,7 @@ const FileSetOwner = @import("../completion.zig").FileSetOwner;
 const FileSetTimestamps = @import("../completion.zig").FileSetTimestamps;
 const DirCreateDir = @import("../completion.zig").DirCreateDir;
 const DirRename = @import("../completion.zig").DirRename;
+const DirRenamePreserve = @import("../completion.zig").DirRenamePreserve;
 const DirDeleteFile = @import("../completion.zig").DirDeleteFile;
 const DirDeleteDir = @import("../completion.zig").DirDeleteDir;
 const FileSize = @import("../completion.zig").FileSize;
@@ -552,8 +553,18 @@ pub fn handleDirCreateDir(c: *Completion, allocator: std.mem.Allocator) void {
 /// Helper to handle dir rename operation
 pub fn handleDirRename(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(DirRename);
-    if (fs.renameat(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
+    if (fs.dirRename(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
         c.setResult(.dir_rename, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle dir rename preserve operation
+pub fn handleDirRenamePreserve(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirRenamePreserve);
+    if (fs.dirRenamePreserve(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
+        c.setResult(.dir_rename_preserve, {});
     } else |err| {
         c.setError(err);
     }
@@ -591,6 +602,13 @@ pub fn dirRenameWork(work: *Work) void {
     const internal: *@FieldType(DirRename, "internal") = @fieldParentPtr("work", work);
     const dir_rename: *DirRename = @fieldParentPtr("internal", internal);
     handleDirRename(&dir_rename.c, dir_rename.internal.allocator);
+}
+
+/// Work function for DirRenamePreserve - performs blocking rename preserve syscall
+pub fn dirRenamePreserveWork(work: *Work) void {
+    const internal: *@FieldType(DirRenamePreserve, "internal") = @fieldParentPtr("work", work);
+    const dir_rename_preserve: *DirRenamePreserve = @fieldParentPtr("internal", internal);
+    handleDirRenamePreserve(&dir_rename_preserve.c, dir_rename_preserve.internal.allocator);
 }
 
 /// Work function for DirDeleteFile - performs blocking unlinkat() syscall

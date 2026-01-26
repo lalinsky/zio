@@ -231,6 +231,11 @@ pub const DirRenameError = error{
     Unexpected,
 };
 
+pub const DirRenamePreserveError = error{
+    PathAlreadyExists,
+    OperationUnsupported,
+} || DirRenameError;
+
 pub const DirDeleteFileError = error{
     AccessDenied,
     FileBusy,
@@ -997,7 +1002,7 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 }
 
 /// Rename a file using renameat() syscall
-pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
+pub fn dirRename(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
     if (builtin.os.tag == .windows) {
         const old_path_w = try w.pathToWide(allocator, old_dir, old_path);
         defer allocator.free(old_path_w);
@@ -1037,6 +1042,36 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
             else => |err| return errnoToDirRenameError(err),
         }
     }
+}
+
+/// Rename a file atomically, failing if destination exists
+pub fn dirRenamePreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
+    // Windows note: MoveFileExW without MOVEFILE_REPLACE_EXISTING is unreliable for
+    // detecting existing destinations. Would need NtSetInformationFile with FileRenameInformationEx
+    // and POSIX_SEMANTICS flag for proper atomic rename preserve support.
+    if (builtin.os.tag == .windows) return error.OperationUnsupported;
+
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+        defer allocator.free(old_path_z);
+        const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+        defer allocator.free(new_path_z);
+
+        while (true) {
+            const rc = linux.renameat2(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, linux.RENAME.NOREPLACE);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return,
+                .INTR => continue,
+                .EXIST => return error.PathAlreadyExists,
+                else => |err| return errnoToDirRenamePreserveError(err),
+            }
+        }
+    }
+
+    // Fallback for other POSIX systems: non-atomic link+unlink
+    // This is not atomic and may leave both files if interrupted
+    return error.OperationUnsupported;
 }
 
 /// Delete a file using unlinkat() syscall
@@ -1290,6 +1325,30 @@ pub fn errnoToDirRenameError(errno: posix.system.E) DirRenameError {
         .NOMEM => error.SystemResources,
         .NOTDIR => error.NotDir,
         .EXIST => error.Unexpected, // PathAlreadyExists mapped to Unexpected for RenameError (use RenamePreserve for non-overwriting)
+        .NOSPC => error.NoSpaceLeft,
+        .ROFS => error.ReadOnlyFileSystem,
+        .XDEV => error.CrossDevice,
+        .NOTEMPTY => error.DirNotEmpty,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e) catch error.Unexpected,
+    };
+}
+
+pub fn errnoToDirRenamePreserveError(errno: posix.system.E) DirRenamePreserveError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .BUSY => error.FileBusy,
+        .DQUOT => error.DiskQuota,
+        .ISDIR => error.IsDir,
+        .LOOP => error.SymLinkLoop,
+        .MLINK => error.LinkQuotaExceeded,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOENT => error.FileNotFound,
+        .NOMEM => error.SystemResources,
+        .NOTDIR => error.NotDir,
+        .EXIST => error.PathAlreadyExists,
         .NOSPC => error.NoSpaceLeft,
         .ROFS => error.ReadOnlyFileSystem,
         .XDEV => error.CrossDevice,
