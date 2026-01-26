@@ -16,7 +16,11 @@ const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
 pub const Timeoutable = common.Timeoutable;
 
-pub const time = @import("time.zig");
+pub const time = @import("time.zig"); // TODO: make non-pub
+pub const Duration = time.Duration;
+pub const Timestamp = time.Timestamp;
+pub const Timeout = time.Timeout;
+pub const Stopwatch = time.Stopwatch;
 
 const fs = @import("fs.zig");
 pub const File = fs.File;
