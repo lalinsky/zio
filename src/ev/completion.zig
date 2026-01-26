@@ -370,7 +370,7 @@ pub const Group = struct {
 pub const Timer = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    delay: Duration = .zero,
+    delay: ?Duration = .zero,
     deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
 
@@ -388,7 +388,7 @@ pub const Timer = struct {
             },
             .deadline => |ts| .{
                 .c = .init(.timer),
-                .delay = .zero,
+                .delay = null,
                 .deadline = ts,
             },
         };

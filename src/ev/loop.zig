@@ -223,25 +223,27 @@ pub const LoopState = struct {
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
-        const was_active = timer.deadline.ns > 0;
-        if (timer.delay.ns > 0) {
-            timer.deadline = self.now.addDuration(timer.delay);
+        const was_active = timer.c.state == .running;
+        if (timer.delay) |delay| {
+            timer.deadline = self.now.addDuration(delay);
         }
-        timer.c.state = .running;
+        // If delay is null, deadline should already be set
+        std.debug.assert(timer.deadline.ns > 0);
         if (was_active) {
             self.timers.remove(timer);
         } else {
             self.active += 1;
         }
+        timer.c.state = .running;
         self.timers.insert(timer);
     }
 
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
         const was_active = timer.deadline.ns > 0;
-        timer.deadline = .zero;
         if (was_active) {
             self.timers.remove(timer);
         }
+        timer.deadline = .zero;
     }
 };
 
