@@ -31,76 +31,72 @@ pub const Group = struct {
     //   1         = sentinel1 = closing (reject new spawns)
     //   pointer   = has tasks
 
-    // Interpret inner.state as State
-    pub const State = extern struct {
-        counter: u32 = 0, // pending task count, also futex target
-        flags: u32 = 0, // atomic Or/And for flag bits
-    };
+    // Interpret inner.state's lower u32 as combined counter+flags
+    // Layout: [8 bits flags (high)][24 bits counter (low)]
+    // This allows futex to observe both counter and flags simultaneously,
+    // enabling features like fail_fast to wake waiters immediately.
+    // 24-bit counter supports up to 16,777,215 concurrent tasks.
+    const counter_mask: u32 = 0x00FFFFFF;
+    const flags_shift: u5 = 24;
 
-    comptime {
-        if (builtin.zig_version.major == 0 and builtin.zig_version.minor >= 16) {
-            std.debug.assert(@sizeOf(State) == @sizeOf(usize));
-        }
-    }
-
-    const canceled_bit: u32 = 1 << 0;
-    const failed_bit: u32 = 1 << 1;
-    const fail_fast_bit: u32 = 1 << 2;
-    const closed_bit: u32 = 1 << 3;
+    // Flag bits in upper 8 bits
+    const canceled_bit: u32 = 1 << 24;
+    const failed_bit: u32 = 1 << 25;
+    const fail_fast_bit: u32 = 1 << 26;
+    const closed_bit: u32 = 1 << 27;
 
     fn getTasks(self: *Group) *CompactWaitQueue(GroupNode) {
         return @ptrCast(&self.inner.token);
     }
 
-    fn getStatePtr(self: *Group) *State {
+    fn getState(self: *Group) *u32 {
+        // Cast u64* to u32* - gets lower u32 on little-endian
         return @ptrCast(&self.inner.state);
     }
 
-    fn getCounter(self: *Group) *u32 {
-        return &self.getStatePtr().counter;
-    }
-
-    fn getFlags(self: *Group) *u32 {
-        return &self.getStatePtr().flags;
-    }
-
     /// Set the failed flag.
+    /// TODO: Wake waiters immediately when this bit transitions from unset to set.
+    /// Currently waiters only wake when counter reaches zero.
     pub fn setFailed(self: *Group) void {
-        _ = @atomicRmw(u32, self.getFlags(), .Or, failed_bit | closed_bit, .acq_rel);
+        _ = @atomicRmw(u32, self.getState(), .Or, failed_bit | closed_bit, .acq_rel);
     }
 
     /// Check if the failed flag is set.
     pub fn hasFailed(self: *Group) bool {
-        return (@atomicLoad(u32, self.getFlags(), .acquire) & failed_bit) != 0;
+        return (@atomicLoad(u32, self.getState(), .acquire) & failed_bit) != 0;
     }
 
     /// Set the canceled flag.
+    /// TODO: Wake waiters immediately when this bit transitions from unset to set.
+    /// Currently waiters only wake when counter reaches zero.
     pub fn setCanceled(self: *Group) void {
-        _ = @atomicRmw(u32, self.getFlags(), .Or, canceled_bit | closed_bit, .acq_rel);
+        _ = @atomicRmw(u32, self.getState(), .Or, canceled_bit | closed_bit, .acq_rel);
     }
 
     /// Check if the canceled flag is set.
     pub fn isCanceled(self: *Group) bool {
-        return (@atomicLoad(u32, self.getFlags(), .acquire) & canceled_bit) != 0;
+        return (@atomicLoad(u32, self.getState(), .acquire) & canceled_bit) != 0;
     }
 
     /// Set the fail_fast flag.
-    // TODO: Implement early wake on first error/cancel when fail_fast is set
+    /// TODO: Implement early wake on first error/cancel when fail_fast is set.
+    /// The unified counter+flags state makes this feasible - setFailed/setCanceled
+    /// just need to check fail_fast and wake waiters when the bit transitions.
     pub fn setFailFast(self: *Group) void {
-        _ = @atomicRmw(u32, self.getFlags(), .Or, fail_fast_bit, .acq_rel);
+        _ = @atomicRmw(u32, self.getState(), .Or, fail_fast_bit, .acq_rel);
     }
 
     /// Check if the fail_fast flag is set.
     pub fn isFailFast(self: *Group) bool {
-        return (@atomicLoad(u32, self.getFlags(), .acquire) & fail_fast_bit) != 0;
+        return (@atomicLoad(u32, self.getState(), .acquire) & fail_fast_bit) != 0;
     }
 
     fn setClosed(self: *Group) void {
-        _ = @atomicRmw(u32, self.getFlags(), .Or, closed_bit, .acq_rel);
+        _ = @atomicRmw(u32, self.getState(), .Or, closed_bit, .acq_rel);
     }
 
     fn isClosed(self: *Group) bool {
-        return (@atomicLoad(u32, self.getFlags(), .acquire) & closed_bit) != 0;
+        return (@atomicLoad(u32, self.getState(), .acquire) & closed_bit) != 0;
     }
 
     pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
@@ -161,11 +157,12 @@ pub const Group = struct {
         errdefer group.cancel(rt);
 
         // Wait for all tasks to complete
-        const counter_ptr = group.getCounter();
+        const state_ptr = group.getState();
         while (true) {
-            const counter = @atomicLoad(u32, counter_ptr, .acquire);
+            const state = @atomicLoad(u32, state_ptr, .acquire);
+            const counter = state & counter_mask;
             if (counter == 0) break;
-            try Futex.wait(rt, counter_ptr, counter);
+            try Futex.wait(rt, state_ptr, state);
         }
 
         // All tasks completed - verify list is empty (sentinel0)
@@ -187,11 +184,12 @@ pub const Group = struct {
         }
 
         // Wait for all tasks to complete
-        const counter_ptr = group.getCounter();
+        const state_ptr = group.getState();
         while (true) {
-            const counter = @atomicLoad(u32, counter_ptr, .acquire);
+            const state = @atomicLoad(u32, state_ptr, .acquire);
+            const counter = state & counter_mask;
             if (counter == 0) break;
-            Futex.wait(rt, counter_ptr, counter) catch unreachable;
+            Futex.wait(rt, state_ptr, state) catch unreachable;
         }
 
         // Transition back to idle
@@ -228,10 +226,10 @@ pub fn groupSpawnBlockingTask(
 /// Returns error.Closed if group is closed.
 pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!void {
     if (group.isClosed()) return error.Closed;
-    _ = @atomicRmw(u32, group.getCounter(), .Add, 1, .acq_rel);
+    _ = @atomicRmw(u32, group.getState(), .Add, 1, .acq_rel);
     awaitable.group_node.group = group;
     if (!group.getTasks().pushUnless(.sentinel1, &awaitable.group_node)) {
-        _ = @atomicRmw(u32, group.getCounter(), .Sub, 1, .acq_rel);
+        _ = @atomicRmw(u32, group.getState(), .Sub, 1, .acq_rel);
         return error.Closed;
     }
 }
@@ -244,9 +242,11 @@ pub fn unregisterGroupTask(rt: *Runtime, group: *Group, awaitable: *Awaitable) v
         awaitable.release(rt);
     }
 
-    const counter_ptr = group.getCounter();
-    if (@atomicRmw(u32, counter_ptr, .Sub, 1, .acq_rel) == 1) {
-        Futex.wake(rt, counter_ptr, std.math.maxInt(u32));
+    const state_ptr = group.getState();
+    const prev_state = @atomicRmw(u32, state_ptr, .Sub, 1, .acq_rel);
+    const prev_counter = prev_state & Group.counter_mask;
+    if (prev_counter == 1) {
+        Futex.wake(rt, state_ptr, std.math.maxInt(u32));
     }
 }
 
