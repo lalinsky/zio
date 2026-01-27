@@ -940,7 +940,7 @@ pub const Socket = struct {
         var int_value: c_int = undefined;
         if (builtin.os.tag == .windows) {
             var len: c_int = @sizeOf(c_int);
-            const rc = os.windows.getsockopt(self.handle, level, optname, std.mem.asBytes(&int_value).ptr, &len);
+            const rc = os.windows.getsockopt(self.handle, level, @intCast(optname), std.mem.asBytes(&int_value).ptr, &len);
             if (rc == os.windows.SOCKET_ERROR) {
                 return error.Unexpected;
             }

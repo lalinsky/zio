@@ -777,6 +777,8 @@ pub const SOL = struct {
 pub const SO = struct {
     pub const REUSEADDR: i32 = 0x0004;
     pub const KEEPALIVE: i32 = 0x0008;
+    pub const SNDBUF: i32 = 0x1001;
+    pub const RCVBUF: i32 = 0x1002;
     pub const ERROR: i32 = 0x1007;
 };
 
