@@ -886,7 +886,7 @@ pub const Runtime = struct {
             worker.executor.run(.until_stopped) catch |e| {
                 std.log.err("Worker executor error: {}, retrying in {f}", .{ e, backoff });
                 os.time.sleep(backoff);
-                backoff = .{ .ns = @min(backoff.ns *| 2, max_backoff.ns) };
+                backoff = .{ .value = @min(backoff.value *| 2, max_backoff.value) };
                 continue;
             };
             break;
@@ -1084,13 +1084,13 @@ test "Runtime: implicit run" {
     const TestContext = struct {
         fn asyncTask(rt: *Runtime) !void {
             const start = rt.now();
-            try std.testing.expect(start.ns > 0);
+            try std.testing.expect(start.value > 0);
 
             // Sleep to ensure time advances
             try rt.sleep(.fromMilliseconds(10));
 
             const end = rt.now();
-            try std.testing.expect(end.ns > start.ns);
+            try std.testing.expect(end.value > start.value);
             try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
         }
     };
@@ -1108,7 +1108,7 @@ test "Runtime: sleep from main" {
     try runtime.sleep(.fromMilliseconds(10));
     const end = runtime.now();
 
-    try std.testing.expect(end.ns > start.ns);
+    try std.testing.expect(end.value > start.value);
     try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 
@@ -1131,13 +1131,13 @@ test "runtime: now() returns monotonic time" {
     defer runtime.deinit();
 
     const start = runtime.now();
-    try std.testing.expect(start.ns > 0);
+    try std.testing.expect(start.value > 0);
 
     // Sleep to ensure time advances
     try runtime.sleep(.fromMilliseconds(10));
 
     const end = runtime.now();
-    try std.testing.expect(end.ns > start.ns);
+    try std.testing.expect(end.value > start.value);
     try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 

@@ -131,11 +131,11 @@ pub const StackPool = struct {
             // Remove expired stacks from the front of the list (up to limit)
             // Do this before adding the new stack to avoid the situation where we'd
             // remove all stacks (including the one we're about to add) and end up with an empty pool
-            if (self.config.max_age.ns > 0) {
+            if (self.config.max_age.value > 0) {
                 while (self.head) |expired| {
                     if (to_free_count >= max_free_per_release) break;
                     const age = expired.timestamp.durationTo(timestamp);
-                    if (age.ns > self.config.max_age.ns) {
+                    if (age.value > self.config.max_age.value) {
                         self.removeNode(expired);
                         expired.next = to_free_head;
                         to_free_head = expired;

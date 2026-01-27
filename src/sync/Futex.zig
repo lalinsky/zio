@@ -262,7 +262,7 @@ test "Futex: basic wait/wake" {
 
             var timeout: AutoCancel = .init;
             defer timeout.clear(io);
-            timeout.set(io, .{ .duration = .fromMilliseconds(10) });
+            timeout.set(io, .fromMilliseconds(10));
 
             try waiter.join(io);
             try std.testing.expect(woken);
@@ -331,7 +331,7 @@ test "Futex: multiple waiters same address" {
 
             var timeout: AutoCancel = .init;
             defer timeout.clear(io);
-            timeout.set(io, .{ .duration = .fromMilliseconds(10) });
+            timeout.set(io, .fromMilliseconds(10));
 
             try waiter1.join(io);
             try waiter2.join(io);
@@ -375,7 +375,7 @@ test "Futex: multiple waiters different addresses" {
 
             var timeout: AutoCancel = .init;
             defer timeout.clear(io);
-            timeout.set(io, .{ .duration = .fromMilliseconds(10) });
+            timeout.set(io, .fromMilliseconds(10));
 
             try waiter1.join(io);
             waiter2.join(io) catch |err| {

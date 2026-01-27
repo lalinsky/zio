@@ -83,7 +83,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
                         .path = undefined,
                     };
                     const timestamp = time.now(.realtime);
-                    _ = std.fmt.bufPrintZ(&self.server_addr.path, "ev-dgram-test-{d}.sock", .{timestamp.ns}) catch unreachable;
+                    _ = std.fmt.bufPrintZ(&self.server_addr.path, "ev-dgram-test-{d}.sock", .{timestamp.value}) catch unreachable;
                 },
                 else => unreachable,
             }
@@ -263,7 +263,7 @@ pub fn EchoClient(comptime domain: net.Domain, comptime sockaddr: type) type {
                     .path = undefined,
                 };
                 const timestamp = time.now(.realtime);
-                _ = std.fmt.bufPrintZ(&self.client_addr.path, "ev-dgram-client-{d}.sock", .{timestamp.ns}) catch unreachable;
+                _ = std.fmt.bufPrintZ(&self.client_addr.path, "ev-dgram-client-{d}.sock", .{timestamp.value}) catch unreachable;
                 self.client_addr_len = @sizeOf(sockaddr);
             }
 

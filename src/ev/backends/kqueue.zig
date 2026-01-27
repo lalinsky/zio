@@ -355,11 +355,11 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
 
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     var timeout_spec: std.c.timespec = undefined;
-    const timeout_ptr: ?*const std.c.timespec = if (timeout.ns < std.math.maxInt(u64)) blk: {
+    const timeout_ptr: ?*const std.c.timespec = if (timeout.value < std.math.maxInt(time.TimeInt)) blk: {
         const timeout_ns = timeout.toNanoseconds();
         timeout_spec = .{
-            .sec = @intCast(timeout_ns / std.time.ns_per_s),
-            .nsec = @intCast(timeout_ns % std.time.ns_per_s),
+            .sec = @intCast(timeout_ns / time.ns_per_s),
+            .nsec = @intCast(timeout_ns % time.ns_per_s),
         };
         break :blk &timeout_spec;
     } else null;
