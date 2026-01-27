@@ -293,7 +293,7 @@ test "ResetEvent timedWait timeout" {
     var reset_event = ResetEvent.init;
 
     // Should timeout after 10ms
-    try std.testing.expectError(error.Timeout, reset_event.timedWait(rt, .{ .duration = .fromMilliseconds(10) }));
+    try std.testing.expectError(error.Timeout, reset_event.timedWait(rt, .fromMilliseconds(10)));
     try std.testing.expect(!reset_event.isSet());
 }
 

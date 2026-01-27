@@ -285,11 +285,11 @@ test "group: nested gather inside race (timeout pattern) - ops complete first" {
     defer loop.deinit();
 
     // Timeout timer (slow)
-    var timeout: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
+    var timeout: Timer = .init(.fromMilliseconds(1000));
 
     // Operations (fast)
-    var op1: Timer = .init(.{ .duration = .fromMilliseconds(10) });
-    var op2: Timer = .init(.{ .duration = .fromMilliseconds(20) });
+    var op1: Timer = .init(.fromMilliseconds(10));
+    var op2: Timer = .init(.fromMilliseconds(20));
 
     // Inner gather group for operations
     var ops: Group = .init(.gather);
@@ -322,11 +322,11 @@ test "group: nested gather inside race (timeout pattern) - timeout fires first" 
     defer loop.deinit();
 
     // Timeout timer (fast)
-    var timeout: Timer = .init(.{ .duration = .fromMilliseconds(10) });
+    var timeout: Timer = .init(.fromMilliseconds(10));
 
     // Operations (slow)
-    var op1: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
-    var op2: Timer = .init(.{ .duration = .fromMilliseconds(1000) });
+    var op1: Timer = .init(.fromMilliseconds(1000));
+    var op2: Timer = .init(.fromMilliseconds(1000));
 
     // Inner gather group for operations
     var ops: Group = .init(.gather);

@@ -194,7 +194,7 @@ test "timedWaitForIo: timeout interrupts long operation" {
 
     // Long timer (1 second) with short timeout (10ms)
     var timer = ev.Timer.init(.{ .duration = .fromSeconds(1) });
-    try std.testing.expectError(error.Timeout, timedWaitForIo(rt, &timer.c, .{ .duration = .fromMilliseconds(10) }));
+    try std.testing.expectError(error.Timeout, timedWaitForIo(rt, &timer.c, .fromMilliseconds(10)));
 }
 
 test "timedWaitForIo: completes before timeout" {

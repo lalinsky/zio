@@ -336,6 +336,31 @@ pub const Timeout = union(enum) {
     duration: Duration,
     deadline: Timestamp,
 
+    /// Creates a timeout from a duration in nanoseconds.
+    pub fn fromNanoseconds(ns: u64) Timeout {
+        return .{ .duration = .fromNanoseconds(ns) };
+    }
+
+    /// Creates a timeout from a duration in microseconds.
+    pub fn fromMicroseconds(us: u64) Timeout {
+        return .{ .duration = .fromMicroseconds(us) };
+    }
+
+    /// Creates a timeout from a duration in milliseconds.
+    pub fn fromMilliseconds(ms: u64) Timeout {
+        return .{ .duration = .fromMilliseconds(ms) };
+    }
+
+    /// Creates a timeout from a duration in seconds.
+    pub fn fromSeconds(s: u64) Timeout {
+        return .{ .duration = .fromSeconds(s) };
+    }
+
+    /// Creates a timeout from a duration in minutes.
+    pub fn fromMinutes(m: u64) Timeout {
+        return .{ .duration = .fromMinutes(m) };
+    }
+
     /// Converts this timeout to a deadline-based timeout.
     /// If already a deadline or none, returns self unchanged.
     /// If a duration, converts to deadline using the current monotonic time.
@@ -586,7 +611,7 @@ test "Timeout future: timeout wins select" {
         fn run(rt: *Runtime, ch: *Channel(u32)) !void {
             const result = try select(rt, .{
                 .recv = ch.asyncReceive(),
-                .timeout = Timeout{ .duration = .fromMilliseconds(10) },
+                .timeout = Timeout.fromMilliseconds(10),
             });
             switch (result) {
                 .recv => try std.testing.expect(false),
