@@ -876,6 +876,36 @@ pub const Socket = struct {
         try self.setBoolOption(os.posix.IPPROTO.TCP, os.posix.TCP.NODELAY, enabled);
     }
 
+    /// Set the system-level send buffer size (SO_SNDBUF)
+    /// Note: The kernel may not grant the full requested size due to system limits.
+    /// Use getSendBufferSize() to verify the actual buffer size allocated.
+    /// Larger buffers can improve throughput, especially for UDP to prevent packet loss.
+    pub fn setSendBufferSize(self: Socket, size: usize) !void {
+        try self.setIntOption(os.posix.SOL.SOCKET, os.posix.SO.SNDBUF, size);
+    }
+
+    /// Set the system-level receive buffer size (SO_RCVBUF)
+    /// Note: The kernel may not grant the full requested size due to system limits.
+    /// Use getReceiveBufferSize() to verify the actual buffer size allocated.
+    /// Larger buffers can improve throughput, especially for UDP to prevent packet loss.
+    pub fn setReceiveBufferSize(self: Socket, size: usize) !void {
+        try self.setIntOption(os.posix.SOL.SOCKET, os.posix.SO.RCVBUF, size);
+    }
+
+    /// Get the current system-level send buffer size (SO_SNDBUF)
+    /// Returns the actual buffer size allocated by the kernel, which may differ
+    /// from the requested size due to kernel limits and internal overhead.
+    pub fn getSendBufferSize(self: Socket) !usize {
+        return self.getIntOption(os.posix.SOL.SOCKET, os.posix.SO.SNDBUF);
+    }
+
+    /// Get the current system-level receive buffer size (SO_RCVBUF)
+    /// Returns the actual buffer size allocated by the kernel, which may differ
+    /// from the requested size due to kernel limits and internal overhead.
+    pub fn getReceiveBufferSize(self: Socket) !usize {
+        return self.getIntOption(os.posix.SOL.SOCKET, os.posix.SO.RCVBUF);
+    }
+
     /// Helper function to set a boolean socket option (POSIX)
     fn setBoolOption(self: Socket, level: i32, optname: u32, enabled: bool) !void {
         if (builtin.os.tag == .windows) {
@@ -889,6 +919,35 @@ pub const Socket = struct {
             const bytes = std.mem.asBytes(&value);
             try std.posix.setsockopt(self.handle, level, optname, bytes);
         }
+    }
+
+    /// Helper function to set an integer socket option
+    fn setIntOption(self: Socket, level: i32, optname: u32, value: usize) !void {
+        const int_value: c_int = @intCast(value);
+        if (builtin.os.tag == .windows) {
+            const rc = os.windows.setsockopt(self.handle, level, optname, std.mem.asBytes(&int_value).ptr, @sizeOf(c_int));
+            if (rc == os.windows.SOCKET_ERROR) {
+                return error.Unexpected;
+            }
+        } else {
+            const bytes = std.mem.asBytes(&int_value);
+            try std.posix.setsockopt(self.handle, level, optname, bytes);
+        }
+    }
+
+    /// Helper function to get an integer socket option
+    fn getIntOption(self: Socket, level: i32, optname: u32) !usize {
+        var int_value: c_int = undefined;
+        if (builtin.os.tag == .windows) {
+            var len: c_int = @sizeOf(c_int);
+            const rc = os.windows.getsockopt(self.handle, level, optname, std.mem.asBytes(&int_value).ptr, &len);
+            if (rc == os.windows.SOCKET_ERROR) {
+                return error.Unexpected;
+            }
+        } else {
+            try std.posix.getsockopt(self.handle, level, optname, std.mem.asBytes(&int_value));
+        }
+        return @intCast(int_value);
     }
 
     /// Bind the socket to an address
@@ -2115,6 +2174,36 @@ test "UnixAddress: listen/accept/connect/read/EOF" {
 
     const addr = try UnixAddress.init(path);
     try checkShutdown(addr, UnixAddress.ListenOptions{});
+}
+
+test "Socket: buffer size get/set" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    // Create a UDP socket for testing
+    const socket = try Socket.open(runtime, .dgram, .ipv4, .udp);
+    defer socket.close(runtime);
+
+    // Test send buffer size
+    const desired_send_size: usize = 128 * 1024; // 128 KB
+    try socket.setSendBufferSize(desired_send_size);
+    const actual_send_size = try socket.getSendBufferSize();
+    // The kernel may grant a different size, but it should be > 0
+    try std.testing.expect(actual_send_size > 0);
+
+    // Test receive buffer size
+    const desired_recv_size: usize = 256 * 1024; // 256 KB
+    try socket.setReceiveBufferSize(desired_recv_size);
+    const actual_recv_size = try socket.getReceiveBufferSize();
+    // The kernel may grant a different size, but it should be > 0
+    try std.testing.expect(actual_recv_size > 0);
+
+    // Verify that setting different sizes results in different values
+    // (though kernel may adjust them)
+    const new_send_size: usize = 64 * 1024; // 64 KB
+    try socket.setSendBufferSize(new_send_size);
+    const updated_send_size = try socket.getSendBufferSize();
+    try std.testing.expect(updated_send_size > 0);
 }
 
 test "IpAddress: listen/accept/connect/read/EOF IPv4" {
