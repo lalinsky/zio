@@ -7,6 +7,9 @@ const Duration = time.Duration;
 const Clock = time.Clock;
 const Timestamp = time.Timestamp;
 
+pub const TimeInt = time.TimeInt;
+pub const ns_per_s = time.ns_per_s;
+
 pub fn now(clock: Clock) Timestamp {
     switch (builtin.os.tag) {
         .windows => {
@@ -21,13 +24,13 @@ pub fn now(clock: Clock) Timestamp {
                     const common_qpf = 10_000_000; // 10MHz is common
                     if (qpf == common_qpf) {
                         // ns_per_s / 10_000_000 = 100
-                        return .{ .ns = qpc * 100 };
+                        return Timestamp.fromNanoseconds(qpc * 100);
                     }
 
                     // General case: convert to ns using fixed point
-                    const scale = (@as(u64, std.time.ns_per_s) << 32) / qpf;
+                    const scale = (@as(u64, time.ns_per_s) << 32) / qpf;
                     const result = (@as(u96, qpc) * scale) >> 32;
-                    return .{ .ns = @truncate(result) };
+                    return Timestamp.fromNanoseconds(@truncate(result));
                 },
                 .realtime => {
                     // RtlGetSystemTimePrecise() has a granularity of 100 nanoseconds
@@ -35,8 +38,8 @@ pub fn now(clock: Clock) Timestamp {
                     // Convert to Unix epoch (1970-01-01) by subtracting the difference.
                     const ticks = w.RtlGetSystemTimePrecise();
                     // 100-nanosecond ticks between Windows epoch (1601) and Unix epoch (1970)
-                    const epoch_diff_ticks = 11644473600 * (std.time.ns_per_s / 100);
-                    return .{ .ns = @intCast((ticks - epoch_diff_ticks) * 100) };
+                    const epoch_diff_ticks = 11644473600 * (time.ns_per_s / 100);
+                    return Timestamp.fromNanoseconds(@intCast((ticks - epoch_diff_ticks) * 100));
                 },
             }
         },
@@ -61,7 +64,7 @@ pub fn now(clock: Clock) Timestamp {
 }
 
 pub fn sleep(duration: Duration) void {
-    if (duration.ns == 0) return;
+    if (duration.value == 0) return;
     switch (builtin.os.tag) {
         .windows => {
             _ = w.SleepEx(@intCast(duration.toMilliseconds()), w.FALSE);

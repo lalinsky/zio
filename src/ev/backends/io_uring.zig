@@ -836,10 +836,11 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     // If timeout is Duration.max (infinite), pass null ts so io_uring_enter2 waits forever
     var ts: linux.kernel_timespec = undefined;
     var arg: linux_os.io_uring_getevents_arg = .{
-        .ts = if (timeout.ns == Duration.max.ns) 0 else blk: {
+        .ts = if (timeout.value == Duration.max.value) 0 else blk: {
+            const timeout_ns = timeout.toNanoseconds();
             ts = .{
-                .sec = @intCast(timeout.ns / std.time.ns_per_s),
-                .nsec = @intCast(timeout.ns % std.time.ns_per_s),
+                .sec = @intCast(timeout_ns / time.ns_per_s),
+                .nsec = @intCast(timeout_ns % time.ns_per_s),
             };
             break :blk @intFromPtr(&ts);
         },

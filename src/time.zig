@@ -13,69 +13,115 @@ const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const WaitNode = @import("runtime/WaitNode.zig");
 
+// Time configuration - adjust these for different platforms
+const TimePrecision = enum { nanoseconds, microseconds, milliseconds };
+const time_unit: TimePrecision = .nanoseconds;
+pub const TimeInt = u64;
+
+pub const ns_per_us = 1000;
+pub const ns_per_ms = 1000 * 1000;
+pub const ns_per_s = 1000 * 1000 * 1000;
+pub const ns_per_min = 60 * ns_per_s;
+pub const ns_per_hour = 60 * ns_per_min;
+pub const s_per_min = 60;
+pub const s_per_hour = 60 * s_per_min;
+pub const s_per_day = 24 * s_per_hour;
+
+// How many nanoseconds per unit (the reciprocal would be fractional for some precisions)
+const ns_per_unit: TimeInt = switch (time_unit) {
+    .nanoseconds => 1,
+    .microseconds => ns_per_us,
+    .milliseconds => ns_per_ms,
+};
+
 pub const Clock = enum {
     monotonic,
     realtime,
 };
 
-/// A duration of time stored as nanoseconds.
+/// A duration of time.
 pub const Duration = struct {
-    ns: u64,
+    value: TimeInt,
 
-    pub const zero: Duration = .{ .ns = 0 };
-    pub const max: Duration = .{ .ns = std.math.maxInt(u64) };
+    pub const zero: Duration = .{ .value = 0 };
+    pub const max: Duration = .{ .value = std.math.maxInt(TimeInt) };
 
-    pub fn fromNanoseconds(ns: u64) Duration {
-        return .{ .ns = ns };
+    pub fn fromNanoseconds(ns: TimeInt) Duration {
+        return .{ .value = ns / ns_per_unit };
     }
 
-    pub fn fromMicroseconds(us: u64) Duration {
-        return .{ .ns = us *| std.time.ns_per_us };
+    pub fn fromMicroseconds(us: TimeInt) Duration {
+        if (ns_per_us >= ns_per_unit) {
+            return .{ .value = us *| (ns_per_us / ns_per_unit) };
+        } else {
+            return .{ .value = us / (ns_per_unit / ns_per_us) };
+        }
     }
 
-    pub fn fromMilliseconds(ms: u64) Duration {
-        return .{ .ns = ms *| std.time.ns_per_ms };
+    pub fn fromMilliseconds(ms: TimeInt) Duration {
+        if (ns_per_ms >= ns_per_unit) {
+            return .{ .value = ms *| (ns_per_ms / ns_per_unit) };
+        } else {
+            return .{ .value = ms / (ns_per_unit / ns_per_ms) };
+        }
     }
 
-    pub fn fromSeconds(s: u64) Duration {
-        return .{ .ns = s *| std.time.ns_per_s };
+    pub fn fromSeconds(s: TimeInt) Duration {
+        return .{ .value = s *| (ns_per_s / ns_per_unit) };
     }
 
-    pub fn fromMinutes(m: u64) Duration {
-        return .{ .ns = m *| std.time.ns_per_min };
+    pub fn fromMinutes(m: TimeInt) Duration {
+        return .{ .value = m *| (ns_per_min / ns_per_unit) };
     }
 
-    pub fn toNanoseconds(self: Duration) u64 {
-        return self.ns;
+    pub fn toNanoseconds(self: Duration) TimeInt {
+        return self.value *| ns_per_unit;
     }
 
-    pub fn toMicroseconds(self: Duration) u64 {
-        return @divTrunc(self.ns, std.time.ns_per_us);
+    pub fn toMicroseconds(self: Duration) TimeInt {
+        if (ns_per_us >= ns_per_unit) {
+            return self.value / (ns_per_us / ns_per_unit);
+        } else {
+            return self.value *| (ns_per_unit / ns_per_us);
+        }
     }
 
-    pub fn toMilliseconds(self: Duration) u64 {
-        return @divTrunc(self.ns, std.time.ns_per_ms);
+    pub fn toMilliseconds(self: Duration) TimeInt {
+        if (ns_per_ms >= ns_per_unit) {
+            return self.value / (ns_per_ms / ns_per_unit);
+        } else {
+            return self.value *| (ns_per_unit / ns_per_ms);
+        }
     }
 
-    pub fn toSeconds(self: Duration) u64 {
-        return @divTrunc(self.ns, std.time.ns_per_s);
+    pub fn toSeconds(self: Duration) TimeInt {
+        if (ns_per_s >= ns_per_unit) {
+            return self.value / (ns_per_s / ns_per_unit);
+        } else {
+            return self.value *| (ns_per_unit / ns_per_s);
+        }
     }
 
-    pub fn toMinutes(self: Duration) u64 {
-        return @divTrunc(self.ns, std.time.ns_per_min);
+    pub fn toMinutes(self: Duration) TimeInt {
+        if (ns_per_min >= ns_per_unit) {
+            return self.value / (ns_per_min / ns_per_unit);
+        } else {
+            return self.value *| (ns_per_unit / ns_per_min);
+        }
     }
 
     pub fn toTimespec(self: Duration) os.timespec {
+        const ns = self.toNanoseconds();
         return .{
-            .sec = @intCast(self.ns / std.time.ns_per_s),
-            .nsec = @intCast(self.ns % std.time.ns_per_s),
+            .sec = @intCast(ns / ns_per_s),
+            .nsec = @intCast(ns % ns_per_s),
         };
     }
 
     /// Formats the duration in Go-style format (e.g., "1h30m45s", "500ms", "1.5us").
     pub fn format(self: Duration, w: *std.Io.Writer) std.Io.Writer.Error!void {
         var buf: [32]u8 = undefined;
-        const start = formatBuf(self.ns, &buf);
+        const start = formatBuf(self.toNanoseconds(), &buf);
         try w.writeAll(buf[start..]);
     }
 
@@ -84,7 +130,7 @@ pub const Duration = struct {
         var u = ns;
         var i: usize = buf.len;
 
-        if (u < std.time.ns_per_s) {
+        if (u < ns_per_s) {
             // Sub-second: use smaller units like "1.2ms"
             var prec: usize = undefined;
             i -= 1;
@@ -93,12 +139,12 @@ pub const Duration = struct {
                 i -= 1;
                 buf[i] = '0';
                 return i;
-            } else if (u < std.time.ns_per_us) {
+            } else if (u < ns_per_us) {
                 // nanoseconds
                 prec = 0;
                 i -= 1;
                 buf[i] = 'n';
-            } else if (u < std.time.ns_per_ms) {
+            } else if (u < ns_per_ms) {
                 // microseconds
                 prec = 3;
                 i -= 1;
@@ -231,15 +277,15 @@ pub const Duration = struct {
             const multiplier: u64 = if (std.mem.eql(u8, unit, "ns"))
                 1
             else if (std.mem.eql(u8, unit, "us"))
-                std.time.ns_per_us
+                ns_per_us
             else if (std.mem.eql(u8, unit, "ms"))
-                std.time.ns_per_ms
+                ns_per_ms
             else if (std.mem.eql(u8, unit, "s"))
-                std.time.ns_per_s
+                ns_per_s
             else if (std.mem.eql(u8, unit, "m"))
-                std.time.ns_per_min
+                ns_per_min
             else if (std.mem.eql(u8, unit, "h"))
-                std.time.ns_per_hour
+                ns_per_hour
             else
                 return error.InvalidDuration;
 
@@ -257,60 +303,65 @@ pub const Duration = struct {
             ns += v;
         }
 
-        return .{ .ns = ns };
+        return fromNanoseconds(ns);
     }
 };
 
-/// A point in time stored as nanoseconds since Unix epoch.
+/// A point in time since Unix epoch.
 pub const Timestamp = struct {
-    ns: u64,
+    value: TimeInt,
 
-    pub const zero: Timestamp = .{ .ns = 0 };
+    pub const zero: Timestamp = .{ .value = 0 };
 
-    pub fn fromNanoseconds(ns: u64) Timestamp {
-        return .{ .ns = ns };
+    pub fn fromNanoseconds(ns: TimeInt) Timestamp {
+        return .{ .value = ns / ns_per_unit };
     }
 
-    pub fn fromMilliseconds(ms: u64) Timestamp {
-        return .{ .ns = ms *| std.time.ns_per_ms };
+    pub fn fromMilliseconds(ms: TimeInt) Timestamp {
+        return .{ .value = ms *| (ns_per_ms / ns_per_unit) };
+    }
+
+    pub fn toNanoseconds(self: Timestamp) TimeInt {
+        return self.value *| ns_per_unit;
     }
 
     pub fn fromTimespec(ts: os.timespec) Timestamp {
-        const ns = @as(i64, @intCast(ts.sec)) * std.time.ns_per_s + @as(i64, @intCast(ts.nsec));
-        return .{ .ns = @intCast(@max(ns, 0)) };
+        const ns = @as(i64, @intCast(ts.sec)) * ns_per_s + @as(i64, @intCast(ts.nsec));
+        return fromNanoseconds(@intCast(@max(ns, 0)));
     }
 
     pub fn toTimespec(self: Timestamp) os.timespec {
+        const ns = self.toNanoseconds();
         return .{
-            .sec = @intCast(self.ns / std.time.ns_per_s),
-            .nsec = @intCast(self.ns % std.time.ns_per_s),
+            .sec = @intCast(ns / ns_per_s),
+            .nsec = @intCast(ns % ns_per_s),
         };
     }
 
     pub fn durationTo(from: Timestamp, to: Timestamp) Duration {
-        return .{ .ns = to.ns -| from.ns };
+        return .{ .value = to.value -| from.value };
     }
 
     pub fn addDuration(self: Timestamp, duration: Duration) Timestamp {
-        return .{ .ns = self.ns +| duration.ns };
+        return .{ .value = self.value +| duration.value };
     }
 
     pub fn subDuration(self: Timestamp, duration: Duration) Timestamp {
-        return .{ .ns = self.ns -| duration.ns };
+        return .{ .value = self.value -| duration.value };
     }
 
     /// Formats the timestamp as "YYYY-MM-DD HH:MM:SS".
     pub fn format(self: Timestamp, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const secs = self.ns / std.time.ns_per_s;
+        const secs = self.toNanoseconds() / ns_per_s;
 
         // Days since Unix epoch
-        var days = secs / std.time.s_per_day;
-        const day_secs = secs % std.time.s_per_day;
+        var days = secs / s_per_day;
+        const day_secs = secs % s_per_day;
 
         // Time of day
-        const hour = day_secs / std.time.s_per_hour;
-        const minute = (day_secs % std.time.s_per_hour) / std.time.s_per_min;
-        const second = day_secs % std.time.s_per_min;
+        const hour = day_secs / s_per_hour;
+        const minute = (day_secs % s_per_hour) / s_per_min;
+        const second = day_secs % s_per_min;
 
         // Convert days to year/month/day
         // Algorithm from http://howardhinnant.github.io/date_algorithms.html
@@ -454,7 +505,7 @@ pub const Stopwatch = struct {
     /// Samples the monotonic clock, ensuring monotonicity by saturating on the previous sample.
     fn sample(self: *Stopwatch) Timestamp {
         const current = os.time.now(.monotonic);
-        if (current.ns > self.previous.ns) {
+        if (current.value > self.previous.value) {
             self.previous = current;
         }
         return self.previous;
@@ -462,27 +513,27 @@ pub const Stopwatch = struct {
 };
 
 test "Timestamp: addDuration, subDuration, durationTo" {
-    const t1: Timestamp = .{ .ns = 1_000_000_000 };
+    const t1 = Timestamp.fromNanoseconds(1_000_000_000);
     const t2 = t1.addDuration(.fromSeconds(5));
-    try std.testing.expectEqual(6_000_000_000, t2.ns);
+    try std.testing.expectEqual(6_000_000_000, t2.toNanoseconds());
 
     const t3 = t2.subDuration(.fromSeconds(2));
-    try std.testing.expectEqual(4_000_000_000, t3.ns);
+    try std.testing.expectEqual(4_000_000_000, t3.toNanoseconds());
 
     const dur = t1.durationTo(t2);
-    try std.testing.expectEqual(5_000_000_000, dur.ns);
+    try std.testing.expectEqual(5_000_000_000, dur.toNanoseconds());
 }
 
 test "Timestamp: format" {
     var buf: [64]u8 = undefined;
 
     // Unix epoch
-    const epoch: Timestamp = .{ .ns = 0 };
+    const epoch = Timestamp.fromNanoseconds(0);
     var result = std.fmt.bufPrint(&buf, "{f}", .{epoch}) catch unreachable;
     try std.testing.expectEqualStrings("1970-01-01 00:00:00", result);
 
     // 2024-01-15 12:40:45 UTC
-    const t: Timestamp = .{ .ns = 1705322445 * std.time.ns_per_s };
+    const t = Timestamp.fromNanoseconds(1705322445 * ns_per_s);
     result = std.fmt.bufPrint(&buf, "{f}", .{t}) catch unreachable;
     try std.testing.expectEqualStrings("2024-01-15 12:40:45", result);
 }
@@ -509,7 +560,10 @@ test "Duration: format" {
     };
 
     for (cases) |case| {
-        const d: Duration = .{ .ns = case.ns };
+        // Skip tests where precision would be lost
+        if (case.ns % ns_per_unit != 0) continue;
+
+        const d = Duration.fromNanoseconds(case.ns);
         const result = std.fmt.bufPrint(&buf, "{f}", .{d}) catch unreachable;
         try std.testing.expectEqualStrings(case.expected, result);
     }
@@ -539,8 +593,11 @@ test "Duration: parse" {
     };
 
     for (cases) |case| {
+        // Skip tests where precision would be lost
+        if (case.expected % ns_per_unit != 0) continue;
+
         const d = try Duration.parse(case.input);
-        try std.testing.expectEqual(case.expected, d.ns);
+        try std.testing.expectEqual(case.expected, d.toNanoseconds());
     }
 
     // Error cases
@@ -564,29 +621,35 @@ test "Duration: parse" {
     // Accumulation overflow: multiple units that sum over u64
     try std.testing.expectError(error.InvalidDuration, Duration.parse("5124095h1h"));
 
-    // Valid edge case: max u64 in nanoseconds
-    try std.testing.expectEqual(std.math.maxInt(u64), (try Duration.parse("18446744073709551615ns")).ns);
+    // Valid edge case: max u64 in nanoseconds (only if precision supports it)
+    if (ns_per_unit == 1) {
+        try std.testing.expectEqual(std.math.maxInt(u64), (try Duration.parse("18446744073709551615ns")).toNanoseconds());
+    }
 }
 
 test "Duration: overflow saturation" {
     // Values that would overflow if multiplied normally should saturate to Duration.max
     const max_u64 = std.math.maxInt(u64);
 
-    // fromMicroseconds: max_u64 * 1000 would overflow
-    try std.testing.expectEqual(Duration.max, Duration.fromMicroseconds(max_u64));
+    // fromMicroseconds: only overflows when converting to smaller unit (ns)
+    if (ns_per_us > ns_per_unit) {
+        try std.testing.expectEqual(Duration.max, Duration.fromMicroseconds(max_u64));
+    }
 
-    // fromMilliseconds: max_u64 * 1_000_000 would overflow
-    try std.testing.expectEqual(Duration.max, Duration.fromMilliseconds(max_u64));
+    // fromMilliseconds: only overflows when converting to smaller unit (ns or us)
+    if (ns_per_ms > ns_per_unit) {
+        try std.testing.expectEqual(Duration.max, Duration.fromMilliseconds(max_u64));
+    }
 
-    // fromSeconds: max_u64 * 1_000_000_000 would overflow
+    // fromSeconds: always overflows since seconds > all precisions
     try std.testing.expectEqual(Duration.max, Duration.fromSeconds(max_u64));
 
-    // fromMinutes: max_u64 * 60_000_000_000 would overflow
+    // fromMinutes: always overflows since minutes > all precisions
     try std.testing.expectEqual(Duration.max, Duration.fromMinutes(max_u64));
 
     // Verify non-overflowing values still work correctly
-    try std.testing.expectEqual(1_000_000_000, Duration.fromSeconds(1).ns);
-    try std.testing.expectEqual(60_000_000_000, Duration.fromMinutes(1).ns);
+    try std.testing.expectEqual(1_000_000_000, Duration.fromSeconds(1).toNanoseconds());
+    try std.testing.expectEqual(60_000_000_000, Duration.fromMinutes(1).toNanoseconds());
 }
 
 test "Stopwatch: start, read, lap, reset" {

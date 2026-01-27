@@ -47,7 +47,7 @@ pub const RunMode = enum {
 };
 
 fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
-    return a.deadline.ns < b.deadline.ns;
+    return a.deadline.value < b.deadline.value;
 }
 
 const TimerHeap = Heap(Timer, void, timerDeadlineLess);
@@ -224,13 +224,13 @@ pub const LoopState = struct {
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
-        if (timer.deadline.ns > 0) {
+        if (timer.deadline.value > 0) {
             self.timers.remove(timer);
         } else {
             self.active += 1;
         }
         switch (timer.timeout) {
-            .none => timer.deadline = .{ .ns = std.math.maxInt(u64) },
+            .none => timer.deadline = .{ .value = std.math.maxInt(time.TimeInt) },
             .duration => |d| timer.deadline = self.now.addDuration(d),
             .deadline => |ts| timer.deadline = ts,
         }
@@ -239,7 +239,7 @@ pub const LoopState = struct {
     }
 
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
-        const was_active = timer.deadline.ns > 0;
+        const was_active = timer.deadline.value > 0;
         if (was_active) {
             self.timers.remove(timer);
         }
@@ -355,7 +355,7 @@ pub const Loop = struct {
     pub fn clearTimer(self: *Loop, timer: *Timer) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
-        const was_active = timer.deadline.ns > 0;
+        const was_active = timer.deadline.value > 0;
         self.state.clearTimer(timer);
         if (was_active) {
             // Reset state so timer can be reused
@@ -629,7 +629,7 @@ pub const Loop = struct {
             self.state.lockTimers();
             self.state.updateNow();
             while (self.state.timers.peek()) |timer| {
-                if (timer.deadline.ns > self.state.now.ns) {
+                if (timer.deadline.value > self.state.now.value) {
                     next_timeout = self.state.now.durationTo(timer.deadline);
                     break;
                 }
@@ -818,7 +818,7 @@ pub const Loop = struct {
                 timeout = .zero;
             } else if (timer_result.next_timeout) |t| {
                 // Use timer timeout, capped at max_wait
-                timeout = if (t.ns < self.max_wait.ns) t else self.max_wait;
+                timeout = if (t.value < self.max_wait.value) t else self.max_wait;
             } else {
                 // No timers, wait for blocking I/O
                 timeout = self.max_wait;
