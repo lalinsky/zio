@@ -625,7 +625,7 @@ test "Stack: automatic growth" {
     // Run coroutine - should trigger automatic stack growth
     // On POSIX: via SIGSEGV/SIGBUS handler
     // On Windows: via PAGE_GUARD mechanism
-    while (!coro.finished) {
+    while (!closure.finished) {
         coro.step();
     }
 

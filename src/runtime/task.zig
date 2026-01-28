@@ -169,6 +169,7 @@ pub const AnyTask = struct {
         ready,
         preparing_to_wait,
         waiting,
+        finished,
     };
 
     pub const wait_node_vtable = WaitNode.VTable{
@@ -378,6 +379,7 @@ pub const AnyTask = struct {
     pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
         const self = fromCoroutine(coro);
         self.closure.call(AnyTask, self);
+        self.state.store(.finished, .release);
     }
 
     pub fn create(

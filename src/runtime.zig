@@ -512,10 +512,10 @@ pub const Executor = struct {
 
                 task.coro.step();
 
-                // Handle finished coroutines
+                // Handle finished tasks
                 if (self.current_coroutine) |current_coro| {
-                    if (current_coro.finished) {
-                        const current_task = AnyTask.fromCoroutine(current_coro);
+                    const current_task = AnyTask.fromCoroutine(current_coro);
+                    if (current_task.state.load(.acquire) == .finished) {
                         const current_awaitable = &current_task.awaitable;
 
                         // Release stack immediately

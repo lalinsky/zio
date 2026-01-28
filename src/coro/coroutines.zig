@@ -726,7 +726,6 @@ fn coroEntry() callconv(.naked) noreturn {
 pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
-    finished: bool = false,
 
     /// Step into the coroutine
     pub fn step(self: *Coroutine) void {
@@ -760,7 +759,7 @@ pub const Coroutine = struct {
 
                 coro_data.func(coro, coro_data.userdata);
 
-                coro.finished = true;
+                // Coroutine function has returned - caller must track completion
                 coro.yield();
                 unreachable;
             }
@@ -806,6 +805,7 @@ pub fn Closure(func: anytype) type {
     return struct {
         args: UserArgs,
         result: ReturnType = undefined,
+        finished: bool = false,
 
         pub fn init(a: UserArgs) @This() {
             return .{ .args = a };
@@ -816,6 +816,7 @@ pub fn Closure(func: anytype) type {
             // Prepend the coroutine to the args tuple
             const full_args = .{coro} ++ self.args;
             self.result = @call(.auto, func, full_args);
+            self.finished = true;
         }
     };
 }
@@ -840,7 +841,7 @@ test "Coroutine: basic" {
     var closure = C.init(.{ 1, 2 });
     coro.setup(&C.start, &closure);
 
-    while (!coro.finished) {
+    while (!closure.finished) {
         coro.step();
     }
 
@@ -868,7 +869,7 @@ test "Coroutine: recursion" {
     var closure = C.init(.{ 10 });
     coro.setup(&C.start, &closure);
 
-    while (!coro.finished) {
+    while (!closure.finished) {
         coro.step();
     }
 
@@ -953,9 +954,9 @@ test "Coroutine: message passing" {
     coro2.setup(&ReceiverClosure.start, &receiver_closure);
 
     // Round-robin scheduler
-    while (!coro1.finished or !coro2.finished) {
-        if (!coro1.finished) coro1.step();
-        if (!coro2.finished) coro2.step();
+    while (!sender_closure.finished or !receiver_closure.finished) {
+        if (!sender_closure.finished) coro1.step();
+        if (!receiver_closure.finished) coro2.step();
     }
 
     try std.testing.expectEqual(9, receiver_closure.result);
@@ -998,7 +999,7 @@ test "Coroutine: allocator inside coroutine" {
     var closure = C.init(.{});
     coro.setup(&C.start, &closure);
 
-    while (!coro.finished) {
+    while (!closure.finished) {
         coro.step();
     }
 
@@ -1024,6 +1025,7 @@ test "Coroutine: stack trace" {
     const TestData = struct {
         trace: std.builtin.StackTrace = undefined,
         trace_addrs: [32]usize = undefined,
+        finished: bool = false,
 
         fn coroFunc(c: *Coroutine, userdata: ?*anyopaque) void {
             c.yield(); // make it slightly more complicated and yield once
@@ -1035,13 +1037,14 @@ test "Coroutine: stack trace" {
             } else {
                 self.trace = std.debug.captureCurrentStackTrace(.{}, &self.trace_addrs);
             }
+            self.finished = true;
         }
     };
 
     var test_data = TestData{};
     coro.setup(&TestData.coroFunc, &test_data);
 
-    while (!coro.finished) {
+    while (!test_data.finished) {
         coro.step();
     }
 
