@@ -137,11 +137,17 @@ pub const Closure = struct {
 };
 
 // Cancellation status - tracks both user and auto-cancellation
+// Organized as 4 bytes for easier alignment:
+// Byte 0: flags (user_canceled + padding)
+// Byte 1: auto_canceled counter
+// Byte 2: pending_errors counter
+// Byte 3: shield_count counter
 pub const CanceledStatus = packed struct(u32) {
     user_canceled: bool = false,
-    auto_canceled: u8 = 0,
-    pending_errors: u16 = 0,
     _padding: u7 = 0,
+    auto_canceled: u8 = 0,
+    pending_errors: u8 = 0,
+    shield_count: u8 = 0,
 };
 
 // Kind of cancellation
@@ -152,11 +158,8 @@ pub const AnyTask = struct {
     coro: Coroutine,
     state: std.atomic.Value(State),
 
-    // Cancellation status - tracks user cancel, timeout, and pending errors
+    // Cancellation status - tracks user cancel, timeout, pending errors, and shield count
     canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-
-    // Number of active cancellation shields
-    shield_count: u8 = 0,
 
     // Closure for the task
     closure: Closure,
@@ -212,13 +215,33 @@ pub const AnyTask = struct {
 
     /// Begin a cancellation shield to prevent being canceled during critical sections.
     pub fn beginShield(self: *AnyTask) void {
-        self.shield_count += 1;
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+            status.shield_count += 1;
+            const new: u32 = @bitCast(status);
+            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                current = prev;
+                continue;
+            }
+            break;
+        }
     }
 
     /// End a cancellation shield.
     pub fn endShield(self: *AnyTask) void {
-        std.debug.assert(self.shield_count > 0);
-        self.shield_count -= 1;
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+            std.debug.assert(status.shield_count > 0);
+            status.shield_count -= 1;
+            const new: u32 = @bitCast(status);
+            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                current = prev;
+                continue;
+            }
+            break;
+        }
     }
 
     /// Set the canceled status on this task.
@@ -309,11 +332,12 @@ pub const AnyTask = struct {
     /// If pending_errors > 0 and not shielded, decrements the count and returns error.Canceled.
     /// Otherwise returns void (no error).
     pub fn checkCancel(self: *AnyTask) Cancelable!void {
-        if (self.shield_count > 0) return;
-
         var current = self.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
+
+            // If shielded, nothing to consume
+            if (status.shield_count > 0) return;
 
             // If no pending errors, nothing to consume
             if (status.pending_errors == 0) return;
