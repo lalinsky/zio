@@ -8,6 +8,7 @@ const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("WaitNode.zig");
 const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
+const SimpleQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitResult = @import("../select.zig").WaitResult;
 const Cancelable = @import("../common.zig").Cancelable;
 const select = @import("../select.zig");
@@ -30,11 +31,8 @@ pub const Awaitable = struct {
 
     wait_node: WaitNode,
 
-    // Completion status - true when awaitable has completed
-    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
     // WaitNodes waiting for the completion of this awaitable
-    // Use WaitQueue sentinel states:
+    // Use WaitQueue sentinel states to track completion:
     // - sentinel0 = not complete (no waiters, task not complete)
     // - sentinel1 = complete (no waiters, task is complete)
     // - pointer = waiting (has waiters, task not complete)
@@ -69,7 +67,7 @@ pub const Awaitable = struct {
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
     pub fn asyncWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
         // Fast path: check if already complete
-        if (self.done.load(.acquire)) {
+        if (self.waiting_list.getState() == complete) {
             return false;
         }
         // Try to push to queue - only succeeds if awaitable is not complete
@@ -88,12 +86,17 @@ pub const Awaitable = struct {
     /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
     /// Can be called from any context.
     pub fn markComplete(self: *Awaitable) void {
-        // Set done flag first (release semantics for memory ordering)
-        self.done.store(true, .release);
+        // First, pop ALL waiters into a temporary list and transition to complete state.
+        // This ensures waiting_list.getState() == complete BEFORE we wake any waiters,
+        // preventing a race where woken tasks check hasResult() before the transition completes.
+        var waiters: SimpleQueue(WaitNode) = .empty;
 
-        // Pop and wake all waiters, then transition to complete
-        // Loop continues until popOrTransition successfully transitions not_complete->complete
         while (self.waiting_list.popOrTransition(not_complete, complete)) |wait_node| {
+            waiters.push(wait_node);
+        }
+
+        // Now wake all waiters - at this point waiting_list is in complete state
+        while (waiters.pop()) |wait_node| {
             wait_node.wake();
         }
     }
@@ -106,7 +109,7 @@ pub const Awaitable = struct {
 
     /// Check if the awaitable has completed and a result is available.
     pub fn hasResult(self: *const Awaitable) bool {
-        return self.done.load(.acquire);
+        return self.waiting_list.getState() == complete;
     }
 
     /// Get the typed result from this awaitable.
