@@ -110,11 +110,11 @@ pub fn main() !void {
 
     // Simple round-robin scheduler
     std.log.info("[scheduler] starting round-robin scheduling", .{});
-    while (!producer_coro.finished or !consumer_coro.finished) {
-        if (!producer_coro.finished) {
+    while (!producer_closure.finished or !consumer_closure.finished) {
+        if (!producer_closure.finished) {
             producer_coro.step();
         }
-        if (!consumer_coro.finished) {
+        if (!consumer_closure.finished) {
             consumer_coro.step();
         }
     }
