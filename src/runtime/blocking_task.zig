@@ -36,7 +36,7 @@ pub const AnyBlockingTask = struct {
     pub fn getResult(self: *AnyBlockingTask, comptime T: type) T {
         // Sanity checks before unsafe casting
         if (std.debug.runtime_safety) {
-            std.debug.assert(self.awaitable.done.load(.acquire)); // Task must be completed
+            std.debug.assert(self.awaitable.hasResult()); // Task must be completed
             std.debug.assert(@sizeOf(T) == self.closure.result_len); // Size must match
             std.debug.assert(@alignOf(T) <= Closure.max_result_alignment); // Alignment must fit
         }
