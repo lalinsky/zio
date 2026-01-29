@@ -754,6 +754,8 @@ pub const Runtime = struct {
         const num_workers = num_executors - 1;
         try self.workers.ensureTotalCapacity(allocator, num_workers);
 
+        errdefer self.shutdownWorkers();
+
         for (0..num_workers) |i| {
             std.log.debug("Spawning worker thread {}", .{i + 1});
             const worker = self.workers.addOneAssumeCapacity();
@@ -774,12 +776,8 @@ pub const Runtime = struct {
         return self;
     }
 
-    pub fn deinit(self: *Runtime) void {
-        const allocator = self.allocator;
-
-        // Set shutting_down flag to prevent new spawns
-        self.shutting_down.store(true, .release);
-
+    /// Stop worker executors and join threads. Used by deinit() and init() error path.
+    fn shutdownWorkers(self: *Runtime) void {
         // Wait for all workers to finish initialization, then stop their event loops.
         // Workers that failed to initialize (err != null) don't have valid executors.
         for (self.workers.items) |*worker| {
@@ -793,7 +791,17 @@ pub const Runtime = struct {
         for (self.workers.items) |*worker| {
             worker.thread.join();
         }
-        self.workers.deinit(allocator);
+        self.workers.deinit(self.allocator);
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        const allocator = self.allocator;
+
+        // Set shutting_down flag to prevent new spawns
+        self.shutting_down.store(true, .release);
+
+        // Stop worker executors and join threads
+        self.shutdownWorkers();
 
         // Shutdown thread pool
         self.thread_pool.stop();
