@@ -105,6 +105,35 @@ pub fn main() !void {
         }
     }
 
+    // Count total tests to run
+    const test_count = blk: {
+        var count: usize = 0;
+        for (builtin.test_functions) |t| {
+            if (isSetup(t) or isTeardown(t)) continue;
+            const is_unnamed_test = isUnnamed(t);
+            if (env.filters.items.len > 0) {
+                if (is_unnamed_test) continue;
+                var matches = false;
+                for (env.filters.items) |f| {
+                    if (std.mem.indexOf(u8, t.name, f) != null) {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (!matches) continue;
+            }
+            count += 1;
+        }
+        break :blk count;
+    };
+
+    const root_node = if (!env.verbose) std.Progress.start(.{
+        .root_name = "Running tests",
+        .estimated_total_items = test_count,
+    }) else std.Progress.Node.none;
+
+    var test_index: usize = 0;
+
     for (builtin.test_functions) |t| {
         if (isSetup(t) or isTeardown(t)) {
             continue;
@@ -131,6 +160,19 @@ pub fn main() !void {
         }
 
         const friendly_name = t.name;
+
+        // Update progress
+        if (root_node.index != .none) {
+            root_node.setCompletedItems(test_index);
+            // Progress truncates at 40 chars, so show the end of long names
+            const display_name = if (friendly_name.len <= std.Progress.Node.max_name_len)
+                friendly_name
+            else
+                friendly_name[friendly_name.len - std.Progress.Node.max_name_len ..];
+            root_node.setName(display_name);
+        }
+
+        test_index += 1;
 
         current_test = friendly_name;
         std.testing.allocator_instance = .{};
@@ -186,13 +228,9 @@ pub fn main() !void {
         if (env.verbose) {
             Printer.status(status, "{s}", .{status_str});
             Printer.fmt(" ({d:.2}ms)\n", .{ms});
-        } else if (status == .fail) {
-            Printer.fmt("{s} .. ", .{friendly_name});
-            Printer.status(status, "{s}", .{status_str});
-            Printer.fmt(" ({d:.2}ms)\n", .{ms});
         }
 
-        // Print error details after the status line
+        // Print error details for failures (in non-verbose mode, progress will show above this)
         if (fail_err) |err| {
             Printer.fmt("{s}\n", .{BORDER});
             Printer.status(.fail, "\"{s}\" - {s}\n", .{ friendly_name, @errorName(err) });
@@ -223,6 +261,11 @@ pub fn main() !void {
                 return err;
             };
         }
+    }
+
+    // End progress before printing summary
+    if (root_node.index != .none) {
+        root_node.end();
     }
 
     const total_tests = pass + fail;
