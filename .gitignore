@@ -1,5 +1,5 @@
 /.claude/settings.local.json
-/.zig-cache
+.zig-cache
 /zig-out
 /test-file
 

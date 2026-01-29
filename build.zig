@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         .filters = if (test_filter) |f| &.{f} else &.{},
     });
-    lib_unit_tests.linkLibC();
+    // lib_unit_tests.linkLibC();
 
     const test_step = b.step("test", "Run unit tests");
     if (emit_test_bin) {
