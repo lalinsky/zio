@@ -10,7 +10,7 @@ vtable: *const VTable,
 // For participation in wait queues
 prev: ?*WaitNode = null,
 next: ?*WaitNode = null,
-in_list: bool = false,
+in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 
 // User data associated with this wait node
 userdata: usize = undefined,
