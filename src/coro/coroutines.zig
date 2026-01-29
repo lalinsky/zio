@@ -39,6 +39,7 @@ pub const Context = switch (builtin.cpu.arch) {
     .arm, .thumb => extern struct {
         sp: u32,  // r13 (stack pointer)
         fp: u32,  // r11 (frame pointer, r7 in Thumb)
+        lr: u32,  // r14 (link register)
         pc: u32,  // r15 (program counter)
         stack_info: StackInfo,
 
@@ -90,6 +91,7 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
         .arm, .thumb => {
             ctx.sp = @intCast(stack_ptr);
             ctx.fp = 0;
+            ctx.lr = @returnAddress();
             ctx.pc = @intCast(@intFromPtr(entry_point));
         },
         .riscv64 => {
@@ -358,11 +360,13 @@ pub inline fn switchContext(
             \\ adr r2, 0f
             \\ str sp, [r0, #0]
             \\ str r11, [r0, #4]
-            \\ str r2, [r0, #8]
+            \\ str lr, [r0, #8]
+            \\ str r2, [r0, #12]
             \\
             \\ ldr sp, [r1, #0]
             \\ ldr r11, [r1, #4]
-            \\ ldr r2, [r1, #8]
+            \\ ldr lr, [r1, #8]
+            \\ ldr r2, [r1, #12]
             \\ bx r2
             \\0:
             :
@@ -383,7 +387,7 @@ pub inline fn switchContext(
               .r11 = false, // frame pointer (saved)
               .r12 = true,
               .r13 = false, // stack pointer (saved)
-              .r14 = true, // link register (could be clobbered)
+              .r14 = false, // link register (saved)
               .d0 = true,
               .d1 = true,
               .d2 = true,
@@ -427,12 +431,16 @@ pub inline fn switchContext(
             \\ mov r3, sp
             \\ str r3, [r0, #0]
             \\ str r7, [r0, #4]
-            \\ str r2, [r0, #8]
+            \\ mov r3, lr
+            \\ str r3, [r0, #8]
+            \\ str r2, [r0, #12]
             \\
             \\ ldr r3, [r1, #0]
             \\ mov sp, r3
             \\ ldr r7, [r1, #4]
-            \\ ldr r2, [r1, #8]
+            \\ ldr r3, [r1, #8]
+            \\ mov lr, r3
+            \\ ldr r2, [r1, #12]
             \\ bx r2
             \\.balign 4
             \\0:
@@ -454,7 +462,7 @@ pub inline fn switchContext(
               .r11 = true,
               .r12 = true,
               .r13 = false,  // stack pointer (saved)
-              .r14 = true,  // link register (could be clobbered)
+              .r14 = false,  // link register (saved)
               .d0 = true,
               .d1 = true,
               .d2 = true,
