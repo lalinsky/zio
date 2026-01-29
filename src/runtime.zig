@@ -975,6 +975,10 @@ pub const Runtime = struct {
     }
 
     pub fn onTaskComplete(self: *Runtime, awaitable: *Awaitable) void {
+        // Decrement task count BEFORE marking complete to prevent race where
+        // waiting thread wakes up and sees non-zero task_count in deinit()
+        const prev_count = self.task_count.fetchSub(1, .acq_rel);
+
         // Mark awaitable as complete and wake all waiters
         awaitable.markComplete();
 
@@ -986,10 +990,8 @@ pub const Runtime = struct {
         // Decref for task completion
         awaitable.release(self);
 
-        // Decrement task count
-        const prev_count = self.task_count.fetchSub(1, .acq_rel);
+        // Wake main executor if last task completed and it's waiting in run() mode
         if (prev_count == 1) {
-            // Last task completed - wake main executor if it's waiting in run() mode
             if (self.main_executor.main_task.state.cmpxchgStrong(.new, .ready, .release, .acquire) == null) {
                 self.main_executor.loop.wake();
             }
