@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/zio.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = target.result.os.tag != .freestanding,
     });
     zio.addOptions("zio_options", options);
 
@@ -77,7 +78,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-        exe.linkLibC();
         exe.root_module.addImport("zio", zio);
 
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -97,7 +97,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-        exe.linkLibC();
         exe.root_module.addImport("zio", zio);
 
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -113,7 +112,6 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         .filters = if (test_filter) |f| &.{f} else &.{},
     });
-    lib_unit_tests.linkLibC();
 
     const test_step = b.step("test", "Run unit tests");
     if (emit_test_bin) {

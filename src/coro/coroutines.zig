@@ -39,7 +39,6 @@ pub const Context = switch (builtin.cpu.arch) {
     .arm, .thumb => extern struct {
         sp: u32,  // r13 (stack pointer)
         fp: u32,  // r11 (frame pointer, r7 in Thumb)
-        lr: u32,  // r14 (link register)
         pc: u32,  // r15 (program counter)
         stack_info: StackInfo,
 
@@ -49,6 +48,14 @@ pub const Context = switch (builtin.cpu.arch) {
         sp: u64,
         fp: u64,
         pc: u64,
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
+    },
+    .riscv32 => extern struct {
+        sp: u32,
+        fp: u32,
+        pc: u32,
         stack_info: StackInfo,
 
         pub const stack_alignment = 16;
@@ -77,19 +84,23 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
         .aarch64 => {
             ctx.sp = stack_ptr;
             ctx.fp = 0;
-            ctx.lr = 0;
+            ctx.lr = @returnAddress();
             ctx.pc = @intFromPtr(entry_point);
         },
         .arm, .thumb => {
             ctx.sp = @intCast(stack_ptr);
             ctx.fp = 0;
-            ctx.lr = 0;
             ctx.pc = @intCast(@intFromPtr(entry_point));
         },
         .riscv64 => {
             ctx.sp = stack_ptr;
             ctx.fp = 0;
             ctx.pc = @intFromPtr(entry_point);
+        },
+        .riscv32 => {
+            ctx.sp = @intCast(stack_ptr);
+            ctx.fp = 0;
+            ctx.pc = @intCast(@intFromPtr(entry_point));
         },
         .loongarch64 => {
             ctx.sp = stack_ptr;
@@ -347,13 +358,11 @@ pub inline fn switchContext(
             \\ adr r2, 0f
             \\ str sp, [r0, #0]
             \\ str r11, [r0, #4]
-            \\ str lr, [r0, #8]
-            \\ str r2, [r0, #12]
+            \\ str r2, [r0, #8]
             \\
             \\ ldr sp, [r1, #0]
             \\ ldr r11, [r1, #4]
-            \\ ldr lr, [r1, #8]
-            \\ ldr r2, [r1, #12]
+            \\ ldr r2, [r1, #8]
             \\ bx r2
             \\0:
             :
@@ -371,8 +380,10 @@ pub inline fn switchContext(
               .r8 = true,
               .r9 = true,
               .r10 = true,
-              // r11 explicitly saved/restored, not clobbered
+              .r11 = false, // frame pointer (saved)
               .r12 = true,
+              .r13 = false, // stack pointer (saved)
+              .r14 = true, // link register (could be clobbered)
               .d0 = true,
               .d1 = true,
               .d2 = true,
@@ -416,16 +427,12 @@ pub inline fn switchContext(
             \\ mov r3, sp
             \\ str r3, [r0, #0]
             \\ str r7, [r0, #4]
-            \\ mov r3, lr
-            \\ str r3, [r0, #8]
-            \\ str r2, [r0, #12]
+            \\ str r2, [r0, #8]
             \\
             \\ ldr r3, [r1, #0]
             \\ mov sp, r3
             \\ ldr r7, [r1, #4]
-            \\ ldr r3, [r1, #8]
-            \\ mov lr, r3
-            \\ ldr r2, [r1, #12]
+            \\ ldr r2, [r1, #8]
             \\ bx r2
             \\.balign 4
             \\0:
@@ -440,11 +447,14 @@ pub inline fn switchContext(
               .r4 = true,
               .r5 = true,
               .r6 = true,
+              .r7 = false, // frame pointer (saved)
               .r8 = true,
               .r9 = true,
               .r10 = true,
               .r11 = true,
               .r12 = true,
+              .r13 = false,  // stack pointer (saved)
+              .r14 = true,  // link register (could be clobbered)
               .d0 = true,
               .d1 = true,
               .d2 = true,
@@ -496,13 +506,93 @@ pub inline fn switchContext(
               [new] "{a1}" (new_context),
             : .{
               .x1 = true,   // ra
-              .x2 = true,   // sp
+              .x2 = false,  // sp (saved)
               .x3 = true,   // gp
               .x4 = true,   // tp
               .x5 = true,   // t0
               .x6 = true,   // t1
               .x7 = true,   // t2
-              .x8 = true,   // s0/fp
+              .x8 = false,  // s0/fp (saved)
+              .x9 = true,   // s1
+              .x10 = true,  // a0
+              .x11 = true,  // a1
+              .x12 = true,  // a2
+              .x13 = true,  // a3
+              .x14 = true,  // a4
+              .x15 = true,  // a5
+              .x16 = true,  // a6
+              .x17 = true,  // a7
+              .x18 = true,  // s2
+              .x19 = true,  // s3
+              .x20 = true,  // s4
+              .x21 = true,  // s5
+              .x22 = true,  // s6
+              .x23 = true,  // s7
+              .x24 = true,  // s8
+              .x25 = true,  // s9
+              .x26 = true,  // s10
+              .x27 = true,  // s11
+              .x28 = true,  // t3
+              .x29 = true,  // t4
+              .x30 = true,  // t5
+              .x31 = true,  // t6
+              .f0 = true,   // ft0
+              .f1 = true,   // ft1
+              .f2 = true,   // ft2
+              .f3 = true,   // ft3
+              .f4 = true,   // ft4
+              .f5 = true,   // ft5
+              .f6 = true,   // ft6
+              .f7 = true,   // ft7
+              .f8 = true,   // fs0
+              .f9 = true,   // fs1
+              .f10 = true,  // fa0
+              .f11 = true,  // fa1
+              .f12 = true,  // fa2
+              .f13 = true,  // fa3
+              .f14 = true,  // fa4
+              .f15 = true,  // fa5
+              .f16 = true,  // fa6
+              .f17 = true,  // fa7
+              .f18 = true,  // fs2
+              .f19 = true,  // fs3
+              .f20 = true,  // fs4
+              .f21 = true,  // fs5
+              .f22 = true,  // fs6
+              .f23 = true,  // fs7
+              .f24 = true,  // fs8
+              .f25 = true,  // fs9
+              .f26 = true,  // fs10
+              .f27 = true,  // fs11
+              .f28 = true,  // ft8
+              .f29 = true,  // ft9
+              .f30 = true,  // ft10
+              .f31 = true,  // ft11
+              .memory = true,
+            }),
+        .riscv32 => asm volatile (
+            \\ lla t0, 0f
+            \\ sw t0, 8(a0)
+            \\ sw sp, 0(a0)
+            \\ sw s0, 4(a0)
+            \\
+            \\ lw sp, 0(a1)
+            \\ lw s0, 4(a1)
+            \\ lw t0, 8(a1)
+            \\ jr t0
+            \\0:
+            :
+            : [current] "{a0}" (current_context_param),
+              [new] "{a1}" (new_context),
+            : .{
+              .x1 = true,   // ra
+              .x2 = false,  // sp (saved)
+              .x3 = true,   // gp
+              .x4 = true,   // tp
+              .x5 = true,   // t0
+              .x6 = true,   // t1
+              .x7 = true,   // t2
+              .x8 = false,  // s0/fp (saved)
               .x9 = true,   // s1
               .x10 = true,  // a0
               .x11 = true,  // a1
@@ -702,76 +792,30 @@ fn coroEntry() callconv(.naked) noreturn {
                 }
             }
         },
-        .aarch64 => {
-            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-                asm volatile (
-                    \\ adr x30, 1f
-                    \\ ldp x2, x0, [sp]
-                    \\ br x2
-                    \\1:
-                );
-            } else {
-                // Create sentinel frame for FP-based unwinding (needed for macOS)
-                asm volatile (
-                    \\ stp xzr, xzr, [sp, #-16]!
-                    \\ mov x29, sp
-                    \\ mov x30, xzr
-                    \\ ldp x2, x0, [sp, #16]
-                    \\ br x2
-                );
-            }
-        },
+        .aarch64 => asm volatile (
+            \\ ldp x2, x0, [sp]
+            \\ br x2
+        ),
         .arm, .thumb => asm volatile (
             \\ ldr r0, [sp, #4]
             \\ ldr r2, [sp, #0]
             \\ bx r2
         ),
-        .riscv64 => {
-            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-                asm volatile (
-                    \\ lla ra, 1f
-                    \\ ld a0, 8(sp)
-                    \\ ld t0, 0(sp)
-                    \\ jr t0
-                    \\1:
-                );
-            } else {
-                // Create sentinel frame for FP-based unwinding
-                asm volatile (
-                    \\ addi sp, sp, -16
-                    \\ sd zero, 0(sp)
-                    \\ sd zero, 8(sp)
-                    \\ addi s0, sp, 16
-                    \\ li ra, 0
-                    \\ ld t0, 16(sp)
-                    \\ ld a0, 24(sp)
-                    \\ jr t0
-                );
-            }
-        },
-        .loongarch64 => {
-            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-                asm volatile (
-                    \\ la.local $ra, 1f
-                    \\ ld.d $a0, $sp, 8
-                    \\ ld.d $t0, $sp, 0
-                    \\ jr $t0
-                    \\1:
-                );
-            } else {
-                // Create sentinel frame for FP-based unwinding
-                asm volatile (
-                    \\ addi.d $sp, $sp, -16
-                    \\ st.d $zero, $sp, 0
-                    \\ st.d $zero, $sp, 8
-                    \\ addi.d $fp, $sp, 16
-                    \\ li.d $ra, 0
-                    \\ ld.d $t0, $sp, 16
-                    \\ ld.d $a0, $sp, 24
-                    \\ jr $t0
-                );
-            }
-        },
+        .riscv64 => asm volatile (
+            \\ ld a0, 8(sp)
+            \\ ld t0, 0(sp)
+            \\ jr t0
+        ),
+        .riscv32 => asm volatile (
+            \\ lw a0, 4(sp)
+            \\ lw t0, 0(sp)
+            \\ jr t0
+        ),
+        .loongarch64 => asm volatile (
+            \\ ld.d $a0, $sp, 8
+            \\ ld.d $t0, $sp, 0
+            \\ jr $t0
+        ),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -1100,6 +1144,8 @@ test "Coroutine: stack trace" {
     while (!test_data.finished) {
         coro.step();
     }
+
+    std.debug.dumpStackTrace(test_data.trace);
 
     std.testing.expect(test_data.trace.index > 1 and test_data.trace.index < 7) catch |err| {
         if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
