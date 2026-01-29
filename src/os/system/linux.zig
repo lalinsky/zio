@@ -278,13 +278,23 @@ pub fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) usize {
 }
 
 pub fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, flags: u32) usize {
-    return linux.syscall4(
-        .utimensat,
-        @as(usize, @bitCast(@as(isize, dirfd))),
-        @intFromPtr(path),
-        @intFromPtr(times),
-        flags,
-    );
+    if (@hasField(linux.SYS, "utimensat")) {
+        return linux.syscall4(
+            .utimensat,
+            @as(usize, @bitCast(@as(isize, dirfd))),
+            @intFromPtr(path),
+            @intFromPtr(times),
+            flags,
+        );
+    } else {
+        return linux.syscall4(
+            .utimensat_time64,
+            @as(usize, @bitCast(@as(isize, dirfd))),
+            @intFromPtr(path),
+            @intFromPtr(times),
+            flags,
+        );
+    }
 }
 
 pub fn unlinkat(dirfd: fd_t, path: [*:0]const u8, flags: u32) usize {
@@ -297,13 +307,24 @@ pub fn unlinkat(dirfd: fd_t, path: [*:0]const u8, flags: u32) usize {
 }
 
 pub fn renameat(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0]const u8) usize {
-    return linux.syscall4(
-        .renameat,
-        @as(usize, @bitCast(@as(isize, oldfd))),
-        @intFromPtr(oldpath),
-        @as(usize, @bitCast(@as(isize, newfd))),
-        @intFromPtr(newpath),
-    );
+    if (@hasField(linux.SYS, "renameat2")) {
+        return linux.syscall5(
+            .renameat2,
+            @as(usize, @bitCast(@as(isize, oldfd))),
+            @intFromPtr(oldpath),
+            @as(usize, @bitCast(@as(isize, newfd))),
+            @intFromPtr(newpath),
+            0,
+        );
+    } else {
+        return linux.syscall4(
+            .renameat,
+            @as(usize, @bitCast(@as(isize, oldfd))),
+            @intFromPtr(oldpath),
+            @as(usize, @bitCast(@as(isize, newfd))),
+            @intFromPtr(newpath),
+        );
+    }
 }
 
 pub fn mkdirat(dirfd: fd_t, path: [*:0]const u8, mode: mode_t) usize {
