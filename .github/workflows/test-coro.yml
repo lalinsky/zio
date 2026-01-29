@@ -24,6 +24,7 @@ jobs:
           - { os: ubuntu-24.04, target: native }
           - { os: ubuntu-24.04-arm, target: native }
           - { os: ubuntu-latest, target: arm-linux, qemu: true }
+          - { os: ubuntu-latest, target: thumb-linux, qemu: true }
           - { os: ubuntu-latest, target: riscv32-linux, qemu: true }
           - { os: ubuntu-latest, target: riscv64-linux, qemu: true }
           - { os: ubuntu-latest, target: loongarch64-linux, qemu: true }
