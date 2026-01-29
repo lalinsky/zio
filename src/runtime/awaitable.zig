@@ -27,7 +27,7 @@ pub const AwaitableKind = enum {
 // Awaitable - base type for anything that can be waited on
 pub const Awaitable = struct {
     kind: AwaitableKind,
-    ref_count: RefCounter(u32) = RefCounter(u32).init(),
+    ref_count: RefCounter(u8) = RefCounter(u8).init(),
 
     wait_node: WaitNode,
 
