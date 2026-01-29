@@ -126,7 +126,7 @@ const FutexWaiter = struct {
     // Linked list fields for SimpleWaitQueue
     next: ?*FutexWaiter = null,
     prev: ?*FutexWaiter = null,
-    in_list: bool = false,
+    in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
     waiter: Waiter,
     address: usize,
 

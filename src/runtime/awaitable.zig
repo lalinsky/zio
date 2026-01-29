@@ -41,7 +41,7 @@ pub const Awaitable = struct {
     // Intrusive list node for Runtime.tasks registry (WaitQueue)
     next: ?*Awaitable = null,
     prev: ?*Awaitable = null,
-    in_list: bool = false,
+    in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 
     // Group membership - group_node.group is null if standalone
     group_node: GroupNode = .{},

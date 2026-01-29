@@ -10,7 +10,7 @@
 //! const MyNode = struct {
 //!     next: ?*MyNode = null,
 //!     prev: ?*MyNode = null,
-//!     in_list: bool = false, // Required in debug mode
+//!     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 //!     data: i32,
 //! };
 //! var queue: SimpleQueue(MyNode) = .{};
@@ -21,7 +21,7 @@ const builtin = @import("builtin");
 
 /// Generic simple FIFO queue.
 /// T must be a struct type with `next` and `prev` fields of type ?*T.
-/// In debug mode, the struct must also have an `in_list` field of type bool.
+/// In debug mode, the struct must also have an `in_list` field of type bool; void in release.
 pub fn SimpleQueue(comptime T: type) type {
     return struct {
         const Self = @This();

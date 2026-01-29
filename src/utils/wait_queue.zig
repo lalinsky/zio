@@ -32,14 +32,14 @@ const Executor = @import("../runtime.zig").Executor;
 /// T must be a struct type with:
 /// - `next` field of type ?*T
 /// - `prev` field of type ?*T
-/// - `in_list` field of type bool (tracks queue membership)
+/// - `in_list` field of type bool in debug mode, void in release (tracks queue membership)
 ///
 /// Usage:
 /// ```zig
 /// const MyNode = struct {
 ///     next: ?*MyNode = null,
 ///     prev: ?*MyNode = null,
-///     in_list: bool = false,
+///     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 ///     data: i32,
 /// };
 /// var mutex: std.Thread.Mutex = .{};
@@ -67,8 +67,10 @@ pub fn SimpleWaitQueue(comptime T: type) type {
         /// Add item to the end of the queue.
         /// Must be called with external synchronization.
         pub fn push(self: *Self, item: *T) void {
-            std.debug.assert(!item.in_list);
-            item.in_list = true;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(!item.in_list);
+                item.in_list = true;
+            }
 
             item.next = null;
             item.prev = self.tail;
@@ -88,8 +90,10 @@ pub fn SimpleWaitQueue(comptime T: type) type {
         pub fn pop(self: *Self) ?*T {
             const head = self.head orelse return null;
 
-            std.debug.assert(head.in_list);
-            head.in_list = false;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(head.in_list);
+                head.in_list = false;
+            }
 
             self.head = head.next;
             if (self.head) |new_head| {
@@ -118,16 +122,14 @@ pub fn SimpleWaitQueue(comptime T: type) type {
         /// Must be called with external synchronization.
         /// Returns true if the item was found and removed, false otherwise.
         pub fn remove(self: *Self, item: *T) bool {
-            // If not in any list, nothing to remove
-            if (!item.in_list) {
-                return false;
+            // Validate membership via pointer checks
+            if (item.prev == null and self.head != item) return false;
+            if (item.next == null and self.tail != item) return false;
+
+            if (std.debug.runtime_safety) {
+                std.debug.assert(item.in_list);
+                item.in_list = false;
             }
-
-            // If in_list is true, item must be in THIS list (verify with asserts)
-            std.debug.assert(item.prev != null or self.head == item);
-            std.debug.assert(item.next != null or self.tail == item);
-
-            item.in_list = false;
 
             if (item.prev) |prev| {
                 prev.next = item.next;
@@ -171,14 +173,14 @@ pub fn SimpleWaitQueue(comptime T: type) type {
 /// T must be a struct type with:
 /// - `next` field of type ?*T
 /// - `prev` field of type ?*T
-/// - `in_list` field of type bool (tracks queue membership)
+/// - `in_list` field of type bool in debug mode, void in release (tracks queue membership)
 ///
 /// Usage:
 /// ```zig
 /// const MyNode = struct {
 ///     next: ?*MyNode = null,
 ///     prev: ?*MyNode = null,
-///     in_list: bool = false,
+///     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 ///     data: i32,
 /// };
 /// // Use .empty for initialization:
@@ -338,8 +340,10 @@ pub fn WaitQueue(comptime T: type) type {
         /// Releases lock implicitly (via head.store) if queue was empty, or explicitly otherwise.
         fn pushInternal(self: *Self, old_state: State, item: *T) void {
             // Initialize item
-            std.debug.assert(!item.in_list);
-            item.in_list = true;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(!item.in_list);
+                item.in_list = true;
+            }
             item.next = null;
             item.prev = null;
 
@@ -431,8 +435,10 @@ pub fn WaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            std.debug.assert(old_head.in_list);
-            old_head.in_list = false;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(old_head.in_list);
+                old_head.in_list = false;
+            }
 
             // Clear old head's pointers
             old_head.next = null;
@@ -467,20 +473,23 @@ pub fn WaitQueue(comptime T: type) type {
                 return false;
             }
 
-            // Check if item is in a list (must be under lock)
-            if (!item.in_list) {
+            const head = old_state.getPtr().?;
+
+            // Validate membership via pointer checks
+            if (item.prev == null and head != item) {
+                self.releaseMutationLock();
+                return false;
+            }
+            if (item.next == null and self.tail != item) {
                 self.releaseMutationLock();
                 return false;
             }
 
-            const head = old_state.getPtr().?;
-
-            // If in_list is true, item must be in THIS list (verify with asserts)
-            std.debug.assert(item.prev != null or head == item);
-            std.debug.assert(item.next != null or self.tail == item);
-
             // Mark as removed from list
-            item.in_list = false;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(item.in_list);
+                item.in_list = false;
+            }
 
             // Save pointers, then clear them immediately while holding lock
             // This prevents data races with concurrent remove() calls and ensures
@@ -561,8 +570,10 @@ pub fn WaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            std.debug.assert(old_head.in_list);
-            old_head.in_list = false;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(old_head.in_list);
+                old_head.in_list = false;
+            }
 
             // Clear old head's pointers
             old_head.next = null;
@@ -606,7 +617,7 @@ pub fn WaitQueue(comptime T: type) type {
 /// - `next` field of type ?*T
 /// - `prev` field of type ?*T
 /// - `userdata` field of type usize (reserved for queue internals)
-/// - `in_list` field of type bool (tracks queue membership)
+/// - `in_list` field of type bool in debug mode, void in release (tracks queue membership)
 ///
 /// Usage:
 /// ```zig
@@ -614,7 +625,7 @@ pub fn WaitQueue(comptime T: type) type {
 ///     next: ?*MyNode = null,
 ///     prev: ?*MyNode = null,
 ///     userdata: usize = 0,  // Reserved for queue internals
-///     in_list: bool = false,
+///     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 ///     data: i32,
 /// };
 /// var queue: CompactWaitQueue(MyNode) = .empty;
@@ -757,8 +768,10 @@ pub fn CompactWaitQueue(comptime T: type) type {
         /// Assumes mutation lock is held. Releases lock before returning.
         fn pushInternal(self: *Self, old_state: State, item: *T) void {
             // Initialize item
-            std.debug.assert(!item.in_list);
-            item.in_list = true;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(!item.in_list);
+                item.in_list = true;
+            }
             item.next = null;
             item.prev = null;
 
@@ -841,8 +854,10 @@ pub fn CompactWaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            std.debug.assert(old_head.in_list);
-            old_head.in_list = false;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(old_head.in_list);
+                old_head.in_list = false;
+            }
 
             // Clear old head's pointers
             old_head.next = null;
@@ -872,21 +887,24 @@ pub fn CompactWaitQueue(comptime T: type) type {
                 return false;
             }
 
-            // Check if item is in a list (must be under lock)
-            if (!item.in_list) {
+            const head = old_state.getPtr().?;
+            const tail: *T = @ptrFromInt(head.userdata);
+
+            // Validate membership via pointer checks
+            if (item.prev == null and head != item) {
+                self.releaseMutationLock();
+                return false;
+            }
+            if (item.next == null and tail != item) {
                 self.releaseMutationLock();
                 return false;
             }
 
-            const head = old_state.getPtr().?;
-            const tail: *T = @ptrFromInt(head.userdata);
-
-            // If in_list is true, item must be in THIS list (verify with asserts)
-            std.debug.assert(item.prev != null or head == item);
-            std.debug.assert(item.next != null or tail == item);
-
             // Mark as removed from list
-            item.in_list = false;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(item.in_list);
+                item.in_list = false;
+            }
 
             // Save pointers, then clear them immediately
             const item_prev = item.prev;
@@ -954,8 +972,10 @@ pub fn CompactWaitQueue(comptime T: type) type {
             const next = old_head.next;
 
             // Mark as removed from list
-            std.debug.assert(old_head.in_list);
-            old_head.in_list = false;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(old_head.in_list);
+                old_head.in_list = false;
+            }
 
             // Clear old head's pointers
             old_head.next = null;
@@ -980,7 +1000,7 @@ test "SimpleWaitQueue basic operations" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1021,7 +1041,7 @@ test "SimpleWaitQueue remove operations" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1060,7 +1080,7 @@ test "SimpleWaitQueue remove head and tail" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1092,7 +1112,7 @@ test "SimpleWaitQueue empty constant" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1116,7 +1136,7 @@ test "WaitQueue basic operations" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1151,7 +1171,7 @@ test "WaitQueue state transitions" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1172,7 +1192,7 @@ test "WaitQueue empty constant" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1195,7 +1215,7 @@ test "WaitQueue double remove" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1238,7 +1258,7 @@ test "WaitQueue concurrent push and pop" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
@@ -1290,7 +1310,7 @@ test "WaitQueue concurrent remove during modifications" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
@@ -1367,7 +1387,7 @@ test "WaitQueue popOrTransition with concurrent removals" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
@@ -1438,7 +1458,7 @@ test "WaitQueue stress test with heavy contention" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
@@ -1536,7 +1556,7 @@ test "CompactWaitQueue basic operations" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1579,7 +1599,7 @@ test "CompactWaitQueue state transitions" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1601,7 +1621,7 @@ test "CompactWaitQueue empty constant" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1624,7 +1644,7 @@ test "CompactWaitQueue tail tracking" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1659,7 +1679,7 @@ test "CompactWaitQueue remove tail updates head.userdata" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1691,7 +1711,7 @@ test "CompactWaitQueue remove head transfers userdata" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1721,7 +1741,7 @@ test "CompactWaitQueue double remove" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: i32,
     };
 
@@ -1764,7 +1784,7 @@ test "CompactWaitQueue concurrent push and pop" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
@@ -1817,7 +1837,7 @@ test "CompactWaitQueue concurrent remove during modifications" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
@@ -1895,7 +1915,7 @@ test "CompactWaitQueue popOrTransition with concurrent removals" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
@@ -1965,7 +1985,7 @@ test "CompactWaitQueue stress test with heavy contention" {
         next: ?*@This() = null,
         prev: ?*@This() = null,
         userdata: usize = 0,
-        in_list: bool = false,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
         value: usize,
     };
 
