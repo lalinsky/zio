@@ -24,6 +24,6 @@ pub fn build(b: *std.Build) void {
 
     // We call this twice to demonstrate that the default binary output for
     // RP2040 is UF2, but we can also output other formats easily
-    mb.install_firmware(firmware, .{ });
+    mb.install_firmware(firmware, .{});
     mb.install_firmware(firmware, .{ .format = .elf });
 }
