@@ -122,17 +122,16 @@ fn threadPoolCompletion(ctx: ?*anyopaque, work: *ev.Work) void {
 }
 
 /// Register a blocking task with the runtime and submit it for execution.
-/// Increments its reference count, adds the task to the runtime's task list,
-/// and submits it directly to the thread pool.
+/// Increments the task count and submits the task to the thread pool.
 /// Returns error.RuntimeShutdown if the runtime is shutting down.
 fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) error{RuntimeShutdown}!void {
-    task.awaitable.ref_count.incr();
-    _ = rt.task_count.fetchAdd(1, .acq_rel);
-    if (!rt.tasks.pushUnless(.sentinel1, &task.awaitable)) {
-        _ = rt.task_count.fetchSub(1, .acq_rel);
-        _ = task.awaitable.ref_count.decr();
+    // Check if runtime is shutting down before incrementing counter
+    if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
     }
+
+    task.awaitable.ref_count.incr();
+    _ = rt.task_count.fetchAdd(1, .acq_rel);
     rt.thread_pool.submit(&task.work);
 }
 
