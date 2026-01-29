@@ -8,7 +8,7 @@ const fs = @import("../os/fs.zig");
 const w = @import("../os/windows.zig");
 const coroutines = @import("coroutines.zig");
 
-pub const page_size = std.heap.page_size_min;
+pub const page_size = if (builtin.os.tag == .freestanding) 1 else std.heap.page_size_min;
 
 // Signal type changed from c_int to enum in Zig 0.16
 const is_pre_016 = builtin.zig_version.major == 0 and builtin.zig_version.minor < 16;

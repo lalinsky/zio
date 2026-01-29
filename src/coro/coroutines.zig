@@ -343,7 +343,7 @@ pub inline fn switchContext(
               .ffr = true,
               .memory = true,
             }),
-        .arm, .thumb => asm volatile (
+        .arm => asm volatile (
             \\ adr r2, 0f
             \\ str sp, [r0, #0]
             \\ str r11, [r0, #4]
@@ -372,6 +372,78 @@ pub inline fn switchContext(
               .r9 = true,
               .r10 = true,
               // r11 explicitly saved/restored, not clobbered
+              .r12 = true,
+              .d0 = true,
+              .d1 = true,
+              .d2 = true,
+              .d3 = true,
+              .d4 = true,
+              .d5 = true,
+              .d6 = true,
+              .d7 = true,
+              .d8 = true,
+              .d9 = true,
+              .d10 = true,
+              .d11 = true,
+              .d12 = true,
+              .d13 = true,
+              .d14 = true,
+              .d15 = true,
+              .d16 = true,
+              .d17 = true,
+              .d18 = true,
+              .d19 = true,
+              .d20 = true,
+              .d21 = true,
+              .d22 = true,
+              .d23 = true,
+              .d24 = true,
+              .d25 = true,
+              .d26 = true,
+              .d27 = true,
+              .d28 = true,
+              .d29 = true,
+              .d30 = true,
+              .d31 = true,
+              .fpscr = true,
+              .memory = true,
+            }),
+        .thumb => asm volatile (
+            // Calculate return address and set Thumb bit
+            // CRITICAL: adds r2, #1 sets LSB to indicate Thumb mode
+            \\ adr r2, 0f
+            \\ adds r2, #1
+            \\ mov r3, sp
+            \\ str r3, [r0, #0]
+            \\ str r7, [r0, #4]
+            \\ mov r3, lr
+            \\ str r3, [r0, #8]
+            \\ str r2, [r0, #12]
+            \\
+            \\ ldr r3, [r1, #0]
+            \\ mov sp, r3
+            \\ ldr r7, [r1, #4]
+            \\ ldr r3, [r1, #8]
+            \\ mov lr, r3
+            \\ ldr r2, [r1, #12]
+            \\ bx r2
+            \\.balign 4
+            \\0:
+            :
+            : [current] "{r0}" (current_context_param),
+              [new] "{r1}" (new_context),
+            : .{
+              .r0 = true,
+              .r1 = true,
+              .r2 = true,
+              .r3 = true,
+              .r4 = true,
+              .r5 = true,
+              .r6 = true,
+              .r8 = true,
+              .r9 = true,
+              .r10 = true,
+              .r11 = true,
               .r12 = true,
               .d0 = true,
               .d1 = true,
@@ -649,30 +721,11 @@ fn coroEntry() callconv(.naked) noreturn {
                 );
             }
         },
-        .arm, .thumb => {
-            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-                asm volatile (
-                    \\ adr lr, 1f
-                    \\ ldr r0, [sp, #4]
-                    \\ ldr r2, [sp, #0]
-                    \\ bx r2
-                    \\1:
-                );
-            } else {
-                // Create sentinel frame for FP-based unwinding
-                asm volatile (
-                    \\ sub sp, sp, #8
-                    \\ mov r2, #0
-                    \\ str r2, [sp, #0]
-                    \\ str r2, [sp, #4]
-                    \\ add r11, sp, #8
-                    \\ mov lr, #0
-                    \\ ldr r2, [sp, #8]
-                    \\ ldr r0, [sp, #12]
-                    \\ bx r2
-                );
-            }
-        },
+        .arm, .thumb => asm volatile (
+            \\ ldr r0, [sp, #4]
+            \\ ldr r2, [sp, #0]
+            \\ bx r2
+        ),
         .riscv64 => {
             if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
                 asm volatile (
