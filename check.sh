@@ -7,6 +7,7 @@ IFS=$'\n\t'
 CI_MODE=false
 FULL_MODE=false
 VERBOSE=false
+RELEASE_MODE=false
 TEST_FILTER=""
 TARGET=""
 BACKEND=""
@@ -16,7 +17,7 @@ NO_EXEC=false
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--ci] [--full] [--verbose]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--ci] [--full] [--release] [--verbose]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -54,6 +55,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --full)
             FULL_MODE=true
+            shift
+            ;;
+        --release)
+            RELEASE_MODE=true
             shift
             ;;
         --verbose|-v)
@@ -99,6 +104,10 @@ if [ "$USE_QEMU" = true ]; then
 fi
 if [ "$NO_EXEC" = true ]; then
     BUILD_ARGS="$BUILD_ARGS -Demit-test-bin"
+fi
+if [ "$RELEASE_MODE" = true ]; then
+    echo "Build mode: ReleaseFast"
+    BUILD_ARGS="$BUILD_ARGS -Doptimize=ReleaseFast"
 fi
 if [ "$VERBOSE" = true ]; then
     export TEST_VERBOSE=true
