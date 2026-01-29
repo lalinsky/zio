@@ -438,13 +438,12 @@ const getNextExecutor = @import("../runtime.zig").getNextExecutor;
 /// and schedules it on its executor.
 /// Returns error.RuntimeShutdown if the runtime is shutting down.
 pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
-    task.awaitable.ref_count.incr();
-    _ = rt.task_count.fetchAdd(1, .acq_rel);
-    if (!rt.tasks.pushUnless(.sentinel1, &task.awaitable)) {
-        _ = rt.task_count.fetchSub(1, .acq_rel);
-        _ = task.awaitable.ref_count.decr();
+    // Check if runtime is shutting down before incrementing counter
+    if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
     }
+
+    _ = rt.task_count.fetchAdd(1, .acq_rel);
 
     const executor = Executor.fromCoroutine(&task.coro);
     executor.scheduleTask(task);

@@ -711,7 +711,6 @@ pub const Runtime = struct {
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
     workers: std.ArrayList(Worker) = .empty,
-    tasks: WaitQueue(Awaitable) = .empty, // Global awaitable registry
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     futex_table: Futex.Table, // Global futex wait table
@@ -752,10 +751,6 @@ pub const Runtime = struct {
         errdefer self.main_executor.deinit();
         self.executors.appendAssumeCapacity(&self.main_executor);
 
-        // errdefer shutdown() must come after main_executor.init() because
-        // shutdown() operates on main_executor (runs it until idle)
-        errdefer self.shutdown();
-
         const num_workers = num_executors - 1;
         try self.workers.ensureTotalCapacity(allocator, num_workers);
 
@@ -782,11 +777,29 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         const allocator = self.allocator;
 
-        // Gracefully shutdown - cancel tasks, stop executors, join worker threads
-        self.shutdown();
+        // Set shutting_down flag to prevent new spawns
+        self.shutting_down.store(true, .release);
 
-        // After shutdown(), tasks should be in sentinel1 (closed) state
-        std.debug.assert(self.tasks.getState() == .sentinel1);
+        // Wait for all workers to finish initialization, then stop their event loops.
+        // Workers that failed to initialize (err != null) don't have valid executors.
+        for (self.workers.items) |*worker| {
+            worker.ready.wait();
+            if (worker.err == null) {
+                worker.executor.shutdown.notify();
+            }
+        }
+
+        // Join worker threads
+        for (self.workers.items) |*worker| {
+            worker.thread.join();
+        }
+        self.workers.deinit(allocator);
+
+        // Shutdown thread pool
+        self.thread_pool.stop();
+
+        // All tasks should be complete before deinit
+        std.debug.assert(self.task_count.load(.acquire) == 0);
 
         // Worker executors clean themselves up via defer in runWorker.
         // We only need to deinit the main executor here.
@@ -962,10 +975,6 @@ pub const Runtime = struct {
             unregisterGroupTask(self, group, awaitable);
         }
 
-        // Decref for list membership (if we successfully remove)
-        if (self.tasks.remove(awaitable)) {
-            awaitable.release(self);
-        }
         // Decref for task completion
         awaitable.release(self);
 
@@ -977,45 +986,6 @@ pub const Runtime = struct {
                 self.main_executor.loop.wake();
             }
         }
-    }
-
-    /// Gracefully shutdown the runtime.
-    /// Cancels all remaining tasks, stops all executors, joins worker threads,
-    /// and stops the thread pool.
-    pub fn shutdown(self: *Runtime) void {
-        // Set shutting_down flag to prevent new spawns and new executor selection
-        self.shutting_down.store(true, .release);
-
-        // Pop all tasks, cancel them, and decref for list membership.
-        // popOrTransition transitions to sentinel1 (closed) when empty,
-        // preventing new tasks from being added.
-        while (self.tasks.popOrTransition(.sentinel0, .sentinel1)) |awaitable| {
-            awaitable.cancel();
-            awaitable.release(self);
-        }
-
-        // Run until all tasks complete
-        self.main_executor.run(.until_idle) catch |err| {
-            std.log.err("Error running main executor during shutdown: {}", .{err});
-        };
-
-        // Wait for all workers to finish initialization, then stop their event loops.
-        // Workers that failed to initialize (err != null) don't have valid executors.
-        for (self.workers.items) |*worker| {
-            worker.ready.wait();
-            if (worker.err == null) {
-                worker.executor.shutdown.notify();
-            }
-        }
-
-        // Join worker threads
-        for (self.workers.items) |*worker| {
-            worker.thread.join();
-        }
-        self.workers.deinit(self.allocator);
-
-        // Shutdown thread pool
-        self.thread_pool.stop();
     }
 };
 
