@@ -9,7 +9,7 @@
 //!
 //! Provides two variants:
 //! - SimpleWaitQueue: Non-atomic queue for use under external synchronization (e.g., mutex)
-//! - WaitQueue: 8-byte queue with tail stored in head node's userdata field
+//! - WaitQueue: Atomic queue with sentinel states for lock-free synchronization
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -166,14 +166,18 @@ pub fn SimpleWaitQueue(comptime T: type) type {
     };
 }
 
-/// Compact wait queue using only 8 bytes, with tail stored in head node's userdata.
+/// Wait queue with two sentinel states for synchronization primitives.
 ///
 /// **Low-level primitive**: This is intended for implementing synchronization primitives.
 /// Application code should use higher-level abstractions from the sync module instead.
 ///
-/// This queue uses only 8 bytes by storing the tail pointer in the head node's userdata field.
-/// This is useful for implementing standard library interfaces that only provide 64 bits of
-/// state (e.g., std.Thread.Mutex).
+/// This is a space-efficient queue using only 8 bytes by storing the tail pointer in the
+/// head node's userdata field. This is useful for implementing standard library interfaces
+/// that only provide 64 bits of state (e.g., std.Io.Mutex).
+///
+/// While this design is more complex than a standard separate head/tail layout, it's actually
+/// faster in practice because the head is always cache-hot from the atomic operations, so
+/// accessing the tail via head.userdata is cheaper than a separate atomic tail pointer.
 ///
 /// Uses tagged pointers with mutation spinlock for thread-safe operations:
 /// - 0b00: Sentinel state 0
