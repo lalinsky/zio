@@ -107,7 +107,7 @@ pub fn main() !void {
 }
 ```
 
-See `examples/*.zig` and [mini-redis](https://github.com/lalinsky/zio-mini-redis) for more examples.
+See `examples/*.zig` for more examples.
 
 ## Ecosystem
 
