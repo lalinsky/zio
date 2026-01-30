@@ -5,10 +5,257 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
+const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Barrier = @import("Barrier.zig");
 const select = @import("../select.zig").select;
 const Waiter = @import("../common.zig").Waiter;
+
+/// Consumer position tracker.
+/// This is separate from the generic BroadcastChannel(T) since it only stores positions.
+const BroadcastChannelConsumer = struct {
+    read_pos: usize = 0,
+    prev: ?*BroadcastChannelConsumer = null,
+    next: ?*BroadcastChannelConsumer = null,
+    in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+};
+
+/// Type-erased broadcast channel implementation that operates on raw bytes.
+/// This is the core implementation shared by all BroadcastChannel(T) instances to reduce code size.
+const BroadcastChannelImpl = struct {
+    buffer: [*]u8,
+    elem_size: usize,
+    capacity: usize, // number of elements
+    write_pos: usize = 0,
+
+    consumers: SimpleQueue(BroadcastChannelConsumer) = .{},
+    mutex: std.Thread.Mutex = .{},
+    wait_queue: SimpleWaitQueue(WaitNode) = .empty,
+
+    closed: bool = false,
+
+    const Self = @This();
+
+    fn elemPtr(self: *Self, index: usize) [*]u8 {
+        return self.buffer + (index * self.elem_size);
+    }
+
+    fn subscribe(self: *Self, consumer: *BroadcastChannelConsumer) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        consumer.read_pos = self.write_pos;
+        self.consumers.push(consumer);
+    }
+
+    fn unsubscribe(self: *Self, consumer: *BroadcastChannelConsumer) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        _ = self.consumers.remove(consumer);
+    }
+
+    fn receive(self: *Self, runtime: *Runtime, consumer: *BroadcastChannelConsumer, elem_ptr: [*]u8) !void {
+        var waiter: Waiter = .init(runtime);
+
+        while (true) {
+            self.mutex.lock();
+
+            const unread = self.write_pos -% consumer.read_pos;
+            if (unread > self.capacity) {
+                consumer.read_pos = self.write_pos -% self.capacity;
+                self.mutex.unlock();
+                return error.Lagged;
+            }
+
+            if (unread > 0) {
+                const src = self.elemPtr(consumer.read_pos % self.capacity);
+                @memcpy(elem_ptr[0..self.elem_size], src[0..self.elem_size]);
+                consumer.read_pos +%= 1;
+                self.mutex.unlock();
+                return;
+            }
+
+            if (self.closed) {
+                self.mutex.unlock();
+                return error.Closed;
+            }
+
+            self.wait_queue.push(&waiter.wait_node);
+            self.mutex.unlock();
+
+            waiter.wait(1, .allow_cancel) catch |err| {
+                self.mutex.lock();
+                const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+                if (!was_in_queue) {
+                    self.mutex.unlock();
+                    waiter.wait(1, .no_cancel);
+                    self.mutex.lock();
+                    const next_consumer = self.wait_queue.pop();
+                    self.mutex.unlock();
+                    if (next_consumer) |node| {
+                        node.wake();
+                    }
+                } else {
+                    self.mutex.unlock();
+                }
+                return err;
+            };
+        }
+    }
+
+    fn tryReceive(self: *Self, consumer: *BroadcastChannelConsumer, elem_ptr: [*]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const unread = self.write_pos -% consumer.read_pos;
+
+        if (unread > self.capacity) {
+            consumer.read_pos = self.write_pos -% self.capacity;
+            return error.Lagged;
+        }
+
+        if (unread == 0) {
+            if (self.closed) {
+                return error.Closed;
+            }
+            return error.WouldBlock;
+        }
+
+        const src = self.elemPtr(consumer.read_pos % self.capacity);
+        @memcpy(elem_ptr[0..self.elem_size], src[0..self.elem_size]);
+        consumer.read_pos +%= 1;
+    }
+
+    fn send(self: *Self, elem_ptr: [*]const u8) !void {
+        self.mutex.lock();
+
+        if (self.closed) {
+            self.mutex.unlock();
+            return error.Closed;
+        }
+
+        const dest = self.elemPtr(self.write_pos % self.capacity);
+        @memcpy(dest[0..self.elem_size], elem_ptr[0..self.elem_size]);
+        self.write_pos +%= 1;
+
+        var waiters = self.wait_queue.popAll();
+        self.mutex.unlock();
+
+        while (waiters.pop()) |node| {
+            node.wake();
+        }
+    }
+
+    fn close(self: *Self) void {
+        self.mutex.lock();
+
+        self.closed = true;
+
+        var waiters = self.wait_queue.popAll();
+        self.mutex.unlock();
+
+        while (waiters.pop()) |node| {
+            node.wake();
+        }
+    }
+};
+
+/// Type-erased async receive operation for BroadcastChannelImpl
+const AsyncReceiveImpl = struct {
+    channel: *BroadcastChannelImpl,
+    consumer: *BroadcastChannelConsumer,
+
+    const RecvSelf = @This();
+
+    pub const WaitContext = struct {
+        result_ptr: [*]u8 = undefined,
+        result: ?error{ Closed, Lagged }!void = null,
+    };
+
+    pub fn asyncWait(self: *const RecvSelf, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext, result_ptr: [*]u8) bool {
+        ctx.result_ptr = result_ptr;
+        ctx.result = null;
+
+        self.channel.mutex.lock();
+
+        const unread = self.channel.write_pos -% self.consumer.read_pos;
+
+        // Check if lagged
+        if (unread > self.channel.capacity) {
+            self.consumer.read_pos = self.channel.write_pos -% self.channel.capacity;
+            ctx.result = error.Lagged;
+            self.channel.mutex.unlock();
+            return false; // Complete immediately with error
+        }
+
+        // Fast path: message available
+        if (unread > 0) {
+            const src = self.channel.elemPtr(self.consumer.read_pos % self.channel.capacity);
+            @memcpy(ctx.result_ptr[0..self.channel.elem_size], src[0..self.channel.elem_size]);
+            self.consumer.read_pos +%= 1;
+            ctx.result = {};
+            self.channel.mutex.unlock();
+            return false; // Complete immediately
+        }
+
+        // Fast path: channel closed
+        if (self.channel.closed) {
+            ctx.result = error.Closed;
+            self.channel.mutex.unlock();
+            return false; // Complete immediately with error
+        }
+
+        // Slow path: enqueue and wait
+        self.channel.wait_queue.push(wait_node);
+        self.channel.mutex.unlock();
+        return true;
+    }
+
+    pub fn asyncCancelWait(self: *const RecvSelf, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+        _ = ctx;
+        self.channel.mutex.lock();
+        const was_in_queue = self.channel.wait_queue.remove(wait_node);
+        self.channel.mutex.unlock();
+        return was_in_queue;
+    }
+
+    pub fn getResult(self: *const RecvSelf, ctx: *WaitContext) error{ Closed, Lagged }!void {
+        // Fast path: result already set by asyncWait
+        if (ctx.result) |r| {
+            return r;
+        }
+
+        // Slow path: woken from wait, read from buffer now
+        self.channel.mutex.lock();
+
+        const unread = self.channel.write_pos -% self.consumer.read_pos;
+
+        // Check if lagged
+        if (unread > self.channel.capacity) {
+            self.consumer.read_pos = self.channel.write_pos -% self.channel.capacity;
+            self.channel.mutex.unlock();
+            return error.Lagged;
+        }
+
+        // Message available
+        if (unread > 0) {
+            const src = self.channel.elemPtr(self.consumer.read_pos % self.channel.capacity);
+            @memcpy(ctx.result_ptr[0..self.channel.elem_size], src[0..self.channel.elem_size]);
+            self.consumer.read_pos +%= 1;
+            self.channel.mutex.unlock();
+            return;
+        }
+
+        // Channel closed
+        if (self.channel.closed) {
+            self.channel.mutex.unlock();
+            return error.Closed;
+        }
+
+        unreachable;
+    }
+};
 
 /// A broadcast channel for sending values to multiple consumers.
 ///
@@ -62,61 +309,25 @@ const Waiter = @import("../common.zig").Waiter;
 /// ```
 pub fn BroadcastChannel(comptime T: type) type {
     return struct {
-        buffer: []T,
-        write_pos: usize = 0, // Monotonically increasing write position
-
-        consumers: ConsumerList = .{},
-        mutex: std.Thread.Mutex = .{},
-        wait_queue: SimpleWaitQueue(WaitNode) = .empty,
-
-        closed: bool = false,
+        impl: BroadcastChannelImpl,
 
         const Self = @This();
 
         /// Consumer handle for receiving broadcast messages.
         /// Must remain valid while subscribed to the channel.
-        pub const Consumer = struct {
-            read_pos: usize = 0,
-            prev: ?*Consumer = null,
-            next: ?*Consumer = null,
-        };
-
-        const ConsumerList = struct {
-            first: ?*Consumer = null,
-            last: ?*Consumer = null,
-
-            fn append(self: *ConsumerList, consumer: *Consumer) void {
-                consumer.prev = self.last;
-                consumer.next = null;
-                if (self.last) |last| {
-                    last.next = consumer;
-                } else {
-                    self.first = consumer;
-                }
-                self.last = consumer;
-            }
-
-            fn remove(self: *ConsumerList, consumer: *Consumer) void {
-                if (consumer.prev) |prev| {
-                    prev.next = consumer.next;
-                } else {
-                    self.first = consumer.next;
-                }
-                if (consumer.next) |next| {
-                    next.prev = consumer.prev;
-                } else {
-                    self.last = consumer.prev;
-                }
-                consumer.prev = null;
-                consumer.next = null;
-            }
-        };
+        pub const Consumer = BroadcastChannelConsumer;
 
         /// Initialize a broadcast channel with the provided buffer.
         /// The buffer's length determines the channel capacity.
         pub fn init(buffer: []T) Self {
             std.debug.assert(buffer.len > 0);
-            return .{ .buffer = buffer };
+            return .{
+                .impl = .{
+                    .buffer = std.mem.sliceAsBytes(buffer).ptr,
+                    .elem_size = @sizeOf(T),
+                    .capacity = buffer.len,
+                },
+            };
         }
 
         /// Subscribes a consumer to the channel.
@@ -126,26 +337,12 @@ pub fn BroadcastChannel(comptime T: type) type {
         ///
         /// The consumer must remain valid until `unsubscribe()` is called.
         pub fn subscribe(self: *Self, consumer: *Consumer) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // Guard against double-subscribe (would corrupt the list)
-            std.debug.assert(consumer.prev == null and consumer.next == null);
-
-            consumer.read_pos = self.write_pos;
-            self.consumers.append(consumer);
+            self.impl.subscribe(consumer);
         }
 
         /// Unsubscribes a consumer from the channel.
         pub fn unsubscribe(self: *Self, consumer: *Consumer) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // Guard against unsubscribing a consumer that's not in the list
-            std.debug.assert(consumer.prev != null or consumer.next != null or
-                self.consumers.first == consumer or self.consumers.last == consumer);
-
-            self.consumers.remove(consumer);
+            self.impl.unsubscribe(consumer);
         }
 
         /// Receives the next message for this consumer, blocking if none available.
@@ -159,65 +356,9 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// Returns `error.Closed` if the channel is closed and no more messages are available.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, runtime: *Runtime, consumer: *Consumer) !T {
-            // Stack-allocated waiter - separates operation wait node from task wait node
-            var waiter: Waiter = .init(runtime);
-
-            while (true) {
-                self.mutex.lock();
-
-                // Check if we've been lapped (more than buffer.len behind)
-                // Use wrapping subtraction to handle counter overflow correctly
-                const unread = self.write_pos -% consumer.read_pos;
-                if (unread > self.buffer.len) {
-                    // Skip to the oldest available message
-                    consumer.read_pos = self.write_pos -% self.buffer.len;
-                    self.mutex.unlock();
-                    return error.Lagged;
-                }
-
-                // Fast path: message available
-                if (unread > 0) {
-                    const item = self.buffer[consumer.read_pos % self.buffer.len];
-                    consumer.read_pos +%= 1;
-                    self.mutex.unlock();
-                    return item;
-                }
-
-                // Check if closed and caught up
-                if (self.closed) {
-                    self.mutex.unlock();
-                    return error.Closed;
-                }
-
-                // Slow path: need to wait
-                self.wait_queue.push(&waiter.wait_node);
-                self.mutex.unlock();
-
-                // Wait for signal, handling spurious wakeups internally
-                waiter.wait(1, .allow_cancel) catch |err| {
-                    // On cancellation, try to remove from queue
-                    self.mutex.lock();
-                    const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
-                    if (!was_in_queue) {
-                        // Removed by sender - wait for signal to complete before destroying waiter
-                        self.mutex.unlock();
-                        waiter.wait(1, .no_cancel);
-                        // Since we're being cancelled and won't consume the message,
-                        // wake another consumer to receive it instead.
-                        self.mutex.lock();
-                        const next_consumer = self.wait_queue.pop();
-                        self.mutex.unlock();
-                        if (next_consumer) |node| {
-                            node.wake();
-                        }
-                    } else {
-                        self.mutex.unlock();
-                    }
-                    return err;
-                };
-
-                // Woken up, loop to try again
-            }
+            var result: T = undefined;
+            try self.impl.receive(runtime, consumer, std.mem.asBytes(&result).ptr);
+            return result;
         }
 
         /// Tries to receive a message without blocking.
@@ -228,30 +369,9 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// Returns `error.Lagged` if the consumer has fallen too far behind.
         /// Returns `error.Closed` if the channel is closed and no more messages are available.
         pub fn tryReceive(self: *Self, consumer: *Consumer) !T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // Use wrapping subtraction to handle counter overflow correctly
-            const unread = self.write_pos -% consumer.read_pos;
-
-            // Check if we've been lapped
-            if (unread > self.buffer.len) {
-                consumer.read_pos = self.write_pos -% self.buffer.len;
-                return error.Lagged;
-            }
-
-            // Check if caught up
-            if (unread == 0) {
-                if (self.closed) {
-                    return error.Closed;
-                }
-                return error.WouldBlock;
-            }
-
-            const item = self.buffer[consumer.read_pos % self.buffer.len];
-            consumer.read_pos +%= 1;
-
-            return item;
+            var result: T = undefined;
+            try self.impl.tryReceive(consumer, std.mem.asBytes(&result).ptr);
+            return result;
         }
 
         /// Broadcasts a message to all consumers.
@@ -262,23 +382,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         ///
         /// Returns `error.Closed` if the channel has been closed.
         pub fn send(self: *Self, item: T) !void {
-            self.mutex.lock();
-
-            if (self.closed) {
-                self.mutex.unlock();
-                return error.Closed;
-            }
-
-            self.buffer[self.write_pos % self.buffer.len] = item;
-            self.write_pos +%= 1;
-
-            // Wake all waiting consumers
-            var waiters = self.wait_queue.popAll();
-            self.mutex.unlock();
-
-            while (waiters.pop()) |node| {
-                node.wake();
-            }
+            return self.impl.send(std.mem.asBytes(&item).ptr);
         }
 
         /// Closes the channel.
@@ -286,17 +390,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// After closing, all send operations will fail with `error.Closed`.
         /// Consumers can still drain any buffered messages before receiving `error.Closed`.
         pub fn close(self: *Self) void {
-            self.mutex.lock();
-
-            self.closed = true;
-
-            // Wake all waiting consumers so they can see the channel is closed
-            var waiters = self.wait_queue.popAll();
-            self.mutex.unlock();
-
-            while (waiters.pop()) |node| {
-                node.wake();
-            }
+            self.impl.close();
         }
 
         /// Creates an AsyncReceive operation for use with select().
@@ -317,7 +411,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// }
         /// ```
         pub fn asyncReceive(self: *Self, consumer: *Consumer) AsyncReceive(T) {
-            return AsyncReceive(T).init(self, consumer);
+            return AsyncReceive(T).init(&self.impl, consumer);
         }
     };
 }
@@ -342,108 +436,43 @@ pub fn BroadcastChannel(comptime T: type) type {
 /// ```
 pub fn AsyncReceive(comptime T: type) type {
     return struct {
-        channel: *BroadcastChannel(T),
-        consumer: *BroadcastChannel(T).Consumer,
+        impl: AsyncReceiveImpl,
 
         const Self = @This();
 
         pub const Result = error{ Closed, Lagged }!T;
 
         pub const WaitContext = struct {
-            result: ?Result = null,
+            impl_ctx: AsyncReceiveImpl.WaitContext = .{},
+            result: T = undefined,
         };
 
-        fn init(channel: *BroadcastChannel(T), consumer: *BroadcastChannel(T).Consumer) Self {
+        fn init(channel: *BroadcastChannelImpl, consumer: *BroadcastChannelConsumer) Self {
             return .{
-                .channel = channel,
-                .consumer = consumer,
+                .impl = .{
+                    .channel = channel,
+                    .consumer = consumer,
+                },
             };
         }
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            self.channel.mutex.lock();
-
-            // Use wrapping subtraction to handle counter overflow correctly
-            const unread = self.channel.write_pos -% self.consumer.read_pos;
-
-            // Check if we've been lapped
-            if (unread > self.channel.buffer.len) {
-                self.consumer.read_pos = self.channel.write_pos -% self.channel.buffer.len;
-                self.channel.mutex.unlock();
-                ctx.result = error.Lagged;
-                return false; // Already ready (with error)
-            }
-
-            // Fast path: message available
-            if (unread > 0) {
-                const item = self.channel.buffer[self.consumer.read_pos % self.channel.buffer.len];
-                self.consumer.read_pos +%= 1;
-                self.channel.mutex.unlock();
-                ctx.result = item;
-                return false; // Already ready
-            }
-
-            // Fast path: channel closed
-            if (self.channel.closed) {
-                self.channel.mutex.unlock();
-                ctx.result = error.Closed;
-                return false; // Already ready (with error)
-            }
-
-            // Slow path: enqueue and wait
-            self.channel.wait_queue.push(wait_node);
-            self.channel.mutex.unlock();
-            return true; // Need to wait
+        pub fn asyncWait(self: *const Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            return self.impl.asyncWait(rt, wait_node, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
         }
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *const Self, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            _ = ctx;
-            self.channel.mutex.lock();
-            const was_in_queue = self.channel.wait_queue.remove(wait_node);
-            self.channel.mutex.unlock();
-            return was_in_queue;
+        pub fn asyncCancelWait(self: *const Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            return self.impl.asyncCancelWait(rt, wait_node, &ctx.impl_ctx);
         }
 
         /// Get the result of the receive operation.
         /// Must only be called after asyncWait() returns false or the wait_node is woken.
         pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
-            // Fast path: result already set
-            if (ctx.result) |r| {
-                return r;
-            }
-
-            // Slow path: woken from wait, read from buffer now
-            self.channel.mutex.lock();
-
-            const unread = self.channel.write_pos -% self.consumer.read_pos;
-
-            // Check if we've been lapped
-            if (unread > self.channel.buffer.len) {
-                self.consumer.read_pos = self.channel.write_pos -% self.channel.buffer.len;
-                self.channel.mutex.unlock();
-                return error.Lagged;
-            }
-
-            // Message available
-            if (unread > 0) {
-                const item = self.channel.buffer[self.consumer.read_pos % self.channel.buffer.len];
-                self.consumer.read_pos +%= 1;
-                self.channel.mutex.unlock();
-                return item;
-            }
-
-            // Channel closed
-            if (self.channel.closed) {
-                self.channel.mutex.unlock();
-                return error.Closed;
-            }
-
-            // Should never happen - woken but nothing available and not closed
-            unreachable;
+            try self.impl.getResult(&ctx.impl_ctx);
+            return ctx.result;
         }
     };
 }
@@ -1050,10 +1079,10 @@ test "BroadcastChannel: position counter overflow handling" {
             // This tests that wrapping arithmetic works correctly
             const near_max = std.math.maxInt(usize) - 5;
 
-            ch.mutex.lock();
-            ch.write_pos = near_max;
+            ch.impl.mutex.lock();
+            ch.impl.write_pos = near_max;
             consumer.read_pos = near_max;
-            ch.mutex.unlock();
+            ch.impl.mutex.unlock();
 
             // Send items that will cause write_pos to wrap around
             try ch.send(100);
