@@ -197,42 +197,37 @@ pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
     const address = @intFromPtr(ptr);
     const bucket = getBucket(&runtime.futex_table, address);
 
-    var total_woken: u32 = 0;
+    bucket.mutex.lock();
 
-    // Wake in batches to handle more than 64 waiters
-    while (total_woken < max_waiters) {
-        var to_wake: [64]*FutexWaiter = undefined;
-        var batch_count: u32 = 0;
+    var local_stack: ?*FutexWaiter = null;
+    var count: u32 = 0;
 
-        bucket.mutex.lock();
+    // Iterate the queue looking for matching addresses
+    var node = bucket.waiters.head;
+    while (node) |waiter| {
+        if (count >= max_waiters) break;
 
-        // Iterate the queue looking for matching addresses
-        var node = bucket.waiters.head;
-        while (node) |waiter| {
-            if (total_woken + batch_count >= max_waiters or batch_count >= to_wake.len) break;
+        const next = waiter.next;
 
-            const next = waiter.next;
-
-            if (waiter.address == address) {
-                _ = bucket.waiters.remove(waiter);
-                to_wake[batch_count] = waiter;
-                batch_count += 1;
-            }
-
-            node = next;
+        if (waiter.address == address) {
+            _ = bucket.waiters.remove(waiter);
+            // Verify prev = null (sentinel prevents concurrent remove() from touching this node)
+            std.debug.assert(waiter.prev == null and waiter.next == null);
+            // Push to local stack (only uses next pointer)
+            waiter.next = local_stack;
+            local_stack = waiter;
+            count += 1;
         }
 
-        bucket.mutex.unlock();
+        node = next;
+    }
 
-        // No more waiters for this address
-        if (batch_count == 0) break;
+    bucket.mutex.unlock();
 
-        // Wake outside lock to avoid holding lock during resume
-        for (to_wake[0..batch_count]) |futex_waiter| {
-            futex_waiter.waiter.signal();
-        }
-
-        total_woken += batch_count;
+    // Wake all waiters outside lock to avoid holding lock during resume
+    while (local_stack) |waiter| {
+        local_stack = waiter.next;
+        waiter.waiter.signal();
     }
 }
 
