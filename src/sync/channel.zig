@@ -56,7 +56,7 @@ const ChannelImpl = struct {
     }
 
     /// Receives a value from the channel, blocking if empty.
-    fn receiveImpl(self: *Self, rt: *Runtime, elem_ptr: [*]u8) !void {
+    fn receive(self: *Self, rt: *Runtime, elem_ptr: [*]u8) !void {
         const recv = AsyncReceiveImpl{ .channel = self };
         var ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = undefined };
         var waiter = Waiter.init(rt);
@@ -78,7 +78,7 @@ const ChannelImpl = struct {
     }
 
     /// Tries to receive a value without blocking.
-    fn tryReceiveImpl(self: *Self, elem_ptr: [*]u8) !void {
+    fn tryReceive(self: *Self, elem_ptr: [*]u8) !void {
         self.mutex.lock();
 
         if (self.count > 0) {
@@ -124,7 +124,7 @@ const ChannelImpl = struct {
         self.mutex.unlock();
     }
 
-    fn sendImpl(self: *Self, rt: *Runtime, elem_ptr: [*]const u8) !void {
+    fn send(self: *Self, rt: *Runtime, elem_ptr: [*]const u8) !void {
         const send_op = AsyncSendImpl{ .channel = self };
         var ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = undefined };
         var waiter = Waiter.init(rt);
@@ -145,7 +145,7 @@ const ChannelImpl = struct {
         return send_op.getResult(&ctx);
     }
 
-    fn trySendImpl(self: *Self, elem_ptr: [*]const u8) !void {
+    fn trySend(self: *Self, elem_ptr: [*]const u8) !void {
         self.mutex.lock();
 
         if (self.closed) {
@@ -175,7 +175,7 @@ const ChannelImpl = struct {
         self.mutex.unlock();
     }
 
-    fn closeImpl(self: *Self, mode: CloseMode) void {
+    fn close(self: *Self, mode: CloseMode) void {
         self.mutex.lock();
 
         self.closed = true;
@@ -432,7 +432,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self, rt: *Runtime) !T {
             var result: T = undefined;
-            try self.impl.receiveImpl(rt, std.mem.asBytes(&result).ptr);
+            try self.impl.receive(rt, std.mem.asBytes(&result).ptr);
             return result;
         }
 
@@ -444,7 +444,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed and empty.
         pub fn tryReceive(self: *Self) !T {
             var result: T = undefined;
-            try self.impl.tryReceiveImpl(std.mem.asBytes(&result).ptr);
+            try self.impl.tryReceive(std.mem.asBytes(&result).ptr);
             return result;
         }
 
@@ -455,7 +455,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelClosed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, rt: *Runtime, item: T) !void {
-            return self.impl.sendImpl(rt, std.mem.asBytes(&item).ptr);
+            return self.impl.send(rt, std.mem.asBytes(&item).ptr);
         }
 
         /// Tries to send a value without blocking.
@@ -465,7 +465,7 @@ pub fn Channel(comptime T: type) type {
         /// Returns `error.ChannelFull` if the channel is full.
         /// Returns `error.ChannelClosed` if the channel is closed.
         pub fn trySend(self: *Self, item: T) !void {
-            return self.impl.trySendImpl(std.mem.asBytes(&item).ptr);
+            return self.impl.trySend(std.mem.asBytes(&item).ptr);
         }
 
         /// Closes the channel.
@@ -478,7 +478,7 @@ pub fn Channel(comptime T: type) type {
         /// Use `CloseMode.immediate` to clear all buffered items immediately,
         /// causing receivers to get `error.ChannelClosed` right away.
         pub fn close(self: *Self, mode: CloseMode) void {
-            self.impl.closeImpl(mode);
+            self.impl.close(mode);
         }
 
         /// Creates an AsyncReceive operation for use with select().
