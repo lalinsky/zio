@@ -31,7 +31,9 @@ theme:
     - content.code.copy
 
 nav:
-  - Overview: index.md
+  - About: index.md
+  - Tutorial:
+    - Getting Started: getting-started.md
   - User Guide:
     - Tasks: tasks.md
     - Networking: networking.md
