@@ -10,7 +10,7 @@ const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
-const CompactWaitQueue = @import("utils/wait_queue.zig").CompactWaitQueue;
+const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");
 const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
@@ -42,7 +42,7 @@ const MAX_HANDLERS = 32;
 const HandlerEntry = struct {
     kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
     counter: std.atomic.Value(usize) = .init(0),
-    waiters: CompactWaitQueue(WaitNode) = .empty,
+    waiters: WaitQueue(WaitNode) = .empty,
 };
 
 const HandlerRegistryUnix = struct {

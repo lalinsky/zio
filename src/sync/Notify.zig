@@ -53,19 +53,19 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
-const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Waiter = @import("../common.zig").Waiter;
 
-wait_queue: CompactWaitQueue(WaitNode) = .empty,
+wait_queue: WaitQueue(WaitNode) = .empty,
 
 const Notify = @This();
 
-// Use CompactWaitQueue sentinel states:
+// Use WaitQueue sentinel states:
 // - sentinel0 = no waiters (empty)
 // - pointer = has waiters
 // No sentinel1 needed since there's no persistent "signaled" state
-const State = CompactWaitQueue(WaitNode).State;
+const State = WaitQueue(WaitNode).State;
 const empty = State.sentinel0;
 
 /// Creates a new Notify primitive.
@@ -386,8 +386,8 @@ test "Notify timedWait success" {
 }
 
 test "Notify size and alignment" {
-    // Should be the same size as CompactWaitQueue (one pointer for head, tail stored in head.userdata)
-    try std.testing.expectEqual(@sizeOf(CompactWaitQueue(WaitNode)), @sizeOf(Notify));
+    // Should be the same size as WaitQueue (one pointer for head, tail stored in head.userdata)
+    try std.testing.expectEqual(@sizeOf(WaitQueue(WaitNode)), @sizeOf(Notify));
     _ = @alignOf(Notify);
 }
 

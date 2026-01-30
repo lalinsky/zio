@@ -229,7 +229,6 @@ pub fn JoinHandle(comptime T: type) type {
 // Generic data structures (private)
 const WaitNode = @import("runtime/WaitNode.zig");
 const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
-const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 

@@ -56,11 +56,11 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
 const Mutex = @import("Mutex.zig");
-const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Waiter = @import("../common.zig").Waiter;
 
-wait_queue: CompactWaitQueue(WaitNode) = .empty,
+wait_queue: WaitQueue(WaitNode) = .empty,
 
 const Condition = @This();
 

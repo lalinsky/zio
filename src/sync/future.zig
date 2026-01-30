@@ -5,7 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const Cancelable = @import("../common.zig").Cancelable;
-const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const meta = @import("../meta.zig");
 const select = @import("../select.zig");
@@ -71,14 +71,14 @@ pub fn Future(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        wait_queue: CompactWaitQueue(WaitNode) = .empty,
+        wait_queue: WaitQueue(WaitNode) = .empty,
         value: FutureResult(T) = .{},
 
-        // Use CompactWaitQueue sentinel states to encode future state:
+        // Use WaitQueue sentinel states to encode future state:
         // - sentinel0 = not set (no waiters, value not available)
         // - sentinel1 = done (no waiters, value is available)
         // - pointer = waiting (has waiters, value not available)
-        const State = CompactWaitQueue(WaitNode).State;
+        const State = WaitQueue(WaitNode).State;
         const not_set = State.sentinel0;
         const done = State.sentinel1;
 
