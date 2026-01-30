@@ -109,7 +109,13 @@ pub fn main() !void {
 
 See `examples/*.zig` and [mini-redis](https://github.com/lalinsky/zio-mini-redis) for more examples.
 
-You can also have a look at [Dusty](https://github.com/lalinsky/dusty), a HTTP server library that uses Zio.
+## Ecosystem
+
+The following libraries use zio for networking and concurrency:
+
+- [Dusty](https://github.com/lalinsky/dusty) - HTTP client and server library
+- [nats.zig](https://github.com/lalinsky/nats.zig) - NATS client library
+- [pg.zig](https://github.com/lalinsky/pg.zig) - PostgreSQL client library (fork of [karlseguin/pg.zig](https://github.com/karlseguin/pg.zig))
 
 ## Building
 
