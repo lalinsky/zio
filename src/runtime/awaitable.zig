@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("WaitNode.zig");
 const GroupNode = @import("group.zig").GroupNode;
-const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const SimpleQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitResult = @import("../select.zig").WaitResult;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -32,11 +32,11 @@ pub const Awaitable = struct {
     wait_node: WaitNode,
 
     // WaitNodes waiting for the completion of this awaitable
-    // Use CompactWaitQueue sentinel states to track completion:
+    // Use WaitQueue sentinel states to track completion:
     // - sentinel0 = not complete (no waiters, task not complete)
     // - sentinel1 = complete (no waiters, task is complete)
     // - pointer = waiting (has waiters, task not complete)
-    waiting_list: CompactWaitQueue(WaitNode) = .empty,
+    waiting_list: WaitQueue(WaitNode) = .empty,
 
     // Group membership - group_node.group is null if standalone
     group_node: GroupNode = .{},
@@ -44,7 +44,7 @@ pub const Awaitable = struct {
     // Future protocol - type-erased result type
     pub const Result = void;
 
-    pub const State = CompactWaitQueue(WaitNode).State;
+    pub const State = WaitQueue(WaitNode).State;
     pub const not_complete = State.sentinel0;
     pub const complete = State.sentinel1;
 

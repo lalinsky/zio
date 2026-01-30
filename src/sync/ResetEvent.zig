@@ -54,19 +54,19 @@ const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
 const Awaitable = @import("../runtime.zig").Awaitable;
 const AnyTask = @import("../runtime.zig").AnyTask;
-const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Waiter = @import("../common.zig").Waiter;
 
-wait_queue: CompactWaitQueue(WaitNode) = .empty,
+wait_queue: WaitQueue(WaitNode) = .empty,
 
 const ResetEvent = @This();
 
-// Use CompactWaitQueue sentinel states to encode event state:
+// Use WaitQueue sentinel states to encode event state:
 // - sentinel0 = unset (no waiters, event not signaled)
 // - sentinel1 = set (no waiters, event signaled)
 // - pointer = waiting (has waiters, event not signaled)
-const State = CompactWaitQueue(WaitNode).State;
+const State = WaitQueue(WaitNode).State;
 const unset = State.sentinel0;
 const is_set = State.sentinel1;
 

@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const meta = @import("../meta.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const JoinHandle = @import("../runtime.zig").JoinHandle;
-const CompactWaitQueue = @import("../utils/wait_queue.zig").CompactWaitQueue;
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const AnyTask = @import("task.zig").AnyTask;
@@ -26,7 +26,7 @@ pub const Group = struct {
 
     pub const init: Group = .{};
 
-    // Interpret inner.token as CompactWaitQueue head
+    // Interpret inner.token as WaitQueue head
     //   null (0)  = sentinel0 = idle/done
     //   1         = sentinel1 = closing (reject new spawns)
     //   pointer   = has tasks
@@ -45,7 +45,7 @@ pub const Group = struct {
     const fail_fast_bit: u32 = 1 << 26;
     const closed_bit: u32 = 1 << 27;
 
-    fn getTasks(self: *Group) *CompactWaitQueue(GroupNode) {
+    fn getTasks(self: *Group) *WaitQueue(GroupNode) {
         return @ptrCast(&self.inner.token);
     }
 

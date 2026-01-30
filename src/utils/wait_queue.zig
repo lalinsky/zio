@@ -9,7 +9,7 @@
 //!
 //! Provides two variants:
 //! - SimpleWaitQueue: Non-atomic queue for use under external synchronization (e.g., mutex)
-//! - CompactWaitQueue: 8-byte queue with tail stored in head node's userdata field
+//! - WaitQueue: 8-byte queue with tail stored in head node's userdata field
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -200,9 +200,9 @@ pub fn SimpleWaitQueue(comptime T: type) type {
 ///     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 ///     data: i32,
 /// };
-/// var queue: CompactWaitQueue(MyNode) = .empty;
+/// var queue: WaitQueue(MyNode) = .empty;
 /// ```
-pub fn CompactWaitQueue(comptime T: type) type {
+pub fn WaitQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
@@ -704,7 +704,7 @@ test "SimpleWaitQueue empty constant" {
     try std.testing.expect(queue.isEmpty());
 }
 
-test "CompactWaitQueue basic operations" {
+test "WaitQueue basic operations" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -713,7 +713,7 @@ test "CompactWaitQueue basic operations" {
         value: i32,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     // Initially in sentinel0 state
@@ -747,7 +747,7 @@ test "CompactWaitQueue basic operations" {
     try std.testing.expectEqual(false, queue.remove(&node1));
 }
 
-test "CompactWaitQueue state transitions" {
+test "WaitQueue state transitions" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -756,7 +756,7 @@ test "CompactWaitQueue state transitions" {
         value: i32,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue = Queue.initWithState(.sentinel1);
     try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
 
@@ -769,7 +769,7 @@ test "CompactWaitQueue state transitions" {
     try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "CompactWaitQueue empty constant" {
+test "WaitQueue empty constant" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -779,8 +779,8 @@ test "CompactWaitQueue empty constant" {
     };
 
     // Test .empty initialization
-    var queue: CompactWaitQueue(TestNode) = .empty;
-    try std.testing.expectEqual(CompactWaitQueue(TestNode).State.sentinel0, queue.getState());
+    var queue: WaitQueue(TestNode) = .empty;
+    try std.testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
 
     // Verify it works
     var node align(8) = TestNode{ .value = 42 };
@@ -789,10 +789,10 @@ test "CompactWaitQueue empty constant" {
 
     const popped = queue.pop();
     try std.testing.expectEqual(&node, popped);
-    try std.testing.expectEqual(CompactWaitQueue(TestNode).State.sentinel0, queue.getState());
+    try std.testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
 }
 
-test "CompactWaitQueue tail tracking" {
+test "WaitQueue tail tracking" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -801,7 +801,7 @@ test "CompactWaitQueue tail tracking" {
         value: i32,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     var node1 align(8) = TestNode{ .value = 1 };
@@ -827,7 +827,7 @@ test "CompactWaitQueue tail tracking" {
     try std.testing.expectEqual(@intFromPtr(&node3), node3.userdata);
 }
 
-test "CompactWaitQueue remove tail updates head.userdata" {
+test "WaitQueue remove tail updates head.userdata" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -836,7 +836,7 @@ test "CompactWaitQueue remove tail updates head.userdata" {
         value: i32,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     var node1 align(8) = TestNode{ .value = 1 };
@@ -859,7 +859,7 @@ test "CompactWaitQueue remove tail updates head.userdata" {
     try std.testing.expectEqual(@intFromPtr(&node1), node1.userdata);
 }
 
-test "CompactWaitQueue remove head transfers userdata" {
+test "WaitQueue remove head transfers userdata" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -868,7 +868,7 @@ test "CompactWaitQueue remove head transfers userdata" {
         value: i32,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     var node1 align(8) = TestNode{ .value = 1 };
@@ -889,7 +889,7 @@ test "CompactWaitQueue remove head transfers userdata" {
     try std.testing.expectEqual(@intFromPtr(&node3), node2.userdata);
 }
 
-test "CompactWaitQueue double remove" {
+test "WaitQueue double remove" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -898,7 +898,7 @@ test "CompactWaitQueue double remove" {
         value: i32,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     var node1 align(8) = TestNode{ .value = 1 };
@@ -932,7 +932,7 @@ test "CompactWaitQueue double remove" {
     try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "CompactWaitQueue concurrent push and pop" {
+test "WaitQueue concurrent push and pop" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -941,7 +941,7 @@ test "CompactWaitQueue concurrent push and pop" {
         value: usize,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     const num_threads = 4;
@@ -985,7 +985,7 @@ test "CompactWaitQueue concurrent push and pop" {
     try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "CompactWaitQueue concurrent remove during modifications" {
+test "WaitQueue concurrent remove during modifications" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -994,7 +994,7 @@ test "CompactWaitQueue concurrent remove during modifications" {
         value: usize,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     const num_items = 200;
@@ -1063,7 +1063,7 @@ test "CompactWaitQueue concurrent remove during modifications" {
     try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
 }
 
-test "CompactWaitQueue popOrTransition with concurrent removals" {
+test "WaitQueue popOrTransition with concurrent removals" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1072,7 +1072,7 @@ test "CompactWaitQueue popOrTransition with concurrent removals" {
         value: usize,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue = Queue.initWithState(.sentinel0);
 
     const num_items = 500;
@@ -1133,7 +1133,7 @@ test "CompactWaitQueue popOrTransition with concurrent removals" {
     try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
 }
 
-test "CompactWaitQueue stress test with heavy contention" {
+test "WaitQueue stress test with heavy contention" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1142,7 +1142,7 @@ test "CompactWaitQueue stress test with heavy contention" {
         value: usize,
     };
 
-    const Queue = CompactWaitQueue(TestNode);
+    const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
     const num_threads = 8;
