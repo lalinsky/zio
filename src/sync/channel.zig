@@ -21,9 +21,9 @@ pub const CloseMode = enum {
 /// Type-erased channel implementation that operates on raw bytes.
 /// This is the core implementation shared by all Channel(T) instances to reduce code size.
 const ChannelImpl = struct {
-    buffer: []u8,
+    buffer: [*]u8,
     elem_size: usize,
-    capacity: usize, // number of elements (buffer.len / elem_size)
+    capacity: usize, // number of elements
     head: usize = 0,
     tail: usize = 0,
     count: usize = 0,
@@ -38,7 +38,7 @@ const ChannelImpl = struct {
 
     /// Gets a pointer to the i'th element in the buffer
     fn elemPtr(self: *Self, index: usize) [*]u8 {
-        return self.buffer.ptr + (index * self.elem_size);
+        return self.buffer + (index * self.elem_size);
     }
 
     /// Checks if the channel is empty.
@@ -406,7 +406,7 @@ pub fn Channel(comptime T: type) type {
         pub fn init(buffer: []T) Self {
             return .{
                 .impl = .{
-                    .buffer = std.mem.sliceAsBytes(buffer),
+                    .buffer = std.mem.sliceAsBytes(buffer).ptr,
                     .elem_size = @sizeOf(T),
                     .capacity = buffer.len,
                 },
