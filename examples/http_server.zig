@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
-// SPDX-License-Identifier: MIT
-
 const std = @import("std");
 const zio = @import("zio");
 
@@ -9,10 +6,6 @@ const MAX_REQUEST_HEADER_SIZE = 64 * 1024;
 
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     defer stream.close(rt);
-
-    defer stream.shutdown(rt, .both) catch |err| {
-        std.log.debug("Failed to shutdown client connection: {}", .{err});
-    };
 
     std.log.info("HTTP client connected from {f}", .{stream.socket.address});
 
@@ -25,15 +18,13 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     // Initialize HTTP server for this connection
     var server = std.http.Server.init(&reader.interface, &writer.interface);
 
-    // Handle multiple requests on the same connection (keep-alive)
     while (true) {
         // Receive HTTP request headers
-        var request = server.receiveHead() catch |err| {
-            std.log.debug("Failed to receive request: {}", .{err});
-            return err;
+        var request = server.receiveHead() catch |err| switch (err) {
+            error.ReadFailed => |e| return reader.err orelse e,
+            else => |e| return e,
         };
-
-        std.log.info("{s} {s}", .{ @tagName(request.head.method), request.head.target });
+        std.log.info("{t} {s}", .{ request.head.method, request.head.target });
 
         // Simple HTML response
         const html =
@@ -55,18 +46,17 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
         });
 
         // If the client doesn't want keep-alive, close the connection
-        if (!request.head.keep_alive) break;
+        if (!request.head.keep_alive) {
+            try stream.shutdown(rt, .both);
+            break;
+        }
     }
 
     std.log.info("HTTP client disconnected", .{});
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var rt = try zio.Runtime.init(allocator, .{});
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
@@ -83,9 +73,8 @@ pub fn main() !void {
 
     while (true) {
         const stream = try server.accept(rt);
-        group.spawn(rt, handleClient, .{ rt, stream }) catch |err| {
-            std.log.debug("Failed to spawn client handler: {}", .{err});
-            stream.close(rt);
-        };
+        errdefer stream.close(rt);
+
+        try group.spawn(rt, handleClient, .{ rt, stream });
     }
 }

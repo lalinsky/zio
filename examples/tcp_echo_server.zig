@@ -1,17 +1,8 @@
-// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
-// SPDX-License-Identifier: MIT
-//
-// Test with: echo "hello" | nc -N 127.0.0.1 8080
-
 const std = @import("std");
 const zio = @import("zio");
 
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     defer stream.close(rt);
-
-    defer stream.shutdown(rt, .both) catch |err| {
-        std.log.err("Failed to shutdown client connection: {}", .{err});
-    };
 
     std.log.info("Client connected from {f}", .{stream.socket.address});
 
@@ -22,13 +13,18 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     var writer = stream.writer(rt, &write_buffer);
 
     while (true) {
-        // Use new Reader delimiter method to read lines
+        // Read a line from the client
         const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err,
+            error.ReadFailed => |e| return reader.err orelse e,
+            else => |e| return e,
         };
-
         std.log.info("Received: {s}", .{line});
+
+        // Delay the response a little bit
+        try rt.sleep(.fromMilliseconds(1000));
+
+        // Echo the line back
         try writer.interface.writeAll(line);
         try writer.interface.flush();
     }
@@ -37,11 +33,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const rt = try zio.Runtime.init(allocator, .{});
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);

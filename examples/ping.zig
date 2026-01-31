@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
-// SPDX-License-Identifier: MIT
-//
 // Simple ICMP ping demo using raw sockets
 //
 // Note: Requires root or CAP_NET_RAW capability
