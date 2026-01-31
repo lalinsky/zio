@@ -97,7 +97,7 @@ if [ -n "$BACKEND" ]; then
     BUILD_ARGS="$BUILD_ARGS -Dbackend=$BACKEND"
 fi
 if [ "$USE_WINE" = true ]; then
-    BUILD_ARGS="$BUILD_ARGS -fwine"
+    BUILD_ARGS="$BUILD_ARGS -Demit-test-bin"
 fi
 if [ "$USE_QEMU" = true ]; then
     BUILD_ARGS="$BUILD_ARGS -fqemu"
@@ -113,6 +113,11 @@ if [ "$VERBOSE" = true ]; then
     export TEST_VERBOSE=true
 fi
 eval zig build $BUILD_ARGS --summary all
+
+if [ "$USE_WINE" = true ]; then
+    echo "=== Running tests with Wine ==="
+    wine zig-out/bin/test.exe
+fi
 
 if [ "$FULL_MODE" = true ]; then
     echo "=== Building examples ==="

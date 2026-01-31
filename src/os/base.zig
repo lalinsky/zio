@@ -21,7 +21,7 @@ pub fn unexpectedError(err: anytype) error{Unexpected} {
     if (unexpected_error_tracing) {
         std.debug.print(
             \\unexpected error: {}
-            \\please file a bug report: https://github.com/lalinsky/ev.zig/issues/new
+            \\please file a bug report: https://github.com/lalinsky/zio/issues/new
             \\
         , .{err});
         if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {

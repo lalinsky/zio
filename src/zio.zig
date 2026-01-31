@@ -25,6 +25,12 @@ pub const Stopwatch = time.Stopwatch;
 const fs = @import("fs.zig");
 pub const File = fs.File;
 pub const Dir = fs.Dir;
+pub const Pipe = fs.Pipe;
+pub const PipePair = fs.PipePair;
+
+pub const stdin = fs.stdin;
+pub const stdout = fs.stdout;
+pub const stderr = fs.stderr;
 
 pub const net = @import("net.zig");
 
