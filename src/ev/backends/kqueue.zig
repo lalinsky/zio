@@ -656,18 +656,8 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
         .pipe_close => unreachable, // Handled synchronously in submit
         .pipe_create => unreachable, // Handled synchronously in submit
         .pipe_poll => {
-            const data = comp.cast(PipePoll);
-            // Check for errors directly (don't use getSockError for pipes)
-            const has_error = (event.flags & EV_ERROR) != 0;
-            if (has_error and event.data != 0) {
-                const errno_fn = switch (data.event) {
-                    .read => fs.errnoToFileReadError,
-                    .write => fs.errnoToFileWriteError,
-                };
-                comp.setError(errno_fn(@enumFromInt(@as(i32, @intCast(event.data)))));
-                return .completed;
-            }
-            // For poll operations, EOF or readiness means the fd is ready
+            // For poll operations, any event (error, EOF, or readiness) means "ready"
+            // The actual error (if any) will be discovered on the next read/write
             comp.setResult(.pipe_poll, {});
             return .completed;
         },
