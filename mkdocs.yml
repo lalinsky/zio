@@ -24,6 +24,7 @@ theme:
   features:
     - navigation.sections
     - navigation.top
+    - navigation.footer
     - search.suggest
     - search.highlight
     - content.tabs.link
@@ -31,19 +32,14 @@ theme:
     - content.code.copy
 
 nav:
-  - About: index.md
+  - Overview: index.md
   - Tutorial:
     - Getting Started: getting-started.md
-  - User Guide:
-    - Tasks: tasks.md
-    - Networking: networking.md
-    - Files: files.md
-    - Synchronization: sync.md
-    - Signals: signals.md
+    - Simple TCP Server: tcp-server.md
+    - Simple HTTP Server: http-server.md
   - Reference:
     - API Documentation: apidocs/
   - Project:
-    - FAQ: faq.md
     - Changelog: changelog.md
 
 markdown_extensions:
