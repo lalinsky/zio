@@ -37,6 +37,7 @@ nav:
     - Getting Started: getting-started.md
     - Simple TCP Server: tcp-server.md
     - Simple HTTP Server: http-server.md
+    - Parallel Grep: parallel-grep.md
   - Reference:
     - API Documentation: apidocs/
   - Project:
