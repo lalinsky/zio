@@ -31,9 +31,11 @@ const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
 const DirCreateDir = @import("../completion.zig").DirCreateDir;
 const DirRename = @import("../completion.zig").DirRename;
-const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
-const FileStreamRead = @import("../completion.zig").FileStreamRead;
-const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
+const PipePoll = @import("../completion.zig").PipePoll;
+const PipeCreate = @import("../completion.zig").PipeCreate;
+const PipeRead = @import("../completion.zig").PipeRead;
+const PipeWrite = @import("../completion.zig").PipeWrite;
+const PipeClose = @import("../completion.zig").PipeClose;
 
 // WAIT_IO_COMPLETION is returned when an alertable wait is interrupted by an APC
 const WAIT_IO_COMPLETION: windows.Win32Error = @enumFromInt(0xC0);
@@ -498,23 +500,39 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_hard_link,
         => unreachable, // These are handled by thread pool (capabilities = false)
 
-        .file_stream_poll => {
+        .pipe_poll => {
             // Windows IOCP doesn't support poll-style waiting on file handles
             c.setError(error.Unexpected);
             state.markCompletedFromBackend(c);
         },
 
-        .file_stream_read => {
-            const data = c.cast(FileStreamRead);
-            self.submitFileStreamRead(state, data) catch |err| {
+        .pipe_create => {
+            const data = c.cast(PipeCreate);
+            self.submitPipeCreate(state, data) catch |err| {
                 c.setError(err);
                 state.markCompletedFromBackend(c);
             };
         },
 
-        .file_stream_write => {
-            const data = c.cast(FileStreamWrite);
-            self.submitFileStreamWrite(state, data) catch |err| {
+        .pipe_read => {
+            const data = c.cast(PipeRead);
+            self.submitPipeRead(state, data) catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+            };
+        },
+
+        .pipe_write => {
+            const data = c.cast(PipeWrite);
+            self.submitPipeWrite(state, data) catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+            };
+        },
+
+        .pipe_close => {
+            const data = c.cast(PipeClose);
+            self.submitPipeClose(state, data) catch |err| {
                 c.setError(err);
                 state.markCompletedFromBackend(c);
             };
@@ -1072,10 +1090,52 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
     // Operation will complete via IOCP (either immediate or async)
 }
 
-fn submitFileStreamRead(self: *Self, state: *LoopState, data: *FileStreamRead) !void {
+fn submitPipeCreate(self: *Self, state: *LoopState, data: *PipeCreate) !void {
+    // Create pipe with overlapped I/O support
+    const fds = windows.pipe() catch |err| {
+        data.c.setError(err);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    };
+
+    // Associate both handles with IOCP
+    const read_result = windows.CreateIoCompletionPort(
+        fds[0],
+        self.shared_state.iocp,
+        0,
+        0,
+    );
+    if (read_result == null) {
+        _ = windows.CloseHandle(fds[0]);
+        _ = windows.CloseHandle(fds[1]);
+        data.c.setError(error.Unexpected);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
+
+    const write_result = windows.CreateIoCompletionPort(
+        fds[1],
+        self.shared_state.iocp,
+        0,
+        0,
+    );
+    if (write_result == null) {
+        _ = windows.CloseHandle(fds[0]);
+        _ = windows.CloseHandle(fds[1]);
+        data.c.setError(error.Unexpected);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
+
+    // Store result and complete immediately
+    data.c.setResult(.pipe_create, fds);
+    state.markCompletedFromBackend(&data.c);
+}
+
+fn submitPipeRead(self: *Self, state: *LoopState, data: *PipeRead) !void {
     _ = self;
 
-    // Initialize OVERLAPPED with zero offset (streams don't have offsets)
+    // Initialize OVERLAPPED with zero offset (pipes don't have offsets)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
     // ReadFile only supports a single buffer, so we read into the first iovec
@@ -1095,9 +1155,14 @@ fn submitFileStreamRead(self: *Self, state: *LoopState, data: *FileStreamRead) !
     // the completion will be posted to the IOCP port.
     if (result == 0) {
         const err = windows.GetLastError();
-        if (err != .IO_PENDING) {
+        if (err == .BROKEN_PIPE) {
+            // Write end closed - this is EOF, not an error
+            data.c.setResult(.pipe_read, 0);
+            state.markCompletedFromBackend(&data.c);
+            return;
+        } else if (err != .IO_PENDING) {
             // Real error - complete immediately with error
-            log.err("ReadFile (stream) failed: {}", .{err});
+            log.err("ReadFile (pipe) failed: {}", .{err});
             data.c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
             state.markCompletedFromBackend(&data.c);
             return;
@@ -1106,10 +1171,10 @@ fn submitFileStreamRead(self: *Self, state: *LoopState, data: *FileStreamRead) !
     // Operation will complete via IOCP (either immediate or async)
 }
 
-fn submitFileStreamWrite(self: *Self, state: *LoopState, data: *FileStreamWrite) !void {
+fn submitPipeWrite(self: *Self, state: *LoopState, data: *PipeWrite) !void {
     _ = self;
 
-    // Initialize OVERLAPPED with zero offset (streams don't have offsets)
+    // Initialize OVERLAPPED with zero offset (pipes don't have offsets)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
     // WriteFile only supports a single buffer, so we write from the first iovec
@@ -1131,13 +1196,29 @@ fn submitFileStreamWrite(self: *Self, state: *LoopState, data: *FileStreamWrite)
         const err = windows.GetLastError();
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
-            log.err("WriteFile (stream) failed: {}", .{err});
+            log.err("WriteFile (pipe) failed: {}", .{err});
             data.c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             state.markCompletedFromBackend(&data.c);
             return;
         }
     }
     // Operation will complete via IOCP (either immediate or async)
+}
+
+fn submitPipeClose(self: *Self, state: *LoopState, data: *PipeClose) !void {
+    _ = self;
+
+    const result = windows.CloseHandle(data.handle);
+    if (result == windows.FALSE) {
+        const err = windows.GetLastError();
+        log.err("CloseHandle (pipe) failed: {}", .{err});
+        data.c.setError(fs.errnoToFileCloseError(@enumFromInt(@intFromEnum(err))));
+    } else {
+        data.c.setResult(.pipe_close, {});
+    }
+
+    // Complete immediately (synchronous operation)
+    state.markCompletedFromBackend(&data.c);
 }
 
 /// Cancel a completion - infallible.
@@ -1186,16 +1267,16 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .file_read,
                 .file_write,
                 .file_sync,
-                .file_stream_read,
-                .file_stream_write,
+                .pipe_read,
+                .pipe_write,
                 => blk: {
                     // Get file handle from the completion
                     const h = switch (target.op) {
                         .file_read => target.cast(FileRead).handle,
                         .file_write => target.cast(FileWrite).handle,
                         .file_sync => target.cast(FileSync).handle,
-                        .file_stream_read => target.cast(FileStreamRead).handle,
-                        .file_stream_write => target.cast(FileStreamWrite).handle,
+                        .pipe_read => target.cast(PipeRead).handle,
+                        .pipe_write => target.cast(PipeWrite).handle,
                         else => unreachable,
                     };
                     break :blk h;
@@ -1586,8 +1667,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             state.markCompletedFromBackend(c);
         },
 
-        .file_stream_read => {
-            const data = c.cast(FileStreamRead);
+        .pipe_read => {
+            const data = c.cast(PipeRead);
             var bytes_transferred: windows.DWORD = 0;
 
             const result = windows.GetOverlappedResult(
@@ -1599,21 +1680,21 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == 0) {
                 const err = windows.GetLastError();
-                // HANDLE_EOF is not an error - it means we successfully read 0 bytes (EOF)
-                if (err == .HANDLE_EOF) {
-                    c.setResult(.file_stream_read, 0);
+                // HANDLE_EOF and BROKEN_PIPE are not errors for pipe reads - they mean EOF (0 bytes)
+                if (err == .HANDLE_EOF or err == .BROKEN_PIPE) {
+                    c.setResult(.pipe_read, 0);
                 } else {
                     c.setError(fs.errnoToFileReadError(err));
                 }
             } else {
-                c.setResult(.file_stream_read, @intCast(bytes_transferred));
+                c.setResult(.pipe_read, @intCast(bytes_transferred));
             }
 
             state.markCompletedFromBackend(c);
         },
 
-        .file_stream_write => {
-            const data = c.cast(FileStreamWrite);
+        .pipe_write => {
+            const data = c.cast(PipeWrite);
             var bytes_transferred: windows.DWORD = 0;
 
             const result = windows.GetOverlappedResult(
@@ -1627,7 +1708,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 const err = windows.GetLastError();
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             } else {
-                c.setResult(.file_stream_write, @intCast(bytes_transferred));
+                c.setResult(.pipe_write, @intCast(bytes_transferred));
             }
 
             state.markCompletedFromBackend(c);

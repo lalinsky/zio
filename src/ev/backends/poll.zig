@@ -25,9 +25,11 @@ const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
-const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
-const FileStreamRead = @import("../completion.zig").FileStreamRead;
-const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
+const PipePoll = @import("../completion.zig").PipePoll;
+const PipeCreate = @import("../completion.zig").PipeCreate;
+const PipeRead = @import("../completion.zig").PipeRead;
+const PipeWrite = @import("../completion.zig").PipeWrite;
+const PipeClose = @import("../completion.zig").PipeClose;
 
 pub const NetHandle = net.fd_t;
 
@@ -154,11 +156,11 @@ fn getEvents(completion: *Completion) @FieldType(net.pollfd, "events") {
                 .send => net.POLL.OUT,
             };
         },
-        // File stream operations not supported on Windows (poll uses SOCKET, not HANDLE)
-        .file_stream_read => if (builtin.os.tag == .windows) unreachable else net.POLL.IN,
-        .file_stream_write => if (builtin.os.tag == .windows) unreachable else net.POLL.OUT,
-        .file_stream_poll => if (builtin.os.tag == .windows) unreachable else blk: {
-            const poll_data = completion.cast(FileStreamPoll);
+        // Pipe operations not supported on Windows (poll uses SOCKET, not HANDLE - Windows uses IOCP)
+        .pipe_read => if (builtin.os.tag == .windows) unreachable else net.POLL.IN,
+        .pipe_write => if (builtin.os.tag == .windows) unreachable else net.POLL.OUT,
+        .pipe_poll => if (builtin.os.tag == .windows) unreachable else blk: {
+            const poll_data = completion.cast(PipePoll);
             break :blk switch (poll_data.event) {
                 .read => net.POLL.IN,
                 .write => net.POLL.OUT,
@@ -179,9 +181,9 @@ fn getPollType(op: Op) PollEntryType {
         .net_recvmsg => .send_or_recv,
         .net_sendmsg => .send_or_recv,
         .net_poll => .send_or_recv,
-        .file_stream_read => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
-        .file_stream_write => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
-        .file_stream_poll => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
+        .pipe_read => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
+        .pipe_write => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
+        .pipe_poll => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
         else => unreachable,
     };
 }
@@ -278,10 +280,11 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_recvmsg => completion.cast(NetRecvMsg).handle,
         .net_sendmsg => completion.cast(NetSendMsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
-        // File stream handles are only compatible with NetHandle on non-Windows
-        .file_stream_read => if (builtin.os.tag == .windows) unreachable else completion.cast(FileStreamRead).handle,
-        .file_stream_write => if (builtin.os.tag == .windows) unreachable else completion.cast(FileStreamWrite).handle,
-        .file_stream_poll => if (builtin.os.tag == .windows) unreachable else completion.cast(FileStreamPoll).handle,
+        // Pipe handles are only compatible with NetHandle on non-Windows (Windows uses IOCP)
+        .pipe_read => if (builtin.os.tag == .windows) unreachable else completion.cast(PipeRead).handle,
+        .pipe_write => if (builtin.os.tag == .windows) unreachable else completion.cast(PipeWrite).handle,
+        .pipe_close => if (builtin.os.tag == .windows) unreachable else completion.cast(PipeClose).handle,
+        .pipe_poll => if (builtin.os.tag == .windows) unreachable else completion.cast(PipePoll).handle,
         else => unreachable,
     };
 }
@@ -370,33 +373,57 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             self.addToPollQueue(state, data.handle, c);
         },
 
-        // File stream operations (not supported on Windows - poll uses SOCKET, not HANDLE)
-        .file_stream_read => {
+        .pipe_poll => {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             }
-            const data = c.cast(FileStreamRead);
+            const data = c.cast(PipePoll);
             self.addToPollQueue(state, data.handle, c);
         },
-        .file_stream_write => {
+
+        // Pipe operations (not supported on Windows - poll uses SOCKET, not HANDLE; Windows uses IOCP)
+        .pipe_create => {
+            const fds = fs.pipe() catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            c.setResult(.pipe_create, fds);
+            state.markCompletedFromBackend(c);
+        },
+        .pipe_read => {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             }
-            const data = c.cast(FileStreamWrite);
+            const data = c.cast(PipeRead);
             self.addToPollQueue(state, data.handle, c);
         },
-        .file_stream_poll => {
+        .pipe_write => {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             }
-            const data = c.cast(FileStreamPoll);
+            const data = c.cast(PipeWrite);
             self.addToPollQueue(state, data.handle, c);
+        },
+        .pipe_close => {
+            if (builtin.os.tag == .windows) {
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            }
+            const data = c.cast(PipeClose);
+            if (fs.close(data.handle)) |_| {
+                c.setResult(.pipe_close, {});
+            } else |err| {
+                c.setError(err);
+            }
+            state.markCompletedFromBackend(c);
         },
 
         // File operations are handled by Loop via thread pool
@@ -655,32 +682,42 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
             // Requested events not ready yet - requeue
             return .requeue;
         },
-        // File stream operations not supported on Windows (poll uses SOCKET, not HANDLE)
-        .file_stream_read => if (builtin.os.tag == .windows) unreachable else {
-            const data = c.cast(FileStreamRead);
-            if (handlePollError(item, fs.errnoToFileReadError)) |err| {
-                c.setError(err);
-                return .completed;
-            }
+        // Pipe operations not supported on Windows (poll uses SOCKET, not HANDLE - Windows uses IOCP)
+        .pipe_read => if (builtin.os.tag == .windows) unreachable else {
+            const data = c.cast(PipeRead);
+            // Try to read - there might still be data in the pipe buffer
             if (fs.readv(data.handle, data.buffer.iovecs)) |n| {
-                c.setResult(.file_stream_read, n);
+                c.setResult(.pipe_read, n);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    // For pipes, HUP means the write end is closed
+                    // If we got WouldBlock and HUP is set, that's EOF (no more data)
+                    const has_hup = (item.revents & net.POLL.HUP) != 0;
+                    if (has_hup) {
+                        c.setResult(.pipe_read, 0);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     c.setError(err);
                     return .completed;
                 },
             }
         },
-        .file_stream_write => if (builtin.os.tag == .windows) unreachable else {
-            const data = c.cast(FileStreamWrite);
-            if (handlePollError(item, fs.errnoToFileWriteError)) |err| {
-                c.setError(err);
+        .pipe_write => if (builtin.os.tag == .windows) unreachable else {
+            const data = c.cast(PipeWrite);
+            // For pipes, check for errors but don't use getSockError
+            const has_error = (item.revents & net.POLL.ERR) != 0;
+            const has_hup = (item.revents & net.POLL.HUP) != 0;
+            if (has_error or has_hup) {
+                // Pipe error or read end closed
+                c.setError(error.BrokenPipe);
                 return .completed;
             }
             if (fs.writev(data.handle, data.buffer.iovecs)) |n| {
-                c.setResult(.file_stream_write, n);
+                c.setResult(.pipe_write, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,
@@ -690,14 +727,14 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 },
             }
         },
-        .file_stream_poll => if (builtin.os.tag == .windows) unreachable else {
+        .pipe_poll => if (builtin.os.tag == .windows) unreachable else {
             // For poll operations, we want to know when the fd is "ready"
             const has_error = (item.revents & net.POLL.ERR) != 0;
             const has_hup = (item.revents & net.POLL.HUP) != 0;
 
             if (has_error or has_hup) {
                 // Stream has error or hangup - it's "ready"
-                c.setResult(.file_stream_poll, {});
+                c.setResult(.pipe_poll, {});
                 return .completed;
             }
 
@@ -705,12 +742,14 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
             const requested_events = getEvents(c);
             const ready_events = item.revents & requested_events;
             if (ready_events != 0) {
-                c.setResult(.file_stream_poll, {});
+                c.setResult(.pipe_poll, {});
                 return .completed;
             }
             // Requested events not ready yet - requeue
             return .requeue;
         },
+        .pipe_create => unreachable, // Handled synchronously in submit
+        .pipe_close => unreachable, // Handled synchronously in submit
         else => {
             std.debug.panic("unexpected completion type in complete: {}", .{c.op});
         },

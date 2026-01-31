@@ -43,6 +43,7 @@ pub fn build(b: *std.Build) void {
 
     // Examples configuration
     const examples = [_]struct { name: []const u8, file: []const u8 }{
+        .{ .name = "hello-world", .file = "examples/hello_world.zig" },
         .{ .name = "sleep", .file = "examples/sleep.zig" },
         .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
         .{ .name = "tcp-echo-server-plain", .file = "examples/tcp_echo_server_plain.zig" },

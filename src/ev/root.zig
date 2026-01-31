@@ -75,9 +75,11 @@ pub const DirRealPath = completion.DirRealPath;
 pub const DirRealPathFile = completion.DirRealPathFile;
 pub const FileRealPath = completion.FileRealPath;
 pub const FileHardLink = completion.FileHardLink;
-pub const FileStreamPoll = completion.FileStreamPoll;
-pub const FileStreamRead = completion.FileStreamRead;
-pub const FileStreamWrite = completion.FileStreamWrite;
+pub const PipePoll = completion.PipePoll;
+pub const PipeCreate = completion.PipeCreate;
+pub const PipeRead = completion.PipeRead;
+pub const PipeWrite = completion.PipeWrite;
+pub const PipeClose = completion.PipeClose;
 
 test {
     std.testing.refAllDecls(@This());

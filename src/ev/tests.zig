@@ -6,9 +6,9 @@ const Async = @import("completion.zig").Async;
 const NetClose = @import("completion.zig").NetClose;
 const NetOpen = @import("completion.zig").NetOpen;
 const NetBind = @import("completion.zig").NetBind;
-const FileStreamPoll = @import("completion.zig").FileStreamPoll;
-const FileStreamRead = @import("completion.zig").FileStreamRead;
-const FileStreamWrite = @import("completion.zig").FileStreamWrite;
+const PipePoll = @import("completion.zig").PipePoll;
+const PipeRead = @import("completion.zig").PipeRead;
+const PipeWrite = @import("completion.zig").PipeWrite;
 const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
 const net = @import("../os/net.zig");
@@ -213,7 +213,7 @@ test "Loop: async notification - re-arm" {
     try std.testing.expectEqual(.dead, async_handle.c.state);
 }
 
-test "FileStream: write and read" {
+test "Pipe: write and read" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var loop: Loop = undefined;
@@ -229,7 +229,7 @@ test "FileStream: write and read" {
     const write_data = "Hello, pipe!";
     var write_iovecs: [1]fs.iovec_const = undefined;
     const write_buf = WriteBuf.fromSlice(write_data, &write_iovecs);
-    var stream_write: FileStreamWrite = .init(pipefd[1], write_buf);
+    var stream_write: PipeWrite = .init(pipefd[1], write_buf);
     loop.add(&stream_write.c);
     try loop.run(.until_done);
     const written = try stream_write.getResult();
@@ -239,7 +239,7 @@ test "FileStream: write and read" {
     var read_data: [128]u8 = undefined;
     var read_iovecs: [1]fs.iovec = undefined;
     const read_buf = ReadBuf.fromSlice(&read_data, &read_iovecs);
-    var stream_read: FileStreamRead = .init(pipefd[0], read_buf);
+    var stream_read: PipeRead = .init(pipefd[0], read_buf);
     loop.add(&stream_read.c);
     try loop.run(.until_done);
     const read_len = try stream_read.getResult();
@@ -247,7 +247,7 @@ test "FileStream: write and read" {
     try std.testing.expectEqualStrings(write_data, read_data[0..read_len]);
 }
 
-test "FileStream: poll for readability" {
+test "Pipe: poll for readability" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var loop: Loop = undefined;
@@ -264,7 +264,7 @@ test "FileStream: poll for readability" {
     _ = posix.system.write(pipefd[1], write_data.ptr, write_data.len);
 
     // Poll for readability
-    var stream_poll: FileStreamPoll = .init(pipefd[0], .read);
+    var stream_poll: PipePoll = .init(pipefd[0], .read);
     loop.add(&stream_poll.c);
     try loop.run(.until_done);
     try stream_poll.getResult();

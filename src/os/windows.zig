@@ -315,6 +315,85 @@ pub extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
 // File deletion
 pub extern "kernel32" fn DeleteFileW(lpFileName: LPCWSTR) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn CreatePipe(
+    hReadPipe: *HANDLE,
+    hWritePipe: *HANDLE,
+    lpPipeAttributes: ?*SECURITY_ATTRIBUTES,
+    nSize: DWORD,
+) callconv(.winapi) BOOL;
+
+// Named pipe constants
+pub const PIPE_ACCESS_INBOUND: DWORD = 0x00000001;
+pub const PIPE_ACCESS_OUTBOUND: DWORD = 0x00000002;
+pub const PIPE_TYPE_BYTE: DWORD = 0x00000000;
+pub const PIPE_WAIT: DWORD = 0x00000000;
+pub const PIPE_REJECT_REMOTE_CLIENTS: DWORD = 0x00000008;
+
+pub extern "kernel32" fn CreateNamedPipeW(
+    lpName: LPCWSTR,
+    dwOpenMode: DWORD,
+    dwPipeMode: DWORD,
+    nMaxInstances: DWORD,
+    nOutBufferSize: DWORD,
+    nInBufferSize: DWORD,
+    nDefaultTimeOut: DWORD,
+    lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
+) callconv(.winapi) HANDLE;
+
+var pipe_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+
+pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
+
+/// Create an anonymous pipe with overlapped I/O support.
+/// Returns [read_handle, write_handle].
+pub fn pipe() !([2]HANDLE) {
+    // Generate unique pipe name
+    const counter = pipe_counter.fetchAdd(1, .monotonic);
+    const pid = GetCurrentProcessId();
+    var name_buf: [256]u8 = undefined;
+    const name = std.fmt.bufPrintZ(&name_buf, "\\\\.\\pipe\\zio-{d}-{d}", .{ pid, counter }) catch unreachable;
+
+    // Convert to wide string
+    var wide_name: [256:0]WCHAR = undefined;
+    const wide_len = MultiByteToWideChar(CP_UTF8, 0, name.ptr, @intCast(name.len), &wide_name, wide_name.len - 1);
+    if (wide_len == 0) return error.Unexpected;
+    wide_name[@intCast(wide_len)] = 0;
+
+    // Create unidirectional named pipe (read end) with overlapped support
+    const read_handle = CreateNamedPipeW(
+        &wide_name,
+        PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, // nMaxInstances
+        4096, // nOutBufferSize
+        4096, // nInBufferSize
+        120 * 1000, // nDefaultTimeOut (120 seconds)
+        null,
+    );
+
+    if (read_handle == INVALID_HANDLE_VALUE) {
+        return error.Unexpected;
+    }
+    errdefer _ = CloseHandle(read_handle);
+
+    // Connect to the pipe (write end)
+    const write_handle = CreateFileW(
+        &wide_name,
+        GENERIC_WRITE,
+        0, // no sharing
+        null,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+        null,
+    );
+
+    if (write_handle == INVALID_HANDLE_VALUE) {
+        return error.Unexpected;
+    }
+
+    return .{ read_handle, write_handle };
+}
+
 // Path utilities (shlwapi)
 pub extern "shlwapi" fn PathIsRelativeW(pszPath: LPCWSTR) callconv(.winapi) BOOL;
 

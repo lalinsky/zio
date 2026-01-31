@@ -8,8 +8,11 @@ const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Cancelable = @import("common.zig").Cancelable;
+const Timeoutable = @import("common.zig").Timeoutable;
 const waitForIo = @import("common.zig").waitForIo;
+const timedWaitForIo = @import("common.zig").timedWaitForIo;
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const Timeout = @import("time.zig").Timeout;
 
 pub const Handle = os.fs.fd_t;
 
@@ -51,6 +54,28 @@ pub fn createDir(rt: *Runtime, path: []const u8, mode: os.fs.mode_t) Dir.CreateD
 pub fn createFile(rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) Dir.CreateFileError!File {
     const cwd = Dir.cwd();
     return cwd.createFile(rt, path, flags);
+}
+
+pub fn createPipe(rt: *Runtime) (os.fs.PipeError || Cancelable)!PipePair {
+    var op = ev.PipeCreate.init();
+    try waitForIo(rt, &op.c);
+    const fds = try op.getResult();
+    return .{
+        .read = Pipe.fromFd(fds[0]),
+        .write = Pipe.fromFd(fds[1]),
+    };
+}
+
+pub fn stdin() Pipe {
+    return Pipe.fromFd(os.fs.stdin());
+}
+
+pub fn stdout() Pipe {
+    return Pipe.fromFd(os.fs.stdout());
+}
+
+pub fn stderr() Pipe {
+    return Pipe.fromFd(os.fs.stderr());
 }
 
 pub fn stat(rt: *Runtime, path: []const u8) Dir.StatError!os.fs.FileStatInfo {
@@ -533,6 +558,210 @@ pub const FileWriter = struct {
     }
 };
 
+pub const PipePair = struct {
+    read: Pipe,
+    write: Pipe,
+
+    /// Close both ends of the pipe
+    pub fn close(self: PipePair, rt: *Runtime) void {
+        self.read.close(rt);
+        self.write.close(rt);
+    }
+};
+
+pub const Pipe = struct {
+    fd: Handle,
+
+    pub const ReadError = os.fs.FileReadError || Cancelable || Timeoutable;
+    pub const WriteError = os.fs.FileWriteError || Cancelable || Timeoutable;
+
+    /// Create pipe from existing file descriptor
+    pub fn fromFd(fd: Handle) Pipe {
+        return .{ .fd = fd };
+    }
+
+    /// Read from pipe
+    pub fn read(self: Pipe, rt: *Runtime, buffer: []u8, timeout: Timeout) ReadError!usize {
+        var storage: [1]os.iovec = undefined;
+        return self.readBuf(rt, .fromSlice(buffer, &storage), timeout);
+    }
+
+    /// Write to pipe
+    pub fn write(self: Pipe, rt: *Runtime, data: []const u8, timeout: Timeout) WriteError!usize {
+        var storage: [1]os.iovec_const = undefined;
+        return self.writeBuf(rt, .fromSlice(data, &storage), timeout);
+    }
+
+    /// Read using ReadBuf (vectored I/O)
+    pub fn readBuf(self: Pipe, rt: *Runtime, buf: ev.ReadBuf, timeout: Timeout) ReadError!usize {
+        var op = ev.PipeRead.init(self.fd, buf);
+        try timedWaitForIo(rt, &op.c, timeout);
+        return try op.getResult();
+    }
+
+    /// Write using WriteBuf (vectored I/O)
+    pub fn writeBuf(self: Pipe, rt: *Runtime, buf: ev.WriteBuf, timeout: Timeout) WriteError!usize {
+        var op = ev.PipeWrite.init(self.fd, buf);
+        try timedWaitForIo(rt, &op.c, timeout);
+        return try op.getResult();
+    }
+
+    /// Close this end of the pipe
+    pub fn close(self: Pipe, rt: *Runtime) void {
+        var op = ev.PipeClose.init(self.fd);
+        rt.beginShield();
+        defer rt.endShield();
+        waitForIo(rt, &op.c) catch unreachable;
+        _ = op.getResult() catch {};
+    }
+
+    /// Get a buffered reader
+    pub fn reader(self: Pipe, rt: *Runtime, buffer: []u8) PipeReader {
+        return PipeReader.init(self, rt, buffer);
+    }
+
+    /// Get a buffered writer
+    pub fn writer(self: Pipe, rt: *Runtime, buffer: []u8) PipeWriter {
+        return PipeWriter.init(self, rt, buffer);
+    }
+};
+
+pub const PipeReader = struct {
+    pipe: Pipe,
+    runtime: *Runtime,
+    timeout: Timeout = .none,
+    err: ?Pipe.ReadError = null,
+    interface: std.Io.Reader,
+
+    pub fn init(pipe: Pipe, runtime: *Runtime, buffer: []u8) PipeReader {
+        return .{
+            .pipe = pipe,
+            .runtime = runtime,
+            .interface = .{
+                .vtable = &.{
+                    .stream = stream,
+                    .readVec = readVec,
+                },
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    pub fn setTimeout(self: *PipeReader, timeout: Timeout) void {
+        self.timeout = timeout;
+    }
+
+    fn stream(io_reader: *std.Io.Reader, io_writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const r: *PipeReader = @alignCast(@fieldParentPtr("interface", io_reader));
+        const dest = limit.slice(try io_writer.writableSliceGreedy(1));
+
+        const n = r.pipe.read(r.runtime, dest, r.timeout) catch |err| {
+            r.err = err;
+            return error.ReadFailed;
+        };
+
+        if (n == 0) return error.EndOfStream;
+
+        io_writer.advance(n);
+        return n;
+    }
+
+    fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        const r: *PipeReader = @alignCast(@fieldParentPtr("interface", io_reader));
+
+        var iovec_storage: [1 + max_vecs]os.iovec = undefined;
+        const dest_n, const data_size = if (builtin.os.tag == .windows)
+            try io_reader.writableVectorWsa(&iovec_storage, data)
+        else
+            try io_reader.writableVectorPosix(&iovec_storage, data);
+        if (dest_n == 0) return 0;
+
+        const buf = ev.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
+        const n = r.pipe.readBuf(r.runtime, buf, r.timeout) catch |err| {
+            r.err = err;
+            return error.ReadFailed;
+        };
+
+        if (n == 0) return error.EndOfStream;
+
+        if (n > data_size) {
+            io_reader.end += n - data_size;
+            return data_size;
+        }
+        return n;
+    }
+};
+
+pub const PipeWriter = struct {
+    pipe: Pipe,
+    runtime: *Runtime,
+    timeout: Timeout = .none,
+    err: ?Pipe.WriteError = null,
+    interface: std.Io.Writer,
+
+    pub fn init(pipe: Pipe, runtime: *Runtime, buffer: []u8) PipeWriter {
+        return .{
+            .pipe = pipe,
+            .runtime = runtime,
+            .interface = .{
+                .vtable = &.{
+                    .drain = drain,
+                    .flush = flush,
+                },
+                .buffer = buffer,
+                .end = 0,
+            },
+        };
+    }
+
+    pub fn setTimeout(self: *PipeWriter, timeout: Timeout) void {
+        self.timeout = timeout;
+    }
+
+    fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const w: *PipeWriter = @alignCast(@fieldParentPtr("interface", io_writer));
+        const buffered = io_writer.buffered();
+
+        var splat_buf: [64]u8 = undefined;
+        var slices: [max_vecs][]const u8 = undefined;
+        const buf_len = fillBuf(&slices, buffered, data, splat, &splat_buf);
+
+        if (buf_len == 0) return 0;
+
+        var storage: [max_vecs]os.iovec_const = undefined;
+        const write_buf = ev.WriteBuf.fromSlices(slices[0..buf_len], &storage);
+        const n = w.pipe.writeBuf(w.runtime, write_buf, w.timeout) catch |err| {
+            w.err = err;
+            return error.WriteFailed;
+        };
+
+        return io_writer.consume(n);
+    }
+
+    fn flush(io_writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const w: *PipeWriter = @alignCast(@fieldParentPtr("interface", io_writer));
+
+        while (io_writer.end > 0) {
+            const buffered = io_writer.buffered();
+            const n = w.pipe.write(w.runtime, buffered, w.timeout) catch |err| {
+                w.err = err;
+                return error.WriteFailed;
+            };
+
+            if (n == 0) return error.WriteFailed;
+
+            if (n < buffered.len) {
+                std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
+                io_writer.end -= n;
+            } else {
+                io_writer.end = 0;
+            }
+        }
+    }
+};
+
 const TestFile = struct {
     rt: *Runtime,
     dir: Dir,
@@ -562,6 +791,10 @@ test {
     _ = rename;
     _ = createDir;
     _ = createFile;
+    _ = createPipe;
+    _ = stdin;
+    _ = stdout;
+    _ = stderr;
     _ = stat;
     _ = access;
 }
@@ -884,4 +1117,97 @@ test "Dir: access" {
         return;
     };
     return error.TestExpectedError;
+}
+
+test "Pipe: basic read and write" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.close(rt);
+
+    const write_data = "Hello, pipe!";
+    const bytes_written = try pipe.write.write(rt, write_data, .none);
+    try std.testing.expectEqual(write_data.len, bytes_written);
+
+    var buffer: [100]u8 = undefined;
+    const bytes_read = try pipe.read.read(rt, &buffer, .none);
+    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+}
+
+test "Pipe: reader and writer interface" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.close(rt);
+
+    var write_buffer: [256]u8 = undefined;
+    var writer = pipe.write.writer(rt, &write_buffer);
+
+    try writer.interface.writeAll("Line 1\n");
+    try writer.interface.writeAll("Line 2\n");
+    try writer.interface.flush();
+
+    var read_buffer: [256]u8 = undefined;
+    var reader = pipe.read.reader(rt, &read_buffer);
+
+    const line1 = try reader.interface.takeDelimiterInclusive('\n');
+    try std.testing.expectEqualStrings("Line 1\n", line1);
+
+    const line2 = try reader.interface.takeDelimiterInclusive('\n');
+    try std.testing.expectEqualStrings("Line 2\n", line2);
+}
+
+test "Pipe: timeout on blocked read" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.close(rt);
+
+    var buffer: [100]u8 = undefined;
+    const timeout = Timeout.fromMilliseconds(10);
+
+    const result = pipe.read.read(rt, &buffer, timeout);
+    try std.testing.expectError(error.Timeout, result);
+}
+
+test "Pipe: half-close write end" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.read.close(rt);
+
+    const write_data = "Data before close";
+    _ = try pipe.write.write(rt, write_data, .none);
+
+    // Close write end
+    pipe.write.close(rt);
+
+    // Should be able to read existing data
+    var buffer: [100]u8 = undefined;
+    const bytes_read = try pipe.read.read(rt, &buffer, .none);
+    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+
+    // Next read should return 0 (EOF)
+    const eof_read = try pipe.read.read(rt, &buffer, .none);
+    try std.testing.expectEqual(0, eof_read);
+}
+
+test "Pipe: half-close read end" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.write.close(rt);
+
+    // Close read end first
+    pipe.read.close(rt);
+
+    // Try to write - should get BrokenPipe error
+    const write_data = "Data after close";
+    const result = pipe.write.write(rt, write_data, .none);
+    try std.testing.expectError(error.BrokenPipe, result);
 }

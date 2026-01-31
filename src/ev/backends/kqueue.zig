@@ -27,9 +27,11 @@ const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
-const FileStreamPoll = @import("../completion.zig").FileStreamPoll;
-const FileStreamRead = @import("../completion.zig").FileStreamRead;
-const FileStreamWrite = @import("../completion.zig").FileStreamWrite;
+const PipePoll = @import("../completion.zig").PipePoll;
+const PipeCreate = @import("../completion.zig").PipeCreate;
+const PipeRead = @import("../completion.zig").PipeRead;
+const PipeWrite = @import("../completion.zig").PipeWrite;
+const PipeClose = @import("../completion.zig").PipeClose;
 const fs = @import("../../os/fs.zig");
 
 pub const NetHandle = net.fd_t;
@@ -155,10 +157,10 @@ fn getFilter(completion: *Completion) i16 {
                 .send => std.c.EVFILT.WRITE,
             };
         },
-        .file_stream_read => std.c.EVFILT.READ,
-        .file_stream_write => std.c.EVFILT.WRITE,
-        .file_stream_poll => blk: {
-            const poll_data = completion.cast(FileStreamPoll);
+        .pipe_read => std.c.EVFILT.READ,
+        .pipe_write => std.c.EVFILT.WRITE,
+        .pipe_poll => blk: {
+            const poll_data = completion.cast(PipePoll);
             break :blk switch (poll_data.event) {
                 .read => std.c.EVFILT.READ,
                 .write => std.c.EVFILT.WRITE,
@@ -229,9 +231,10 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_recvmsg => completion.cast(NetRecvMsg).handle,
         .net_sendmsg => completion.cast(NetSendMsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
-        .file_stream_poll => completion.cast(FileStreamPoll).handle,
-        .file_stream_read => completion.cast(FileStreamRead).handle,
-        .file_stream_write => completion.cast(FileStreamWrite).handle,
+        .pipe_poll => completion.cast(PipePoll).handle,
+        .pipe_read => completion.cast(PipeRead).handle,
+        .pipe_write => completion.cast(PipeWrite).handle,
+        .pipe_close => completion.cast(PipeClose).handle,
         else => unreachable,
     };
 }
@@ -319,17 +322,35 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetPoll);
             self.queueRegister(state, data.handle, c);
         },
-        .file_stream_poll => {
-            const data = c.cast(FileStreamPoll);
+        .pipe_poll => {
+            const data = c.cast(PipePoll);
             self.queueRegister(state, data.handle, c);
         },
-        .file_stream_read => {
-            const data = c.cast(FileStreamRead);
+        .pipe_create => {
+            const fds = fs.pipe() catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            c.setResult(.pipe_create, fds);
+            state.markCompletedFromBackend(c);
+        },
+        .pipe_read => {
+            const data = c.cast(PipeRead);
             self.queueRegister(state, data.handle, c);
         },
-        .file_stream_write => {
-            const data = c.cast(FileStreamWrite);
+        .pipe_write => {
+            const data = c.cast(PipeWrite);
             self.queueRegister(state, data.handle, c);
+        },
+        .pipe_close => {
+            const data = c.cast(PipeClose);
+            if (fs.close(data.handle)) |_| {
+                c.setResult(.pipe_close, {});
+            } else |err| {
+                c.setError(err);
+            }
+            state.markCompletedFromBackend(c);
         },
 
         // File operations are handled by Loop via thread pool
@@ -578,31 +599,51 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             }
             return .completed;
         },
-        .file_stream_read => {
-            const data = comp.cast(FileStreamRead);
-            if (handleKqueueError(event, fs.errnoToFileReadError)) |err| {
-                comp.setError(err);
+        .pipe_read => {
+            const data = comp.cast(PipeRead);
+            // Check for actual errors first
+            const has_error = (event.flags & EV_ERROR) != 0;
+            if (has_error and event.data != 0) {
+                comp.setError(fs.errnoToFileReadError(@enumFromInt(@as(i32, @intCast(event.data)))));
                 return .completed;
             }
+            // Try to read - there might still be data in the pipe buffer
             if (fs.readv(data.handle, data.buffer.iovecs)) |n| {
-                comp.setResult(.file_stream_read, n);
+                comp.setResult(.pipe_read, n);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    // For pipes, EV_EOF means the write end is closed
+                    // If we got WouldBlock and EOF is set, that's EOF (no more data)
+                    const has_eof = (event.flags & EV_EOF) != 0;
+                    if (has_eof) {
+                        comp.setResult(.pipe_read, 0);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     comp.setError(err);
                     return .completed;
                 },
             }
         },
-        .file_stream_write => {
-            const data = comp.cast(FileStreamWrite);
-            if (handleKqueueError(event, fs.errnoToFileWriteError)) |err| {
-                comp.setError(err);
+        .pipe_write => {
+            const data = comp.cast(PipeWrite);
+            // For pipes, check for errors but don't use getSockError
+            const has_error = (event.flags & EV_ERROR) != 0;
+            const has_eof = (event.flags & EV_EOF) != 0;
+            if (has_error and event.data != 0) {
+                comp.setError(fs.errnoToFileWriteError(@enumFromInt(@as(i32, @intCast(event.data)))));
+                return .completed;
+            }
+            if (has_eof) {
+                // Read end closed
+                comp.setError(error.BrokenPipe);
                 return .completed;
             }
             if (fs.writev(data.handle, data.buffer.iovecs)) |n| {
-                comp.setResult(.file_stream_write, n);
+                comp.setResult(.pipe_write, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,
@@ -612,12 +653,14 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 },
             }
         },
-        .file_stream_poll => {
+        .pipe_close => unreachable, // Handled synchronously in submit
+        .pipe_create => unreachable, // Handled synchronously in submit
+        .pipe_poll => {
             // For poll operations, EOF means the fd is "ready" (will return EOF on next read).
             if (handleKqueueError(event, fs.errnoToFileReadError)) |err| {
                 comp.setError(err);
             } else {
-                comp.setResult(.file_stream_poll, {});
+                comp.setResult(.pipe_poll, {});
             }
             return .completed;
         },
