@@ -24,6 +24,24 @@ $ zig fetch --save git+https://github.com/lalinsky/zio
 info: resolved to commit f4c56e3e7b7b9abd7360473d8af3ee55edcc9957
 ```
 
-## Writing a TCP server
+## Hello World
 
+Now let's do the simplest possible "Hello World" example that still uses `zio.File` to write the text. Put this into `src/main.zig`:
 
+```zig
+const std = @import("std");
+const zio = @import("zio");
+
+pub fn main() !void {
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+    defer rt.deinit();
+
+    var stdout = zio.File.stdout();
+
+    var buffer: [100]u8 = undefined;
+    var writer = stdout.writer(rt, &buffer);
+
+    try writer.interface.writeAll("Hello, world!\n");
+    try writer.interface.flush();
+}
+```
