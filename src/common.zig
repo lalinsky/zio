@@ -123,7 +123,9 @@ pub const Waiter = struct {
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
 pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
+    std.debug.print("[COMMON] waitForIo: starting\n", .{});
     var waiter = Waiter.init(rt);
+    std.debug.print("[COMMON] waitForIo: waiter initialized\n", .{});
     c.userdata = &waiter;
     c.callback = Waiter.callback;
 
@@ -133,9 +135,12 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     };
 
     // Submit to the event loop and wait for completion
+    std.debug.print("[COMMON] waitForIo: adding to loop\n", .{});
     waiter.task.getExecutor().loop.add(c);
+    std.debug.print("[COMMON] waitForIo: added to loop, now waiting\n", .{});
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
+            std.debug.print("[COMMON] waitForIo: got Canceled, canceling I/O\n", .{});
             // On cancellation, cancel the I/O and wait for completion
             waiter.task.getExecutor().loop.cancel(c);
             waiter.wait(1, .no_cancel);
@@ -151,6 +156,7 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
             return;
         },
     };
+    std.debug.print("[COMMON] waitForIo: wait completed successfully\n", .{});
 }
 
 /// Runs an I/O operation to completion with a timeout.

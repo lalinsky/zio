@@ -105,8 +105,10 @@ pub const Op = enum {
     file_real_path,
     file_hard_link,
     file_stream_poll,
-    file_stream_read,
-    file_stream_write,
+    pipe_create,
+    pipe_read,
+    pipe_write,
+    pipe_close,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -162,8 +164,10 @@ pub const Op = enum {
             .file_real_path => FileRealPath,
             .file_hard_link => FileHardLink,
             .file_stream_poll => FileStreamPoll,
-            .file_stream_read => FileStreamRead,
-            .file_stream_write => FileStreamWrite,
+            .pipe_create => PipeCreate,
+            .pipe_read => PipeRead,
+            .pipe_write => PipeWrite,
+            .pipe_close => PipeClose,
         };
     }
 
@@ -221,8 +225,10 @@ pub const Op = enum {
             FileRealPath => .file_real_path,
             FileHardLink => .file_hard_link,
             FileStreamPoll => .file_stream_poll,
-            FileStreamRead => .file_stream_read,
-            FileStreamWrite => .file_stream_write,
+            PipeCreate => .pipe_create,
+            PipeRead => .pipe_read,
+            PipeWrite => .pipe_write,
+            PipeClose => .pipe_close,
             else => @compileError("unknown completion type"),
         };
     }
@@ -1720,7 +1726,24 @@ pub const FileStreamPoll = struct {
     }
 };
 
-pub const FileStreamRead = struct {
+pub const PipeCreate = struct {
+    c: Completion,
+    result_private_do_not_touch: [2]fs.fd_t = undefined,
+
+    pub const Error = fs.PipeError || Cancelable;
+
+    pub fn init() PipeCreate {
+        return .{
+            .c = .init(.pipe_create),
+        };
+    }
+
+    pub fn getResult(self: *const PipeCreate) Error![2]fs.fd_t {
+        return self.c.getResult(.pipe_create);
+    }
+};
+
+pub const PipeRead = struct {
     c: Completion,
     result_private_do_not_touch: usize = undefined,
     handle: fs.fd_t,
@@ -1728,20 +1751,20 @@ pub const FileStreamRead = struct {
 
     pub const Error = fs.FileReadError || Cancelable;
 
-    pub fn init(handle: fs.fd_t, buffer: ReadBuf) FileStreamRead {
+    pub fn init(handle: fs.fd_t, buffer: ReadBuf) PipeRead {
         return .{
-            .c = .init(.file_stream_read),
+            .c = .init(.pipe_read),
             .handle = handle,
             .buffer = buffer,
         };
     }
 
-    pub fn getResult(self: *const FileStreamRead) Error!usize {
-        return self.c.getResult(.file_stream_read);
+    pub fn getResult(self: *const PipeRead) Error!usize {
+        return self.c.getResult(.pipe_read);
     }
 };
 
-pub const FileStreamWrite = struct {
+pub const PipeWrite = struct {
     c: Completion,
     result_private_do_not_touch: usize = undefined,
     handle: fs.fd_t,
@@ -1749,15 +1772,34 @@ pub const FileStreamWrite = struct {
 
     pub const Error = fs.FileWriteError || Cancelable;
 
-    pub fn init(handle: fs.fd_t, buffer: WriteBuf) FileStreamWrite {
+    pub fn init(handle: fs.fd_t, buffer: WriteBuf) PipeWrite {
         return .{
-            .c = .init(.file_stream_write),
+            .c = .init(.pipe_write),
             .handle = handle,
             .buffer = buffer,
         };
     }
 
-    pub fn getResult(self: *const FileStreamWrite) Error!usize {
-        return self.c.getResult(.file_stream_write);
+    pub fn getResult(self: *const PipeWrite) Error!usize {
+        return self.c.getResult(.pipe_write);
+    }
+};
+
+pub const PipeClose = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    handle: fs.fd_t,
+
+    pub const Error = fs.FileCloseError || Cancelable;
+
+    pub fn init(handle: fs.fd_t) PipeClose {
+        return .{
+            .c = .init(.pipe_close),
+            .handle = handle,
+        };
+    }
+
+    pub fn getResult(self: *const PipeClose) Error!void {
+        return self.c.getResult(.pipe_close);
     }
 };

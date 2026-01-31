@@ -20,6 +20,44 @@ pub fn cwd() fd_t {
     }
 }
 
+/// Returns file descriptor for stdin.
+pub fn stdin() fd_t {
+    return switch (builtin.os.tag) {
+        .windows => std.os.windows.peb().ProcessParameters.hStdInput,
+        else => std.posix.STDIN_FILENO,
+    };
+}
+
+/// Returns file descriptor for stdout.
+pub fn stdout() fd_t {
+    return switch (builtin.os.tag) {
+        .windows => std.os.windows.peb().ProcessParameters.hStdOutput,
+        else => std.posix.STDOUT_FILENO,
+    };
+}
+
+/// Returns file descriptor for stderr.
+pub fn stderr() fd_t {
+    return switch (builtin.os.tag) {
+        .windows => std.os.windows.peb().ProcessParameters.hStdError,
+        else => std.posix.STDERR_FILENO,
+    };
+}
+
+pub const PipeError = if (builtin.os.tag == .windows)
+    error{Unexpected}
+else
+    posix.PipeError;
+
+/// Create a pipe for inter-process communication.
+/// Returns a pair of file descriptors [read_fd, write_fd].
+pub fn pipe() PipeError![2]fd_t {
+    return switch (builtin.os.tag) {
+        .windows => w.pipe(),
+        else => posix.pipe(.{ .nonblocking = true, .cloexec = true }),
+    };
+}
+
 pub const iovec = @import("base.zig").iovec;
 pub const iovec_const = @import("base.zig").iovec_const;
 
@@ -1200,12 +1238,22 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
     }
 }
 
-pub fn errnoToFileCloseError(errno: posix.system.E) FileCloseError {
-    return switch (errno) {
-        .SUCCESS => unreachable,
-        .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
-    };
+pub fn errnoToFileCloseError(errno: E) FileCloseError {
+    switch (builtin.os.tag) {
+        .windows => {
+            return switch (errno) {
+                .SUCCESS => unreachable,
+                else => |e| unexpectedError(e) catch error.Unexpected,
+            };
+        },
+        else => {
+            return switch (errno) {
+                .SUCCESS => unreachable,
+                .CANCELED => error.Canceled,
+                else => |e| unexpectedError(e) catch error.Unexpected,
+            };
+        },
+    }
 }
 
 pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {

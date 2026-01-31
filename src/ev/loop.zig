@@ -147,6 +147,7 @@ pub const LoopState = struct {
     }
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
+        std.debug.print("[LOOP] markCompleted: starting\n", .{});
         std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
 
@@ -161,18 +162,23 @@ pub const LoopState = struct {
         // Always set state
         completion.state = .completed;
 
+        std.debug.print("[LOOP] markCompleted: in_queue={}, defer_callbacks={}\n", .{ old.in_queue, self.loop.defer_callbacks });
         // Only call finish if not in cancel queue
         // If in_queue, cancel queue processing will call finishCompletion
         if (!old.in_queue) {
             if (self.loop.defer_callbacks) {
                 self.completions.push(completion);
             } else {
+                std.debug.print("[LOOP] markCompleted: calling finishCompletion\n", .{});
                 self.finishCompletion(completion);
+                std.debug.print("[LOOP] markCompleted: finishCompletion returned\n", .{});
             }
         }
+        std.debug.print("[LOOP] markCompleted: done\n", .{});
     }
 
     pub fn finishCompletion(self: *LoopState, completion: *Completion) void {
+        std.debug.print("[LOOP] finishCompletion: starting\n", .{});
         std.debug.assert(completion.state == .completed);
 
         completion.state = .dead;
@@ -203,7 +209,9 @@ pub const LoopState = struct {
             }
         }
 
+        std.debug.print("[LOOP] finishCompletion: calling completion callback\n", .{});
         completion.call(self.loop);
+        std.debug.print("[LOOP] finishCompletion: callback returned\n", .{});
     }
 
     pub fn markRunning(self: *LoopState, completion: *Completion) void {
@@ -605,7 +613,9 @@ pub const Loop = struct {
                 }
 
                 self.state.inflight_io += 1;
+                std.debug.print("[LOOP] addInternal: calling backend.submit for op={}\n", .{completion.op});
                 self.backend.submit(&self.state, completion);
+                std.debug.print("[LOOP] addInternal: backend.submit returned\n", .{});
                 return;
             },
         }
