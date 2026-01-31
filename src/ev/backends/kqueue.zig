@@ -656,12 +656,19 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
         .pipe_close => unreachable, // Handled synchronously in submit
         .pipe_create => unreachable, // Handled synchronously in submit
         .pipe_poll => {
-            // For poll operations, EOF means the fd is "ready" (will return EOF on next read).
-            if (handleKqueueError(event, fs.errnoToFileReadError)) |err| {
-                comp.setError(err);
-            } else {
-                comp.setResult(.pipe_poll, {});
+            const data = comp.cast(PipePoll);
+            // Check for errors directly (don't use getSockError for pipes)
+            const has_error = (event.flags & EV_ERROR) != 0;
+            if (has_error and event.data != 0) {
+                const errno_fn = switch (data.event) {
+                    .read => fs.errnoToFileReadError,
+                    .write => fs.errnoToFileWriteError,
+                };
+                comp.setError(errno_fn(@enumFromInt(@as(i32, @intCast(event.data)))));
+                return .completed;
             }
+            // For poll operations, EOF or readiness means the fd is ready
+            comp.setResult(.pipe_poll, {});
             return .completed;
         },
         else => {

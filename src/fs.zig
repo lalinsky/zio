@@ -574,7 +574,7 @@ pub const Pipe = struct {
 
     pub const ReadError = os.fs.FileReadError || Cancelable || Timeoutable;
     pub const WriteError = os.fs.FileWriteError || Cancelable || Timeoutable;
-    pub const PollError = os.fs.FileReadError || Cancelable || Timeoutable;
+    pub const PollError = os.fs.FileReadError || os.fs.FileWriteError || Cancelable || Timeoutable;
     pub const PollEvent = ev.PipePoll.Event;
 
     /// Create pipe from existing file descriptor

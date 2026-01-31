@@ -1705,7 +1705,7 @@ pub const PipePoll = struct {
     handle: fs.fd_t,
     event: Event,
 
-    pub const Error = fs.FileReadError || Cancelable;
+    pub const Error = fs.FileReadError || fs.FileWriteError || Cancelable;
 
     /// Event to monitor for
     pub const Event = enum {
