@@ -422,6 +422,18 @@ pub const Timeout = union(enum) {
         };
     }
 
+    /// Formats the timeout for display.
+    pub fn format(self: Timeout, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .none => try w.writeAll("none"),
+            .duration => |d| try d.format(w),
+            .deadline => |ts| {
+                try w.writeAll("deadline:");
+                try ts.format(w);
+            },
+        }
+    }
+
     // Future protocol implementation for use with select()
 
     pub const Result = void;

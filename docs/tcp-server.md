@@ -1,6 +1,13 @@
-# Simple TCP Server
+# TCP Server
 
 Now that you've seen a basic "Hello, world!" example, let's build something more interesting: a TCP echo server that can handle multiple clients concurrently.
+
+You'll learn about:
+
+- **TCP listeners** - accepting incoming connections
+- **Task groups** - structured concurrency for managing multiple tasks
+- **Spawning tasks** - running handlers concurrently for each client
+- **Stream readers and writers** - buffered I/O on network connections
 
 ## The Code
 
@@ -38,8 +45,7 @@ The server consists of two main parts: the main function that accepts connection
 The `main` function starts by initializing the runtime and creating a TCP listener:
 
 ```zig
-const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
-const server = try addr.listen(rt, .{});
+--8<-- "examples/tcp_echo_server.zig:setup"
 ```
 
 This creates a server socket listening on `127.0.0.1:8080`.
@@ -49,8 +55,7 @@ This creates a server socket listening on `127.0.0.1:8080`.
 Before entering the accept loop, we create a task group:
 
 ```zig
-var group: zio.Group = .init;
-defer group.cancel(rt);
+--8<-- "examples/tcp_echo_server.zig:group"
 ```
 
 A [`Group`](../apidocs/#zio.Group) manages a collection of tasks and provides structured concurrency. When the group is cancelled (which happens automatically via `defer` when `main` exits), all tasks spawned into the group are also cancelled. This ensures proper cleanup of all client handlers.
@@ -60,12 +65,7 @@ A [`Group`](../apidocs/#zio.Group) manages a collection of tasks and provides st
 The server then enters an infinite loop accepting connections:
 
 ```zig
-while (true) {
-    const stream = try server.accept(rt);
-    errdefer stream.close(rt);
-
-    try group.spawn(rt, handleClient, .{ rt, stream });
-}
+--8<-- "examples/tcp_echo_server.zig:accept"
 ```
 
 For each incoming connection, we spawn a new task using [`group.spawn()`](../apidocs/#zio.Group.spawn). This creates a new fiber (lightweight thread) that runs the `handleClient` function concurrently with the main loop. This is what allows the server to handle multiple clients at the same time.
@@ -77,28 +77,7 @@ The `errdefer` ensures that if spawning fails, we close the stream to avoid leak
 The `handleClient` function processes a single client connection:
 
 ```zig
-fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
-    defer stream.close(rt);
-
-    var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(rt, &read_buffer);
-
-    var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(rt, &write_buffer);
-
-    while (true) {
-        const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => |e| return reader.err orelse e,
-            else => |e| return e,
-        };
-
-        try rt.sleep(.fromMilliseconds(1000));
-
-        try writer.interface.writeAll(line);
-        try writer.interface.flush();
-    }
-}
+--8<-- "examples/tcp_echo_server.zig:handleClient"
 ```
 
 This function:

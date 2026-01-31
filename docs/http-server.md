@@ -1,6 +1,8 @@
-# Simple HTTP Server
+# HTTP Server
 
 This example follows the same pattern as [the TCP server we built previously](tcp-server.md) - accepting connections and spawning tasks to handle clients - but uses Zig's standard library [`std.http.Server`](https://ziglang.org/documentation/0.15.2/std/#std.http.Server) to handle the HTTP protocol.
+
+You'll see that thanks to the standard [`std.Io.Reader`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer) interfaces, you can use existing Zig libraries that were not written with async I/O in mind.
 
 ## The Code
 
@@ -30,7 +32,7 @@ The structure is similar to the TCP server, but instead of reading raw bytes, we
 For each client connection, we create an HTTP server instance:
 
 ```zig
-var server = std.http.Server.init(&reader.interface, &writer.interface);
+--8<-- "examples/http_server.zig:init"
 ```
 
 The key here is that `std.http.Server` works with any [`std.Io.Reader`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer). ZIO's stream reader and writer implement these standard interfaces, so they work seamlessly with existing Zig libraries.
@@ -40,24 +42,7 @@ The key here is that `std.http.Server` works with any [`std.Io.Reader`](https://
 The request handling loop receives HTTP requests and sends responses:
 
 ```zig
-while (true) {
-    var request = server.receiveHead() catch |err| switch (err) {
-        error.ReadFailed => |e| return reader.err orelse e,
-        else => |e| return e,
-    };
-
-    try request.respond(html, .{
-        .status = .ok,
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = "text/html; charset=utf-8" },
-        },
-    });
-
-    if (!request.head.keep_alive) {
-        try stream.shutdown(rt, .both);
-        break;
-    }
-}
+--8<-- "examples/http_server.zig:loop"
 ```
 
 The server supports HTTP keep-alive, allowing multiple requests over a single connection. When the client doesn't want keep-alive, we shut down the connection.

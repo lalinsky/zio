@@ -22,12 +22,13 @@ pub fn main() !void {
     std.log.info("UDP echo server listening on {f}", .{socket.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
 
+    const timeout: zio.Timeout = .none;
     var buffer: [1024]u8 = undefined;
 
     while (true) {
-        const result = try socket.receiveFrom(rt, &buffer);
+        const result = try socket.receiveFrom(rt, &buffer, timeout);
         std.log.info("Received {d} bytes from {f}", .{ result.len, result.from });
-        const sent = try socket.sendTo(rt, result.from, buffer[0..result.len]);
+        const sent = try socket.sendTo(rt, result.from, buffer[0..result.len], timeout);
         std.debug.assert(sent == result.len);
     }
 }

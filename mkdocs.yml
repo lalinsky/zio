@@ -35,8 +35,9 @@ nav:
   - Overview: index.md
   - Tutorial:
     - Getting Started: getting-started.md
-    - Simple TCP Server: tcp-server.md
-    - Simple HTTP Server: http-server.md
+    - TCP Server: tcp-server.md
+    - HTTP Server: http-server.md
+    - NTP Client: ntp-client.md
     - Parallel Grep: parallel-grep.md
   - Reference:
     - API Documentation: apidocs/
