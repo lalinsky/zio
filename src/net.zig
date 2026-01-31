@@ -1013,23 +1013,23 @@ pub const Socket = struct {
 
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
-    pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8) !ReceiveFromResult {
+    pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8, timeout: Timeout) !ReceiveFromResult {
         var storage: [1]os.iovec = undefined;
         var result: ReceiveFromResult = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
         var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
-        try waitForIo(rt, &op.c);
+        try timedWaitForIo(rt, &op.c, timeout);
         result.len = try op.getResult();
         return result;
     }
 
     /// Sends a datagram to the specified address.
     /// Used for UDP and other datagram-based protocols.
-    pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8) !usize {
+    pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
         const addr_len = getSockAddrLen(&addr.any);
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
-        try waitForIo(rt, &op.c);
+        try timedWaitForIo(rt, &op.c, timeout);
         return try op.getResult();
     }
 
@@ -2018,11 +2018,11 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
 
         pub fn serverFn(rt: *Runtime, socket: Socket) !void {
             var buf: [1024]u8 = undefined;
-            const result = try socket.receiveFrom(rt, &buf);
+            const result = try socket.receiveFrom(rt, &buf, .none);
 
             try std.testing.expectEqualStrings("hello", buf[0..result.len]);
 
-            const bytes_sent = try socket.sendTo(rt, result.from, buf[0..result.len]);
+            const bytes_sent = try socket.sendTo(rt, result.from, buf[0..result.len], .none);
             try std.testing.expectEqual(result.len, bytes_sent);
         }
 
@@ -2031,11 +2031,11 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
             defer client_socket.close(rt);
 
             const test_data = "hello";
-            const bytes_sent = try client_socket.sendTo(rt, server_socket.address, test_data);
+            const bytes_sent = try client_socket.sendTo(rt, server_socket.address, test_data, .none);
             try std.testing.expectEqual(test_data.len, bytes_sent);
 
             var buf: [1024]u8 = undefined;
-            const result = try client_socket.receiveFrom(rt, &buf);
+            const result = try client_socket.receiveFrom(rt, &buf, .none);
             try std.testing.expectEqualStrings(test_data, buf[0..result.len]);
         }
     };

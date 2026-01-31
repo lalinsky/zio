@@ -15,9 +15,12 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     var write_buffer: [4096]u8 = undefined;
     var writer = stream.writer(rt, &write_buffer);
 
+    // --8<-- [start:init]
     // Initialize HTTP server for this connection
     var server = std.http.Server.init(&reader.interface, &writer.interface);
+    // --8<-- [end:init]
 
+    // --8<-- [start:loop]
     while (true) {
         // Receive HTTP request headers
         var request = server.receiveHead() catch |err| switch (err) {
@@ -51,6 +54,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
             break;
         }
     }
+    // --8<-- [end:loop]
 
     std.log.info("HTTP client disconnected", .{});
 }

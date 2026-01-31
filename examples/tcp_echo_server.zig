@@ -1,6 +1,7 @@
 const std = @import("std");
 const zio = @import("zio");
 
+// --8<-- [start:handleClient]
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
     defer stream.close(rt);
 
@@ -31,26 +32,33 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
 
     std.log.info("Client disconnected", .{});
 }
+// --8<-- [end:handleClient]
 
 pub fn main() !void {
     const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
+    // --8<-- [start:setup]
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
     const server = try addr.listen(rt, .{});
+    // --8<-- [end:setup]
     defer server.close(rt);
 
     std.log.info("TCP echo server listening on {f}", .{server.socket.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
 
+    // --8<-- [start:group]
     var group: zio.Group = .init;
     defer group.cancel(rt);
+    // --8<-- [end:group]
 
+    // --8<-- [start:accept]
     while (true) {
         const stream = try server.accept(rt);
         errdefer stream.close(rt);
 
         try group.spawn(rt, handleClient, .{ rt, stream });
     }
+    // --8<-- [end:accept]
 }
