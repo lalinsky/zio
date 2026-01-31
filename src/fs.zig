@@ -66,16 +66,51 @@ pub fn createPipe(rt: *Runtime) (os.fs.PipeError || Cancelable)!PipePair {
     };
 }
 
+// Global state to track if stdio fds have been set to non-blocking mode
+// TODO: This should be handled more generically by the backend
+var stdio_nonblocking_mutex: std.Thread.Mutex = .{};
+var stdio_nonblocking = [3]bool{ false, false, false };
+
 pub fn stdin() Pipe {
-    return Pipe.fromFd(os.fs.stdin());
+    const fd = os.fs.stdin();
+    // Only set non-blocking for backends that require it
+    if (ev.backend != .io_uring and ev.backend != .iocp) {
+        stdio_nonblocking_mutex.lock();
+        defer stdio_nonblocking_mutex.unlock();
+        if (!stdio_nonblocking[0]) {
+            os.posix.setNonblocking(fd) catch {};
+            stdio_nonblocking[0] = true;
+        }
+    }
+    return Pipe.fromFd(fd);
 }
 
 pub fn stdout() Pipe {
-    return Pipe.fromFd(os.fs.stdout());
+    const fd = os.fs.stdout();
+    // Only set non-blocking for backends that require it
+    if (ev.backend != .io_uring and ev.backend != .iocp) {
+        stdio_nonblocking_mutex.lock();
+        defer stdio_nonblocking_mutex.unlock();
+        if (!stdio_nonblocking[1]) {
+            os.posix.setNonblocking(fd) catch {};
+            stdio_nonblocking[1] = true;
+        }
+    }
+    return Pipe.fromFd(fd);
 }
 
 pub fn stderr() Pipe {
-    return Pipe.fromFd(os.fs.stderr());
+    const fd = os.fs.stderr();
+    // Only set non-blocking for backends that require it
+    if (ev.backend != .io_uring and ev.backend != .iocp) {
+        stdio_nonblocking_mutex.lock();
+        defer stdio_nonblocking_mutex.unlock();
+        if (!stdio_nonblocking[2]) {
+            os.posix.setNonblocking(fd) catch {};
+            stdio_nonblocking[2] = true;
+        }
+    }
+    return Pipe.fromFd(fd);
 }
 
 pub fn stat(rt: *Runtime, path: []const u8) Dir.StatError!os.fs.FileStatInfo {
