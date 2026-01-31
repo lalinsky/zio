@@ -574,6 +574,8 @@ pub const Pipe = struct {
 
     pub const ReadError = os.fs.FileReadError || Cancelable || Timeoutable;
     pub const WriteError = os.fs.FileWriteError || Cancelable || Timeoutable;
+    pub const PollError = os.fs.FileReadError || Cancelable || Timeoutable;
+    pub const PollEvent = ev.PipePoll.Event;
 
     /// Create pipe from existing file descriptor
     pub fn fromFd(fd: Handle) Pipe {
@@ -602,6 +604,15 @@ pub const Pipe = struct {
     /// Write using WriteBuf (vectored I/O)
     pub fn writeBuf(self: Pipe, rt: *Runtime, buf: ev.WriteBuf, timeout: Timeout) WriteError!usize {
         var op = ev.PipeWrite.init(self.fd, buf);
+        try timedWaitForIo(rt, &op.c, timeout);
+        return try op.getResult();
+    }
+
+    /// Poll for readiness
+    /// Waits until the pipe is ready for the specified event (read or write)
+    /// Note: Not supported on Windows (returns error.Unexpected)
+    pub fn poll(self: Pipe, rt: *Runtime, event: PollEvent, timeout: Timeout) PollError!void {
+        var op = ev.PipePoll.init(self.fd, event);
         try timedWaitForIo(rt, &op.c, timeout);
         return try op.getResult();
     }
@@ -1171,6 +1182,75 @@ test "Pipe: timeout on blocked read" {
 
     const result = pipe.read.read(rt, &buffer, timeout);
     try std.testing.expectError(error.Timeout, result);
+}
+
+test "Pipe: poll for readability" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.close(rt);
+
+    // Poll should timeout when no data available
+    const timeout = Timeout.fromMilliseconds(10);
+    const poll_result = pipe.read.poll(rt, .read, timeout);
+    try std.testing.expectError(error.Timeout, poll_result);
+
+    // Write some data
+    const write_data = "poll test";
+    _ = try pipe.write.write(rt, write_data, .none);
+
+    // Now poll should succeed immediately
+    try pipe.read.poll(rt, .read, .none);
+
+    // And we should be able to read the data
+    var buffer: [100]u8 = undefined;
+    const bytes_read = try pipe.read.read(rt, &buffer, .none);
+    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+}
+
+test "Pipe: poll on closed write end" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.read.close(rt);
+
+    // Close write end
+    pipe.write.close(rt);
+
+    // Poll should succeed immediately (EOF condition)
+    try pipe.read.poll(rt, .read, .none);
+
+    // Read should return 0 (EOF)
+    var buffer: [100]u8 = undefined;
+    const bytes_read = try pipe.read.read(rt, &buffer, .none);
+    try std.testing.expectEqual(0, bytes_read);
+}
+
+test "Pipe: poll on closed read end" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const pipe = try createPipe(rt);
+    defer pipe.write.close(rt);
+
+    // Close read end
+    pipe.read.close(rt);
+
+    // Poll for writability succeeds (pipe appears writable)
+    try pipe.write.poll(rt, .write, .none);
+
+    // But actual write fails with BrokenPipe
+    const write_data = "test";
+    const result = pipe.write.write(rt, write_data, .none);
+    try std.testing.expectError(error.BrokenPipe, result);
 }
 
 test "Pipe: half-close write end" {
