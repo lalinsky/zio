@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added support 32-bit ARM/Thumb and RISC-V CPUs
+- Added `Pipe` to explicitly support streaming-only file descriptors (#267)
+- Added `Socket` methods for configuring OS-level buffer sizes (#243)
+- Added custom panic handler that fully extends stack before calling the default handler
+- Added convenience `fromXxx()` methods to `Timeout`
+
+### Changed
+
+- All timeout parameters now accept `Timeout` instead of `Duration` (#238, #239)
+- Increased default stack committment to 256KiB to avoid stack overflows in the default panic handler
+- Internal refactoring to reduce memory usage and binary size
+
+### Fixed
+
+- Fixed possible race condition between `Channel.close` and task cancelation
+
 ## [0.5.1] - 2026-01-25
 
 ### Added
