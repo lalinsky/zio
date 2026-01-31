@@ -20,8 +20,8 @@ info: see `zig build --help` for a menu of options
 Then add ZIO as a dependency to the project:
 
 ```sh
-$ zig fetch --save git+https://github.com/lalinsky/zio
-info: resolved to commit f4c56e3e7b7b9abd7360473d8af3ee55edcc9957
+$ zig fetch --save "git+https://github.com/lalinsky/zio#v0.6.0"
+info: resolved to commit 0000000000000000000000000000000000000000
 ```
 
 Now open `build.zig` and add these lines after the `exe` definition:
