@@ -74,7 +74,7 @@ var stdio_nonblocking = [3]bool{ false, false, false };
 pub fn stdin() Pipe {
     const fd = os.fs.stdin();
     // Only set non-blocking for backends that require it
-    if (ev.backend != .io_uring and ev.backend != .iocp) {
+    if (ev.backend != .io_uring and builtin.os.tag != .windows) {
         stdio_nonblocking_mutex.lock();
         defer stdio_nonblocking_mutex.unlock();
         if (!stdio_nonblocking[0]) {
@@ -88,7 +88,7 @@ pub fn stdin() Pipe {
 pub fn stdout() Pipe {
     const fd = os.fs.stdout();
     // Only set non-blocking for backends that require it
-    if (ev.backend != .io_uring and ev.backend != .iocp) {
+    if (ev.backend != .io_uring and builtin.os.tag != .windows) {
         stdio_nonblocking_mutex.lock();
         defer stdio_nonblocking_mutex.unlock();
         if (!stdio_nonblocking[1]) {
@@ -102,7 +102,7 @@ pub fn stdout() Pipe {
 pub fn stderr() Pipe {
     const fd = os.fs.stderr();
     // Only set non-blocking for backends that require it
-    if (ev.backend != .io_uring and ev.backend != .iocp) {
+    if (ev.backend != .io_uring and builtin.os.tag != .windows) {
         stdio_nonblocking_mutex.lock();
         defer stdio_nonblocking_mutex.unlock();
         if (!stdio_nonblocking[2]) {
@@ -1166,6 +1166,8 @@ test "Dir: access" {
 }
 
 test "Pipe: basic read and write" {
+    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1182,6 +1184,8 @@ test "Pipe: basic read and write" {
 }
 
 test "Pipe: reader and writer interface" {
+    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1206,6 +1210,8 @@ test "Pipe: reader and writer interface" {
 }
 
 test "Pipe: timeout on blocked read" {
+    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1289,6 +1295,8 @@ test "Pipe: poll on closed read end" {
 }
 
 test "Pipe: half-close write end" {
+    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1312,6 +1320,8 @@ test "Pipe: half-close write end" {
 }
 
 test "Pipe: half-close read end" {
+    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 

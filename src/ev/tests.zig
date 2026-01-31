@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const backend = @import("backend.zig");
 const Loop = @import("loop.zig").Loop;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
