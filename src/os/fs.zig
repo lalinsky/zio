@@ -1059,7 +1059,7 @@ pub fn dirRenamePreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: 
         defer allocator.free(new_path_z);
 
         while (true) {
-            const rc = linux.renameat2(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, linux.RENAME.NOREPLACE);
+            const rc = linux.renameat2(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, .{ .NOREPLACE = true });
             switch (posix.errno(rc)) {
                 .SUCCESS => return,
                 .INTR => continue,
