@@ -1071,7 +1071,25 @@ pub fn dirRenamePreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: 
 
     // Fallback for other POSIX systems: non-atomic link+unlink
     // This is not atomic and may leave both files if interrupted
-    return error.OperationUnsupported;
+    const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+    defer allocator.free(old_path_z);
+    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    defer allocator.free(new_path_z);
+
+    while (true) {
+        const rc = posix.system.linkat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, 0);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                // Successfully linked, now unlink the old path
+                // If this fails, we have both files but no data loss
+                _ = posix.system.unlinkat(old_dir, old_path_z.ptr, 0);
+                return;
+            },
+            .INTR => continue,
+            .EXIST => return error.PathAlreadyExists,
+            else => |err| return errnoToDirRenamePreserveError(err),
+        }
+    }
 }
 
 /// Delete a file using unlinkat() syscall

@@ -2396,6 +2396,9 @@ test "Io: Dir realPathFile" {
 }
 
 test "Io: File realPath" {
+    // Skip on FreeBSD - F_KINFO cache is unreliable for regular files
+    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
