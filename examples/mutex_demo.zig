@@ -11,7 +11,7 @@ const SharedData = struct {
 
 fn incrementTask(rt: *zio.Runtime, data: *SharedData, id: u32) !void {
     for (0..1000) |_| {
-        try data.mutex.lock(rt);
+        try data.mutex.lock();
         defer data.mutex.unlock();
 
         const old = data.counter;

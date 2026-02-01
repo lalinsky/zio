@@ -710,6 +710,15 @@ pub fn getCurrentTask() *AnyTask {
     return getCurrentExecutor().getCurrentTask();
 }
 
+/// Cooperatively yield control to allow other tasks to run.
+/// The current task will be rescheduled and continue execution later.
+/// Returns error.Canceled if the task was canceled.
+/// No-op if called from a thread without an executor (returns without error).
+pub fn yield() Cancelable!void {
+    const executor = Executor.current orelse return;
+    return executor.yield(.ready, .ready, .allow_cancel);
+}
+
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
     thread_pool: ev.ThreadPool,

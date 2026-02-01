@@ -17,7 +17,7 @@
 //! var mutex: zio.Mutex = .init;
 //! var shared_data: u32 = 0;
 //!
-//! try mutex.lock(rt);
+//! try mutex.lock();
 //! defer mutex.unlock();
 //!
 //! shared_data += 1;
@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const getCurrentTask = @import("../runtime.zig").getCurrentTask;
 const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -67,8 +68,7 @@ pub fn tryLock(self: *Mutex) bool {
 /// the zio runtime.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
-pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
-    _ = runtime;
+pub fn lock(self: *Mutex) Cancelable!void {
     // Fast path: try to acquire unlocked mutex
     if (self.queue.tryTransition(unlocked, locked_once)) {
         return;
@@ -113,11 +113,12 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 /// of cancellation (e.g., cleanup operations like close(), post()).
 ///
 /// If you need to propagate cancellation after acquiring the lock, call
-/// `runtime.checkCancel()` after this function returns.
-pub fn lockUncancelable(self: *Mutex, runtime: *Runtime) void {
-    runtime.beginShield();
-    defer runtime.endShield();
-    self.lock(runtime) catch unreachable;
+/// `Runtime.checkCancel()` after this function returns.
+pub fn lockUncancelable(self: *Mutex) void {
+    const task = getCurrentTask();
+    task.beginShield();
+    defer task.endShield();
+    self.lock() catch unreachable;
 }
 
 /// Releases the mutex.
@@ -145,8 +146,9 @@ test "Mutex basic lock/unlock" {
 
     const TestFn = struct {
         fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) !void {
+            _ = rt;
             for (0..100) |_| {
-                try mtx.lock(rt);
+                try mtx.lock();
                 defer mtx.unlock();
                 counter.* += 1;
             }

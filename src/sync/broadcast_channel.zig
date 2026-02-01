@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
@@ -486,8 +487,8 @@ test "BroadcastChannel: basic send and receive" {
     var barrier = Barrier.init(2);
 
     const TestFn = struct {
-        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = try b.wait(rt); // Wait for receiver to subscribe
+        fn sender(ch: *BroadcastChannel(u32), b: *Barrier) !void {
+            _ = try b.wait(); // Wait for receiver to subscribe
             try ch.send(1);
             try ch.send(2);
             try ch.send(3);
@@ -496,7 +497,7 @@ test "BroadcastChannel: basic send and receive" {
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[3]u32, b: *Barrier) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
-            _ = try b.wait(rt); // Signal that we're subscribed
+            _ = try b.wait(); // Signal that we're subscribed
 
             results[0] = try ch.receive(rt, consumer);
             results[1] = try ch.receive(rt, consumer);
@@ -510,7 +511,7 @@ test "BroadcastChannel: basic send and receive" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &barrier });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier });
 
     try group.wait(runtime);
@@ -530,8 +531,8 @@ test "BroadcastChannel: multiple consumers receive same messages" {
     var barrier = Barrier.init(4); // 3 receivers + 1 sender
 
     const TestFn = struct {
-        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = try b.wait(rt); // Wait for all consumers to subscribe
+        fn sender(ch: *BroadcastChannel(u32), b: *Barrier) !void {
+            _ = try b.wait(); // Wait for all consumers to subscribe
             try ch.send(10);
             try ch.send(20);
             try ch.send(30);
@@ -540,7 +541,7 @@ test "BroadcastChannel: multiple consumers receive same messages" {
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, sum: *u32, b: *Barrier) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
-            _ = try b.wait(rt); // Signal that we're subscribed
+            _ = try b.wait(); // Signal that we're subscribed
 
             sum.* += try ch.receive(rt, consumer);
             sum.* += try ch.receive(rt, consumer);
@@ -558,7 +559,7 @@ test "BroadcastChannel: multiple consumers receive same messages" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &barrier });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer1, &sum1, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer2, &sum2, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer3, &sum3, &barrier });
@@ -756,8 +757,8 @@ test "BroadcastChannel: consumers can drain after close" {
     var barrier = Barrier.init(2);
 
     const TestFn = struct {
-        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = try b.wait(rt); // Wait for receiver to subscribe
+        fn sender(ch: *BroadcastChannel(u32), b: *Barrier) !void {
+            _ = try b.wait(); // Wait for receiver to subscribe
             try ch.send(1);
             try ch.send(2);
             try ch.send(3);
@@ -767,7 +768,7 @@ test "BroadcastChannel: consumers can drain after close" {
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, results: *[4]?u32, b: *Barrier) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
-            _ = try b.wait(rt); // Signal that we're subscribed
+            _ = try b.wait(); // Signal that we're subscribed
 
             // Should be able to drain all messages
             results[0] = ch.receive(rt, consumer) catch null;
@@ -784,7 +785,7 @@ test "BroadcastChannel: consumers can drain after close" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &barrier });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &results, &barrier });
 
     try group.wait(runtime);
@@ -808,7 +809,7 @@ test "BroadcastChannel: waiting consumers wake on close" {
         fn waiter(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, got_closed: *bool, b: *Barrier) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
-            _ = try b.wait(rt); // Signal that we're subscribed and about to wait
+            _ = try b.wait(); // Signal that we're subscribed and about to wait
 
             // Wait for message (channel is empty, so will block)
             const err = ch.receive(rt, consumer);
@@ -821,8 +822,8 @@ test "BroadcastChannel: waiting consumers wake on close" {
             }
         }
 
-        fn closer(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = try b.wait(rt); // Wait for waiter to be ready
+        fn closer(ch: *BroadcastChannel(u32), b: *Barrier) !void {
+            _ = try b.wait(); // Wait for waiter to be ready
             ch.close();
         }
     };
@@ -834,7 +835,7 @@ test "BroadcastChannel: waiting consumers wake on close" {
     defer group.cancel(runtime);
 
     try group.spawn(runtime, TestFn.waiter, .{ runtime, &channel, &consumer, &got_closed, &barrier });
-    try group.spawn(runtime, TestFn.closer, .{ runtime, &channel, &barrier });
+    try group.spawn(runtime, TestFn.closer, .{ &channel, &barrier });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -877,16 +878,16 @@ test "BroadcastChannel: asyncReceive with select - basic" {
     var barrier = Barrier.init(2);
 
     const TestFn = struct {
-        fn sender(rt: *Runtime, ch: *BroadcastChannel(u32), b: *Barrier) !void {
-            _ = try b.wait(rt);
-            try rt.yield(); // Let receiver start waiting
+        fn sender(ch: *BroadcastChannel(u32), b: *Barrier) !void {
+            _ = try b.wait();
+            try yield(); // Let receiver start waiting
             try ch.send(42);
         }
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, b: *Barrier) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
-            _ = try b.wait(rt);
+            _ = try b.wait();
 
             const result = try select(rt, .{ .recv = ch.asyncReceive(consumer) });
             switch (result) {
@@ -902,7 +903,7 @@ test "BroadcastChannel: asyncReceive with select - basic" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &barrier });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &consumer, &barrier });
 
     try group.wait(runtime);
@@ -1036,8 +1037,8 @@ test "BroadcastChannel: select with multiple broadcast channels" {
             }
         }
 
-        fn sender2(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-            try rt.yield();
+        fn sender2(ch: *BroadcastChannel(u32)) !void {
+            try yield();
             try ch.send(99);
         }
     };
@@ -1050,7 +1051,7 @@ test "BroadcastChannel: select with multiple broadcast channels" {
     defer group.cancel(runtime);
 
     try group.spawn(runtime, TestFn.selectTask, .{ runtime, &channel1, &channel2, &consumer1, &consumer2, &which });
-    try group.spawn(runtime, TestFn.sender2, .{ runtime, &channel2 });
+    try group.spawn(runtime, TestFn.sender2, .{&channel2});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());

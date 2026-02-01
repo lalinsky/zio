@@ -34,15 +34,15 @@
 //! var ready = false;
 //!
 //! // Waiter task
-//! try mutex.lock(rt);
+//! try mutex.lock();
 //! defer mutex.unlock();
 //! while (!ready) {
-//!     try condition.wait(rt, &mutex);
+//!     try condition.wait(&mutex);
 //! }
 //! // ... proceed with work ...
 //!
 //! // Signaler task
-//! try mutex.lock(rt);
+//! try mutex.lock();
 //! ready = true;
 //! mutex.unlock();
 //! condition.signal();
@@ -50,6 +50,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const getCurrentTask = @import("../runtime.zig").getCurrentTask;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -77,16 +78,16 @@ pub const init: Condition = .{};
 ///
 /// This function should typically be called in a loop that checks the condition:
 /// ```zig
-/// try mutex.lock(rt);
+/// try mutex.lock();
 /// defer mutex.unlock();
 /// while (!condition_is_true) {
-///     try condition.wait(rt, &mutex);
+///     try condition.wait(&mutex);
 /// }
 /// ```
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting. The mutex
 /// will still be held when returning with an error.
-pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
+pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
 
@@ -110,13 +111,13 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
             }
         }
         // Must reacquire mutex before returning
-        mutex.lockUncancelable(runtime);
+        mutex.lockUncancelable();
         return err;
     };
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
-    mutex.lockUncancelable(runtime);
-    try runtime.checkCancel();
+    mutex.lockUncancelable();
+    try getCurrentTask().checkCancel();
 }
 
 /// Atomically releases the mutex and waits for a signal with cancellation shielding.
@@ -134,11 +135,12 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
 /// of cancellation (e.g., cleanup operations that need to wait for resources to be freed).
 ///
 /// If you need to propagate cancellation after the wait completes, call
-/// `runtime.checkCancel()` after this function returns.
-pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void {
-    runtime.beginShield();
-    defer runtime.endShield();
-    self.wait(runtime, mutex) catch unreachable;
+/// `Runtime.getCurrentTask().checkCancel()` after this function returns.
+pub fn waitUncancelable(self: *Condition, mutex: *Mutex) void {
+    const task = getCurrentTask();
+    task.beginShield();
+    defer task.endShield();
+    self.wait(mutex) catch unreachable;
 }
 
 /// Atomically releases the mutex and waits for a signal with a timeout.
@@ -153,7 +155,7 @@ pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void
 /// Returns `error.Canceled` if the task is cancelled while waiting. Cancellation
 /// takes priority over timeout - if both occur, `error.Canceled` is returned.
 /// The mutex will be held when returning with any error.
-pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
 
@@ -177,7 +179,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Ti
         }
 
         // Must reacquire mutex before returning
-        mutex.lockUncancelable(runtime);
+        mutex.lockUncancelable();
 
         return err;
     };
@@ -186,8 +188,8 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Ti
     const timed_out = self.wait_queue.remove(&waiter.wait_node);
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
-    mutex.lockUncancelable(runtime);
-    try runtime.checkCancel();
+    mutex.lockUncancelable();
+    try getCurrentTask().checkCancel();
 
     if (timed_out) {
         return error.Timeout;
@@ -204,7 +206,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Ti
 /// It is typically called after modifying the shared state and releasing
 /// the mutex:
 /// ```zig
-/// try mutex.lock(rt);
+/// try mutex.lock();
 /// shared_state = new_value;
 /// mutex.unlock();
 /// condition.signal();
@@ -225,7 +227,7 @@ pub fn signal(self: *Condition) void {
 ///
 /// Use this when the condition change might allow multiple waiters to proceed:
 /// ```zig
-/// try mutex.lock(rt);
+/// try mutex.lock();
 /// shutdown_flag = true;
 /// mutex.unlock();
 /// condition.broadcast();
@@ -245,19 +247,19 @@ test "Condition basic wait/signal" {
     var ready = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
-            try mtx.lock(rt);
+        fn waiter(mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
+            try mtx.lock();
             defer mtx.unlock();
 
             while (!ready_flag.*) {
-                try cond.wait(rt, mtx);
+                try cond.wait(mtx);
             }
         }
 
         fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
             try rt.yield(); // Give waiter time to start waiting
 
-            try mtx.lock(rt);
+            try mtx.lock();
             ready_flag.* = true;
             mtx.unlock();
 
@@ -268,7 +270,7 @@ test "Condition basic wait/signal" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready });
+    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready });
     try group.spawn(runtime, TestFn.signaler, .{ runtime, &mutex, &condition, &ready });
 
     try group.wait(runtime);
@@ -286,12 +288,12 @@ test "Condition timedWait timeout" {
     var timed_out = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, timeout_flag: *bool) !void {
-            try mtx.lock(rt);
+        fn waiter(mtx: *Mutex, cond: *Condition, timeout_flag: *bool) !void {
+            try mtx.lock();
             defer mtx.unlock();
 
             // Should timeout after 10ms
-            cond.timedWait(rt, mtx, .{ .duration = .fromMilliseconds(10) }) catch |err| {
+            cond.timedWait(mtx, .{ .duration = .fromMilliseconds(10) }) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -299,7 +301,7 @@ test "Condition timedWait timeout" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &mutex, &condition, &timed_out });
+    var handle = try runtime.spawn(TestFn.waiter, .{ &mutex, &condition, &timed_out });
     try handle.join(runtime);
 
     try std.testing.expect(timed_out);
@@ -315,12 +317,12 @@ test "Condition broadcast" {
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) !void {
-            try mtx.lock(rt);
+        fn waiter(mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) !void {
+            try mtx.lock();
             defer mtx.unlock();
 
             while (!ready_flag.*) {
-                try cond.wait(rt, mtx);
+                try cond.wait(mtx);
             }
             counter.* += 1;
         }
@@ -331,7 +333,7 @@ test "Condition broadcast" {
             try rt.yield();
             try rt.yield();
 
-            try mtx.lock(rt);
+            try mtx.lock();
             ready_flag.* = true;
             mtx.unlock();
 
@@ -342,9 +344,9 @@ test "Condition broadcast" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
     try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready });
 
     try group.wait(runtime);

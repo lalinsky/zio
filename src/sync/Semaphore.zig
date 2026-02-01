@@ -23,8 +23,8 @@
 //! ```zig
 //! fn worker(rt: *Runtime, sem: *zio.Semaphore, id: u32) !void {
 //!     // Acquire a permit (blocks if none available)
-//!     try sem.wait(rt);
-//!     defer sem.post(rt);
+//!     try sem.wait();
+//!     defer sem.post();
 //!
 //!     // Critical section - only N tasks can be here simultaneously
 //!     std.debug.print("Worker {} in critical section\n", .{id});
@@ -42,6 +42,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const getCurrentTask = @import("../runtime.zig").getCurrentTask;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -67,12 +68,12 @@ const Semaphore = @This();
 /// is signaled to other waiting tasks to avoid lost wakeups.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
-    try self.mutex.lock(rt);
+pub fn wait(self: *Semaphore) Cancelable!void {
+    try self.mutex.lock();
     defer self.mutex.unlock();
 
     while (self.permits == 0) {
-        self.cond.wait(rt, &self.mutex) catch {
+        self.cond.wait(&self.mutex) catch {
             // Wake another waiter to handle any race with permit availability
             if (self.permits > 0) {
                 self.cond.signal();
@@ -99,11 +100,12 @@ pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
 /// of cancellation (e.g., cleanup operations that need resource access).
 ///
 /// If you need to propagate cancellation after acquiring the permit, call
-/// `runtime.checkCancel()` after this function returns.
-pub fn waitUncancelable(self: *Semaphore, rt: *Runtime) void {
-    rt.beginShield();
-    defer rt.endShield();
-    self.wait(rt) catch unreachable;
+/// `getCurrentTask().checkCancel()` after this function returns.
+pub fn waitUncancelable(self: *Semaphore) void {
+    const task = getCurrentTask();
+    task.beginShield();
+    defer task.endShield();
+    self.wait() catch unreachable;
 }
 
 /// Acquires a permit with a timeout.
@@ -116,18 +118,18 @@ pub fn waitUncancelable(self: *Semaphore, rt: *Runtime) void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a permit becomes available.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *Semaphore, timeout: Timeout) (Timeoutable || Cancelable)!void {
     if (timeout == .none) {
-        return self.wait(rt);
+        return self.wait();
     }
 
     const deadline = timeout.toDeadline();
 
-    try self.mutex.lock(rt);
+    try self.mutex.lock();
     defer self.mutex.unlock();
 
     while (self.permits == 0) {
-        self.cond.timedWait(rt, &self.mutex, deadline) catch |err| switch (err) {
+        self.cond.timedWait(&self.mutex, deadline) catch |err| switch (err) {
             error.Timeout => return error.Timeout,
             error.Canceled => {
                 // Wake another waiter to handle any race with permit availability
@@ -151,8 +153,8 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Timeout) (Timeoutable 
 ///
 /// This operation is shielded from cancellation to ensure the permit is always
 /// released, even if the calling task is in the process of being cancelled.
-pub fn post(self: *Semaphore, rt: *Runtime) void {
-    self.mutex.lockUncancelable(rt);
+pub fn post(self: *Semaphore) void {
+    self.mutex.lockUncancelable();
     defer self.mutex.unlock();
 
     self.permits += 1;
@@ -166,10 +168,10 @@ test "Semaphore: basic wait/post" {
     var sem = Semaphore{ .permits = 1 };
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, s: *Semaphore, n: *i32) !void {
-            try s.wait(rt);
+        fn worker(s: *Semaphore, n: *i32) !void {
+            try s.wait();
             n.* += 1;
-            s.post(rt);
+            s.post();
         }
     };
 
@@ -178,9 +180,9 @@ test "Semaphore: basic wait/post" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &sem, &n });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &sem, &n });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &sem, &n });
+    try group.spawn(runtime, TestFn.worker, .{ &sem, &n });
+    try group.spawn(runtime, TestFn.worker, .{ &sem, &n });
+    try group.spawn(runtime, TestFn.worker, .{ &sem, &n });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -196,8 +198,8 @@ test "Semaphore: timedWait timeout" {
     var timed_out = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, s: *Semaphore, timeout_flag: *bool) void {
-            s.timedWait(rt, .{ .duration = .fromMilliseconds(10) }) catch |err| {
+        fn waiter(s: *Semaphore, timeout_flag: *bool) void {
+            s.timedWait(.{ .duration = .fromMilliseconds(10) }) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -205,7 +207,7 @@ test "Semaphore: timedWait timeout" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &sem, &timed_out });
+    var handle = try runtime.spawn(TestFn.waiter, .{ &sem, &timed_out });
     handle.join(runtime);
 
     try std.testing.expect(timed_out);
@@ -220,13 +222,13 @@ test "Semaphore: timedWait success" {
     var got_permit = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, s: *Semaphore, flag: *bool) void {
-            s.timedWait(rt, .{ .duration = .fromMilliseconds(100) }) catch return;
+        fn waiter(s: *Semaphore, flag: *bool) void {
+            s.timedWait(.{ .duration = .fromMilliseconds(100) }) catch return;
             flag.* = true;
         }
 
         fn poster(rt: *Runtime, s: *Semaphore) !void {
-            defer s.post(rt);
+            defer s.post();
             try rt.yield();
         }
     };
@@ -234,7 +236,7 @@ test "Semaphore: timedWait success" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &sem, &got_permit });
+    try group.spawn(runtime, TestFn.waiter, .{ &sem, &got_permit });
     try group.spawn(runtime, TestFn.poster, .{ runtime, &sem });
 
     try group.wait(runtime);
@@ -251,8 +253,8 @@ test "Semaphore: multiple permits" {
     var sem = Semaphore{ .permits = 3 };
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, s: *Semaphore) !void {
-            try s.wait(rt);
+        fn worker(s: *Semaphore) !void {
+            try s.wait();
             // Don't post - consume the permit
         }
     };
@@ -260,9 +262,9 @@ test "Semaphore: multiple permits" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &sem });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &sem });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &sem });
+    try group.spawn(runtime, TestFn.worker, .{&sem});
+    try group.spawn(runtime, TestFn.worker, .{&sem});
+    try group.spawn(runtime, TestFn.worker, .{&sem});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
