@@ -810,11 +810,28 @@ fn coroEntry() callconv(.naked) noreturn {
                 \\ br x2
             );
         },
-        .arm, .thumb => asm volatile (
-            \\ ldr r0, [sp, #4]
-            \\ ldr r2, [sp, #0]
-            \\ bx r2
-        ),
+        .arm => {
+            // Create sentinel frame for FP-based unwinding (ARM uses r11 for fp)
+            asm volatile (
+                \\ push {r0, r1}
+                \\ mov r11, sp
+                \\ mov r14, #0
+                \\ ldr r0, [sp, #12]
+                \\ ldr r2, [sp, #8]
+                \\ bx r2
+            );
+        },
+        .thumb => {
+            // Create sentinel frame for FP-based unwinding (Thumb uses r7 for fp)
+            asm volatile (
+                \\ push {r0, r1}
+                \\ mov r7, sp
+                \\ mov r14, #0
+                \\ ldr r0, [sp, #12]
+                \\ ldr r2, [sp, #8]
+                \\ bx r2
+            );
+        },
         .riscv64 => asm volatile (
             \\ ld a0, 8(sp)
             \\ ld t0, 0(sp)
