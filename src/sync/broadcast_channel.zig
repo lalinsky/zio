@@ -279,8 +279,7 @@ const AsyncReceiveImpl = struct {
 /// ## Example
 ///
 /// ```zig
-/// fn broadcaster(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-///     _ = rt;
+/// fn broadcaster(ch: *BroadcastChannel(u32)) !void {
 ///     for (0..10) |i| {
 ///         try ch.send(@intCast(i));
 ///     }
@@ -620,8 +619,7 @@ test "BroadcastChannel: tryReceive" {
     var channel = BroadcastChannel(u32).init(&buffer);
 
     const TestFn = struct {
-        fn test_try(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            _ = rt;
+        fn test_try(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
 
@@ -647,7 +645,7 @@ test "BroadcastChannel: tryReceive" {
     };
 
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_try, .{ runtime, &channel, &consumer });
+    var handle = try runtime.spawn(TestFn.test_try, .{ &channel, &consumer });
     try handle.join(runtime);
 }
 
@@ -731,8 +729,7 @@ test "BroadcastChannel: close prevents new sends" {
     var channel = BroadcastChannel(u32).init(&buffer);
 
     const TestFn = struct {
-        fn test_close(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-            _ = rt;
+        fn test_close(ch: *BroadcastChannel(u32)) !void {
             // Send before closing
             try ch.send(1);
 
@@ -745,7 +742,7 @@ test "BroadcastChannel: close prevents new sends" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.test_close, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.test_close, .{&channel});
     try handle.join(runtime);
 }
 
@@ -852,8 +849,7 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
     var channel = BroadcastChannel(u32).init(&buffer);
 
     const TestFn = struct {
-        fn test_try_closed(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            _ = rt;
+        fn test_try_closed(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
 
@@ -867,7 +863,7 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
     };
 
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_try_closed, .{ runtime, &channel, &consumer });
+    var handle = try runtime.spawn(TestFn.test_try_closed, .{ &channel, &consumer });
     try handle.join(runtime);
 }
 
@@ -1070,8 +1066,7 @@ test "BroadcastChannel: position counter overflow handling" {
     var channel = BroadcastChannel(u32).init(&buffer);
 
     const TestFn = struct {
-        fn test_overflow(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            _ = rt;
+        fn test_overflow(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
 
@@ -1134,6 +1129,6 @@ test "BroadcastChannel: position counter overflow handling" {
     };
 
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_overflow, .{ runtime, &channel, &consumer });
+    var handle = try runtime.spawn(TestFn.test_overflow, .{ &channel, &consumer });
     try handle.join(runtime);
 }

@@ -663,8 +663,7 @@ test "Channel: trySend and tryReceive" {
     var channel = Channel(u32).init(&buffer);
 
     const TestFn = struct {
-        fn testTry(rt: *Runtime, ch: *Channel(u32)) !void {
-            _ = rt;
+        fn testTry(ch: *Channel(u32)) !void {
             // tryReceive on empty channel should fail
             const empty_err = ch.tryReceive();
             try std.testing.expectError(error.ChannelEmpty, empty_err);
@@ -690,7 +689,7 @@ test "Channel: trySend and tryReceive" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.testTry, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.testTry, .{&channel});
     try handle.join(runtime);
 }
 

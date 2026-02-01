@@ -331,7 +331,7 @@ pub const Signal = struct {
         // Set up timeout timer
         var timer = AutoCancel.init;
         defer timer.clear();
-        timer.set(rt, timeout);
+        timer.set(timeout);
 
         // Wait for signal, handling spurious wakeups internally
         waiter.wait(1, .allow_cancel) catch |err| {
@@ -343,7 +343,7 @@ pub const Signal = struct {
             }
 
             // Check if this auto-cancel triggered, otherwise it was user cancellation
-            if (timer.check(rt, err)) return error.Timeout;
+            if (timer.check(err)) return error.Timeout;
             return err;
         };
 
