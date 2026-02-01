@@ -277,13 +277,14 @@ pub const Signal = struct {
     ///
     /// Returns error.Canceled if the task is cancelled while waiting (including due to timeout expiry).
     pub fn wait(self: *Signal, rt: *Runtime) Cancelable!void {
+        _ = rt;
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
         }
 
         // Stack-allocated waiter - separates operation wait node from task wait node
-        var waiter: Waiter = .init(rt);
+        var waiter: Waiter = .init();
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.wait_node);
@@ -317,13 +318,14 @@ pub const Signal = struct {
     /// - rt: Runtime context
     /// - timeout: Timeout
     pub fn timedWait(self: *Signal, rt: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+        _ = rt;
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
         }
 
         // Stack-allocated waiter - separates operation wait node from task wait node
-        var waiter: Waiter = .init(rt);
+        var waiter: Waiter = .init();
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.wait_node);

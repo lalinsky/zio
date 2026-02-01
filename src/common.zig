@@ -7,6 +7,7 @@ const ev = @import("ev/root.zig");
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
 const Runtime = @import("runtime.zig").Runtime;
+const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("runtime/WaitNode.zig");
@@ -31,7 +32,7 @@ pub const Timeoutable = error{
 ///
 /// Usage:
 /// ```zig
-/// var waiter: Waiter = .init(runtime);
+/// var waiter: Waiter = .init();
 /// // Setup operation (e.g., push to queue, submit I/O)
 /// try waiter.wait(1, .allow_cancel);
 /// ```
@@ -44,10 +45,10 @@ pub const Waiter = struct {
         .wake = wakeImpl,
     };
 
-    pub fn init(runtime: *Runtime) Waiter {
+    pub fn init() Waiter {
         return .{
             .wait_node = .{ .vtable = &vtable },
-            .task = runtime.getCurrentTask(),
+            .task = getCurrentTask(),
         };
     }
 
@@ -123,7 +124,8 @@ pub const Waiter = struct {
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
 pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
-    var waiter = Waiter.init(rt);
+    _ = rt;
+    var waiter = Waiter.init();
     c.userdata = &waiter;
     c.callback = Waiter.callback;
 

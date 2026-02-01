@@ -88,7 +88,7 @@ pub const init: Condition = .{};
 /// will still be held when returning with an error.
 pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Add to wait queue before releasing mutex
     self.wait_queue.push(&waiter.wait_node);
@@ -155,7 +155,7 @@ pub fn waitUncancelable(self: *Condition, runtime: *Runtime, mutex: *Mutex) void
 /// The mutex will be held when returning with any error.
 pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     self.wait_queue.push(&waiter.wait_node);
 

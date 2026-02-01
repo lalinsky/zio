@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
+const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Waiter = @import("common.zig").Waiter;
@@ -285,12 +286,13 @@ pub const SelectWaiter = struct {
 /// }
 /// ```
 pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
+    _ = rt;
     const S = @TypeOf(futures);
     const U = SelectResult(S);
     const fields = @typeInfo(S).@"struct".fields;
 
     // Self-wait detection: check all futures for self-wait
-    const task = rt.getCurrentTask();
+    const task = getCurrentTask();
     inline for (fields) |field| {
         checkSelfWait(task, @field(futures, field.name));
     }
@@ -299,7 +301,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
 
     // Parent waiter that SelectWaiters will signal when they win
-    var waiter = Waiter.init(rt);
+    var waiter = Waiter.init();
 
     // Allocate WaitContext struct on stack for futures that need per-wait state
     const ContextsType = WaitContextsType(S);
@@ -388,13 +390,14 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 /// Returns the index of the first awaitable to complete.
 /// Used by std.Io.selectImpl.
 pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable!usize {
+    _ = rt;
     const max_awaitables = 64;
     if (awaitables.len > max_awaitables) {
         @panic("selectAwaitables: too many awaitables (max 64)");
     }
 
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiter = Waiter.init(rt);
+    var waiter = Waiter.init();
     var select_waiters: [max_awaitables]SelectWaiter = undefined;
 
     for (select_waiters[0..awaitables.len], 0..) |*sw, i| {
@@ -443,14 +446,15 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
 
 /// Internal wait implementation with configurable cancellation behavior.
 fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
-    const task = rt.getCurrentTask();
+    _ = rt;
+    const task = getCurrentTask();
 
     // Self-wait detection: check if waiting on own task (would deadlock)
     checkSelfWait(task, future);
 
     // Winner tracking: for single future, winner is always 0 if signaled
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiter = Waiter.init(rt);
+    var waiter = Waiter.init();
     var select_waiter = SelectWaiter.init(&waiter, &winner, 0);
 
     // Allocate WaitContext if needed

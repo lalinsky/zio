@@ -107,8 +107,9 @@ pub fn broadcast(self: *Notify) void {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
+    _ = runtime;
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Push to wait queue
     self.wait_queue.push(&waiter.wait_node);
@@ -142,8 +143,9 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
 /// Returns `error.Timeout` if the timeout expires before a signal is received.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    _ = runtime;
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Push to wait queue
     self.wait_queue.push(&waiter.wait_node);

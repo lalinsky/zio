@@ -114,6 +114,7 @@ pub fn reset(self: *ResetEvent) void {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
+    _ = runtime;
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -122,7 +123,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     }
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
@@ -157,6 +158,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    _ = runtime;
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -165,7 +167,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Timeout) (Timeou
     }
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters

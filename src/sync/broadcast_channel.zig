@@ -56,7 +56,8 @@ const BroadcastChannelImpl = struct {
     }
 
     fn receive(self: *Self, runtime: *Runtime, consumer: *BroadcastChannelConsumer, elem_ptr: [*]u8) !void {
-        var waiter: Waiter = .init(runtime);
+        _ = runtime;
+        var waiter: Waiter = .init();
 
         while (true) {
             self.mutex.lock();

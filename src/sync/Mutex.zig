@@ -68,6 +68,7 @@ pub fn tryLock(self: *Mutex) bool {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
 pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
+    _ = runtime;
     // Fast path: try to acquire unlocked mutex
     if (self.queue.tryTransition(unlocked, locked_once)) {
         return;
@@ -76,7 +77,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     // Slow path: add to FIFO wait queue
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Try to push to queue, or if mutex is unlocked, acquire it atomically
     // This prevents the race: unlocked -> has_waiters (skipping locked_once)

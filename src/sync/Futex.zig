@@ -91,7 +91,7 @@ pub fn wait(runtime: *Runtime, ptr: *const u32, expect: u32) Cancelable!void {
 
     // Use a stack-allocated waiter
     var futex_waiter = FutexWaiter{
-        .waiter = Waiter.init(runtime),
+        .waiter = Waiter.init(),
         .address = address,
     };
 
@@ -146,7 +146,7 @@ pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Timeo
 
     // Use a stack-allocated waiter with its own WaitNode
     var futex_waiter = FutexWaiter{
-        .waiter = Waiter.init(runtime),
+        .waiter = Waiter.init(),
         .address = address,
     };
 

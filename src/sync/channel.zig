@@ -57,9 +57,10 @@ const ChannelImpl = struct {
 
     /// Receives a value from the channel, blocking if empty.
     fn receive(self: *Self, rt: *Runtime, elem_ptr: [*]u8) !void {
+        _ = rt;
         const recv = AsyncReceiveImpl{ .channel = self };
         var ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = undefined };
-        var waiter = Waiter.init(rt);
+        var waiter = Waiter.init();
 
         if (!recv.asyncWait(&waiter.wait_node, &ctx, elem_ptr)) {
             return recv.getResult(&ctx);
@@ -125,9 +126,10 @@ const ChannelImpl = struct {
     }
 
     fn send(self: *Self, rt: *Runtime, elem_ptr: [*]const u8) !void {
+        _ = rt;
         const send_op = AsyncSendImpl{ .channel = self };
         var ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = undefined };
-        var waiter = Waiter.init(rt);
+        var waiter = Waiter.init();
 
         if (!send_op.asyncWait(&waiter.wait_node, &ctx, elem_ptr)) {
             return send_op.getResult(&ctx);
