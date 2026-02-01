@@ -70,7 +70,7 @@ pub const RuntimeOptions = struct {
     thread_pool: ev.ThreadPool.Options = .{},
     stack_pool: StackPoolConfig = .{
         .maximum_size = 8 * 1024 * 1024,
-        .committed_size = 256 * 1024,
+        .committed_size = 1 * 1024 * 1024,
         .max_unused_stacks = 16,
         .max_age = .fromSeconds(60),
     },
