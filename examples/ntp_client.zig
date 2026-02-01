@@ -106,11 +106,11 @@ fn queryNtpServer(server: []const u8, port: u16, timeout: zio.Timeout) !void {
     });
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const gpa = std.heap.smp_allocator;
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try init.args.toSlice(gpa);
+    defer gpa.free(args);
 
     const server = if (args.len > 1) args[1] else "pool.ntp.org";
     const port: u16 = 123;
@@ -119,7 +119,7 @@ pub fn main() !void {
     defer rt.deinit();
 
     // Setup SIGINT handler
-    var signal = try zio.Signal.init(.interrupt);
+    var signal = try zio.Signal.init(.INT);
     defer signal.deinit();
 
     const interval: zio.Timeout = .{ .duration = .fromSeconds(30) };

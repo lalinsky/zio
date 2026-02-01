@@ -99,11 +99,11 @@ fn collector(
 }
 // --8<-- [end:collector]
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const gpa = std.heap.smp_allocator;
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try init.args.toSlice(gpa);
+    defer gpa.free(args);
 
     if (args.len < 3) {
         std.log.err("Usage: {s} <pattern> <file1> [file2...]", .{args[0]});

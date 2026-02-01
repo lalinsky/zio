@@ -149,8 +149,8 @@ fn WaitContextsType(comptime futures_type: type) type {
     comptime var i: usize = 0;
     inline for (fields) |field| {
         const WaitCtx = FutureWaitContext(field.type);
-        const default_value: WaitCtx = .{};
         if (WaitCtx != void) {
+            const default_value: WaitCtx = .{};
             field_names[i] = field.name;
             field_types[i] = WaitCtx;
             field_attrs[i] = .{
