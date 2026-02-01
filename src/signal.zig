@@ -330,7 +330,7 @@ pub const Signal = struct {
 
         // Set up timeout timer
         var timer = AutoCancel.init;
-        defer timer.clear(rt);
+        defer timer.clear();
         timer.set(rt, timeout);
 
         // Wait for signal, handling spurious wakeups internally
@@ -354,7 +354,7 @@ pub const Signal = struct {
     /// Registers a wait node to be notified when the signal is received.
     /// This is part of the Future protocol for select().
     /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
-    pub fn asyncWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *Signal, wait_node: *WaitNode) bool {
         // Fast path: signal already received
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return false;
@@ -368,7 +368,7 @@ pub const Signal = struct {
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
     /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncCancelWait(self: *Signal, wait_node: *WaitNode) bool {
         // Simply remove from queue - no need to wake another waiter since signals broadcast to all
         return self.entry.waiters.remove(wait_node);
     }

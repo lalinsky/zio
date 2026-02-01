@@ -12,7 +12,7 @@ const SharedData = struct {
 fn incrementTask(rt: *zio.Runtime, data: *SharedData, id: u32) !void {
     for (0..1000) |_| {
         try data.mutex.lock(rt);
-        defer data.mutex.unlock(rt);
+        defer data.mutex.unlock();
 
         const old = data.counter;
         try rt.yield(); // Yield to simulate preemption

@@ -18,7 +18,7 @@
 //! var shared_data: u32 = 0;
 //!
 //! try mutex.lock(rt);
-//! defer mutex.unlock(rt);
+//! defer mutex.unlock();
 //!
 //! shared_data += 1;
 //! ```
@@ -92,7 +92,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
         if (!self.queue.remove(&waiter.wait_node)) {
             // Already inherited the lock - wait for signal to complete, then unlock
             waiter.wait(1, .no_cancel);
-            self.unlock(runtime);
+            self.unlock();
         }
         return err;
     };
@@ -127,8 +127,7 @@ pub fn lockUncancelable(self: *Mutex, runtime: *Runtime) void {
 /// to the unlocked state.
 ///
 /// It is undefined behavior if the current coroutine does not hold the lock.
-pub fn unlock(self: *Mutex, runtime: *Runtime) void {
-    _ = runtime;
+pub fn unlock(self: *Mutex) void {
     // Pop one waiter or transition from locked_once to unlocked
     // Handles cancellation race by retrying internally
     if (self.queue.popOrTransition(locked_once, unlocked)) |wait_node| {
@@ -147,7 +146,7 @@ test "Mutex basic lock/unlock" {
         fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) !void {
             for (0..100) |_| {
                 try mtx.lock(rt);
-                defer mtx.unlock(rt);
+                defer mtx.unlock();
                 counter.* += 1;
             }
         }
@@ -173,7 +172,7 @@ test "Mutex tryLock" {
 
     try std.testing.expect(mutex.tryLock()); // Should succeed
     try std.testing.expect(!mutex.tryLock()); // Should fail (already locked)
-    mutex.unlock(rt);
+    mutex.unlock();
     try std.testing.expect(mutex.tryLock()); // Should succeed again
-    mutex.unlock(rt);
+    mutex.unlock();
 }

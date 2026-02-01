@@ -35,7 +35,7 @@
 //!
 //! // Waiter task
 //! try mutex.lock(rt);
-//! defer mutex.unlock(rt);
+//! defer mutex.unlock();
 //! while (!ready) {
 //!     try condition.wait(rt, &mutex);
 //! }
@@ -44,8 +44,8 @@
 //! // Signaler task
 //! try mutex.lock(rt);
 //! ready = true;
-//! mutex.unlock(rt);
-//! condition.signal(rt);
+//! mutex.unlock();
+//! condition.signal();
 //! ```
 
 const std = @import("std");
@@ -78,7 +78,7 @@ pub const init: Condition = .{};
 /// This function should typically be called in a loop that checks the condition:
 /// ```zig
 /// try mutex.lock(rt);
-/// defer mutex.unlock(rt);
+/// defer mutex.unlock();
 /// while (!condition_is_true) {
 ///     try condition.wait(rt, &mutex);
 /// }
@@ -94,7 +94,7 @@ pub fn wait(self: *Condition, runtime: *Runtime, mutex: *Mutex) Cancelable!void 
     self.wait_queue.push(&waiter.wait_node);
 
     // Atomically release mutex
-    mutex.unlock(runtime);
+    mutex.unlock();
 
     // Wait for signal, handling spurious wakeups internally
     waiter.wait(1, .allow_cancel) catch |err| {
@@ -160,7 +160,7 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Ti
     self.wait_queue.push(&waiter.wait_node);
 
     // Atomically release mutex
-    mutex.unlock(runtime);
+    mutex.unlock();
 
     // Wait for signal or timeout, handling spurious wakeups internally
     waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
@@ -206,11 +206,10 @@ pub fn timedWait(self: *Condition, runtime: *Runtime, mutex: *Mutex, timeout: Ti
 /// ```zig
 /// try mutex.lock(rt);
 /// shared_state = new_value;
-/// mutex.unlock(rt);
-/// condition.signal(rt);
+/// mutex.unlock();
+/// condition.signal();
 /// ```
-pub fn signal(self: *Condition, runtime: *Runtime) void {
-    _ = runtime;
+pub fn signal(self: *Condition) void {
     if (self.wait_queue.pop()) |wait_node| {
         wait_node.wake();
     }
@@ -228,11 +227,10 @@ pub fn signal(self: *Condition, runtime: *Runtime) void {
 /// ```zig
 /// try mutex.lock(rt);
 /// shutdown_flag = true;
-/// mutex.unlock(rt);
-/// condition.broadcast(rt);
+/// mutex.unlock();
+/// condition.broadcast();
 /// ```
-pub fn broadcast(self: *Condition, runtime: *Runtime) void {
-    _ = runtime;
+pub fn broadcast(self: *Condition) void {
     while (self.wait_queue.pop()) |wait_node| {
         wait_node.wake();
     }
@@ -249,7 +247,7 @@ test "Condition basic wait/signal" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
             try mtx.lock(rt);
-            defer mtx.unlock(rt);
+            defer mtx.unlock();
 
             while (!ready_flag.*) {
                 try cond.wait(rt, mtx);
@@ -261,9 +259,9 @@ test "Condition basic wait/signal" {
 
             try mtx.lock(rt);
             ready_flag.* = true;
-            mtx.unlock(rt);
+            mtx.unlock();
 
-            cond.signal(rt);
+            cond.signal();
         }
     };
 
@@ -290,7 +288,7 @@ test "Condition timedWait timeout" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, timeout_flag: *bool) !void {
             try mtx.lock(rt);
-            defer mtx.unlock(rt);
+            defer mtx.unlock();
 
             // Should timeout after 10ms
             cond.timedWait(rt, mtx, .{ .duration = .fromMilliseconds(10) }) catch |err| {
@@ -319,7 +317,7 @@ test "Condition broadcast" {
     const TestFn = struct {
         fn waiter(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) !void {
             try mtx.lock(rt);
-            defer mtx.unlock(rt);
+            defer mtx.unlock();
 
             while (!ready_flag.*) {
                 try cond.wait(rt, mtx);
@@ -335,9 +333,9 @@ test "Condition broadcast" {
 
             try mtx.lock(rt);
             ready_flag.* = true;
-            mtx.unlock(rt);
+            mtx.unlock();
 
-            cond.broadcast(rt);
+            cond.broadcast();
         }
     };
 

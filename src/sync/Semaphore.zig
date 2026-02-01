@@ -69,13 +69,13 @@ const Semaphore = @This();
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
     try self.mutex.lock(rt);
-    defer self.mutex.unlock(rt);
+    defer self.mutex.unlock();
 
     while (self.permits == 0) {
         self.cond.wait(rt, &self.mutex) catch {
             // Wake another waiter to handle any race with permit availability
             if (self.permits > 0) {
-                self.cond.signal(rt);
+                self.cond.signal();
             }
             return error.Canceled;
         };
@@ -83,7 +83,7 @@ pub fn wait(self: *Semaphore, rt: *Runtime) Cancelable!void {
 
     self.permits -= 1;
     if (self.permits > 0) {
-        self.cond.signal(rt);
+        self.cond.signal();
     }
 }
 
@@ -124,7 +124,7 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Timeout) (Timeoutable 
     const deadline = timeout.toDeadline();
 
     try self.mutex.lock(rt);
-    defer self.mutex.unlock(rt);
+    defer self.mutex.unlock();
 
     while (self.permits == 0) {
         self.cond.timedWait(rt, &self.mutex, deadline) catch |err| switch (err) {
@@ -132,7 +132,7 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Timeout) (Timeoutable 
             error.Canceled => {
                 // Wake another waiter to handle any race with permit availability
                 if (self.permits > 0) {
-                    self.cond.signal(rt);
+                    self.cond.signal();
                 }
                 return error.Canceled;
             },
@@ -141,7 +141,7 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Timeout) (Timeoutable 
 
     self.permits -= 1;
     if (self.permits > 0) {
-        self.cond.signal(rt);
+        self.cond.signal();
     }
 }
 
@@ -153,10 +153,10 @@ pub fn timedWait(self: *Semaphore, rt: *Runtime, timeout: Timeout) (Timeoutable 
 /// released, even if the calling task is in the process of being cancelled.
 pub fn post(self: *Semaphore, rt: *Runtime) void {
     self.mutex.lockUncancelable(rt);
-    defer self.mutex.unlock(rt);
+    defer self.mutex.unlock();
 
     self.permits += 1;
-    self.cond.signal(rt);
+    self.cond.signal();
 }
 
 test "Semaphore: basic wait/post" {

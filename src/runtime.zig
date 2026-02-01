@@ -136,9 +136,9 @@ pub fn JoinHandle(comptime T: type) type {
         /// Registers a wait node to be notified when the task completes.
         /// This is part of the Future protocol for select().
         /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(self: Self, rt: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: Self, wait_node: *WaitNode) bool {
             if (self.awaitable) |awaitable| {
-                return awaitable.asyncWait(rt, wait_node);
+                return awaitable.asyncWait(wait_node);
             }
             return false; // Already complete
         }
@@ -146,9 +146,9 @@ pub fn JoinHandle(comptime T: type) type {
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: Self, rt: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncCancelWait(self: Self, wait_node: *WaitNode) bool {
             if (self.awaitable) |awaitable| {
-                return awaitable.asyncCancelWait(rt, wait_node);
+                return awaitable.asyncCancelWait(wait_node);
             }
             return true; // No awaitable means already completed, no wake in-flight
         }
@@ -697,6 +697,18 @@ pub const Executor = struct {
         self.scheduleTaskRemote(task);
     }
 };
+
+/// Get the current thread's executor.
+/// Panics if called from a thread without an active executor context.
+pub fn getCurrentExecutor() *Executor {
+    return Executor.current orelse @panic("no current executor");
+}
+
+/// Get the currently executing task.
+/// Panics if called from a thread without an active executor context.
+pub fn getCurrentTask() *AnyTask {
+    return getCurrentExecutor().getCurrentTask();
+}
 
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {

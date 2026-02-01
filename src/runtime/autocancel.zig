@@ -21,8 +21,7 @@ pub const AutoCancel = struct {
 
     pub const init: AutoCancel = .{};
 
-    pub fn clear(self: *AutoCancel, rt: *Runtime) void {
-        _ = rt;
+    pub fn clear(self: *AutoCancel) void {
         const loop = self.timer.c.loop orelse return;
         if (self.timer.c.state != .running) return;
 
@@ -33,7 +32,7 @@ pub const AutoCancel = struct {
     pub fn set(self: *AutoCancel, rt: *Runtime, timeout: Timeout) void {
         // Disable timer if waiting forever
         if (timeout == .none) {
-            self.clear(rt);
+            self.clear();
             return;
         }
 
@@ -92,7 +91,7 @@ test "AutoCancel: smoke test" {
     defer rt.deinit();
 
     var timeout = AutoCancel.init;
-    defer timeout.clear(rt);
+    defer timeout.clear();
 
     timeout.set(rt, .fromMilliseconds(100));
 }
@@ -102,7 +101,7 @@ test "AutoCancel: fires and returns error.Timeout" {
     defer rt.deinit();
 
     var timeout = AutoCancel.init;
-    defer timeout.clear(rt);
+    defer timeout.clear();
 
     timeout.set(rt, .fromMilliseconds(10));
 
@@ -121,9 +120,9 @@ test "AutoCancel: nested timeouts - earliest fires first" {
     defer rt.deinit();
 
     var timeout1 = AutoCancel.init;
-    defer timeout1.clear(rt);
+    defer timeout1.clear();
     var timeout2 = AutoCancel.init;
-    defer timeout2.clear(rt);
+    defer timeout2.clear();
 
     // Set longer timeout first
     timeout1.set(rt, .fromMilliseconds(50));
@@ -148,7 +147,7 @@ test "AutoCancel: cleared before firing" {
     timeout.set(rt, .fromMilliseconds(50));
 
     // Clear timeout before it fires
-    timeout.clear(rt);
+    timeout.clear();
 
     // Sleep should complete without timeout
     try rt.sleep(.fromMilliseconds(10));
@@ -158,7 +157,7 @@ test "AutoCancel: user cancel has priority over timeout" {
     const Test = struct {
         fn worker(rt: *Runtime) !void {
             var timeout = AutoCancel.init;
-            defer timeout.clear(rt);
+            defer timeout.clear();
 
             timeout.set(rt, .fromMilliseconds(50));
 
@@ -198,11 +197,11 @@ test "AutoCancel: multiple timeouts with different deadlines" {
     defer rt.deinit();
 
     var timeout1 = AutoCancel.init;
-    defer timeout1.clear(rt);
+    defer timeout1.clear();
     var timeout2 = AutoCancel.init;
-    defer timeout2.clear(rt);
+    defer timeout2.clear();
     var timeout3 = AutoCancel.init;
-    defer timeout3.clear(rt);
+    defer timeout3.clear();
 
     timeout1.set(rt, .{ .duration = .fromMilliseconds(200) });
     timeout2.set(rt, .fromMilliseconds(10)); // This should fire
@@ -228,13 +227,13 @@ test "AutoCancel: set, clear, and re-set" {
     defer rt.deinit();
 
     var timeout = AutoCancel.init;
-    defer timeout.clear(rt);
+    defer timeout.clear();
 
     // Set timeout
     timeout.set(rt, .fromMilliseconds(20));
 
     // Clear it
-    timeout.clear(rt);
+    timeout.clear();
 
     // Re-set with shorter duration
     timeout.set(rt, .fromMilliseconds(10));
@@ -253,7 +252,7 @@ test "AutoCancel: set with Duration.max clears prior timer" {
     defer rt.deinit();
 
     var timeout: AutoCancel = .init;
-    defer timeout.clear(rt);
+    defer timeout.clear();
 
     // Set a short timeout
     timeout.set(rt, .fromMilliseconds(10));
@@ -279,7 +278,7 @@ test "AutoCancel: cancels spawned task via join" {
             defer handle.cancel(rt);
 
             var timeout = AutoCancel.init;
-            defer timeout.clear(rt);
+            defer timeout.clear();
             timeout.set(rt, .fromMilliseconds(10));
 
             // Join should be canceled by timeout

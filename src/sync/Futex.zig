@@ -256,7 +256,7 @@ test "Futex: basic wait/wake" {
             try waker.join(io);
 
             var timeout: AutoCancel = .init;
-            defer timeout.clear(io);
+            defer timeout.clear();
             timeout.set(io, .fromMilliseconds(10));
 
             try waiter.join(io);
@@ -325,7 +325,7 @@ test "Futex: multiple waiters same address" {
             try waker.join(io);
 
             var timeout: AutoCancel = .init;
-            defer timeout.clear(io);
+            defer timeout.clear();
             timeout.set(io, .fromMilliseconds(10));
 
             try waiter1.join(io);
@@ -369,7 +369,7 @@ test "Futex: multiple waiters different addresses" {
             try waker.join(io);
 
             var timeout: AutoCancel = .init;
-            defer timeout.clear(io);
+            defer timeout.clear();
             timeout.set(io, .fromMilliseconds(10));
 
             try waiter1.join(io);

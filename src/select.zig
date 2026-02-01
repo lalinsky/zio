@@ -26,8 +26,8 @@ const NO_WINNER = std.math.maxInt(usize);
 //     asyncWait/asyncCancelWait. Useful for storing completions, results, or other
 //     data that varies per wait operation.
 //
-//   fn asyncWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) bool           // if WaitContext == void
-//   fn asyncWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
+//   fn asyncWait(self: *Self, wait_node: *WaitNode) bool           // if WaitContext == void
+//   fn asyncWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
 //     Register for notification when this future completes.
 //
 //     If WaitContext != void, the ctx parameter points to caller-allocated per-wait state
@@ -45,8 +45,8 @@ const NO_WINNER = std.math.maxInt(usize);
 //       - Thread-safe: can be called from any thread
 //       - The ctx pointer (if present) remains valid until asyncCancelWait() or wait_node.wake()
 //
-//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) bool     // if WaitContext == void
-//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
+//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode) bool     // if WaitContext == void
+//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
 //     Cancel a pending wait operation by removing the wait_node from internal queues.
 //
 //     Must be called if asyncWait() returned true and the caller no longer wants to wait
@@ -327,9 +327,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
             if (i < registered_count and winner_index != i) {
                 var future = @field(futures, field.name);
                 const was_removed = if (comptime hasWaitContext(field.type))
-                    future.asyncCancelWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name))
+                    future.asyncCancelWait(&select_waiters[i].wait_node, &@field(contexts, field.name))
                 else
-                    future.asyncCancelWait(rt, &select_waiters[i].wait_node);
+                    future.asyncCancelWait(&select_waiters[i].wait_node);
 
                 if (was_removed) {
                     // Successfully removed from queue - won't signal
@@ -346,9 +346,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     inline for (fields, 0..) |field, i| {
         const future = @field(futures, field.name);
         const waiting = if (comptime hasWaitContext(field.type))
-            future.asyncWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name))
+            future.asyncWait(&select_waiters[i].wait_node, &@field(contexts, field.name))
         else
-            future.asyncWait(rt, &select_waiters[i].wait_node);
+            future.asyncWait(&select_waiters[i].wait_node);
 
         if (!waiting) {
             winner.store(i, .release);
@@ -412,7 +412,7 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         var expected: u32 = @intCast(registered_count);
         for (awaitables[0..registered_count], 0..) |awaitable, i| {
             if (winner_index != i) {
-                const was_removed = awaitable.asyncCancelWait(rt, &select_waiters[i].wait_node);
+                const was_removed = awaitable.asyncCancelWait(&select_waiters[i].wait_node);
                 if (was_removed) {
                     // Successfully removed from queue - won't signal
                     expected -= 1;
@@ -425,7 +425,7 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
     }
 
     for (awaitables, 0..) |awaitable, i| {
-        const waiting = awaitable.asyncWait(rt, &select_waiters[i].wait_node);
+        const waiting = awaitable.asyncWait(&select_waiters[i].wait_node);
 
         if (!waiting) {
             winner.store(i, .release);
@@ -461,9 +461,9 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     // Fast path: check if already complete
     var fut = future;
     const added = if (has_context)
-        fut.asyncWait(rt, &select_waiter.wait_node, &context)
+        fut.asyncWait(&select_waiter.wait_node, &context)
     else
-        fut.asyncWait(rt, &select_waiter.wait_node);
+        fut.asyncWait(&select_waiter.wait_node);
 
     if (!added) {
         winner.store(0, .release);
@@ -475,9 +475,9 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     defer {
         if (winner.load(.acquire) == NO_WINNER) {
             const was_removed = if (has_context)
-                fut.asyncCancelWait(rt, &select_waiter.wait_node, &context)
+                fut.asyncCancelWait(&select_waiter.wait_node, &context)
             else
-                fut.asyncCancelWait(rt, &select_waiter.wait_node);
+                fut.asyncCancelWait(&select_waiter.wait_node);
 
             if (!was_removed) {
                 // Wake is in-flight, wait for it to complete (1 signal expected)

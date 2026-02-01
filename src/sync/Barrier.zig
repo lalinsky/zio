@@ -90,7 +90,7 @@ pub fn init(count: usize) Barrier {
 /// also break the barrier for all other waiting tasks.
 pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrier})!bool {
     try self.mutex.lock(runtime);
-    defer self.mutex.unlock(runtime);
+    defer self.mutex.unlock();
 
     // Check if barrier is already broken
     if (self.broken) {
@@ -104,7 +104,7 @@ pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrie
         // Last one to arrive - release everyone
         self.current = 0;
         self.generation += 1;
-        self.cond.broadcast(runtime);
+        self.cond.broadcast();
         return true;
     } else {
         // Wait for the barrier to be released
@@ -113,7 +113,7 @@ pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrie
                 // On cancellation: break the barrier and wake all waiters
                 self.current -= 1;
                 self.broken = true;
-                self.cond.broadcast(runtime);
+                self.cond.broadcast();
                 return err;
             };
         }

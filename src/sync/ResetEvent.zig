@@ -215,7 +215,7 @@ pub fn getResult(self: *const ResetEvent) void {
 /// Registers a wait node to be notified when the event is set.
 /// This is part of the Future protocol for select().
 /// Returns false if the event is already set (no wait needed), true if added to queue.
-pub fn asyncWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) bool {
+pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) bool {
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     return self.wait_queue.pushUnless(is_set, wait_node);
@@ -224,7 +224,7 @@ pub fn asyncWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) bool {
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
 /// Returns true if removed, false if already removed by completion (wake in-flight).
-pub fn asyncCancelWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) bool {
+pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) bool {
     return self.wait_queue.remove(wait_node);
 }
 

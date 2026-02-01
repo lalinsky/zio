@@ -60,7 +60,7 @@ pub const Awaitable = struct {
     /// Registers a wait node to be notified when the awaitable completes.
     /// This is part of the Future protocol for select().
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
-    pub fn asyncWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *Awaitable, wait_node: *WaitNode) bool {
         // Fast path: check if already complete
         if (self.waiting_list.getState() == complete) {
             return false;
@@ -73,7 +73,7 @@ pub const Awaitable = struct {
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
     /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncCancelWait(self: *Awaitable, wait_node: *WaitNode) bool {
         return self.waiting_list.remove(wait_node);
     }
 

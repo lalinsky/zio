@@ -173,7 +173,7 @@ const AsyncReceiveImpl = struct {
         result: ?error{ Closed, Lagged }!void = null,
     };
 
-    pub fn asyncWait(self: *const RecvSelf, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext, result_ptr: [*]u8) bool {
+    pub fn asyncWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext, result_ptr: [*]u8) bool {
         ctx.result_ptr = result_ptr;
         ctx.result = null;
 
@@ -212,7 +212,7 @@ const AsyncReceiveImpl = struct {
         return true;
     }
 
-    pub fn asyncCancelWait(self: *const RecvSelf, _: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncCancelWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext) bool {
         _ = ctx;
         self.channel.mutex.lock();
         const was_in_queue = self.channel.wait_queue.remove(wait_node);
@@ -458,14 +458,14 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncWait(rt, wait_node, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
+        pub fn asyncWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            return self.impl.asyncWait(wait_node, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
         }
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *const Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncCancelWait(rt, wait_node, &ctx.impl_ctx);
+        pub fn asyncCancelWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
+            return self.impl.asyncCancelWait(wait_node, &ctx.impl_ctx);
         }
 
         /// Get the result of the receive operation.
