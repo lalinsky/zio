@@ -28,12 +28,13 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 - Support for Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and many other systems (`poll`).
 - User-mode coroutine context switching for `x86_64`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64` and `loongarch64` architectures.
 - Growable stacks for the coroutines implemented by auto-extending virtual memory reservations.
-- Multi-threaded coroutine scheduler.
-- Fully asynchronous network I/O on all systems.
-- Asynchronous file I/O on Linux and Windows, simulated using auxiliary thread pool on other systems.
-- Cancelation support for all operations.
+- Single-threaded or multi-threaded coroutine scheduler.
+- Fully asynchronous network I/O on all systems. Supports TCP, UDP, Unix sockets, raw IP sockets. DNS lookups.
+- Fully asynchronous file I/O on Linux, partially (read/write) on Windows, simulated using auxiliary thread pool on other systems.
+- Safe cancelation support for all operations.
 - Structured concurrency using task groups.
 - Synchronization primitives, including more advanced ones, like channels.
+- Low-level event loop access for integrating with existing C libraries.
 
 ## Installation
 
