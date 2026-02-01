@@ -943,7 +943,11 @@ pub const Socket = struct {
                 return error.Unexpected;
             }
         } else {
-            try std.posix.getsockopt(self.handle, level, optname, std.mem.asBytes(&int_value));
+            var len: std.posix.socklen_t = @sizeOf(c_int);
+            const rc = std.c.getsockopt(self.handle, level, optname, &int_value, &len);
+            if (rc != 0) {
+                return error.Unexpected;
+            }
         }
         return @intCast(int_value);
     }

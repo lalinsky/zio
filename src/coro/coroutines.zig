@@ -1168,11 +1168,11 @@ test "Coroutine: stack trace" {
         coro.step();
     }
 
-    std.debug.dumpStackTrace(test_data.trace);
+    std.debug.dumpStackTrace(&test_data.trace);
 
     std.testing.expect(test_data.trace.index > 1 and test_data.trace.index < 7) catch |err| {
         if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            std.debug.dumpStackTrace(test_data.trace);
+            std.debug.dumpStackTrace(&test_data.trace);
         } else {
             std.debug.dumpStackTrace(&test_data.trace);
         }
