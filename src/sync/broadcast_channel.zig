@@ -406,7 +406,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         /// defer channel.unsubscribe(&consumer);
         ///
         /// var recv = channel.asyncReceive(&consumer);
-        /// const result = try select(rt, .{ .recv = &recv });
+        /// const result = try select(.{ .recv = &recv });
         /// switch (result) {
         ///     .recv => |val| std.debug.print("Received: {}\n", .{val}),
         /// }
@@ -430,7 +430,7 @@ pub fn BroadcastChannel(comptime T: type) type {
 /// channel.subscribe(&consumer1);
 /// channel.subscribe(&consumer2);
 ///
-/// const result = try select(rt, .{
+/// const result = try select(.{
 ///     .ch1 = channel.asyncReceive(&consumer1),
 ///     .ch2 = other_channel.asyncReceive(&consumer2),
 /// });
@@ -885,11 +885,12 @@ test "BroadcastChannel: asyncReceive with select - basic" {
         }
 
         fn receiver(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer, b: *Barrier) !void {
+            _ = rt;
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
             _ = try b.wait();
 
-            const result = try select(rt, .{ .recv = ch.asyncReceive(consumer) });
+            const result = try select(.{ .recv = ch.asyncReceive(consumer) });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
@@ -919,6 +920,7 @@ test "BroadcastChannel: asyncReceive with select - already ready" {
 
     const TestFn = struct {
         fn test_ready(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
+            _ = rt;
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
 
@@ -926,7 +928,7 @@ test "BroadcastChannel: asyncReceive with select - already ready" {
             try ch.send(99);
 
             var recv = ch.asyncReceive(consumer);
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(99, try val);
@@ -949,13 +951,14 @@ test "BroadcastChannel: asyncReceive with select - closed channel" {
 
     const TestFn = struct {
         fn test_closed(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
+            _ = rt;
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
 
             ch.close();
 
             var recv = ch.asyncReceive(consumer);
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectError(error.Closed, val);
@@ -978,6 +981,7 @@ test "BroadcastChannel: asyncReceive with select - lagged consumer" {
 
     const TestFn = struct {
         fn test_lagged(rt: *Runtime, ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
+            _ = rt;
             ch.subscribe(consumer);
             defer ch.unsubscribe(consumer);
 
@@ -990,7 +994,7 @@ test "BroadcastChannel: asyncReceive with select - lagged consumer" {
 
             // asyncReceive should return Lagged immediately
             var recv = ch.asyncReceive(consumer);
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectError(error.Lagged, val);
@@ -1016,6 +1020,7 @@ test "BroadcastChannel: select with multiple broadcast channels" {
 
     const TestFn = struct {
         fn selectTask(rt: *Runtime, ch1: *BroadcastChannel(u32), ch2: *BroadcastChannel(u32), c1: *BroadcastChannel(u32).Consumer, c2: *BroadcastChannel(u32).Consumer, which: *u8) !void {
+            _ = rt;
             ch1.subscribe(c1);
             defer ch1.unsubscribe(c1);
             ch2.subscribe(c2);
@@ -1024,7 +1029,7 @@ test "BroadcastChannel: select with multiple broadcast channels" {
             var recv1 = ch1.asyncReceive(c1);
             var recv2 = ch2.asyncReceive(c2);
 
-            const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
+            const result = try select(.{ .ch1 = &recv1, .ch2 = &recv2 });
             switch (result) {
                 .ch1 => |val| {
                     try std.testing.expectEqual(42, try val);

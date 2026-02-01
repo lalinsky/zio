@@ -686,7 +686,8 @@ test "Timeout future: timeout wins select" {
 
     const TestFn = struct {
         fn run(rt: *Runtime, ch: *Channel(u32)) !void {
-            const result = try select(rt, .{
+            _ = rt;
+            const result = try select(.{
                 .recv = ch.asyncReceive(),
                 .timeout = Timeout.fromMilliseconds(10),
             });

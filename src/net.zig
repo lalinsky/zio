@@ -1568,7 +1568,7 @@ test "tcpConnectToAddress: basic" {
             const server = try addr.listen(rt, .{});
             defer server.close(rt);
 
-            try server_port.send(rt, server.socket.address.ip.getPort());
+            try server_port.send(server.socket.address.ip.getPort());
 
             var stream = try server.accept(rt);
             defer stream.close(rt);
@@ -1583,7 +1583,7 @@ test "tcpConnectToAddress: basic" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
-            const port = try server_port.receive(rt);
+            const port = try server_port.receive();
             const addr = try IpAddress.parseIp4("127.0.0.1", port);
 
             var stream = try tcpConnectToAddress(rt, addr, .{});
@@ -1622,7 +1622,7 @@ test "tcpConnectToHost: basic" {
 
             std.log.info("Server listening on port {}\n", .{server.socket.address.ip.getPort()});
 
-            try server_port.send(rt, server.socket.address.ip.getPort());
+            try server_port.send(server.socket.address.ip.getPort());
 
             var stream = try server.accept(rt);
             defer stream.close(rt);
@@ -1637,7 +1637,7 @@ test "tcpConnectToHost: basic" {
 
     const ClientTask = struct {
         fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
-            const port = try server_port.receive(rt);
+            const port = try server_port.receive();
             std.log.info("Client connecting to port {}\n", .{port});
 
             var stream = try tcpConnectToHost(rt, "localhost", port, .{});

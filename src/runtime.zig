@@ -108,7 +108,7 @@ pub fn JoinHandle(comptime T: type) type {
             const awaitable = self.awaitable orelse return self.result;
 
             // Wait for completion
-            _ = select.waitUntilComplete(rt, awaitable);
+            _ = select.waitUntilComplete(awaitable);
 
             // Get result and release awaitable
             self.finishAwaitable(rt, awaitable);
@@ -179,7 +179,7 @@ pub fn JoinHandle(comptime T: type) type {
             awaitable.cancel();
 
             // Wait for completion
-            _ = select.waitUntilComplete(rt, awaitable);
+            _ = select.waitUntilComplete(awaitable);
 
             // Get result and release awaitable
             self.finishAwaitable(rt, awaitable);

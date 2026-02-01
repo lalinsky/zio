@@ -279,14 +279,13 @@ pub const SelectWaiter = struct {
 /// ```
 /// // JoinHandles must be passed by pointer (they mutate self)
 /// var h1 = try rt.spawn(task1, .{});
-/// const result = try select(rt, .{ .task = &h1, .recv = channel.asyncReceive() });
+/// const result = try select(.{ .task = &h1, .recv = channel.asyncReceive() });
 /// switch (result) {
 ///     .task => |val| ...,
 ///     .recv => |val| ...,
 /// }
 /// ```
-pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
-    _ = rt;
+pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const S = @TypeOf(futures);
     const U = SelectResult(S);
     const fields = @typeInfo(S).@"struct".fields;
@@ -389,8 +388,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 /// Select on a runtime slice of type-erased Awaitables.
 /// Returns the index of the first awaitable to complete.
 /// Used by std.Io.selectImpl.
-pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable!usize {
-    _ = rt;
+pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     const max_awaitables = 64;
     if (awaitables.len > max_awaitables) {
         @panic("selectAwaitables: too many awaitables (max 64)");
@@ -445,8 +443,7 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
 }
 
 /// Internal wait implementation with configurable cancellation behavior.
-fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
-    _ = rt;
+fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
     const task = getCurrentTask();
 
     // Self-wait detection: check if waiting on own task (would deadlock)
@@ -519,11 +516,11 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
 /// Example:
 /// ```
 /// // For Future(error{Foo}!i32)
-/// const result = try rt.wait(&future); // returns Cancelable!WaitResult(error{Foo}!i32)
+/// const result = try wait(&future); // returns Cancelable!WaitResult(error{Foo}!i32)
 /// const value = try result.value; // handle the inner error union
 /// ```
-pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
-    return waitInternal(rt, future, .{ .on_cancel = .propagate });
+pub fn wait(future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
+    return waitInternal(future, .{ .on_cancel = .propagate });
 }
 
 /// Wait for a single future to complete, never propagating cancellation.
@@ -534,11 +531,11 @@ pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@T
 ///
 /// Example:
 /// ```
-/// const value = rt.waitUntilComplete(&future); // never returns error.Canceled
+/// const value = waitUntilComplete(&future); // never returns error.Canceled
 /// // value is directly FutureResult (e.g., error{Foo}!i32)
 /// ```
-pub fn waitUntilComplete(rt: *Runtime, future: anytype) FutureResult(@TypeOf(future)) {
-    const result = waitInternal(rt, future, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
+pub fn waitUntilComplete(future: anytype) FutureResult(@TypeOf(future)) {
+    const result = waitInternal(future, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
     return result.value;
 }
 
@@ -563,7 +560,7 @@ test "select: basic - first completes" {
             var fast = try rt.spawn(fastTask, .{rt});
             defer fast.cancel(rt);
 
-            const result = try select(rt, .{ .fast = &fast, .slow = &slow });
+            const result = try select(.{ .fast = &fast, .slow = &slow });
             switch (result) {
                 .slow => |val| try std.testing.expectEqual(42, val),
                 .fast => |val| try std.testing.expectEqual(99, val),
@@ -603,7 +600,7 @@ test "select: already complete - fast path" {
             defer slow.cancel(rt);
 
             // immediate should already be complete, select should return immediately
-            const result = try select(rt, .{ .immediate = &immediate, .slow = &slow });
+            const result = try select(.{ .immediate = &immediate, .slow = &slow });
             switch (result) {
                 .immediate => |val| try std.testing.expectEqual(123, val),
                 .slow => return error.TestUnexpectedResult,
@@ -643,7 +640,7 @@ test "select: heterogeneous types" {
             var bool_handle = try rt.spawn(boolTask, .{rt});
             defer bool_handle.cancel(rt);
 
-            const result = try select(rt, .{
+            const result = try select(.{
                 .string = &string_handle,
                 .int = &int_handle,
                 .bool = &bool_handle,
@@ -691,7 +688,7 @@ test "select: with cancellation" {
             var h2 = try rt.spawn(slowTask2, .{rt});
             defer h2.cancel(rt);
 
-            const result = try select(rt, .{ .first = &h1, .second = &h2 });
+            const result = try select(.{ .first = &h1, .second = &h2 });
             return switch (result) {
                 .first => |v| v,
                 .second => |v| v,
@@ -743,7 +740,7 @@ test "select: with error unions - success case" {
             var validate_handle = try rt.spawn(validateTask, .{rt});
             defer validate_handle.cancel(rt);
 
-            const result = try select(rt, .{
+            const result = try select(.{
                 .validate = &validate_handle,
                 .parse = &parse_handle,
             });
@@ -799,7 +796,7 @@ test "select: with error unions - error case" {
             var slow = try rt.spawn(slowTask, .{rt});
             defer slow.cancel(rt);
 
-            const result = try select(rt, .{ .failing = &failing, .slow = &slow });
+            const result = try select(.{ .failing = &failing, .slow = &slow });
 
             switch (result) {
                 .failing => |val_or_err| {
@@ -856,7 +853,7 @@ test "select: with mixed error types" {
 
             // select returns Cancelable!SelectUnion(...)
             // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
-            const result = try select(rt, .{ .h2 = &h2, .h1 = &h1, .h3 = &h3 });
+            const result = try select(.{ .h2 = &h2, .h1 = &h1, .h3 = &h3 });
 
             switch (result) {
                 .h1 => |val_or_err| {
@@ -903,7 +900,7 @@ test "wait: plain type" {
             defer task.cancel(rt);
 
             // Wait for the future
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             try std.testing.expectEqual(42, result.value);
         }
     };
@@ -933,7 +930,7 @@ test "wait: error union" {
             defer task.cancel(rt);
 
             // Wait for the future
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             const value = try result.value;
             try std.testing.expectEqual(123, value);
         }
@@ -964,7 +961,7 @@ test "wait: error union with error" {
             defer task.cancel(rt);
 
             // Wait for the future
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             try std.testing.expectError(MyError.Foo, result.value);
         }
     };
@@ -981,11 +978,12 @@ test "wait: already complete (fast path)" {
 
     const TestContext = struct {
         fn asyncTask(rt: *Runtime) !void {
+            _ = rt;
             var future = Future(i32).init;
             future.set(99);
 
             // Wait should return immediately since already set
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             try std.testing.expectEqual(99, result.value);
         }
     };
@@ -1013,7 +1011,7 @@ test "select: wait on JoinHandle from spawned task" {
             defer handle2.cancel(rt);
 
             // Wait on JoinHandles using select
-            const result = try select(rt, .{
+            const result = try select(.{
                 .first = &handle1,
                 .second = &handle2,
             });

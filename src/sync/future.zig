@@ -104,8 +104,8 @@ pub fn Future(comptime T: type) type {
         /// Wait for the future's value to be set.
         /// Returns immediately if the value is already available.
         /// Returns error.Canceled if the task is canceled while waiting.
-        pub fn wait(self: *Self, runtime: *Runtime) Cancelable!select.WaitResult(T) {
-            return select.wait(runtime, self);
+        pub fn wait(self: *Self) Cancelable!select.WaitResult(T) {
+            return select.wait(self);
         }
 
         // Future protocol implementation for use with select()
@@ -146,13 +146,14 @@ test "Future: basic set and get" {
 
     const TestContext = struct {
         fn asyncTask(rt: *Runtime) !void {
+            _ = rt;
             var future = Future(i32).init;
 
             // Set value
             future.set(42);
 
             // Get value (should return immediately since already set)
-            const result = try future.wait(rt);
+            const result = try future.wait();
             try std.testing.expectEqual(42, result.value);
         }
     };
@@ -174,8 +175,9 @@ test "Future: await from coroutine" {
         }
 
         fn getterTask(rt: *Runtime, future: *Future(i32)) !i32 {
+            _ = rt;
             // This will block until setter sets the value
-            const result = try future.wait(rt);
+            const result = try future.wait();
             return result.value;
         }
 
@@ -205,7 +207,8 @@ test "Future: multiple waiters" {
 
     const TestContext = struct {
         fn waiterTask(rt: *Runtime, future: *Future(i32), expected: i32) !void {
-            const result = try future.wait(rt);
+            _ = rt;
+            const result = try future.wait();
             try std.testing.expectEqual(expected, result.value);
         }
 

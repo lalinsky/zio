@@ -557,12 +557,13 @@ test "Signal: select on multiple signals" {
         }
 
         fn waitForSignals(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig1 = try Signal.init(.user1);
             defer sig1.deinit();
             var sig2 = try Signal.init(.user2);
             defer sig2.deinit();
 
-            const result = try select(r, .{ .sig1 = &sig1, .sig2 = &sig2 });
+            const result = try select(.{ .sig1 = &sig1, .sig2 = &sig2 });
             switch (result) {
                 .sig1 => self.signal_received.store(@intFromEnum(SignalKind.user1), .monotonic),
                 .sig2 => self.signal_received.store(@intFromEnum(SignalKind.user2), .monotonic),
@@ -604,7 +605,7 @@ test "Signal: select with signal already received (fast path)" {
             try r.sleep(.fromMilliseconds(10));
 
             // Now select should return immediately (fast path)
-            const result = try select(r, .{ .sig = &sig });
+            const result = try select(.{ .sig = &sig });
             switch (result) {
                 .sig => self.signal_received = true,
             }
@@ -645,7 +646,7 @@ test "Signal: select with signal and task" {
             defer sender.cancel(r);
 
             // Signal should win (arrives much sooner)
-            const result = try select(r, .{ .sig = &sig, .task = &task });
+            const result = try select(.{ .sig = &sig, .task = &task });
             switch (result) {
                 .sig => self.winner = .signal,
                 .task => |val| {

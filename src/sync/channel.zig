@@ -486,7 +486,7 @@ pub fn Channel(comptime T: type) type {
         /// Example:
         /// ```zig
         /// var recv = channel.asyncReceive();
-        /// const result = try select(rt, .{ .recv = &recv });
+        /// const result = try select(.{ .recv = &recv });
         /// switch (result) {
         ///     .recv => |val| std.debug.print("Received: {}\n", .{val}),
         /// }
@@ -503,7 +503,7 @@ pub fn Channel(comptime T: type) type {
         /// Example:
         /// ```zig
         /// var send = channel.asyncSend(42);
-        /// const result = try select(rt, .{ .send = &send });
+        /// const result = try select(.{ .send = &send });
         /// ```
         pub fn asyncSend(self: *Self, item: T) AsyncSend(T) {
             return AsyncSend(T).init(&self.impl, item);
@@ -521,7 +521,7 @@ pub fn Channel(comptime T: type) type {
 /// ```zig
 /// var recv1 = channel1.asyncReceive();
 /// var recv2 = channel2.asyncReceive();
-/// const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
+/// const result = try select(.{ .ch1 = &recv1, .ch2 = &recv2 });
 /// switch (result) {
 ///     .ch1 => |val| try std.testing.expectEqual(42, val),
 ///     .ch2 => |val| try std.testing.expectEqual(99, val),
@@ -577,7 +577,7 @@ pub fn AsyncReceive(comptime T: type) type {
 /// ```zig
 /// var send1 = channel1.asyncSend(42);
 /// var send2 = channel2.asyncSend(99);
-/// const result = try select(rt, .{ .ch1 = &send1, .ch2 = &send2 });
+/// const result = try select(.{ .ch1 = &send1, .ch2 = &send2 });
 /// ```
 pub fn AsyncSend(comptime T: type) type {
     return struct {
@@ -645,8 +645,8 @@ test "Channel: basic send and receive" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
+    try group.spawn(runtime, TestFn.producer, .{&channel});
+    try group.spawn(runtime, TestFn.consumer, .{ &channel, &results });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -717,8 +717,8 @@ test "Channel: blocking behavior when empty" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &result });
-    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.consumer, .{ &channel, &result });
+    try group.spawn(runtime, TestFn.producer, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -753,8 +753,8 @@ test "Channel: blocking behavior when full" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel, &count });
-    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.producer, .{ &channel, &count });
+    try group.spawn(runtime, TestFn.consumer, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -789,10 +789,10 @@ test "Channel: multiple producers and consumers" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel, 0 });
-    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel, 100 });
-    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &sum });
-    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &sum });
+    try group.spawn(runtime, TestFn.producer, .{ &channel, 0 });
+    try group.spawn(runtime, TestFn.producer, .{ &channel, 100 });
+    try group.spawn(runtime, TestFn.consumer, .{ &channel, &sum });
+    try group.spawn(runtime, TestFn.consumer, .{ &channel, &sum });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -828,8 +828,8 @@ test "Channel: close graceful" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &results });
+    try group.spawn(runtime, TestFn.producer, .{&channel});
+    try group.spawn(runtime, TestFn.consumer, .{ &channel, &results });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -865,8 +865,8 @@ test "Channel: close immediate" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.producer, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.consumer, .{ runtime, &channel, &result });
+    try group.spawn(runtime, TestFn.producer, .{&channel});
+    try group.spawn(runtime, TestFn.consumer, .{ &channel, &result });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -893,7 +893,7 @@ test "Channel: send on closed channel" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.testClosed, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.testClosed, .{&channel});
     try handle.join(runtime);
 }
 
@@ -932,7 +932,7 @@ test "Channel: ring buffer wrapping" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.testWrap, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.testWrap, .{&channel});
     try handle.join(runtime);
 }
 
@@ -951,7 +951,7 @@ test "Channel: asyncReceive with select - basic" {
 
         fn receiver(ch: *Channel(u32)) !void {
             var recv = ch.asyncReceive();
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
@@ -963,8 +963,8 @@ test "Channel: asyncReceive with select - basic" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.sender, .{&channel});
+    try group.spawn(runtime, TestFn.receiver, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -984,7 +984,7 @@ test "Channel: asyncReceive with select - value types" {
 
         fn receiver(ch: *Channel(u32)) !void {
             // Pass asyncReceive() directly by value, no intermediate variable
-            const result = try select(rt, .{ .recv = ch.asyncReceive() });
+            const result = try select(.{ .recv = ch.asyncReceive() });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
@@ -996,8 +996,8 @@ test "Channel: asyncReceive with select - value types" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.sender, .{&channel});
+    try group.spawn(runtime, TestFn.receiver, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1016,7 +1016,7 @@ test "Channel: asyncReceive with select - already ready" {
             try ch.send(99);
 
             var recv = ch.asyncReceive();
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(99, try val);
@@ -1025,7 +1025,7 @@ test "Channel: asyncReceive with select - already ready" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.test_ready, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.test_ready, .{&channel});
     try handle.join(runtime);
 }
 
@@ -1041,7 +1041,7 @@ test "Channel: asyncReceive with select - closed channel" {
             ch.close(.graceful);
 
             var recv = ch.asyncReceive();
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectError(error.ChannelClosed, val);
@@ -1050,7 +1050,7 @@ test "Channel: asyncReceive with select - closed channel" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.test_closed, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.test_closed, .{&channel});
     try handle.join(runtime);
 }
 
@@ -1065,7 +1065,7 @@ test "Channel: asyncSend with select - basic" {
         fn sender(ch: *Channel(u32)) !void {
             try yield(); // Let receiver start
             var send_op = ch.asyncSend(42);
-            const result = try select(rt, .{ .send = &send_op });
+            const result = try select(.{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try res;
@@ -1084,8 +1084,8 @@ test "Channel: asyncSend with select - basic" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.sender, .{&channel});
+    try group.spawn(runtime, TestFn.receiver, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1102,7 +1102,7 @@ test "Channel: asyncSend with select - already ready" {
         fn test_ready(ch: *Channel(u32)) !void {
             // Channel has space, send should complete immediately
             var send_op = ch.asyncSend(123);
-            const result = try select(rt, .{ .send = &send_op });
+            const result = try select(.{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try res;
@@ -1115,7 +1115,7 @@ test "Channel: asyncSend with select - already ready" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.test_ready, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.test_ready, .{&channel});
     try handle.join(runtime);
 }
 
@@ -1131,7 +1131,7 @@ test "Channel: asyncSend with select - closed channel" {
             ch.close(.graceful);
 
             var send_op = ch.asyncSend(42);
-            const result = try select(rt, .{ .send = &send_op });
+            const result = try select(.{ .send = &send_op });
             switch (result) {
                 .send => |res| {
                     try std.testing.expectError(error.ChannelClosed, res);
@@ -1140,7 +1140,7 @@ test "Channel: asyncSend with select - closed channel" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.test_closed, .{ runtime, &channel });
+    var handle = try runtime.spawn(TestFn.test_closed, .{&channel});
     try handle.join(runtime);
 }
 
@@ -1156,17 +1156,17 @@ test "Channel: select on both send and receive" {
     var channel2 = Channel(u32).init(&buffer2);
 
     const TestFn = struct {
-        fn testMain(ch1: *Channel(u32), ch2: *Channel(u32)) !void {
+        fn testMain(rt: *Runtime, ch1: *Channel(u32), ch2: *Channel(u32)) !void {
             // Fill channel2 so send blocks
-            try ch2.send(rt, 1);
-            try ch2.send(rt, 2);
+            try ch2.send(1);
+            try ch2.send(2);
 
             var which: u8 = 0;
             var group: Group = .init;
             defer group.cancel(rt);
 
-            try group.spawn(rt, selectTask, .{ rt, ch1, ch2, &which });
-            try group.spawn(rt, sender, .{ rt, ch1 });
+            try group.spawn(rt, selectTask, .{ ch1, ch2, &which });
+            try group.spawn(rt, sender, .{ch1});
 
             try group.wait(rt);
 
@@ -1178,7 +1178,7 @@ test "Channel: select on both send and receive" {
             var recv = ch1.asyncReceive();
             var send_op = ch2.asyncSend(99);
 
-            const result = try select(rt, .{ .recv = &recv, .send = &send_op });
+            const result = try select(.{ .recv = &recv, .send = &send_op });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
@@ -1216,7 +1216,7 @@ test "Channel: select with multiple receivers" {
             var recv1 = ch1.asyncReceive();
             var recv2 = ch2.asyncReceive();
 
-            const result = try select(rt, .{ .ch1 = &recv1, .ch2 = &recv2 });
+            const result = try select(.{ .ch1 = &recv1, .ch2 = &recv2 });
             switch (result) {
                 .ch1 => |val| {
                     try std.testing.expectEqual(42, try val);
@@ -1240,8 +1240,8 @@ test "Channel: select with multiple receivers" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.selectTask, .{ runtime, &channel1, &channel2, &which });
-    try group.spawn(runtime, TestFn.sender2, .{ runtime, &channel2 });
+    try group.spawn(runtime, TestFn.selectTask, .{ &channel1, &channel2, &which });
+    try group.spawn(runtime, TestFn.sender2, .{&channel2});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1276,8 +1276,8 @@ test "Channel: unbuffered - basic synchronous transfer" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &results });
+    try group.spawn(runtime, TestFn.sender, .{&channel});
+    try group.spawn(runtime, TestFn.receiver, .{ &channel, &results });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1334,8 +1334,8 @@ test "Channel: unbuffered - sender blocks until receiver ready" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &order, &idx });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.receiver, .{ &channel, &order, &idx });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1376,8 +1376,8 @@ test "Channel: unbuffered - receiver blocks until sender ready" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &order, &idx });
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.receiver, .{ &channel, &order, &idx });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, &order, &idx });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1409,12 +1409,12 @@ test "Channel: unbuffered - multiple senders and receivers" {
     defer group.cancel(runtime);
 
     // Spawn senders and receivers - they will pair up
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 10 });
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 20 });
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, 30 });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &sum });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, 10 });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, 20 });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, 30 });
+    try group.spawn(runtime, TestFn.receiver, .{ &channel, &sum });
+    try group.spawn(runtime, TestFn.receiver, .{ &channel, &sum });
+    try group.spawn(runtime, TestFn.receiver, .{ &channel, &sum });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1431,7 +1431,7 @@ test "Channel: unbuffered - close wakes blocked sender" {
 
     const TestFn = struct {
         fn sender(ch: *Channel(u32), got_closed: *bool) !void {
-            ch.send(rt, 42) catch |err| {
+            ch.send(42) catch |err| {
                 got_closed.* = (err == error.ChannelClosed);
                 return;
             };
@@ -1449,8 +1449,8 @@ test "Channel: unbuffered - close wakes blocked sender" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel, &got_closed });
-    try group.spawn(runtime, TestFn.closer, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.sender, .{ &channel, &got_closed });
+    try group.spawn(runtime, TestFn.closer, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1484,8 +1484,8 @@ test "Channel: unbuffered - close wakes blocked receiver" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel, &got_error });
-    try group.spawn(runtime, TestFn.closer, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.receiver, .{ &channel, &got_error });
+    try group.spawn(runtime, TestFn.closer, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -1507,7 +1507,7 @@ test "Channel: unbuffered - select with direct transfer" {
 
         fn receiver(ch: *Channel(u32)) !void {
             var recv = ch.asyncReceive();
-            const result = try select(rt, .{ .recv = &recv });
+            const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
                     try std.testing.expectEqual(42, try val);
@@ -1519,8 +1519,8 @@ test "Channel: unbuffered - select with direct transfer" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.sender, .{ runtime, &channel });
-    try group.spawn(runtime, TestFn.receiver, .{ runtime, &channel });
+    try group.spawn(runtime, TestFn.sender, .{&channel});
+    try group.spawn(runtime, TestFn.receiver, .{&channel});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
