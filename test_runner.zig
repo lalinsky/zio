@@ -127,7 +127,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         break :blk count;
     };
 
-    const root_node = if (!env.verbose) std.Progress.start(.{
+    const runner_io = std.Io.Threaded.global_single_threaded.ioBasic();
+    const root_node = if (!env.verbose) std.Progress.start(runner_io, .{
         .root_name = "Running tests",
         .estimated_total_items = test_count,
     }) else std.Progress.Node.none;

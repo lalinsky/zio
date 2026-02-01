@@ -39,6 +39,14 @@ const Futex = @import("sync/Futex.zig");
 const waitForIo = @import("common.zig").waitForIo;
 const stdio = @import("stdio.zig");
 
+// Signal handling
+// SIGPIPE: We handle EPIPE errors instead of crashing
+// SIGIO: Used to interrupt blocking syscalls for thread communication
+const have_sig_io = std.posix.SIG != void and @hasField(std.posix.SIG, "IO");
+const have_sig_pipe = std.posix.SIG != void and @hasField(std.posix.SIG, "PIPE");
+
+fn doNothingSignalHandler(_: std.posix.SIG) callconv(.c) void {}
+
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u6) {
     /// Auto-detect based on CPU count
@@ -714,6 +722,9 @@ pub const Runtime = struct {
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     futex_table: Futex.Table, // Global futex wait table
+    old_sig_io: if (have_sig_io) std.posix.Sigaction else void = undefined,
+    old_sig_pipe: if (have_sig_pipe) std.posix.Sigaction else void = undefined,
+    have_signal_handler: bool = false,
 
     const Worker = struct {
         thread: std.Thread = undefined,
@@ -740,6 +751,20 @@ pub const Runtime = struct {
             .task_pool = .init(allocator),
             .futex_table = futex_table,
         };
+
+        // Install signal handlers
+        // SIGIO: interrupts blocking syscalls for thread communication
+        // SIGPIPE: we handle EPIPE errors instead of crashing
+        if (std.posix.Sigaction != void) {
+            const act: std.posix.Sigaction = .{
+                .handler = .{ .handler = doNothingSignalHandler },
+                .mask = std.posix.sigemptyset(),
+                .flags = 0,
+            };
+            if (have_sig_io) std.posix.sigaction(.IO, &act, &self.old_sig_io);
+            if (have_sig_pipe) std.posix.sigaction(.PIPE, &act, &self.old_sig_pipe);
+            self.have_signal_handler = true;
+        }
 
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
@@ -826,6 +851,12 @@ pub const Runtime = struct {
 
         // Clean up futex table
         self.futex_table.deinit(allocator);
+
+        // Restore old signal handlers
+        if (std.posix.Sigaction != void and self.have_signal_handler) {
+            if (have_sig_io) std.posix.sigaction(.IO, &self.old_sig_io, null);
+            if (have_sig_pipe) std.posix.sigaction(.PIPE, &self.old_sig_pipe, null);
+        }
 
         // Free the Runtime allocation
         allocator.destroy(self);

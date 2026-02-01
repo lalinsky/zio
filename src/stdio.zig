@@ -36,10 +36,29 @@ fn timeoutToDuration(rt: *Runtime, timeout: Io.Timeout) time.Duration {
         .deadline => |d| blk: {
             const now = rt.now();
             const deadline_ns = d.raw.nanoseconds;
-            const now_ns: i96 = @intCast(now.ns);
+            const now_ns: i96 = @intCast(now.toNanoseconds());
             const diff = deadline_ns - now_ns;
             if (diff <= 0) break :blk time.Duration.zero;
             break :blk time.Duration.fromNanoseconds(@intCast(diff));
+        },
+    };
+}
+
+fn ioTimeoutToTimeout(rt: *Runtime, timeout: Io.Timeout) time.Timeout {
+    return switch (timeout) {
+        .none => .none,
+        .duration => |d| blk: {
+            const ns = d.raw.nanoseconds;
+            if (ns <= 0) break :blk .{ .duration = time.Duration.zero };
+            break :blk .{ .duration = time.Duration.fromNanoseconds(@intCast(ns)) };
+        },
+        .deadline => |d| blk: {
+            const now = rt.now();
+            const deadline_ns = d.raw.nanoseconds;
+            const now_ns: i96 = @intCast(now.toNanoseconds());
+            const diff = deadline_ns - now_ns;
+            if (diff <= 0) break :blk .{ .duration = time.Duration.zero };
+            break :blk .{ .duration = time.Duration.fromNanoseconds(@intCast(diff)) };
         },
     };
 }
@@ -66,7 +85,7 @@ fn awaitOrCancel(userdata: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8,
     const awaitable: *Awaitable = @ptrCast(@alignCast(any_future));
 
     // Request cancellation if needed
-    if (should_cancel and !awaitable.done.load(.acquire)) {
+    if (should_cancel and !awaitable.hasResult()) {
         awaitable.cancel();
     }
 
@@ -153,9 +172,9 @@ fn checkCancelImpl(userdata: ?*anyopaque) Io.Cancelable!void {
 
 fn futexWaitImpl(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const duration = timeoutToDuration(rt, timeout);
+    const internal_timeout = ioTimeoutToTimeout(rt, timeout);
 
-    Futex.timedWait(rt, ptr, expected, duration) catch |err| switch (err) {
+    Futex.timedWait(rt, ptr, expected, internal_timeout) catch |err| switch (err) {
         error.Timeout => return, // Timeout is not an error, just return void
         error.Canceled => return error.Canceled,
     };
@@ -720,7 +739,7 @@ fn nowImpl(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.Error!Io.Timestamp {
         .real => .realtime,
         .cpu_process, .cpu_thread => return error.UnsupportedClock,
     });
-    return .{ .nanoseconds = ts.ns };
+    return .{ .nanoseconds = @intCast(ts.toNanoseconds()) };
 }
 
 fn sleepImpl(userdata: ?*anyopaque, timeout: Io.Timeout) Io.SleepError!void {
@@ -1231,7 +1250,7 @@ fn fileSetTimestampsImpl(userdata: ?*anyopaque, file: Io.File, options: Io.File.
 fn timestampToNanos(ts: Io.File.SetTimestamp) ?i96 {
     return switch (ts) {
         .unchanged => null,
-        .now => os.time.now(.realtime).ns,
+        .now => @intCast(os.time.now(.realtime).toNanoseconds()),
         .new => |t| t.nanoseconds,
     };
 }
@@ -1305,6 +1324,12 @@ fn tryLockStderrImpl(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelab
 fn unlockStderrImpl(userdata: ?*anyopaque) void {
     _ = userdata;
     @panic("TODO: unlockStderr");
+}
+
+fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
+    _ = userdata;
+    _ = buffer;
+    @panic("TODO: processCurrentPath");
 }
 
 fn processSetCurrentDirImpl(userdata: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
@@ -1390,10 +1415,10 @@ fn fileMemoryMapDestroyImpl(userdata: ?*anyopaque, mm: *Io.File.MemoryMap) void 
     @panic("TODO: fileMemoryMapDestroy");
 }
 
-fn fileMemoryMapSetLengthImpl(userdata: ?*anyopaque, mm: *Io.File.MemoryMap, options: Io.File.MemoryMap.CreateOptions) Io.File.MemoryMap.SetLengthError!void {
+fn fileMemoryMapSetLengthImpl(userdata: ?*anyopaque, mm: *Io.File.MemoryMap, new_length: usize) Io.File.MemoryMap.SetLengthError!void {
     _ = userdata;
     _ = mm;
-    _ = options;
+    _ = new_length;
     @panic("TODO: fileMemoryMapSetLength");
 }
 
@@ -1497,6 +1522,7 @@ pub const vtable = Io.VTable{
     .lockStderr = lockStderrImpl,
     .tryLockStderr = tryLockStderrImpl,
     .unlockStderr = unlockStderrImpl,
+    .processCurrentPath = processCurrentPathImpl,
     .processSetCurrentDir = processSetCurrentDirImpl,
     .processReplace = processReplaceImpl,
     .processReplacePath = processReplacePathImpl,
