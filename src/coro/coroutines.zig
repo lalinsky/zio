@@ -1154,6 +1154,10 @@ test "Coroutine: allocator inside coroutine" {
 
 
 test "Coroutine: stack trace" {
+    // Skip on loongarch64 - stack trace capture is not yet supported
+    // Skip on 32-bit ARM - regression in Zig 0.16, works in 0.15.2
+    if (builtin.cpu.arch == .loongarch64 or builtin.cpu.arch == .arm or builtin.cpu.arch == .thumb) return error.SkipZigTest;
+
     const stack = @import("stack.zig");
 
     var parent_ctx: Context = undefined;
@@ -1202,4 +1206,3 @@ test "Coroutine: stack trace" {
         return err;
     };
 }
-
