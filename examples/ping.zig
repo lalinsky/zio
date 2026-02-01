@@ -66,8 +66,8 @@ pub fn main() !void {
     std.log.info("Target: {f}", .{&addr});
 
     // Create raw ICMP socket (requires root/CAP_NET_RAW)
-    const socket = try zio.net.Socket.open(rt, .raw, .ipv4, .icmp);
-    defer socket.close(rt);
+    const socket = try zio.net.Socket.open(.raw, .ipv4, .icmp);
+    defer socket.close();
 
     const pid: u16 = 1;
     var sequence: u16 = 1;
@@ -103,7 +103,7 @@ pub fn main() !void {
 
         // Send the ping using sendMsg
         var send_storage: [1]zio.os.iovec_const = undefined;
-        _ = try socket.sendMsg(rt, .fromSlice(&packet, &send_storage), addr, null, .none);
+        _ = try socket.sendMsg(.fromSlice(&packet, &send_storage), addr, null, .none);
 
         // Wait for reply using receiveMsg
         var recv_buf: [1024]u8 = undefined;

@@ -7,7 +7,7 @@ const zio = @import("zio");
 fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     for (0..5) |i| {
         const item = @as(i32, @intCast(id * 100 + i));
-        channel.send(rt, item) catch |err| switch (err) {
+        channel.send(item) catch |err| switch (err) {
             error.ChannelClosed => {
                 std.log.info("Producer {}: channel closed, exiting", .{id});
                 return;
@@ -25,7 +25,7 @@ fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelabl
 
 fn consumer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     for (0..5) |_| {
-        const item = channel.receive(rt) catch |err| switch (err) {
+        const item = channel.receive() catch |err| switch (err) {
             error.ChannelClosed => {
                 std.log.info("Consumer {}: channel closed, exiting", .{id});
                 return;

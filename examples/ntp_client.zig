@@ -42,7 +42,7 @@ fn queryNtpServer(rt: *zio.Runtime, server: []const u8, port: u16, timeout: zio.
 
     // Create UDP socket (bind to any local port)
     const local_addr = try zio.net.IpAddress.parseIp4("0.0.0.0", 0);
-    const socket = try local_addr.bind(rt, .{});
+    const socket = try local_addr.bind(.{});
     defer socket.close(rt);
 
     // Prepare and send NTP request
@@ -52,13 +52,13 @@ fn queryNtpServer(rt: *zio.Runtime, server: []const u8, port: u16, timeout: zio.
     var writer = std.Io.Writer.fixed(&buffer);
     try writer.writeStruct(request, .big);
 
-    const sent = try socket.sendTo(rt, addr, &buffer, timeout);
+    const sent = try socket.sendTo(addr, &buffer, timeout);
     if (sent != @sizeOf(NtpPacket)) {
         return error.IncompleteSend;
     }
 
     // Receive response
-    const result = socket.receiveFrom(rt, &buffer, timeout) catch |err| {
+    const result = socket.receiveFrom(&buffer, timeout) catch |err| {
         std.log.warn("Failed to receive NTP response: {}", .{err});
         return err;
     };

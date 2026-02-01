@@ -5,15 +5,15 @@ const zio = @import("zio");
 const MAX_REQUEST_HEADER_SIZE = 64 * 1024;
 
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
-    defer stream.close(rt);
+    defer stream.close();
 
     std.log.info("HTTP client connected from {f}", .{stream.socket.address});
 
     var read_buffer: [MAX_REQUEST_HEADER_SIZE]u8 = undefined;
-    var reader = stream.reader(rt, &read_buffer);
+    var reader = stream.reader(&read_buffer);
 
     var write_buffer: [4096]u8 = undefined;
-    var writer = stream.writer(rt, &write_buffer);
+    var writer = stream.writer(&write_buffer);
 
     // --8<-- [start:init]
     // Initialize HTTP server for this connection
@@ -50,7 +50,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
 
         // If the client doesn't want keep-alive, close the connection
         if (!request.head.keep_alive) {
-            try stream.shutdown(rt, .both);
+            try stream.shutdown(.both);
             break;
         }
     }
@@ -65,8 +65,8 @@ pub fn main() !void {
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
-    const server = try addr.listen(rt, .{});
-    defer server.close(rt);
+    const server = try addr.listen(.{});
+    defer server.close();
 
     std.log.info("HTTP server listening on {f}", .{server.socket.address});
     std.log.info("Visit http://{f} in your browser", .{server.socket.address});
@@ -76,8 +76,8 @@ pub fn main() !void {
     defer group.cancel(rt);
 
     while (true) {
-        const stream = try server.accept(rt);
-        errdefer stream.close(rt);
+        const stream = try server.accept();
+        errdefer stream.close();
 
         try group.spawn(rt, handleClient, .{ rt, stream });
     }
