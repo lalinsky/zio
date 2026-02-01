@@ -22,9 +22,9 @@
 //! ## Example
 //!
 //! ```zig
-//! fn worker(rt: *Runtime, event: *zio.ResetEvent, id: u32) !void {
+//! fn worker(event: *zio.ResetEvent, id: u32) !void {
 //!     // Wait for event to be signaled
-//!     try event.wait(rt);
+//!     try event.wait();
 //!     std.debug.print("Worker {} proceeding\n", .{id});
 //! }
 //!
@@ -113,8 +113,7 @@ pub fn reset(self: *ResetEvent) void {
 /// already set when called, returns immediately without suspending.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
-    _ = runtime;
+pub fn wait(self: *ResetEvent) Cancelable!void {
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -157,8 +156,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
-    _ = runtime;
+pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable)!void {
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -264,8 +262,8 @@ test "ResetEvent wait/set signaling" {
     var waiter_finished = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, finished: *bool) !void {
-            try event.wait(rt);
+        fn waiter(event: *ResetEvent, finished: *bool) !void {
+            try event.wait();
             finished.* = true;
         }
 
@@ -278,7 +276,7 @@ test "ResetEvent wait/set signaling" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_finished });
+    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_finished });
     try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
 
     try group.wait(runtime);
@@ -295,7 +293,7 @@ test "ResetEvent timedWait timeout" {
     var reset_event = ResetEvent.init;
 
     // Should timeout after 10ms
-    try std.testing.expectError(error.Timeout, reset_event.timedWait(rt, .fromMilliseconds(10)));
+    try std.testing.expectError(error.Timeout, reset_event.timedWait(.fromMilliseconds(10)));
     try std.testing.expect(!reset_event.isSet());
 }
 
@@ -307,8 +305,8 @@ test "ResetEvent multiple waiters broadcast" {
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, counter: *u32) !void {
-            try event.wait(rt);
+        fn waiter(event: *ResetEvent, counter: *u32) !void {
+            try event.wait();
             counter.* += 1;
         }
 
@@ -324,9 +322,9 @@ test "ResetEvent multiple waiters broadcast" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
     try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
 
     try group.wait(runtime);
@@ -345,7 +343,7 @@ test "ResetEvent wait on already set event" {
     // Set event before waiting
     reset_event.set();
 
-    try reset_event.wait(rt); // Should return immediately
+    try reset_event.wait(); // Should return immediately
     try std.testing.expect(reset_event.isSet());
 }
 
@@ -363,14 +361,14 @@ test "ResetEvent: cancel waiting task" {
     var started = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, started_flag: *std.atomic.Value(bool)) !void {
+        fn waiter(event: *ResetEvent, started_flag: *std.atomic.Value(bool)) !void {
             // Signal that we're about to wait
             started_flag.store(true, .release);
-            try event.wait(rt);
+            try event.wait();
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &started });
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ &reset_event, &started });
     defer waiter_task.cancel(runtime);
 
     // Wait until waiter has actually started and is blocked
