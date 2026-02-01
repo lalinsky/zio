@@ -834,8 +834,9 @@ pub const Socket = struct {
     address: Address,
 
     pub fn open(rt: *Runtime, sock_type: os.net.Type, domain: os.net.Domain, protocol: os.net.Protocol) !Socket {
+        _ = rt;
         var op = ev.NetOpen.init(domain, sock_type, protocol, .{});
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         const handle = try op.getResult();
         return .{ .handle = handle, .address = undefined };
     }
@@ -844,7 +845,7 @@ pub const Socket = struct {
         var op = ev.NetClose.init(self.handle);
         rt.beginShield();
         defer rt.endShield();
-        waitForIo(rt, &op.c) catch {};
+        waitForIo(&op.c) catch {};
         _ = op.getResult() catch {};
     }
 
@@ -952,19 +953,21 @@ pub const Socket = struct {
 
     /// Bind the socket to an address
     pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
+        _ = rt;
         // Copy addr to self.address so NetBind can update it with actual bound address
         self.address = addr;
         var addr_len = getSockAddrLen(&self.address.any);
 
         var op = ev.NetBind.init(self.handle, &self.address.any, &addr_len);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     /// Mark the socket as a listening socket
     pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
+        _ = rt;
         var op = ev.NetListen.init(self.handle, backlog);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
@@ -974,11 +977,12 @@ pub const Socket = struct {
 
     /// Connect the socket to a remote address
     pub fn connect(self: *Socket, rt: *Runtime, addr: Address, options: ConnectOptions) !void {
+        _ = rt;
         self.address = addr;
         const addr_len = getSockAddrLen(&self.address.any);
 
         var op = ev.NetConnect.init(self.handle, &self.address.any, addr_len);
-        try timedWaitForIo(rt, &op.c, options.timeout);
+        try timedWaitForIo(&op.c, options.timeout);
         try op.getResult();
     }
 
@@ -992,8 +996,9 @@ pub const Socket = struct {
 
     /// Low-level receive function that accepts ev.ReadBuf directly.
     pub fn receiveBuf(self: Socket, rt: *Runtime, buf: ev.ReadBuf, timeout: Timeout) !usize {
+        _ = rt;
         var op = ev.NetRecv.init(self.handle, buf, .{});
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
@@ -1006,19 +1011,21 @@ pub const Socket = struct {
 
     /// Low-level send function that accepts ev.WriteBuf directly.
     pub fn sendBuf(self: Socket, rt: *Runtime, buf: ev.WriteBuf, timeout: Timeout) !usize {
+        _ = rt;
         var op = ev.NetSend.init(self.handle, buf, .{});
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
     pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8, timeout: Timeout) !ReceiveFromResult {
+        _ = rt;
         var storage: [1]os.iovec = undefined;
         var result: ReceiveFromResult = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
         var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         result.len = try op.getResult();
         return result;
     }
@@ -1026,10 +1033,11 @@ pub const Socket = struct {
     /// Sends a datagram to the specified address.
     /// Used for UDP and other datagram-based protocols.
     pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8, timeout: Timeout) !usize {
+        _ = rt;
         var storage: [1]os.iovec_const = undefined;
         const addr_len = getSockAddrLen(&addr.any);
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
@@ -1043,10 +1051,11 @@ pub const Socket = struct {
         control: ?[]u8,
         timeout: Timeout,
     ) !ReceiveMsgResult {
+        _ = rt;
         var result: ReceiveMsgResult = undefined;
         var addr_len: os.net.socklen_t = @sizeOf(Address);
         var op = ev.NetRecvMsg.init(self.handle, buf, .{}, &result.from.any, &addr_len, control);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         const os_result = try op.getResult();
         result.len = os_result.len;
         result.flags = os_result.flags;
@@ -1066,15 +1075,17 @@ pub const Socket = struct {
         timeout: Timeout,
     ) !usize {
         const addr_ptr = if (addr) |a| &a.any else null;
+        _ = rt;
         const addr_len = if (addr) |a| getSockAddrLen(&a.any) else 0;
         var op = ev.NetSendMsg.init(self.handle, buf, .{}, addr_ptr, addr_len, control);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
     pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
+        _ = rt;
         var op = ev.NetShutdown.init(self.handle, how);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 };
@@ -1083,11 +1094,12 @@ pub const Server = struct {
     socket: Socket,
 
     pub fn accept(self: Server, rt: *Runtime) !Stream {
+        _ = rt;
         var peer_addr: Address = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
 
         var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         const handle = try op.getResult();
         return .{ .socket = .{ .handle = handle, .address = peer_addr } };
     }

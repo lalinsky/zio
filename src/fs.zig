@@ -57,8 +57,9 @@ pub fn createFile(rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) 
 }
 
 pub fn createPipe(rt: *Runtime) (os.fs.PipeError || Cancelable)!PipePair {
+    _ = rt;
     var op = ev.PipeCreate.init();
-    try waitForIo(rt, &op.c);
+    try waitForIo(&op.c);
     const fds = try op.getResult();
     return .{
         .read = Pipe.fromFd(fds[0]),
@@ -134,121 +135,136 @@ pub const Dir = struct {
         var op = ev.DirClose.init(self.fd);
         rt.beginShield();
         defer rt.endShield();
-        waitForIo(rt, &op.c) catch unreachable;
+        waitForIo(&op.c) catch unreachable;
         _ = op.getResult() catch {};
     }
 
     pub const OpenDirError = os.fs.DirOpenError || Cancelable;
 
     pub fn openDir(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.DirOpenFlags) OpenDirError!Dir {
+        _ = rt;
         var op = ev.DirOpen.init(self.fd, path, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return .{ .fd = try op.getResult() };
     }
 
     pub const OpenFileError = os.fs.FileOpenError || Cancelable;
 
     pub fn openFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileOpenFlags) OpenFileError!File {
+        _ = rt;
         var op = ev.FileOpen.init(self.fd, path, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return .fromFd(try op.getResult());
     }
 
     pub const CreateDirError = os.fs.DirCreateDirError || Cancelable;
 
     pub fn createDir(self: Dir, rt: *Runtime, path: []const u8, mode: os.fs.mode_t) CreateDirError!void {
+        _ = rt;
         var op = ev.DirCreateDir.init(self.fd, path, mode);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const CreateFileError = os.fs.FileCreateError || Cancelable;
 
     pub fn createFile(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.FileCreateFlags) CreateFileError!File {
+        _ = rt;
         var op = ev.FileCreate.init(self.fd, path, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return .fromFd(try op.getResult());
     }
 
     pub const DeleteDirError = os.fs.DirDeleteDirError || Cancelable;
 
     pub fn deleteDir(self: Dir, rt: *Runtime, path: []const u8) DeleteDirError!void {
+        _ = rt;
         var op = ev.DirDeleteDir.init(self.fd, path);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const DeleteFileError = os.fs.DirDeleteFileError || Cancelable;
 
     pub fn deleteFile(self: Dir, rt: *Runtime, path: []const u8) DeleteFileError!void {
+        _ = rt;
         var op = ev.DirDeleteFile.init(self.fd, path);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const RenameError = os.fs.DirRenameError || Cancelable;
 
     pub fn rename(self: Dir, rt: *Runtime, old_path: []const u8, new_dir: Dir, new_path: []const u8) RenameError!void {
+        _ = rt;
         var op = ev.DirRename.init(self.fd, old_path, new_dir.fd, new_path);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: Dir, rt: *Runtime) StatError!os.fs.FileStatInfo {
+        _ = rt;
         var op = ev.FileStat.init(self.fd, null);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     pub fn statPath(self: Dir, rt: *Runtime, path: []const u8) StatError!os.fs.FileStatInfo {
+        _ = rt;
         var op = ev.FileStat.init(self.fd, path);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     pub const SetPermissionsError = os.fs.FileSetPermissionsError || Cancelable;
 
     pub fn setPermissions(self: Dir, rt: *Runtime, mode: os.fs.mode_t) SetPermissionsError!void {
+        _ = rt;
         var op = ev.DirSetPermissions.init(self.fd, mode);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const SetOwnerError = os.fs.FileSetOwnerError || Cancelable;
 
     pub fn setOwner(self: Dir, rt: *Runtime, uid: ?os.fs.uid_t, gid: ?os.fs.gid_t) SetOwnerError!void {
+        _ = rt;
         var op = ev.DirSetOwner.init(self.fd, uid, gid);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub fn setFilePermissions(self: Dir, rt: *Runtime, path: []const u8, mode: os.fs.mode_t, flags: os.fs.PathSetFlags) SetPermissionsError!void {
+        _ = rt;
         var op = ev.DirSetFilePermissions.init(self.fd, path, mode, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub fn setFileOwner(self: Dir, rt: *Runtime, path: []const u8, uid: ?os.fs.uid_t, gid: ?os.fs.gid_t, flags: os.fs.PathSetFlags) SetOwnerError!void {
+        _ = rt;
         var op = ev.DirSetFileOwner.init(self.fd, path, uid, gid, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const SetTimestampsError = os.fs.FileSetTimestampsError || Cancelable;
 
     pub fn setFileTimestamps(self: Dir, rt: *Runtime, path: []const u8, timestamps: os.fs.FileTimestamps, flags: os.fs.PathSetFlags) SetTimestampsError!void {
+        _ = rt;
         var op = ev.DirSetFileTimestamps.init(self.fd, path, timestamps, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const ReadLinkError = os.fs.ReadLinkError || Cancelable;
 
     pub fn readLink(self: Dir, rt: *Runtime, path: []const u8, buffer: []u8) ReadLinkError![]u8 {
+        _ = rt;
         var op = ev.DirReadLink.init(self.fd, path, buffer);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         const len = try op.getResult();
         return buffer[0..len];
     }
@@ -256,32 +272,36 @@ pub const Dir = struct {
     pub const SymLinkError = os.fs.SymLinkError || Cancelable;
 
     pub fn symLink(self: Dir, rt: *Runtime, target: []const u8, link_path: []const u8, flags: os.fs.SymLinkFlags) SymLinkError!void {
+        _ = rt;
         var op = ev.DirSymLink.init(self.fd, target, link_path, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const HardLinkError = os.fs.HardLinkError || Cancelable;
 
     pub fn hardLink(self: Dir, rt: *Runtime, old_path: []const u8, new_dir: Dir, new_path: []const u8, flags: os.fs.HardLinkFlags) HardLinkError!void {
+        _ = rt;
         var op = ev.DirHardLink.init(self.fd, old_path, new_dir.fd, new_path, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const AccessError = os.fs.DirAccessError || Cancelable;
 
     pub fn access(self: Dir, rt: *Runtime, path: []const u8, flags: os.fs.AccessFlags) AccessError!void {
+        _ = rt;
         var op = ev.DirAccess.init(self.fd, path, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const RealPathError = os.fs.DirRealPathError || Cancelable;
 
     pub fn realPath(self: Dir, rt: *Runtime, buffer: []u8) RealPathError![]u8 {
+        _ = rt;
         var op = ev.DirRealPath.init(self.fd, buffer);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         const len = try op.getResult();
         return buffer[0..len];
     }
@@ -289,8 +309,9 @@ pub const Dir = struct {
     pub const RealPathFileError = os.fs.DirRealPathFileError || Cancelable;
 
     pub fn realPathFile(self: Dir, rt: *Runtime, path: []const u8, buffer: []u8) RealPathFileError![]u8 {
+        _ = rt;
         var op = ev.DirRealPathFile.init(self.fd, path, buffer);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         const len = try op.getResult();
         return buffer[0..len];
     }
@@ -308,47 +329,53 @@ pub const File = struct {
 
     /// Read from file into a single slice.
     pub fn read(self: File, rt: *Runtime, buffer: []u8, offset: u64) ReadError!usize {
+        _ = rt;
         var storage: [1]os.iovec = undefined;
         var op = ev.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Write to file from a single slice.
     pub fn write(self: File, rt: *Runtime, data: []const u8, offset: u64) WriteError!usize {
+        _ = rt;
         var storage: [1]os.iovec_const = undefined;
         var op = ev.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Read from file into multiple slices (vectored read).
     pub fn readVec(self: File, rt: *Runtime, slices: []const []u8, offset: u64) ReadError!usize {
+        _ = rt;
         var storage: [max_vecs]os.iovec = undefined;
         var op = ev.FileRead.init(self.fd, ev.ReadBuf.fromSlices(slices, &storage), offset);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Write to file from multiple slices (vectored write).
     pub fn writeVec(self: File, rt: *Runtime, slices: []const []const u8, offset: u64) WriteError!usize {
+        _ = rt;
         var storage: [max_vecs]os.iovec_const = undefined;
         var op = ev.FileWrite.init(self.fd, ev.WriteBuf.fromSlices(slices, &storage), offset);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Read from file using ReadBuf (vectored read).
     pub fn readBuf(self: File, rt: *Runtime, buf: ev.ReadBuf, offset: u64) ReadError!usize {
+        _ = rt;
         var op = ev.FileRead.init(self.fd, buf, offset);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Write to file using WriteBuf (vectored write).
     pub fn writeBuf(self: File, rt: *Runtime, buf: ev.WriteBuf, offset: u64) WriteError!usize {
+        _ = rt;
         var op = ev.FileWrite.init(self.fd, buf, offset);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
@@ -356,63 +383,70 @@ pub const File = struct {
         var op = ev.FileClose.init(self.fd);
         rt.beginShield();
         defer rt.endShield();
-        waitForIo(rt, &op.c) catch unreachable;
+        waitForIo(&op.c) catch unreachable;
         _ = op.getResult() catch {};
     }
 
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: File, rt: *Runtime) StatError!os.fs.FileStatInfo {
+        _ = rt;
         var op = ev.FileStat.init(self.fd, null);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     pub const SyncError = os.fs.FileSyncError || Cancelable;
 
     pub fn sync(self: File, rt: *Runtime, flags: os.fs.FileSyncFlags) SyncError!void {
+        _ = rt;
         var op = ev.FileSync.init(self.fd, flags);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const SetSizeError = os.fs.FileSetSizeError || Cancelable;
 
     pub fn setSize(self: File, rt: *Runtime, length: u64) SetSizeError!void {
+        _ = rt;
         var op = ev.FileSetSize.init(self.fd, length);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const SizeError = os.fs.FileSizeError || Cancelable;
 
     pub fn size(self: File, rt: *Runtime) SizeError!u64 {
+        _ = rt;
         var op = ev.FileSize.init(self.fd);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         return try op.getResult();
     }
 
     pub const SetPermissionsError = os.fs.FileSetPermissionsError || Cancelable;
 
     pub fn setPermissions(self: File, rt: *Runtime, mode: os.fs.mode_t) SetPermissionsError!void {
+        _ = rt;
         var op = ev.FileSetPermissions.init(self.fd, mode);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const SetOwnerError = os.fs.FileSetOwnerError || Cancelable;
 
     pub fn setOwner(self: File, rt: *Runtime, uid: ?os.fs.uid_t, gid: ?os.fs.gid_t) SetOwnerError!void {
+        _ = rt;
         var op = ev.FileSetOwner.init(self.fd, uid, gid);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     pub const SetTimestampsError = os.fs.FileSetTimestampsError || Cancelable;
 
     pub fn setTimestamps(self: File, rt: *Runtime, timestamps: os.fs.FileTimestamps) SetTimestampsError!void {
+        _ = rt;
         var op = ev.FileSetTimestamps.init(self.fd, timestamps);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
@@ -631,15 +665,17 @@ pub const Pipe = struct {
 
     /// Read using ReadBuf (vectored I/O)
     pub fn readBuf(self: Pipe, rt: *Runtime, buf: ev.ReadBuf, timeout: Timeout) ReadError!usize {
+        _ = rt;
         var op = ev.PipeRead.init(self.fd, buf);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
     /// Write using WriteBuf (vectored I/O)
     pub fn writeBuf(self: Pipe, rt: *Runtime, buf: ev.WriteBuf, timeout: Timeout) WriteError!usize {
+        _ = rt;
         var op = ev.PipeWrite.init(self.fd, buf);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
@@ -647,8 +683,9 @@ pub const Pipe = struct {
     /// Waits until the pipe is ready for the specified event (read or write)
     /// Note: Not supported on Windows (returns error.Unexpected)
     pub fn poll(self: Pipe, rt: *Runtime, event: PollEvent, timeout: Timeout) PollError!void {
+        _ = rt;
         var op = ev.PipePoll.init(self.fd, event);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
@@ -657,7 +694,7 @@ pub const Pipe = struct {
         var op = ev.PipeClose.init(self.fd);
         rt.beginShield();
         defer rt.endShield();
-        waitForIo(rt, &op.c) catch unreachable;
+        waitForIo(&op.c) catch unreachable;
         _ = op.getResult() catch {};
     }
 
