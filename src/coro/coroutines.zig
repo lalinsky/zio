@@ -800,10 +800,16 @@ fn coroEntry() callconv(.naked) noreturn {
                 }
             }
         },
-        .aarch64 => asm volatile (
-            \\ ldp x2, x0, [sp]
-            \\ br x2
-        ),
+        .aarch64 => {
+            // Create sentinel frame for FP-based unwinding (needed for macOS/aarch64)
+            asm volatile (
+                \\ stp xzr, xzr, [sp, #-16]!
+                \\ mov x29, sp
+                \\ mov x30, xzr
+                \\ ldp x2, x0, [sp, #16]
+                \\ br x2
+            );
+        },
         .arm, .thumb => asm volatile (
             \\ ldr r0, [sp, #4]
             \\ ldr r2, [sp, #0]
