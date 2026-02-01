@@ -53,6 +53,16 @@ jobs:
       env:
         TEST_VERBOSE: true
 
+    - name: Debug with lldb (macOS)
+      if: runner.os == 'macOS' && failure()
+      run: |
+        zig build test -Demit-test-bin -Dtest-filter="Unix domain socket"
+        lldb -o "run" -o "bt all" -o "quit" -- ./zig-out/bin/test
+
+    - name: Build examples
+      run: zig build examples
+      timeout-minutes: 5
+
   extended:
     needs: changes
     if: needs.changes.outputs.extended == 'true'
