@@ -719,6 +719,20 @@ pub fn yield() Cancelable!void {
     return executor.yield(.ready, .ready, .allow_cancel);
 }
 
+/// Spawn a task on the current runtime.
+/// Panics if called outside of a task context.
+pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
+    const rt = getCurrentExecutor().runtime;
+    return rt.spawn(func, args);
+}
+
+/// Spawn a blocking task on the current runtime.
+/// Panics if called outside of a task context.
+pub fn spawnBlocking(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
+    const rt = getCurrentExecutor().runtime;
+    return rt.spawnBlocking(func, args);
+}
+
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
     thread_pool: ev.ThreadPool,
