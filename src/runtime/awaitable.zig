@@ -117,15 +117,15 @@ pub const Awaitable = struct {
     }
 
     /// Release the awaitable, decrementing the reference count and destroying it if necessary.
-    pub fn release(self: *Awaitable, rt: *Runtime) void {
-        if (self.ref_count.decr()) self.destroy(rt);
+    pub fn release(self: *Awaitable) void {
+        if (self.ref_count.decr()) self.destroy();
     }
 
     /// Destroy the awaitable, freeing any associated resources.
-    pub fn destroy(self: *Awaitable, rt: *Runtime) void {
+    pub fn destroy(self: *Awaitable) void {
         switch (self.kind) {
-            .task => AnyTask.fromAwaitable(self).destroy(rt),
-            .blocking_task => AnyBlockingTask.fromAwaitable(self).destroy(rt),
+            .task => AnyTask.fromAwaitable(self).destroy(),
+            .blocking_task => AnyBlockingTask.fromAwaitable(self).destroy(),
         }
     }
 };

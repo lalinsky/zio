@@ -159,7 +159,7 @@ test "Future: basic set and get" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Future: await from coroutine" {
@@ -186,19 +186,19 @@ test "Future: await from coroutine" {
 
             // Spawn setter coroutine
             var setter_handle = try rt.spawn(setterTask, .{ rt, &future });
-            defer setter_handle.cancel(rt);
+            defer setter_handle.cancel();
 
             // Spawn getter coroutine
             var getter_handle = try rt.spawn(getterTask, .{ rt, &future });
-            defer getter_handle.cancel(rt);
+            defer getter_handle.cancel();
 
-            const result = try getter_handle.join(rt);
+            const result = try getter_handle.join();
             try std.testing.expectEqual(123, result);
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Future: multiple waiters" {
@@ -224,24 +224,24 @@ test "Future: multiple waiters" {
 
             // Spawn multiple waiters
             var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
-            defer waiter1.cancel(rt);
+            defer waiter1.cancel();
             var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
-            defer waiter2.cancel(rt);
+            defer waiter2.cancel();
             var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
-            defer waiter3.cancel(rt);
+            defer waiter3.cancel();
 
             // Spawn setter
             var setter = try rt.spawn(setterTask, .{ rt, &future });
-            defer setter.cancel(rt);
+            defer setter.cancel();
 
             // Wait for all to complete
-            _ = try waiter1.join(rt);
-            _ = try waiter2.join(rt);
-            _ = try waiter3.join(rt);
-            _ = try setter.join(rt);
+            _ = try waiter1.join();
+            _ = try waiter2.join();
+            _ = try waiter3.join();
+            _ = try setter.join();
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }

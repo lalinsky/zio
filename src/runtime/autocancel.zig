@@ -178,10 +178,10 @@ test "AutoCancel: user cancel has priority over timeout" {
             try rt.sleep(.fromMilliseconds(5));
 
             // User cancel before timeout fires
-            handle.cancel(rt);
+            handle.cancel();
 
             // Worker handles the cancellation gracefully, so join succeeds
-            try handle.join(rt);
+            try handle.join();
         }
     };
 
@@ -189,7 +189,7 @@ test "AutoCancel: user cancel has priority over timeout" {
     defer rt.deinit();
 
     var handle = try rt.spawn(Test.main, .{rt});
-    try handle.join(rt);
+    try handle.join();
 }
 
 test "AutoCancel: multiple timeouts with different deadlines" {
@@ -275,14 +275,14 @@ test "AutoCancel: cancels spawned task via join" {
 
         fn main(rt: *Runtime) !void {
             var handle = try rt.spawn(blocker, .{rt});
-            defer handle.cancel(rt);
+            defer handle.cancel();
 
             var timeout = AutoCancel.init;
             defer timeout.clear();
             timeout.set(.fromMilliseconds(10));
 
             // Join should be canceled by timeout
-            handle.join(rt) catch |err| {
+            handle.join() catch |err| {
                 try std.testing.expect(timeout.check(err));
                 return; // Expected
             };
@@ -295,5 +295,5 @@ test "AutoCancel: cancels spawned task via join" {
     defer rt.deinit();
 
     var handle = try rt.spawn(Test.main, .{rt});
-    try handle.join(rt);
+    try handle.join();
 }

@@ -250,16 +250,16 @@ test "Futex: basic wait/wake" {
             var woken: bool = false;
 
             var waiter = try io.spawn(waiterFunc, .{ io, &value, &woken });
-            defer waiter.cancel(io);
+            defer waiter.cancel();
 
             var waker = try io.spawn(wakerFunc, .{ io, &value });
-            try waker.join(io);
+            try waker.join();
 
             var timeout: AutoCancel = .init;
             defer timeout.clear();
             timeout.set(.fromMilliseconds(10));
 
-            try waiter.join(io);
+            try waiter.join();
             try std.testing.expect(woken);
         }
     };
@@ -268,7 +268,7 @@ test "Futex: basic wait/wake" {
     defer rt.deinit();
 
     var task = try rt.spawn(Main.run, .{rt});
-    try task.join(rt);
+    try task.join();
 }
 
 test "Futex: spurious wakeup - value already changed" {
@@ -316,20 +316,20 @@ test "Futex: multiple waiters same address" {
             var woken: u32 = 0;
 
             var waiter1 = try io.spawn(waiterFunc, .{ io, &value, &woken });
-            defer waiter1.cancel(io);
+            defer waiter1.cancel();
 
             var waiter2 = try io.spawn(waiterFunc, .{ io, &value, &woken });
-            defer waiter2.cancel(io);
+            defer waiter2.cancel();
 
             var waker = try io.spawn(wakerFunc, .{ io, &value });
-            try waker.join(io);
+            try waker.join();
 
             var timeout: AutoCancel = .init;
             defer timeout.clear();
             timeout.set(.fromMilliseconds(10));
 
-            try waiter1.join(io);
-            try waiter2.join(io);
+            try waiter1.join();
+            try waiter2.join();
             try std.testing.expectEqual(2, woken);
         }
     };
@@ -338,7 +338,7 @@ test "Futex: multiple waiters same address" {
     defer rt.deinit();
 
     var task = try rt.spawn(Main.run, .{rt});
-    try task.join(rt);
+    try task.join();
 }
 
 test "Futex: multiple waiters different addresses" {
@@ -360,20 +360,20 @@ test "Futex: multiple waiters different addresses" {
             var value2: u32 = 0;
 
             var waiter1 = try io.spawn(waiterFunc, .{ io, &value1, w });
-            defer waiter1.cancel(io);
+            defer waiter1.cancel();
 
             var waiter2 = try io.spawn(waiterFunc, .{ io, &value2, w });
-            defer waiter2.cancel(io);
+            defer waiter2.cancel();
 
             var waker = try io.spawn(wakerFunc, .{ io, &value1 });
-            try waker.join(io);
+            try waker.join();
 
             var timeout: AutoCancel = .init;
             defer timeout.clear();
             timeout.set(.fromMilliseconds(10));
 
-            try waiter1.join(io);
-            waiter2.join(io) catch |err| {
+            try waiter1.join();
+            waiter2.join() catch |err| {
                 // waiter2 should be canceled by timeout since value2 was never woken
                 return if (err == error.Canceled) {} else err;
             };
@@ -386,7 +386,7 @@ test "Futex: multiple waiters different addresses" {
     var woken: u32 = 0;
 
     var task = try rt.spawn(Main.run, .{ rt, &woken });
-    task.join(rt) catch {};
+    task.join() catch {};
 
     // Only waiter1 should have completed - waiter2 was on a different address
     // and was canceled by the timeout

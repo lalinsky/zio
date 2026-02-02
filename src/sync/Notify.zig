@@ -348,7 +348,7 @@ test "Notify timedWait timeout" {
     };
 
     var handle = try runtime.spawn(TestFn.waiter, .{ &notify, &timed_out });
-    try handle.join(runtime);
+    try handle.join();
 
     try std.testing.expect(timed_out);
 }
@@ -404,7 +404,7 @@ test "Notify: select" {
             var notify = Notify.init;
 
             var task = try rt.spawn(signalerTask, .{ rt, &notify });
-            defer task.cancel(rt);
+            defer task.cancel();
 
             const result = try select(.{ .notify = &notify, .task = &task });
             try std.testing.expectEqual(.notify, result);
@@ -415,5 +415,5 @@ test "Notify: select" {
     defer runtime.deinit();
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }

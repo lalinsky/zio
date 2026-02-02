@@ -164,9 +164,9 @@ pub const HostName = struct {
             error.ResultTooLarge, error.ContextTooLarge => unreachable,
             else => |e| return @as(LookupError, e),
         };
-        defer task.cancel(rt);
+        defer task.cancel();
 
-        const res = try task.join(rt);
+        const res = try task.join();
         return .{
             .head = res,
             .current = res,
@@ -1492,8 +1492,8 @@ test "HostName: connect" {
     };
 
     var task = try rt.spawn(Test.run, .{rt});
-    defer task.cancel(rt);
-    try task.join(rt);
+    defer task.cancel();
+    try task.join();
 }
 
 test "IpAddress: getFamily" {
@@ -1997,7 +1997,7 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     defer runtime.deinit();
 
     var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
@@ -2043,7 +2043,7 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     defer runtime.deinit();
 
     var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 pub fn checkShutdown(addr: anytype, options: anytype) !void {
@@ -2084,7 +2084,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
     defer runtime.deinit();
 
     var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {

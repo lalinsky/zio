@@ -691,7 +691,7 @@ test "Channel: trySend and tryReceive" {
     };
 
     var handle = try runtime.spawn(TestFn.testTry, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: blocking behavior when empty" {
@@ -894,7 +894,7 @@ test "Channel: send on closed channel" {
     };
 
     var handle = try runtime.spawn(TestFn.testClosed, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: ring buffer wrapping" {
@@ -933,7 +933,7 @@ test "Channel: ring buffer wrapping" {
     };
 
     var handle = try runtime.spawn(TestFn.testWrap, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: asyncReceive with select - basic" {
@@ -1026,7 +1026,7 @@ test "Channel: asyncReceive with select - already ready" {
     };
 
     var handle = try runtime.spawn(TestFn.test_ready, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: asyncReceive with select - closed channel" {
@@ -1051,7 +1051,7 @@ test "Channel: asyncReceive with select - closed channel" {
     };
 
     var handle = try runtime.spawn(TestFn.test_closed, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: asyncSend with select - basic" {
@@ -1116,7 +1116,7 @@ test "Channel: asyncSend with select - already ready" {
     };
 
     var handle = try runtime.spawn(TestFn.test_ready, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: asyncSend with select - closed channel" {
@@ -1141,7 +1141,7 @@ test "Channel: asyncSend with select - closed channel" {
     };
 
     var handle = try runtime.spawn(TestFn.test_closed, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: select on both send and receive" {
@@ -1198,7 +1198,7 @@ test "Channel: select on both send and receive" {
     };
 
     var handle = try runtime.spawn(TestFn.testMain, .{ runtime, &channel1, &channel2 });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Channel: select with multiple receivers" {

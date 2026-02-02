@@ -302,7 +302,7 @@ test "Condition timedWait timeout" {
     };
 
     var handle = try runtime.spawn(TestFn.waiter, .{ &mutex, &condition, &timed_out });
-    try handle.join(runtime);
+    try handle.join();
 
     try std.testing.expect(timed_out);
 }

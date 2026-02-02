@@ -416,7 +416,7 @@ test "Signal: basic signal handling" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -459,7 +459,7 @@ test "Signal: multiple handlers for same signal" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expectEqual(3, ctx.count.load(.monotonic));
 }
@@ -490,7 +490,7 @@ test "Signal: timedWait timeout" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.timed_out);
 }
@@ -531,7 +531,7 @@ test "Signal: timedWait receives signal before timeout" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -579,7 +579,7 @@ test "Signal: select on multiple signals" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expectEqual(@intFromEnum(SignalKind.user2), ctx.signal_received.load(.monotonic));
 }
@@ -615,7 +615,7 @@ test "Signal: select with signal already received (fast path)" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -641,10 +641,10 @@ test "Signal: select with signal and task" {
             defer sig.deinit();
 
             var task = try r.spawn(slowTask, .{r});
-            defer task.cancel(r);
+            defer task.cancel();
 
             var sender = try r.spawn(sendSignal, .{r});
-            defer sender.cancel(r);
+            defer sender.cancel();
 
             // Signal should win (arrives much sooner)
             const result = try select(.{ .sig = &sig, .task = &task });
@@ -656,7 +656,7 @@ test "Signal: select with signal and task" {
                 },
             }
 
-            try sender.join(r);
+            try sender.join();
         }
 
         fn sendSignal(r: *Runtime) !void {
@@ -667,7 +667,7 @@ test "Signal: select with signal and task" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expectEqual(.signal, ctx.winner);
 }

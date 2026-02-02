@@ -208,7 +208,7 @@ test "Semaphore: timedWait timeout" {
     };
 
     var handle = try runtime.spawn(TestFn.waiter, .{ &sem, &timed_out });
-    handle.join(runtime);
+    handle.join();
 
     try std.testing.expect(timed_out);
     try std.testing.expectEqual(0, sem.permits);

@@ -214,6 +214,10 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
+    pub inline fn getRuntime(self: *AnyTask) *Runtime {
+        return self.getExecutor().runtime;
+    }
+
     /// Begin a cancellation shield to prevent being canceled during critical sections.
     pub fn beginShield(self: *AnyTask) void {
         var current = self.canceled_status.load(.acquire);
@@ -368,7 +372,8 @@ pub const AnyTask = struct {
         executor.scheduleTask(self);
     }
 
-    pub fn destroy(self: *AnyTask, rt: *Runtime) void {
+    pub fn destroy(self: *AnyTask) void {
+        const rt = self.getRuntime();
         if (self.coro.context.stack_info.allocation_len > 0) {
             rt.stack_pool.release(self.coro.context.stack_info, rt.now());
         }
@@ -476,7 +481,7 @@ pub fn spawnTask(
         context_alignment,
         start,
     );
-    errdefer task.destroy(rt);
+    errdefer task.destroy();
 
     if (group) |g| try registerGroupTask(g, &task.awaitable);
     errdefer if (group) |g| unregisterGroupTask(rt, g, &task.awaitable);

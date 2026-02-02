@@ -609,7 +609,7 @@ test "BroadcastChannel: lagged consumer" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_lag, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: tryReceive" {
@@ -647,7 +647,7 @@ test "BroadcastChannel: tryReceive" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_try, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: new subscriber doesn't receive old messages" {
@@ -683,7 +683,7 @@ test "BroadcastChannel: new subscriber doesn't receive old messages" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_new_subscriber, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
@@ -719,7 +719,7 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
     var consumer1 = BroadcastChannel(u32).Consumer{};
     var consumer2 = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_unsubscribe, .{ &channel, &consumer1, &consumer2 });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: close prevents new sends" {
@@ -744,7 +744,7 @@ test "BroadcastChannel: close prevents new sends" {
     };
 
     var handle = try runtime.spawn(TestFn.test_close, .{&channel});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: consumers can drain after close" {
@@ -865,7 +865,7 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_try_closed, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: asyncReceive with select - basic" {
@@ -936,7 +936,7 @@ test "BroadcastChannel: asyncReceive with select - already ready" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_ready, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: asyncReceive with select - closed channel" {
@@ -965,7 +965,7 @@ test "BroadcastChannel: asyncReceive with select - closed channel" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_closed, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: asyncReceive with select - lagged consumer" {
@@ -1000,7 +1000,7 @@ test "BroadcastChannel: asyncReceive with select - lagged consumer" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_lagged, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "BroadcastChannel: select with multiple broadcast channels" {
@@ -1131,5 +1131,5 @@ test "BroadcastChannel: position counter overflow handling" {
 
     var consumer = BroadcastChannel(u32).Consumer{};
     var handle = try runtime.spawn(TestFn.test_overflow, .{ &channel, &consumer });
-    try handle.join(runtime);
+    try handle.join();
 }

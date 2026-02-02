@@ -180,7 +180,7 @@ pub const Group = struct {
         while (group.getTasks().popOrTransition(.sentinel0, .sentinel1)) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             awaitable.cancel();
-            awaitable.release(rt);
+            awaitable.release();
         }
 
         // Wait for all tasks to complete
@@ -241,7 +241,7 @@ pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!voi
 pub fn unregisterGroupTask(rt: *Runtime, group: *Group, awaitable: *Awaitable) void {
     // Only release if we successfully removed it (cancel might have popped it first)
     if (group.getTasks().remove(&awaitable.group_node)) {
-        awaitable.release(rt);
+        awaitable.release();
     }
 
     const state_ptr = group.getState();
@@ -284,7 +284,7 @@ test "Group: spawn" {
     };
 
     var handle = try rt.spawn(TestContext.asyncTask, .{rt});
-    try handle.join(rt);
+    try handle.join();
 }
 
 test "Group: wait for multiple tasks" {
@@ -315,7 +315,7 @@ test "Group: wait for multiple tasks" {
     };
 
     var handle = try rt.spawn(TestContext.asyncTask, .{rt});
-    try handle.join(rt);
+    try handle.join();
 }
 
 test "Group: cancellation while waiting" {
@@ -362,10 +362,10 @@ test "Group: cancellation while waiting" {
 
             // Spawn a task that will cancel the group task
             var canceller = try runtime.spawn(cancellerTask, .{ runtime, &group_handle });
-            defer canceller.cancel(runtime);
+            defer canceller.cancel();
 
             // Wait for group task to complete (should be canceled)
-            try group_handle.join(runtime);
+            try group_handle.join();
 
             // All tasks should have been canceled
             try std.testing.expectEqual(3, started);
@@ -374,5 +374,5 @@ test "Group: cancellation while waiting" {
     };
 
     var handle = try rt.spawn(TestContext.asyncTask, .{rt});
-    try handle.join(rt);
+    try handle.join();
 }

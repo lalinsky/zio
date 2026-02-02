@@ -556,9 +556,9 @@ test "select: basic - first completes" {
 
         fn asyncTask(rt: *Runtime) !void {
             var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel(rt);
+            defer slow.cancel();
             var fast = try rt.spawn(fastTask, .{rt});
-            defer fast.cancel(rt);
+            defer fast.cancel();
 
             const result = try select(.{ .fast = &fast, .slow = &slow });
             switch (result) {
@@ -571,7 +571,7 @@ test "select: basic - first completes" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: already complete - fast path" {
@@ -590,14 +590,14 @@ test "select: already complete - fast path" {
 
         fn asyncTask(rt: *Runtime) !void {
             var immediate = try rt.spawn(immediateTask, .{});
-            defer immediate.cancel(rt);
+            defer immediate.cancel();
 
             // Give immediate task a chance to complete
             try rt.yield();
             try rt.yield();
 
             var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel(rt);
+            defer slow.cancel();
 
             // immediate should already be complete, select should return immediately
             const result = try select(.{ .immediate = &immediate, .slow = &slow });
@@ -609,7 +609,7 @@ test "select: already complete - fast path" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: heterogeneous types" {
@@ -634,11 +634,11 @@ test "select: heterogeneous types" {
 
         fn asyncTask(rt: *Runtime) !void {
             var int_handle = try rt.spawn(intTask, .{rt});
-            defer int_handle.cancel(rt);
+            defer int_handle.cancel();
             var string_handle = try rt.spawn(stringTask, .{rt});
-            defer string_handle.cancel(rt);
+            defer string_handle.cancel();
             var bool_handle = try rt.spawn(boolTask, .{rt});
-            defer bool_handle.cancel(rt);
+            defer bool_handle.cancel();
 
             const result = try select(.{
                 .string = &string_handle,
@@ -664,7 +664,7 @@ test "select: heterogeneous types" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with cancellation" {
@@ -684,9 +684,9 @@ test "select: with cancellation" {
 
         fn selectTask(rt: *Runtime) !i32 {
             var h1 = try rt.spawn(slowTask1, .{rt});
-            defer h1.cancel(rt);
+            defer h1.cancel();
             var h2 = try rt.spawn(slowTask2, .{rt});
-            defer h2.cancel(rt);
+            defer h2.cancel();
 
             const result = try select(.{ .first = &h1, .second = &h2 });
             return switch (result) {
@@ -697,23 +697,23 @@ test "select: with cancellation" {
 
         fn asyncTask(rt: *Runtime) !void {
             var select_handle = try rt.spawn(selectTask, .{rt});
-            defer select_handle.cancel(rt);
+            defer select_handle.cancel();
 
             // Give it a chance to start waiting
             try rt.yield();
             try rt.yield();
 
             // Cancel the select operation
-            select_handle.cancel(rt);
+            select_handle.cancel();
 
             // Should return error.Canceled
-            const result = select_handle.join(rt);
+            const result = select_handle.join();
             try std.testing.expectError(error.Canceled, result);
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with error unions - success case" {
@@ -736,9 +736,9 @@ test "select: with error unions - success case" {
 
         fn asyncTask(rt: *Runtime) !void {
             var parse_handle = try rt.spawn(parseTask, .{rt});
-            defer parse_handle.cancel(rt);
+            defer parse_handle.cancel();
             var validate_handle = try rt.spawn(validateTask, .{rt});
-            defer validate_handle.cancel(rt);
+            defer validate_handle.cancel();
 
             const result = try select(.{
                 .validate = &validate_handle,
@@ -770,7 +770,7 @@ test "select: with error unions - success case" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with error unions - error case" {
@@ -792,9 +792,9 @@ test "select: with error unions - error case" {
 
         fn asyncTask(rt: *Runtime) !void {
             var failing = try rt.spawn(failingTask, .{rt});
-            defer failing.cancel(rt);
+            defer failing.cancel();
             var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel(rt);
+            defer slow.cancel();
 
             const result = try select(.{ .failing = &failing, .slow = &slow });
 
@@ -817,7 +817,7 @@ test "select: with error unions - error case" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with mixed error types" {
@@ -845,11 +845,11 @@ test "select: with mixed error types" {
 
         fn asyncTask(rt: *Runtime) !void {
             var h1 = try rt.spawn(task1, .{rt});
-            defer h1.cancel(rt);
+            defer h1.cancel();
             var h2 = try rt.spawn(task2, .{rt});
-            defer h2.cancel(rt);
+            defer h2.cancel();
             var h3 = try rt.spawn(task3, .{rt});
-            defer h3.cancel(rt);
+            defer h3.cancel();
 
             // select returns Cancelable!SelectUnion(...)
             // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
@@ -878,7 +878,7 @@ test "select: with mixed error types" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: plain type" {
@@ -897,7 +897,7 @@ test "wait: plain type" {
                     f.set(42);
                 }
             }.run, .{&future});
-            defer task.cancel(rt);
+            defer task.cancel();
 
             // Wait for the future
             const result = try wait(&future);
@@ -906,7 +906,7 @@ test "wait: plain type" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: error union" {
@@ -927,7 +927,7 @@ test "wait: error union" {
                     f.set(123);
                 }
             }.run, .{&future});
-            defer task.cancel(rt);
+            defer task.cancel();
 
             // Wait for the future
             const result = try wait(&future);
@@ -937,7 +937,7 @@ test "wait: error union" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: error union with error" {
@@ -958,7 +958,7 @@ test "wait: error union with error" {
                     f.set(MyError.Foo);
                 }
             }.run, .{&future});
-            defer task.cancel(rt);
+            defer task.cancel();
 
             // Wait for the future
             const result = try wait(&future);
@@ -967,7 +967,7 @@ test "wait: error union with error" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: already complete (fast path)" {
@@ -989,7 +989,7 @@ test "wait: already complete (fast path)" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: wait on JoinHandle from spawned task" {
@@ -1005,10 +1005,10 @@ test "select: wait on JoinHandle from spawned task" {
         fn asyncTask(rt: *Runtime) !void {
             // Spawn a task and get a JoinHandle
             var handle1 = try rt.spawn(workerTask, .{ rt, 21 });
-            defer handle1.cancel(rt);
+            defer handle1.cancel();
 
             var handle2 = try rt.spawn(workerTask, .{ rt, 100 });
-            defer handle2.cancel(rt);
+            defer handle2.cancel();
 
             // Wait on JoinHandles using select
             const result = try select(.{
@@ -1032,5 +1032,5 @@ test "select: wait on JoinHandle from spawned task" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }

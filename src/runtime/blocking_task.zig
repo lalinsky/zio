@@ -52,8 +52,12 @@ pub const AnyBlockingTask = struct {
         // self.runtime.thread_pool.cancel(&self.work);
     }
 
-    pub fn destroy(self: *AnyBlockingTask, rt: *Runtime) void {
-        self.closure.free(AnyBlockingTask, rt, self);
+    pub inline fn getRuntime(self: *AnyBlockingTask) *Runtime {
+        return self.runtime;
+    }
+
+    pub fn destroy(self: *AnyBlockingTask) void {
+        self.closure.free(AnyBlockingTask, self.getRuntime(), self);
     }
 
     pub fn create(
@@ -155,7 +159,7 @@ pub fn spawnBlockingTask(
         context_alignment,
         start,
     );
-    errdefer task.destroy(rt);
+    errdefer task.destroy();
 
     if (group) |g| try registerGroupTask(g, &task.awaitable);
     errdefer if (group) |g| unregisterGroupTask(rt, g, &task.awaitable);

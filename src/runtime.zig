@@ -88,9 +88,9 @@ pub fn JoinHandle(comptime T: type) type {
         result: T,
 
         /// Helper to get result from awaitable and release it
-        fn finishAwaitable(self: *Self, rt: *Runtime, awaitable: *Awaitable) void {
+        fn finishAwaitable(self: *Self, awaitable: *Awaitable) void {
             self.result = awaitable.getTypedResult(T);
-            awaitable.release(rt);
+            awaitable.release();
             self.awaitable = null;
         }
 
@@ -101,9 +101,9 @@ pub fn JoinHandle(comptime T: type) type {
         /// Example:
         /// ```zig
         /// var handle = try rt.spawn(myTask, .{});
-        /// const result = handle.join(rt);
+        /// const result = handle.join();
         /// ```
-        pub fn join(self: *Self, rt: *Runtime) T {
+        pub fn join(self: *Self) T {
             // If awaitable is null, result is already cached
             const awaitable = self.awaitable orelse return self.result;
 
@@ -111,7 +111,7 @@ pub fn JoinHandle(comptime T: type) type {
             _ = select.waitUntilComplete(awaitable);
 
             // Get result and release awaitable
-            self.finishAwaitable(rt, awaitable);
+            self.finishAwaitable(awaitable);
             return self.result;
         }
 
@@ -160,18 +160,18 @@ pub fn JoinHandle(comptime T: type) type {
         /// Example:
         /// ```zig
         /// var handle = try rt.spawn(myTask, .{});
-        /// defer handle.cancel(rt);
+        /// defer handle.cancel();
         /// // Do some other work that could return early
-        /// const result = handle.join(rt);
+        /// const result = handle.join();
         /// // cancel() in defer is a no-op since join() already completed
         /// ```
-        pub fn cancel(self: *Self, rt: *Runtime) void {
+        pub fn cancel(self: *Self) void {
             // If awaitable is null, already completed/detached - no-op
             const awaitable = self.awaitable orelse return;
 
             // If already done, just clean up
             if (awaitable.hasResult()) {
-                self.finishAwaitable(rt, awaitable);
+                self.finishAwaitable(awaitable);
                 return;
             }
 
@@ -182,7 +182,7 @@ pub fn JoinHandle(comptime T: type) type {
             _ = select.waitUntilComplete(awaitable);
 
             // Get result and release awaitable
-            self.finishAwaitable(rt, awaitable);
+            self.finishAwaitable(awaitable);
         }
 
         /// Detach the task, allowing it to run in the background.
@@ -192,13 +192,13 @@ pub fn JoinHandle(comptime T: type) type {
         /// Example:
         /// ```zig
         /// var handle = try rt.spawn(backgroundTask, .{});
-        /// handle.detach(rt); // Task runs independently
+        /// handle.detach(); // Task runs independently
         /// ```
-        pub fn detach(self: *Self, rt: *Runtime) void {
+        pub fn detach(self: *Self) void {
             // If awaitable is null, already detached - no-op
             const awaitable = self.awaitable orelse return;
 
-            awaitable.release(rt);
+            awaitable.release();
             self.awaitable = null;
             self.result = undefined;
         }
@@ -1009,7 +1009,7 @@ pub const Runtime = struct {
         }
 
         // Decref for task completion
-        awaitable.release(self);
+        awaitable.release();
 
         // Wake main executor if last task completed and it's waiting in run() mode
         if (prev_count == 1) {
@@ -1033,9 +1033,9 @@ test "runtime: spawnBlocking smoke test" {
     }.call;
 
     var handle = try runtime.spawnBlocking(blockingWork, .{21});
-    defer handle.cancel(runtime);
+    defer handle.cancel();
 
-    const result = handle.join(runtime);
+    const result = handle.join();
     try std.testing.expectEqual(42, result);
 }
 
@@ -1061,9 +1061,9 @@ test "runtime: JoinHandle.cast() error set conversion" {
     {
         var handle = try runtime.spawn(taskSuccess, .{});
         var casted = handle.cast(anyerror!i32);
-        defer casted.cancel(runtime);
+        defer casted.cancel();
 
-        const result = try casted.join(runtime);
+        const result = try casted.join();
         try std.testing.expectEqual(42, result);
     }
 
@@ -1071,9 +1071,9 @@ test "runtime: JoinHandle.cast() error set conversion" {
     {
         var handle = try runtime.spawn(taskError, .{});
         var casted = handle.cast(anyerror!i32);
-        defer casted.cancel(runtime);
+        defer casted.cancel();
 
-        const result = casted.join(runtime);
+        const result = casted.join();
         try std.testing.expectError(error.Foo, result);
     }
 }
@@ -1097,7 +1097,7 @@ test "Runtime: implicit run" {
     };
 
     var task = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try task.join(runtime);
+    try task.join();
 }
 
 test "Runtime: sleep from main" {
@@ -1124,7 +1124,7 @@ test "runtime: basic sleep" {
     };
 
     var task = try runtime.spawn(Sleeper.run, .{runtime});
-    try task.join(runtime);
+    try task.join();
 }
 
 test "runtime: now() returns monotonic time" {
@@ -1158,13 +1158,13 @@ test "runtime: sleep is cancelable" {
     var timer = time.Stopwatch.start();
 
     var handle = try runtime.spawn(sleepingTask, .{runtime});
-    defer handle.cancel(runtime);
+    defer handle.cancel();
 
     // Cancel the sleeping task
-    handle.cancel(runtime);
+    handle.cancel();
 
     // Should return error.Canceled
-    const result = handle.join(runtime);
+    const result = handle.join();
     try std.testing.expectError(error.Canceled, result);
 
     // Ensure the sleep was canceled before completion
@@ -1187,16 +1187,16 @@ test "runtime: shielded sleep is not cancelable" {
     var timer = time.Stopwatch.start();
 
     var handle = try runtime.spawn(shieldedSleepTask, .{runtime});
-    defer handle.cancel(runtime);
+    defer handle.cancel();
 
     // Wait a bit to ensure the task is actually in the waiting state
     try runtime.sleep(.fromMilliseconds(10));
 
     // Try to cancel the sleeping task
-    handle.cancel(runtime);
+    handle.cancel();
 
     // Should complete successfully (not canceled) because the sleep was shielded
-    const result = handle.join(runtime);
+    const result = handle.join();
     try std.testing.expectEqual({}, result);
 
     // Ensure the sleep completed (took at least 50ms)
@@ -1219,7 +1219,7 @@ test "runtime: yield from main allows tasks to run" {
     }.call;
 
     var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter });
-    defer handle.cancel(runtime);
+    defer handle.cancel();
 
     // Instead of join(), use yield() from main to let the task run
     var iterations: usize = 0;
@@ -1250,7 +1250,7 @@ test "runtime: sleep from main allows tasks to run" {
     }.call;
 
     var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter });
-    defer handle.cancel(runtime);
+    defer handle.cancel();
 
     // Instead of join(), use sleep() from main to let the task run
     var iterations: usize = 0;

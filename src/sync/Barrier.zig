@@ -248,7 +248,7 @@ test "Barrier: single coroutine barrier" {
     };
 
     var handle = try runtime.spawn(TestFn.worker, .{ &barrier, &is_leader_result });
-    try handle.join(runtime);
+    try handle.join();
 
     try std.testing.expect(is_leader_result);
 }

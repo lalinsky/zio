@@ -369,7 +369,7 @@ test "ResetEvent: cancel waiting task" {
     };
 
     var waiter_task = try runtime.spawn(TestFn.waiter, .{ &reset_event, &started });
-    defer waiter_task.cancel(runtime);
+    defer waiter_task.cancel();
 
     // Wait until waiter has actually started and is blocked
     while (!started.load(.acquire)) {
@@ -378,9 +378,9 @@ test "ResetEvent: cancel waiting task" {
     // One more yield to ensure waiter is actually blocked in wait()
     try runtime.yield();
 
-    waiter_task.cancel(runtime);
+    waiter_task.cancel();
 
-    try std.testing.expectError(error.Canceled, waiter_task.join(runtime));
+    try std.testing.expectError(error.Canceled, waiter_task.join());
 }
 
 test "ResetEvent: select" {
@@ -397,7 +397,7 @@ test "ResetEvent: select" {
             var reset_event = ResetEvent.init;
 
             var task = try rt.spawn(setterTask, .{ rt, &reset_event });
-            defer task.cancel(rt);
+            defer task.cancel();
 
             const result = try select(.{ .event = &reset_event, .task = &task });
             try std.testing.expectEqual(.event, result);
@@ -408,5 +408,5 @@ test "ResetEvent: select" {
     defer runtime.deinit();
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }

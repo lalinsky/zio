@@ -98,7 +98,7 @@ pub fn main() !void {
     const total_messages = NUM_CLIENTS * MESSAGES_PER_CLIENT;
 
     var server_task = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done });
-    defer server_task.cancel(rt);
+    defer server_task.cancel();
 
     try server_ready.wait();
 
@@ -115,7 +115,7 @@ pub fn main() !void {
     const elapsed_ns = timer.read().toNanoseconds();
 
     server_done.set();
-    try server_task.join(rt);
+    try server_task.join();
 
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
     const elapsed_s = elapsed_ms / 1000.0;
