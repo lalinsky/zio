@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
+const yield = @import("runtime.zig").yield;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Waiter = @import("common.zig").Waiter;
@@ -593,8 +594,8 @@ test "select: already complete - fast path" {
             defer immediate.cancel();
 
             // Give immediate task a chance to complete
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
 
             var slow = try rt.spawn(slowTask, .{rt});
             defer slow.cancel();
@@ -700,8 +701,8 @@ test "select: with cancellation" {
             defer select_handle.cancel();
 
             // Give it a chance to start waiting
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
 
             // Cancel the select operation
             select_handle.cancel();

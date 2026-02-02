@@ -51,6 +51,7 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const getCurrentTask = @import("../runtime.zig").getCurrentTask;
+const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -256,8 +257,8 @@ test "Condition basic wait/signal" {
             }
         }
 
-        fn signaler(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
-            try rt.yield(); // Give waiter time to start waiting
+        fn signaler(mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
+            try yield(); // Give waiter time to start waiting
 
             try mtx.lock();
             ready_flag.* = true;
@@ -271,7 +272,7 @@ test "Condition basic wait/signal" {
     defer group.cancel(runtime);
 
     try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready });
-    try group.spawn(runtime, TestFn.signaler, .{ runtime, &mutex, &condition, &ready });
+    try group.spawn(runtime, TestFn.signaler, .{ &mutex, &condition, &ready });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -327,11 +328,11 @@ test "Condition broadcast" {
             counter.* += 1;
         }
 
-        fn broadcaster(rt: *Runtime, mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
+        fn broadcaster(mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
             // Give waiters time to start waiting
-            try rt.yield();
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
+            try yield();
 
             try mtx.lock();
             ready_flag.* = true;
@@ -347,7 +348,7 @@ test "Condition broadcast" {
     try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &mutex, &condition, &ready });
+    try group.spawn(runtime, TestFn.broadcaster, .{ &mutex, &condition, &ready });
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());

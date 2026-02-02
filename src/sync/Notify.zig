@@ -48,6 +48,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -222,8 +223,8 @@ test "Notify basic signal/wait" {
             finished.* = true;
         }
 
-        fn signaler(rt: *Runtime, n: *Notify) !void {
-            try rt.yield(); // Give waiter time to start waiting
+        fn signaler(n: *Notify) !void {
+            try yield(); // Give waiter time to start waiting
             n.signal();
         }
     };
@@ -232,7 +233,7 @@ test "Notify basic signal/wait" {
     defer group.cancel(runtime);
 
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_finished });
-    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+    try group.spawn(runtime, TestFn.signaler, .{&notify});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -267,11 +268,11 @@ test "Notify broadcast to multiple waiters" {
             counter.* += 1;
         }
 
-        fn broadcaster(rt: *Runtime, n: *Notify) !void {
+        fn broadcaster(n: *Notify) !void {
             // Give waiters time to start waiting
-            try rt.yield();
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
+            try yield();
             n.broadcast();
         }
     };
@@ -282,7 +283,7 @@ test "Notify broadcast to multiple waiters" {
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &notify });
+    try group.spawn(runtime, TestFn.broadcaster, .{&notify});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -303,11 +304,11 @@ test "Notify multiple signals to multiple waiters" {
             counter.* += 1;
         }
 
-        fn signaler(rt: *Runtime, n: *Notify) !void {
+        fn signaler(n: *Notify) !void {
             // Give waiters time to start waiting
-            try rt.yield();
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
+            try yield();
             // Signal three times to wake all three waiters one by one (FIFO)
             n.signal();
             n.signal();
@@ -321,7 +322,7 @@ test "Notify multiple signals to multiple waiters" {
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+    try group.spawn(runtime, TestFn.signaler, .{&notify});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -367,8 +368,8 @@ test "Notify timedWait success" {
             success_flag.* = true;
         }
 
-        fn signaler(rt: *Runtime, n: *Notify) !void {
-            try rt.yield(); // Give waiter time to start waiting
+        fn signaler(n: *Notify) !void {
+            try yield(); // Give waiter time to start waiting
             n.signal();
         }
     };
@@ -377,7 +378,7 @@ test "Notify timedWait success" {
     defer group.cancel(runtime);
 
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &wait_succeeded });
-    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+    try group.spawn(runtime, TestFn.signaler, .{&notify});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());

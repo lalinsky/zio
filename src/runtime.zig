@@ -1210,15 +1210,15 @@ test "runtime: yield from main allows tasks to run" {
     var counter: usize = 0;
 
     const yieldingTask = struct {
-        fn call(rt: *Runtime, counter_ptr: *usize) !void {
+        fn call(counter_ptr: *usize) !void {
             for (0..10) |_| {
                 counter_ptr.* += 1;
-                try rt.yield();
+                try yield();
             }
         }
     }.call;
 
-    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter });
+    var handle = try runtime.spawn(yieldingTask, .{&counter});
     defer handle.cancel();
 
     // Instead of join(), use yield() from main to let the task run
@@ -1228,7 +1228,7 @@ test "runtime: yield from main allows tasks to run" {
             std.debug.print("yield from main not working: counter={}, iterations={}\n", .{ counter, iterations });
             return error.TestExpectedEqual;
         }
-        try runtime.yield();
+        try yield();
     }
 
     try std.testing.expectEqual(10, counter);
@@ -1241,15 +1241,15 @@ test "runtime: sleep from main allows tasks to run" {
     var counter: usize = 0;
 
     const yieldingTask = struct {
-        fn call(rt: *Runtime, counter_ptr: *usize) !void {
+        fn call(counter_ptr: *usize) !void {
             for (0..10) |_| {
                 counter_ptr.* += 1;
-                try rt.yield();
+                try yield();
             }
         }
     }.call;
 
-    var handle = try runtime.spawn(yieldingTask, .{ runtime, &counter });
+    var handle = try runtime.spawn(yieldingTask, .{&counter});
     defer handle.cancel();
 
     // Instead of join(), use sleep() from main to let the task run

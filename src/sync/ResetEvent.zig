@@ -46,6 +46,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -267,8 +268,8 @@ test "ResetEvent wait/set signaling" {
             finished.* = true;
         }
 
-        fn setter(rt: *Runtime, event: *ResetEvent) !void {
-            try rt.yield(); // Give waiter time to start waiting
+        fn setter(event: *ResetEvent) !void {
+            try yield(); // Give waiter time to start waiting
             event.set();
         }
     };
@@ -277,7 +278,7 @@ test "ResetEvent wait/set signaling" {
     defer group.cancel(runtime);
 
     try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_finished });
-    try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
+    try group.spawn(runtime, TestFn.setter, .{&reset_event});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -310,11 +311,11 @@ test "ResetEvent multiple waiters broadcast" {
             counter.* += 1;
         }
 
-        fn setter(rt: *Runtime, event: *ResetEvent) !void {
+        fn setter(event: *ResetEvent) !void {
             // Give waiters time to start waiting
-            try rt.yield();
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
+            try yield();
             event.set();
         }
     };
@@ -325,7 +326,7 @@ test "ResetEvent multiple waiters broadcast" {
     try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
+    try group.spawn(runtime, TestFn.setter, .{&reset_event});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());
@@ -373,10 +374,10 @@ test "ResetEvent: cancel waiting task" {
 
     // Wait until waiter has actually started and is blocked
     while (!started.load(.acquire)) {
-        try runtime.yield();
+        try yield();
     }
     // One more yield to ensure waiter is actually blocked in wait()
-    try runtime.yield();
+    try yield();
 
     waiter_task.cancel();
 

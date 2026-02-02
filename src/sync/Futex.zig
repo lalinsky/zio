@@ -29,6 +29,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Waiter = @import("../common.zig").Waiter;
@@ -305,7 +306,7 @@ test "Futex: multiple waiters same address" {
             // Yield multiple times to ensure waiters have time to block
             var i: usize = 0;
             while (i < 10) : (i += 1) {
-                try io.yield();
+                try yield();
             }
             @atomicStore(u32, val, 1, .release);
             Futex.wake(io, val, 2);

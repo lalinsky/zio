@@ -43,6 +43,7 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const getCurrentTask = @import("../runtime.zig").getCurrentTask;
+const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -227,9 +228,9 @@ test "Semaphore: timedWait success" {
             flag.* = true;
         }
 
-        fn poster(rt: *Runtime, s: *Semaphore) !void {
+        fn poster(s: *Semaphore) !void {
             defer s.post();
-            try rt.yield();
+            try yield();
         }
     };
 
@@ -237,7 +238,7 @@ test "Semaphore: timedWait success" {
     defer group.cancel(runtime);
 
     try group.spawn(runtime, TestFn.waiter, .{ &sem, &got_permit });
-    try group.spawn(runtime, TestFn.poster, .{ runtime, &sem });
+    try group.spawn(runtime, TestFn.poster, .{&sem});
 
     try group.wait(runtime);
     try std.testing.expect(!group.hasFailed());

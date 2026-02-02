@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Cancelable = @import("../common.zig").Cancelable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
@@ -167,10 +168,10 @@ test "Future: await from coroutine" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
+        fn setterTask(future: *Future(i32)) !void {
             // Simulate async work
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
             future.set(123);
         }
 
@@ -185,7 +186,7 @@ test "Future: await from coroutine" {
             var future = Future(i32).init;
 
             // Spawn setter coroutine
-            var setter_handle = try rt.spawn(setterTask, .{ rt, &future });
+            var setter_handle = try rt.spawn(setterTask, .{&future});
             defer setter_handle.cancel();
 
             // Spawn getter coroutine
@@ -212,10 +213,10 @@ test "Future: multiple waiters" {
             try std.testing.expectEqual(expected, result.value);
         }
 
-        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
+        fn setterTask(future: *Future(i32)) !void {
             // Let waiters block first
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
             future.set(999);
         }
 
@@ -231,7 +232,7 @@ test "Future: multiple waiters" {
             defer waiter3.cancel();
 
             // Spawn setter
-            var setter = try rt.spawn(setterTask, .{ rt, &future });
+            var setter = try rt.spawn(setterTask, .{&future});
             defer setter.cancel();
 
             // Wait for all to complete
