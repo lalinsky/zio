@@ -2,9 +2,9 @@ const std = @import("std");
 const zio = @import("zio");
 
 // --8<-- [start:lookup]
-fn lookupHost(rt: *zio.Runtime, hostname: []const u8, port: u16) !zio.net.Address {
+fn lookupHost(hostname: []const u8, port: u16) !zio.net.Address {
     const host = try zio.net.HostName.init(hostname);
-    var iter = try host.lookup(rt, .{ .port = port });
+    var iter = try host.lookup(.{ .port = port });
     defer iter.deinit();
 
     while (iter.next()) |result| {
@@ -36,8 +36,8 @@ const NtpPacket = extern struct {
     transmit_timestamp: u64 = 0,
 };
 
-fn queryNtpServer(rt: *zio.Runtime, server: []const u8, port: u16, timeout: zio.Timeout) !void {
-    const addr = try lookupHost(rt, server, port);
+fn queryNtpServer(server: []const u8, port: u16, timeout: zio.Timeout) !void {
+    const addr = try lookupHost(server, port);
     std.log.info("Querying NTP server {s}:{d} ({f})", .{ server, port, addr });
 
     // Create UDP socket (bind to any local port)
@@ -126,7 +126,7 @@ pub fn main() !void {
 
     while (true) {
         // Query NTP server
-        queryNtpServer(rt, server, port, request_timeout) catch |err| {
+        queryNtpServer(server, port, request_timeout) catch |err| {
             std.log.err("NTP query failed: {}", .{err});
         };
 

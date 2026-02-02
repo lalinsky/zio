@@ -8,6 +8,7 @@ const os = @import("os/root.zig");
 const runtime_mod = @import("runtime.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
+const spawnBlocking = runtime_mod.spawnBlocking;
 const Channel = @import("sync/channel.zig").Channel;
 const Group = @import("runtime/group.zig").Group;
 
@@ -154,10 +155,9 @@ pub const HostName = struct {
     /// Returns an iterator over the results. Call `deinit()` when done.
     pub fn lookup(
         self: HostName,
-        rt: *Runtime,
         options: LookupOptions,
     ) LookupError!LookupResultIterator {
-        var task = rt.spawnBlocking(
+        var task = spawnBlocking(
             lookupHostBlocking,
             .{ self.bytes, options.port, options.family, options.canonical_name },
         ) catch |err| switch (err) {
@@ -175,8 +175,8 @@ pub const HostName = struct {
     }
 
     /// Resolves the hostname and connects to the first successful address.
-    pub fn connect(self: HostName, rt: *Runtime, port: u16, options: IpAddress.ConnectOptions) !Stream {
-        var iter = try self.lookup(rt, .{ .port = port });
+    pub fn connect(self: HostName, port: u16, options: IpAddress.ConnectOptions) !Stream {
+        var iter = try self.lookup(.{ .port = port });
         defer iter.deinit();
 
         var last_err: ?anyerror = null;
@@ -1346,13 +1346,12 @@ fn lookupHostBlocking(
 }
 
 pub fn tcpConnectToHost(
-    rt: *Runtime,
     name: []const u8,
     port: u16,
     options: IpAddress.ConnectOptions,
 ) !Stream {
     const host = try HostName.init(name);
-    return host.connect(rt, port, options);
+    return host.connect(port, options);
 }
 
 pub fn tcpConnectToAddress(addr: IpAddress, options: IpAddress.ConnectOptions) !Stream {
@@ -1408,7 +1407,7 @@ test "HostName: lookup" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80 });
+    var iter = try host.lookup(.{ .port = 80 });
     defer iter.deinit();
 
     var has_address = false;
@@ -1429,7 +1428,7 @@ test "HostName: lookup with family filter" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80, .family = .ipv4 });
+    var iter = try host.lookup(.{ .port = 80, .family = .ipv4 });
     defer iter.deinit();
 
     while (iter.next()) |result| {
@@ -1447,7 +1446,7 @@ test "HostName: lookup with canonical name" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80, .canonical_name = true });
+    var iter = try host.lookup(.{ .port = 80, .canonical_name = true });
     defer iter.deinit();
 
     var has_canonical_name = false;
@@ -1474,7 +1473,7 @@ test "HostName: connect" {
     defer rt.deinit();
 
     const Test = struct {
-        fn run(runtime: *Runtime) !void {
+        fn run() !void {
             // Start a server
             const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
             const server = try server_addr.listen(.{});
@@ -1484,14 +1483,14 @@ test "HostName: connect" {
 
             // Connect via HostName
             const host = try HostName.init("localhost");
-            var stream = try host.connect(runtime, port, .{});
+            var stream = try host.connect(port, .{});
             defer stream.close();
 
             try stream.writeAll("hello", .none);
         }
     };
 
-    var task = try rt.spawn(Test.run, .{rt});
+    var task = try rt.spawn(Test.run, .{});
     defer task.cancel();
     try task.join();
 }
@@ -1509,7 +1508,7 @@ test "HostName: lookup localhost" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80 });
+    var iter = try host.lookup(.{ .port = 80 });
     defer iter.deinit();
 
     var count: usize = 0;
@@ -1524,7 +1523,7 @@ test "HostName: lookup numeric IP" {
     defer rt.deinit();
 
     const host = try HostName.init("127.0.0.1");
-    var iter = try host.lookup(rt, .{ .port = 8080 });
+    var iter = try host.lookup(.{ .port = 8080 });
     defer iter.deinit();
 
     var count: usize = 0;
@@ -1547,8 +1546,7 @@ test "tcpConnectToAddress: basic" {
     defer runtime.deinit();
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
-            _ = rt;
+        fn run(server_port: *Channel(u16)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
             const server = try addr.listen(.{});
             defer server.close();
@@ -1567,8 +1565,7 @@ test "tcpConnectToAddress: basic" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
-            _ = rt;
+        fn run(server_port: *Channel(u16)) !void {
             const port = try server_port.receive();
             const addr = try IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1591,8 +1588,8 @@ test "tcpConnectToAddress: basic" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, ServerTask.run, .{ runtime, &server_port_ch });
-    try group.spawn(runtime, ClientTask.run, .{ runtime, &server_port_ch });
+    try group.spawn(runtime, ServerTask.run, .{&server_port_ch});
+    try group.spawn(runtime, ClientTask.run, .{&server_port_ch});
 
     try group.wait(runtime);
 }
@@ -1601,8 +1598,7 @@ test "tcpConnectToHost: basic" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
-            _ = rt;
+        fn run(server_port: *Channel(u16)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
             const server = try addr.listen(.{});
             defer server.close();
@@ -1623,11 +1619,11 @@ test "tcpConnectToHost: basic" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
+        fn run(server_port: *Channel(u16)) !void {
             const port = try server_port.receive();
             std.log.info("Client connecting to port {}\n", .{port});
 
-            var stream = try tcpConnectToHost(rt, "localhost", port, .{});
+            var stream = try tcpConnectToHost("localhost", port, .{});
             defer stream.close();
 
             var write_buffer: [256]u8 = undefined;
@@ -1649,8 +1645,8 @@ test "tcpConnectToHost: basic" {
     var group: Group = .init;
     defer group.cancel(runtime);
 
-    try group.spawn(runtime, ServerTask.run, .{ runtime, &server_port_ch });
-    try group.spawn(runtime, ClientTask.run, .{ runtime, &server_port_ch });
+    try group.spawn(runtime, ServerTask.run, .{&server_port_ch});
+    try group.spawn(runtime, ClientTask.run, .{&server_port_ch});
 
     try group.wait(runtime);
 }
