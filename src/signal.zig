@@ -238,7 +238,7 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
 /// ```zig
 /// var sig = try Signal.init(.interrupt);
 /// defer sig.deinit();
-/// try sig.wait(rt);  // Blocks until SIGINT is received
+/// try sig.wait();  // Blocks until SIGINT is received
 /// ```
 pub const Signal = struct {
     kind: SignalKind,
@@ -276,8 +276,7 @@ pub const Signal = struct {
     /// The internal counter is reset after each wait, ensuring signals are not lost.
     ///
     /// Returns error.Canceled if the task is cancelled while waiting (including due to timeout expiry).
-    pub fn wait(self: *Signal, rt: *Runtime) Cancelable!void {
-        _ = rt;
+    pub fn wait(self: *Signal) Cancelable!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
@@ -315,10 +314,8 @@ pub const Signal = struct {
     /// The internal counter is reset after each wait, ensuring signals are not lost.
     ///
     /// Arguments:
-    /// - rt: Runtime context
     /// - timeout: Timeout
-    pub fn timedWait(self: *Signal, rt: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
-        _ = rt;
+    pub fn timedWait(self: *Signal, timeout: Timeout) (Timeoutable || Cancelable)!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
@@ -403,10 +400,11 @@ test "Signal: basic signal handling" {
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.wait(r);
+            try sig.wait();
             self.signal_received = true;
         }
 
@@ -445,10 +443,11 @@ test "Signal: multiple handlers for same signal" {
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.wait(r);
+            try sig.wait();
             _ = self.count.fetchAdd(1, .monotonic);
         }
 
@@ -475,10 +474,11 @@ test "Signal: timedWait timeout" {
         timed_out: bool = false,
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            sig.timedWait(r, .{ .duration = .fromMilliseconds(50) }) catch |err| {
+            sig.timedWait(.{ .duration = .fromMilliseconds(50) }) catch |err| {
                 if (err == error.Timeout) {
                     self.timed_out = true;
                     return;
@@ -515,10 +515,11 @@ test "Signal: timedWait receives signal before timeout" {
         }
 
         fn waitForSignalTimed(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.timedWait(r, .{ .duration = .fromSeconds(1) });
+            try sig.timedWait(.{ .duration = .fromSeconds(1) });
             self.signal_received = true;
         }
 

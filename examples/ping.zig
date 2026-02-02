@@ -108,7 +108,7 @@ pub fn main() !void {
         // Wait for reply using receiveMsg
         var recv_buf: [1024]u8 = undefined;
         var recv_storage: [1]zio.os.iovec = undefined;
-        const result = try socket.receiveMsg(rt, .fromSlice(&recv_buf, &recv_storage), null, .none);
+        const result = try socket.receiveMsg(.fromSlice(&recv_buf, &recv_storage), null, .none);
 
         // Stop timer
         const elapsed = stopwatch.read();

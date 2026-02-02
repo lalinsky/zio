@@ -43,7 +43,7 @@ fn queryNtpServer(rt: *zio.Runtime, server: []const u8, port: u16, timeout: zio.
     // Create UDP socket (bind to any local port)
     const local_addr = try zio.net.IpAddress.parseIp4("0.0.0.0", 0);
     const socket = try local_addr.bind(.{});
-    defer socket.close(rt);
+    defer socket.close();
 
     // Prepare and send NTP request
     const request: NtpPacket = .{};
@@ -132,7 +132,7 @@ pub fn main() !void {
 
         // --8<-- [start:select]
         // Wait for next query or shutdown signal
-        const result = try zio.select(rt, .{
+        const result = try zio.select(.{
             .interval = &interval,
             .shutdown = &signal,
         });

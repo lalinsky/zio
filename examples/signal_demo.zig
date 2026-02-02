@@ -30,12 +30,13 @@ fn serverTask(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
 }
 
 fn signalHandler(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
+    _ = rt;
     // Create signal handler for SIGINT (Ctrl+C)
     var sig = try zio.Signal.init(.interrupt);
     defer sig.deinit();
 
     // Wait for SIGINT (Ctrl+C)
-    try sig.wait(rt);
+    try sig.wait();
 
     std.log.info("Received signal, initiating shutdown...", .{});
     shutdown.store(true, .release);

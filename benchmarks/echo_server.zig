@@ -9,23 +9,24 @@ const MESSAGES_PER_CLIENT = 50_000;
 const MESSAGE_SIZE = 64; // bytes
 
 fn handleClient(rt: *zio.Runtime, in_stream: zio.net.Stream) !void {
+    _ = rt;
     var stream = in_stream;
-    defer stream.close(rt);
+    defer stream.close();
 
     var buffer: [MESSAGE_SIZE]u8 = undefined;
 
     while (true) {
-        const n = try stream.read(rt, &buffer, .none);
+        const n = try stream.read(&buffer, .none);
         if (n == 0) break;
-        try stream.writeAll(rt, buffer[0..n], .none);
+        try stream.writeAll(buffer[0..n], .none);
     }
 }
 
 fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
 
-    var server = try addr.listen(rt, .{ .reuse_address = true });
-    defer server.close(rt);
+    var server = try addr.listen(.{ .reuse_address = true });
+    defer server.close();
 
     ready.set();
 
@@ -34,25 +35,26 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
 
     var clients_handled: usize = 0;
     while (clients_handled < NUM_CLIENTS) : (clients_handled += 1) {
-        var stream = try server.accept(rt);
-        errdefer stream.close(rt);
+        var stream = try server.accept();
+        errdefer stream.close();
 
         try group.spawn(rt, handleClient, .{ rt, stream });
     }
 
-    try done.wait(rt);
+    try done.wait();
 }
 
 fn clientTask(
     rt: *zio.Runtime,
     ready: *zio.ResetEvent,
 ) !void {
-    try ready.wait(rt);
+    _ = rt;
+    try ready.wait();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
-    var stream = try addr.connect(rt, .{});
-    defer stream.close(rt);
-    defer stream.shutdown(rt, .both) catch {};
+    var stream = try addr.connect(.{});
+    defer stream.close();
+    defer stream.shutdown(.both) catch {};
     try stream.socket.setNoDelay(true);
 
     var send_buffer: [MESSAGE_SIZE]u8 = undefined;
@@ -65,11 +67,11 @@ fn clientTask(
 
     var i: usize = 0;
     while (i < MESSAGES_PER_CLIENT) : (i += 1) {
-        try stream.writeAll(rt, &send_buffer, .none);
+        try stream.writeAll(&send_buffer, .none);
 
         var bytes_received: usize = 0;
         while (bytes_received < MESSAGE_SIZE) {
-            const n = try stream.read(rt, recv_buffer[bytes_received..], .none);
+            const n = try stream.read(recv_buffer[bytes_received..], .none);
             if (n == 0) return error.UnexpectedEndOfStream;
             bytes_received += n;
         }
@@ -98,7 +100,7 @@ pub fn main() !void {
     var server_task = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done });
     defer server_task.cancel(rt);
 
-    try server_ready.wait(rt);
+    try server_ready.wait();
 
     var timer = zio.time.Stopwatch.start();
 

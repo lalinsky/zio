@@ -5,6 +5,7 @@ const zio = @import("zio");
 const MAX_REQUEST_HEADER_SIZE = 64 * 1024;
 
 fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
+    _ = rt;
     defer stream.close();
 
     std.log.info("HTTP client connected from {f}", .{stream.socket.address});

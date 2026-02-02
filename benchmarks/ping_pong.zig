@@ -7,18 +7,20 @@ const zio = @import("zio");
 const NUM_ROUNDS = 10_000_000;
 
 fn pinger(rt: *zio.Runtime, ping_tx: *zio.Channel(u32), pong_rx: *zio.Channel(u32), rounds: u32) !void {
+    _ = rt;
     var i: u32 = 0;
     while (i < rounds) : (i += 1) {
-        try ping_tx.send(rt, i);
-        _ = try pong_rx.receive(rt);
+        try ping_tx.send(i);
+        _ = try pong_rx.receive();
     }
 }
 
 fn ponger(rt: *zio.Runtime, ping_rx: *zio.Channel(u32), pong_tx: *zio.Channel(u32), rounds: u32) !void {
+    _ = rt;
     var i: u32 = 0;
     while (i < rounds) : (i += 1) {
-        const value = try ping_rx.receive(rt);
-        try pong_tx.send(rt, value);
+        const value = try ping_rx.receive();
+        try pong_tx.send(value);
     }
 }
 

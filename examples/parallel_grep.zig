@@ -9,7 +9,6 @@ const SearchResult = struct {
 
 // --8<-- [start:searchFile]
 fn searchFile(
-    rt: *zio.Runtime,
     gpa: std.mem.Allocator,
     dir: zio.Dir,
     path: []const u8,
@@ -49,7 +48,6 @@ fn searchFile(
 
 // --8<-- [start:worker]
 fn worker(
-    rt: *zio.Runtime,
     gpa: std.mem.Allocator,
     dir: zio.Dir,
     id: usize,
@@ -67,7 +65,7 @@ fn worker(
         };
 
         std.log.info("Worker {} searching {s}", .{ id, path });
-        searchFile(rt, gpa, dir, path, pattern, results_channel) catch |err| {
+        searchFile(gpa, dir, path, pattern, results_channel) catch |err| {
             std.log.warn("Worker {} error searching {s}: {}", .{ id, path, err });
         };
     }
@@ -138,7 +136,7 @@ pub fn main() !void {
     // Start worker tasks
     const num_workers = 4;
     for (0..num_workers) |i| {
-        try workers_group.spawn(rt, worker, .{ rt, gpa, cwd, i, &work_channel, &results_channel, pattern });
+        try workers_group.spawn(rt, worker, .{ gpa, cwd, i, &work_channel, &results_channel, pattern });
     }
 
     // Start collector task
