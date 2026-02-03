@@ -50,7 +50,9 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const getCurrentTask = @import("../runtime.zig").getCurrentTask;
+const beginShield = @import("../runtime.zig").beginShield;
+const endShield = @import("../runtime.zig").endShield;
+const checkCancel = @import("../runtime.zig").checkCancel;
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -118,7 +120,7 @@ pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable();
-    try getCurrentTask().checkCancel();
+    try checkCancel();
 }
 
 /// Atomically releases the mutex and waits for a signal with cancellation shielding.
@@ -136,11 +138,10 @@ pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
 /// of cancellation (e.g., cleanup operations that need to wait for resources to be freed).
 ///
 /// If you need to propagate cancellation after the wait completes, call
-/// `Runtime.getCurrentTask().checkCancel()` after this function returns.
+/// `Runtime.checkCancel()` after this function returns.
 pub fn waitUncancelable(self: *Condition, mutex: *Mutex) void {
-    const task = getCurrentTask();
-    task.beginShield();
-    defer task.endShield();
+    beginShield();
+    defer endShield();
     self.wait(mutex) catch unreachable;
 }
 
@@ -190,7 +191,7 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable();
-    try getCurrentTask().checkCancel();
+    try checkCancel();
 
     if (timed_out) {
         return error.Timeout;

@@ -15,6 +15,7 @@ pub const yield = runtime.yield;
 pub const sleep = runtime.sleep;
 pub const beginShield = runtime.beginShield;
 pub const endShield = runtime.endShield;
+pub const checkCancel = runtime.checkCancel;
 
 pub const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 

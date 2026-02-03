@@ -393,8 +393,8 @@ pub const Executor = struct {
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        const is_main = self.current_task == &self.main_task;
         const current_task = self.current_task.?;
-        const is_main = current_task == &self.main_task;
         self.current_task = null;
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
@@ -449,6 +449,7 @@ pub const Executor = struct {
                 // After resuming from yield, current_task is already set by run()
             }
         }
+
         // After resuming, verify current_task is set correctly
         const resumed_executor = Executor.current orelse unreachable;
         std.debug.assert(resumed_executor.current_task == current_task);
@@ -753,13 +754,27 @@ pub fn spawnBlocking(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !Jo
 }
 
 /// Begin a cancellation shield to prevent being canceled during critical sections.
+/// If not in a task context, this is a no-op.
 pub fn beginShield() void {
-    getCurrentTask().beginShield();
+    if (getCurrentTaskOrNull()) |task| {
+        task.beginShield();
+    }
 }
 
 /// End a cancellation shield.
+/// If not in a task context, this is a no-op.
 pub fn endShield() void {
-    getCurrentTask().endShield();
+    if (getCurrentTaskOrNull()) |task| {
+        task.endShield();
+    }
+}
+
+/// Check if the current task has been cancelled and return an error if so.
+/// If not in a task context, this is a no-op.
+pub fn checkCancel() Cancelable!void {
+    if (getCurrentTaskOrNull()) |task| {
+        try task.checkCancel();
+    }
 }
 
 /// Sleep for a specified duration.
