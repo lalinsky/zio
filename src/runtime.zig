@@ -37,6 +37,7 @@ const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const waitForIo = @import("common.zig").waitForIo;
+const Waiter = @import("common.zig").Waiter;
 
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u6) {
@@ -701,7 +702,11 @@ pub const Executor = struct {
 /// Get the current thread's executor.
 /// Panics if called from a thread without an active executor context.
 pub fn getCurrentExecutor() *Executor {
-    return Executor.current orelse @panic("no current executor");
+    return getCurrentExecutorOrNull() orelse @panic("no current executor");
+}
+
+pub fn getCurrentExecutorOrNull() ?*Executor {
+    return Executor.current;
 }
 
 /// Get the currently executing task.
@@ -710,12 +715,20 @@ pub fn getCurrentTask() *AnyTask {
     return getCurrentExecutor().getCurrentTask();
 }
 
+pub fn getCurrentTaskOrNull() ?*AnyTask {
+    const executor = getCurrentExecutorOrNull() orelse return null;
+    return executor.getCurrentTask();
+}
+
 /// Cooperatively yield control to allow other tasks to run.
 /// The current task will be rescheduled and continue execution later.
 /// Returns error.Canceled if the task was canceled.
 /// No-op if called from a thread without an executor (returns without error).
 pub fn yield() Cancelable!void {
-    const executor = Executor.current orelse return;
+    const executor = Executor.current orelse {
+        std.Thread.yield() catch {};
+        return;
+    };
     return executor.yield(.ready, .ready, .allow_cancel);
 }
 
@@ -971,10 +984,13 @@ pub const Runtime = struct {
     /// Cooperatively yield control to allow other tasks to run.
     /// The current task will be rescheduled and continue execution later.
     /// Can be called from the main thread or from within a coroutine.
-    /// No-op if called from a thread without an executor.
+    /// If called from a thread without an executor, yields the OS thread.
     pub fn yield(self: *Runtime) Cancelable!void {
         _ = self;
-        const executor = Executor.current orelse return;
+        const executor = Executor.current orelse {
+            std.Thread.yield() catch {};
+            return;
+        };
         return executor.yield(.ready, .ready, .allow_cancel);
     }
 
@@ -982,8 +998,8 @@ pub const Runtime = struct {
     /// Returns error.Canceled if the task was canceled during sleep.
     pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
         _ = self;
-        var timer = ev.Timer.init(.{ .duration = duration });
-        try waitForIo(&timer.c);
+        var waiter = Waiter.init();
+        try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
     }
 
     /// Begin a cancellation shield to prevent being canceled during critical sections.
@@ -1009,10 +1025,25 @@ pub const Runtime = struct {
         return self.getCurrentExecutor().getCurrentTask();
     }
 
+    /// Get the currently executing task, or null if not in task context.
+    pub fn getCurrentTaskOrNull(self: *Runtime) ?*AnyTask {
+        const executor = self.getCurrentExecutorOrNull() orelse return null;
+        return executor.getCurrentTask();
+    }
+
     /// Get the current thread's executor.
     /// Panics if called from a thread without an active executor context.
     pub fn getCurrentExecutor(self: *Runtime) *Executor {
         const executor = Executor.current orelse @panic("no current executor");
+        if (std.debug.runtime_safety) {
+            std.debug.assert(executor.runtime == self);
+        }
+        return executor;
+    }
+
+    /// Get the current thread's executor, or null if not in executor context.
+    pub fn getCurrentExecutorOrNull(self: *Runtime) ?*Executor {
+        const executor = Executor.current orelse return null;
         if (std.debug.runtime_safety) {
             std.debug.assert(executor.runtime == self);
         }

@@ -314,6 +314,10 @@ pub const Timestamp = struct {
 
     pub const zero: Timestamp = .{ .value = 0 };
 
+    pub fn now(comptime clock: Clock) Timestamp {
+        return os.time.now(clock);
+    }
+
     pub fn fromNanoseconds(ns: TimeInt) Timestamp {
         return .{ .value = ns / ns_per_unit };
     }
@@ -420,6 +424,14 @@ pub const Timeout = union(enum) {
         return switch (self) {
             .none, .deadline => self,
             .duration => |d| .{ .deadline = os.time.now(.monotonic).addDuration(d) },
+        };
+    }
+
+    pub fn durationFromNow(self: Timeout) Duration {
+        return switch (self) {
+            .none => .max,
+            .duration => |d| d,
+            .deadline => |ts| Timestamp.now(.monotonic).durationTo(ts),
         };
     }
 
