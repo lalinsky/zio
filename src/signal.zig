@@ -391,12 +391,12 @@ test "Signal: basic signal handling" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
             try group.spawn(r, waitForSignal, .{ self, r });
             try group.spawn(r, sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
@@ -432,14 +432,14 @@ test "Signal: multiple handlers for same signal" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
             try group.spawn(r, waitForSignal, .{ self, r });
             try group.spawn(r, waitForSignal, .{ self, r });
             try group.spawn(r, waitForSignal, .{ self, r });
             try group.spawn(r, sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
@@ -506,12 +506,12 @@ test "Signal: timedWait receives signal before timeout" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
             try group.spawn(r, waitForSignalTimed, .{ self, r });
             try group.spawn(r, sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignalTimed(self: *@This(), r: *Runtime) !void {
@@ -549,12 +549,12 @@ test "Signal: select on multiple signals" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
             try group.spawn(r, waitForSignals, .{ self, r });
             try group.spawn(r, sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignals(self: *@This(), r: *Runtime) !void {

@@ -74,7 +74,7 @@ pub fn main() !void {
     std.log.info("Press Ctrl+C to stop the server", .{});
 
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
 
     while (true) {
         const stream = try server.accept();

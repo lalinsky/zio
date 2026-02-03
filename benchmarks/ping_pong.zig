@@ -44,13 +44,13 @@ pub fn main() !void {
 
     // Spawn pinger and ponger tasks
     var group: zio.Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
     try group.spawn(runtime, ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
 
     // Run until both tasks complete
-    try group.wait(runtime);
+    try group.wait();
 
     const elapsed_ns = timer.read().toNanoseconds();
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;

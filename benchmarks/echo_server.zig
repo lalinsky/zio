@@ -31,7 +31,7 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
     ready.set();
 
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
 
     var clients_handled: usize = 0;
     while (clients_handled < NUM_CLIENTS) : (clients_handled += 1) {
@@ -105,12 +105,12 @@ pub fn main() !void {
     var timer = zio.time.Stopwatch.start();
 
     var client_group: zio.Group = .init;
-    defer client_group.cancel(rt);
+    defer client_group.cancel();
 
     for (0..NUM_CLIENTS) |_| {
         try client_group.spawn(rt, clientTask, .{ rt, &server_ready });
     }
-    try client_group.wait(rt);
+    try client_group.wait();
 
     const elapsed_ns = timer.read().toNanoseconds();
 

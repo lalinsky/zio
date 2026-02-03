@@ -149,13 +149,13 @@ test "Barrier: basic synchronization" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (&results) |*result| {
         try group.spawn(runtime, TestFn.worker, .{ &barrier, &counter, result });
     }
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // All coroutines should have seen counter == 3
@@ -181,13 +181,13 @@ test "Barrier: leader detection" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.worker, .{ &barrier, &leader_count });
     try group.spawn(runtime, TestFn.worker, .{ &barrier, &leader_count });
     try group.spawn(runtime, TestFn.worker, .{ &barrier, &leader_count });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // Exactly one coroutine should have been the leader
@@ -220,12 +220,12 @@ test "Barrier: reusable for multiple cycles" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
     try group.spawn(runtime, TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(2, phase1_done);
@@ -277,13 +277,13 @@ test "Barrier: ordering test" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (&arrivals) |*my_arrival| {
         try group.spawn(runtime, TestFn.worker, .{ &barrier, &arrival_order, my_arrival, &final_order });
     }
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // All three should have unique arrival numbers (0, 1, 2 in some order)
@@ -315,13 +315,13 @@ test "Barrier: many coroutines" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (&final_counts) |*result| {
         try group.spawn(runtime, TestFn.worker, .{ &barrier, &counter, result });
     }
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // All should see the final counter value

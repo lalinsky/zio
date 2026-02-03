@@ -55,7 +55,7 @@ pub fn main() !void {
     std.log.info("Starting demo (press Ctrl+C to stop gracefully)...", .{});
 
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
 
     // Spawn server task
     try group.spawn(rt, serverTask, .{ rt, &shutdown });
@@ -64,7 +64,7 @@ pub fn main() !void {
     try group.spawn(rt, signalHandler, .{ rt, &shutdown });
 
     // Run until all tasks complete
-    try group.wait(rt);
+    try group.wait();
 
     std.log.info("Demo completed.", .{});
 }

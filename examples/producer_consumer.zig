@@ -53,14 +53,14 @@ pub fn main() !void {
 
     // Start 2 producers and 2 consumers
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
 
     for (0..2) |i| {
         try group.spawn(rt, producer, .{ rt, &channel, @intCast(i) });
         try group.spawn(rt, consumer, .{ rt, &channel, @intCast(i) });
     }
 
-    try group.wait(rt);
+    try group.wait();
 
     std.log.info("All tasks completed.", .{});
 }

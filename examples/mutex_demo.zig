@@ -37,13 +37,13 @@ pub fn main() !void {
 
     // Spawn multiple tasks that increment shared counter
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
 
     for (0..4) |i| {
         try group.spawn(rt, incrementTask, .{ rt, &shared_data, @intCast(i) });
     }
 
-    try group.wait(rt);
+    try group.wait();
 
     std.log.info("Final counter value: {} (expected: {})", .{ shared_data.counter, 4000 });
 }

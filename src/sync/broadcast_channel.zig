@@ -508,12 +508,12 @@ test "BroadcastChannel: basic send and receive" {
     var results: [3]u32 = undefined;
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ &channel, &consumer, &results, &barrier });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(1, results[0]);
@@ -556,14 +556,14 @@ test "BroadcastChannel: multiple consumers receive same messages" {
     var sum3: u32 = 0;
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ &channel, &consumer1, &sum1, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ &channel, &consumer2, &sum2, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ &channel, &consumer3, &sum3, &barrier });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // All consumers should receive all messages
@@ -782,12 +782,12 @@ test "BroadcastChannel: consumers can drain after close" {
     var results: [4]?u32 = .{ null, null, null, null };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ &channel, &consumer, &results, &barrier });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(1, results[0]);
@@ -831,12 +831,12 @@ test "BroadcastChannel: waiting consumers wake on close" {
     var got_closed = false;
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.waiter, .{ &channel, &consumer, &got_closed, &barrier });
     try group.spawn(runtime, TestFn.closer, .{ &channel, &barrier });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(got_closed);
@@ -900,12 +900,12 @@ test "BroadcastChannel: asyncReceive with select - basic" {
     var consumer = BroadcastChannel(u32).Consumer{};
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.sender, .{ &channel, &barrier });
     try group.spawn(runtime, TestFn.receiver, .{ &channel, &consumer, &barrier });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 }
 
@@ -1047,12 +1047,12 @@ test "BroadcastChannel: select with multiple broadcast channels" {
     var which: u8 = 0;
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.selectTask, .{ &channel1, &channel2, &consumer1, &consumer2, &which });
     try group.spawn(runtime, TestFn.sender2, .{&channel2});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // ch2 should win

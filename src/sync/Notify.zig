@@ -230,12 +230,12 @@ test "Notify basic signal/wait" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_finished });
     try group.spawn(runtime, TestFn.signaler, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(waiter_finished);
@@ -278,14 +278,14 @@ test "Notify broadcast to multiple waiters" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.broadcaster, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(3, waiter_count);
@@ -317,14 +317,14 @@ test "Notify multiple signals to multiple waiters" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &waiter_count });
     try group.spawn(runtime, TestFn.signaler, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(3, waiter_count);
@@ -375,12 +375,12 @@ test "Notify timedWait success" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, TestFn.waiter, .{ &notify, &wait_succeeded });
     try group.spawn(runtime, TestFn.signaler, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(wait_succeeded);

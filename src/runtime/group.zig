@@ -5,6 +5,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const meta = @import("../meta.zig");
 const Runtime = @import("../runtime.zig").Runtime;
+const getCurrentExecutor = @import("../runtime.zig").getCurrentExecutor;
+const beginShield = @import("../runtime.zig").beginShield;
+const endShield = @import("../runtime.zig").endShield;
 const JoinHandle = @import("../runtime.zig").JoinHandle;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
@@ -152,9 +155,10 @@ pub const Group = struct {
         return groupSpawnBlockingTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start);
     }
 
-    pub fn wait(group: *Group, rt: *Runtime) Cancelable!void {
+    pub fn wait(group: *Group) Cancelable!void {
+        const rt = getCurrentExecutor().runtime;
         group.setClosed();
-        errdefer group.cancel(rt);
+        errdefer group.cancel();
 
         // Wait for all tasks to complete
         const state_ptr = group.getState();
@@ -170,9 +174,10 @@ pub const Group = struct {
         std.debug.assert(group.getTasks().getState() == .sentinel0);
     }
 
-    pub fn cancel(group: *Group, rt: *Runtime) void {
-        rt.beginShield();
-        defer rt.endShield();
+    pub fn cancel(group: *Group) void {
+        const rt = getCurrentExecutor().runtime;
+        beginShield();
+        defer endShield();
 
         group.setCanceled();
 
@@ -275,11 +280,11 @@ test "Group: spawn" {
     const TestContext = struct {
         fn asyncTask(runtime: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(runtime);
+            defer group.cancel();
 
             try group.spawn(runtime, testFn, .{0});
 
-            try group.wait(runtime);
+            try group.wait();
         }
     };
 
@@ -302,13 +307,13 @@ test "Group: wait for multiple tasks" {
             completed = 0;
 
             var group: Group = .init;
-            defer group.cancel(runtime);
+            defer group.cancel();
 
             try group.spawn(runtime, task, .{runtime});
             try group.spawn(runtime, task, .{runtime});
             try group.spawn(runtime, task, .{runtime});
 
-            try group.wait(runtime);
+            try group.wait();
 
             try std.testing.expectEqual(3, completed);
         }
@@ -342,7 +347,7 @@ test "Group: cancellation while waiting" {
 
         fn groupTask(runtime: *Runtime) anyerror!void {
             var group: Group = .init;
-            defer group.cancel(runtime);
+            defer group.cancel();
 
             // Spawn multiple slow tasks
             try group.spawn(runtime, slowTask, .{runtime});
@@ -350,7 +355,7 @@ test "Group: cancellation while waiting" {
             try group.spawn(runtime, slowTask, .{runtime});
 
             // This wait should be interrupted by cancellation
-            group.wait(runtime) catch {};
+            group.wait() catch {};
         }
 
         fn asyncTask(runtime: *Runtime) !void {

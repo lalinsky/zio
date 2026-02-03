@@ -127,10 +127,10 @@ pub fn main() !void {
     // --8<-- [end:channels]
 
     var workers_group: zio.Group = .init;
-    defer workers_group.cancel(rt);
+    defer workers_group.cancel();
 
     var collector_group: zio.Group = .init;
-    defer collector_group.cancel(rt);
+    defer collector_group.cancel();
 
     // --8<-- [start:coordination]
     // Start worker tasks
@@ -154,13 +154,13 @@ pub fn main() !void {
     work_channel.close(.graceful);
 
     // Wait for all workers to finish
-    try workers_group.wait(rt);
+    try workers_group.wait();
 
     // Now close results channel to signal collector to exit
     results_channel.close(.graceful);
 
     // Wait for collector to finish
-    try collector_group.wait(rt);
+    try collector_group.wait();
     // --8<-- [end:coordination]
 
     std.log.info("Search complete.", .{});

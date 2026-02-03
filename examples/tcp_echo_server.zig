@@ -50,7 +50,7 @@ pub fn main() !void {
 
     // --8<-- [start:group]
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
     // --8<-- [end:group]
 
     // --8<-- [start:accept]

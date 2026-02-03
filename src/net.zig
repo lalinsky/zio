@@ -1586,12 +1586,12 @@ test "tcpConnectToAddress: basic" {
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, ServerTask.run, .{&server_port_ch});
     try group.spawn(runtime, ClientTask.run, .{&server_port_ch});
 
-    try group.wait(runtime);
+    try group.wait();
 }
 
 test "tcpConnectToHost: basic" {
@@ -1643,12 +1643,12 @@ test "tcpConnectToHost: basic" {
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     try group.spawn(runtime, ServerTask.run, .{&server_port_ch});
     try group.spawn(runtime, ClientTask.run, .{&server_port_ch});
 
-    try group.wait(runtime);
+    try group.wait();
 }
 
 test "IpAddress: initIp4" {
@@ -1955,12 +1955,12 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
             defer server.close();
 
             var group: Group = .init;
-            defer group.cancel(rt);
+            defer group.cancel();
 
             try group.spawn(rt, serverFn, .{server});
             try group.spawn(rt, clientFn, .{ server, write_buffer_inner });
 
-            try group.wait(rt);
+            try group.wait();
         }
 
         pub fn serverFn(server: Server) !void {
@@ -2003,12 +2003,12 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
             defer socket.close();
 
             var group: Group = .init;
-            defer group.cancel(rt);
+            defer group.cancel();
 
             try group.spawn(rt, serverFn, .{socket});
             try group.spawn(rt, clientFn, .{ socket, client_addr_inner });
 
-            try group.wait(rt);
+            try group.wait();
         }
 
         pub fn serverFn(socket: Socket) !void {
@@ -2049,12 +2049,12 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
             defer server.close();
 
             var group: Group = .init;
-            defer group.cancel(rt);
+            defer group.cancel();
 
             try group.spawn(rt, serverFn, .{server});
             try group.spawn(rt, clientFn, .{server});
 
-            try group.wait(rt);
+            try group.wait();
         }
 
         pub fn serverFn(server: Server) !void {

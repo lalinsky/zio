@@ -733,6 +733,16 @@ pub fn spawnBlocking(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !Jo
     return rt.spawnBlocking(func, args);
 }
 
+/// Begin a cancellation shield to prevent being canceled during critical sections.
+pub fn beginShield() void {
+    getCurrentTask().beginShield();
+}
+
+/// End a cancellation shield.
+pub fn endShield() void {
+    getCurrentTask().endShield();
+}
+
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
     thread_pool: ev.ThreadPool,
@@ -1295,13 +1305,13 @@ test "runtime: multi-threaded execution with 2 executors" {
     TestContext.counter = 0;
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (0..4) |_| {
         try group.spawn(runtime, TestContext.task, .{runtime});
     }
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(4, TestContext.counter);
