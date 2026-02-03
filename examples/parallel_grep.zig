@@ -133,11 +133,13 @@ pub fn main() !void {
     defer collector_group.cancel();
 
     // --8<-- [start:coordination]
+    // --8<-- [start:spawn_workers]
     // Start worker tasks
     const num_workers = 4;
     for (0..num_workers) |i| {
         try workers_group.spawn(worker, .{ gpa, cwd, i, &work_channel, &results_channel, pattern });
     }
+    // --8<-- [end:spawn_workers]
 
     // Start collector task
     try collector_group.spawn(collector, .{ gpa, &results_channel });

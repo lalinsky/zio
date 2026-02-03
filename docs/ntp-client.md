@@ -58,9 +58,7 @@ Before we can contact an NTP server, we need to resolve its hostname to an IP ad
 Unlike TCP which provides reliable, ordered, connection-oriented streams, UDP sends individual datagrams without establishing a connection:
 
 ```zig
-const local_addr = try zio.net.IpAddress.parseIp4("0.0.0.0", 0);
-const socket = try local_addr.bind(rt, .{});
-defer socket.close(rt);
+--8<-- "examples/ntp_client.zig:bind"
 ```
 
 [`bind()`](../apidocs/#zio.net.IpAddress.bind) creates a UDP socket. Binding to `0.0.0.0:0` means "listen on any interface, on any available port" - the OS will assign a random port.
@@ -72,7 +70,7 @@ With TCP, we called [`connect()`](../apidocs/#zio.net.Stream.connect) to establi
 To send a datagram:
 
 ```zig
-const sent = try socket.sendTo(rt, addr, &buffer, timeout);
+--8<-- "examples/ntp_client.zig:sendTo"
 ```
 
 [`sendTo()`](../apidocs/#zio.net.Socket.sendTo) sends data to a specific address. UDP doesn't guarantee delivery - the datagram might get lost, arrive out of order, or be duplicated. For NTP, this is acceptable since we query periodically.
@@ -80,10 +78,7 @@ const sent = try socket.sendTo(rt, addr, &buffer, timeout);
 To receive a datagram:
 
 ```zig
-const result = socket.receiveFrom(rt, &buffer, timeout) catch |err| {
-    std.log.warn("Failed to receive NTP response: {}", .{err});
-    return err;
-};
+--8<-- "examples/ntp_client.zig:receiveFrom"
 ```
 
 [`receiveFrom()`](../apidocs/#zio.net.Socket.receiveFrom) returns both the data and the sender's address. This is important for UDP since we can receive datagrams from any address.
@@ -95,7 +90,7 @@ Both [`sendTo()`](../apidocs/#zio.net.Socket.sendTo) and [`receiveFrom()`](../ap
 ```zig
 const request_timeout: zio.Timeout = .{ .duration = .fromSeconds(5) };
 
-const result = socket.receiveFrom(rt, &buffer, request_timeout) catch |err| {
+const result = socket.receiveFrom(&buffer, request_timeout) catch |err| {
     // Handle timeout or other error
     return err;
 };
