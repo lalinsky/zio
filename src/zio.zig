@@ -8,6 +8,14 @@ const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const JoinHandle = runtime.JoinHandle;
 
+// Standalone task functions
+pub const spawn = runtime.spawn;
+pub const spawnBlocking = runtime.spawnBlocking;
+pub const yield = runtime.yield;
+pub const sleep = runtime.sleep;
+pub const beginShield = runtime.beginShield;
+pub const endShield = runtime.endShield;
+
 pub const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 
 pub const Group = @import("runtime/group.zig").Group;

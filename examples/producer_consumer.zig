@@ -4,7 +4,7 @@
 const std = @import("std");
 const zio = @import("zio");
 
-fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
+fn producer(channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     for (0..5) |i| {
         const item = @as(i32, @intCast(id * 100 + i));
         channel.send(item) catch |err| switch (err) {
@@ -18,12 +18,12 @@ fn producer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelabl
             },
         };
         std.log.info("Produced: {}", .{item});
-        try rt.sleep(.fromMilliseconds(100)); // Small delay between productions
+        try zio.sleep(.fromMilliseconds(100)); // Small delay between productions
     }
     std.log.info("Producer {} finished", .{id});
 }
 
-fn consumer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
+fn consumer(channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     for (0..5) |_| {
         const item = channel.receive() catch |err| switch (err) {
             error.ChannelClosed => {
@@ -36,7 +36,7 @@ fn consumer(rt: *zio.Runtime, channel: *zio.Channel(i32), id: u32) zio.Cancelabl
             },
         };
         std.log.info("Consumed: {}", .{item});
-        try rt.sleep(.fromMilliseconds(150)); // Small delay between consumptions
+        try zio.sleep(.fromMilliseconds(150)); // Small delay between consumptions
     }
     std.log.info("Consumer {} finished", .{id});
 }
@@ -56,8 +56,8 @@ pub fn main() !void {
     defer group.cancel();
 
     for (0..2) |i| {
-        try group.spawn(producer, .{ rt, &channel, @intCast(i) });
-        try group.spawn(consumer, .{ rt, &channel, @intCast(i) });
+        try group.spawn(producer, .{ &channel, @intCast(i) });
+        try group.spawn(consumer, .{ &channel, @intCast(i) });
     }
 
     try group.wait();
