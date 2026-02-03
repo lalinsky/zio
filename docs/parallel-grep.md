@@ -66,10 +66,7 @@ Channels provide a safe way to communicate between concurrent tasks without shar
 The program spawns 4 worker tasks that process files from a shared queue:
 
 ```zig
-const num_workers = 4;
-for (0..num_workers) |i| {
-    try workers_group.spawn(rt, worker, .{ rt, gpa, cwd, i, &work_channel, &results_channel, pattern });
-}
+--8<-- "examples/parallel_grep.zig:spawn_workers"
 ```
 
 Each worker runs this loop:
@@ -126,12 +123,12 @@ const result = SearchResult{
     .line = try gpa.dupe(u8, line),  // Allocate
 };
 errdefer gpa.free(result.line);  // Free if send fails
-try results_channel.send(rt, result);
+try results_channel.send(result);
 ```
 
 ```zig
 // In collector
-const result = results_channel.receive(rt) catch ...
+const result = results_channel.receive() catch ...
 // ... print result ...
 gpa.free(result.line);  // Free
 ```

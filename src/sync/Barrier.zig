@@ -25,12 +25,12 @@
 //! ## Example
 //!
 //! ```zig
-//! fn worker(rt: *Runtime, barrier: *zio.Barrier, id: u32) !void {
+//! fn worker(barrier: *zio.Barrier, id: u32) !void {
 //!     // Phase 1: do some work
 //!     std.debug.print("Worker {} starting phase 1\n", .{id});
 //!
 //!     // Wait for all workers to complete phase 1
-//!     const is_leader = try barrier.wait(rt);
+//!     const is_leader = try barrier.wait();
 //!
 //!     // Phase 2: all workers proceed together
 //!     if (is_leader) {
@@ -77,7 +77,7 @@ pub fn init(count: usize) Barrier {
 /// otherwise. This can be useful for having one task perform cleanup or
 /// initialization for the next phase:
 /// ```zig
-/// const is_leader = try barrier.wait(rt);
+/// const is_leader = try barrier.wait();
 /// if (is_leader) {
 ///     // Perform phase transition work
 /// }
@@ -88,9 +88,9 @@ pub fn init(count: usize) Barrier {
 ///
 /// Returns `error.Canceled` if this task is cancelled while waiting. This will
 /// also break the barrier for all other waiting tasks.
-pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrier})!bool {
-    try self.mutex.lock(runtime);
-    defer self.mutex.unlock(runtime);
+pub fn wait(self: *Barrier) (Cancelable || error{BrokenBarrier})!bool {
+    try self.mutex.lock();
+    defer self.mutex.unlock();
 
     // Check if barrier is already broken
     if (self.broken) {
@@ -104,16 +104,16 @@ pub fn wait(self: *Barrier, runtime: *Runtime) (Cancelable || error{BrokenBarrie
         // Last one to arrive - release everyone
         self.current = 0;
         self.generation += 1;
-        self.cond.broadcast(runtime);
+        self.cond.broadcast();
         return true;
     } else {
         // Wait for the barrier to be released
         while (self.generation == local_gen and !self.broken) {
-            self.cond.wait(runtime, &self.mutex) catch |err| {
+            self.cond.wait(&self.mutex) catch |err| {
                 // On cancellation: break the barrier and wake all waiters
                 self.current -= 1;
                 self.broken = true;
-                self.cond.broadcast(runtime);
+                self.cond.broadcast();
                 return err;
             };
         }
@@ -136,12 +136,12 @@ test "Barrier: basic synchronization" {
     var results: [3]u32 = undefined;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, cnt: *u32, result: *u32) !void {
+        fn worker(b: *Barrier, cnt: *u32, result: *u32) !void {
             // Increment counter before barrier
             cnt.* += 1;
 
             // Wait at barrier - all should see counter == 3 after this
-            _ = try b.wait(rt);
+            _ = try b.wait();
 
             // All coroutines should see the same final counter value
             result.* = cnt.*;
@@ -149,13 +149,13 @@ test "Barrier: basic synchronization" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (&results) |*result| {
-        try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &counter, result });
+        try group.spawn(TestFn.worker, .{ &barrier, &counter, result });
     }
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // All coroutines should have seen counter == 3
@@ -172,8 +172,8 @@ test "Barrier: leader detection" {
     var leader_count: u32 = 0;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, leader_cnt: *u32) !void {
-            const is_leader = try b.wait(rt);
+        fn worker(b: *Barrier, leader_cnt: *u32) !void {
+            const is_leader = try b.wait();
             if (is_leader) {
                 leader_cnt.* += 1;
             }
@@ -181,13 +181,13 @@ test "Barrier: leader detection" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &leader_count });
+    try group.spawn(TestFn.worker, .{ &barrier, &leader_count });
+    try group.spawn(TestFn.worker, .{ &barrier, &leader_count });
+    try group.spawn(TestFn.worker, .{ &barrier, &leader_count });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // Exactly one coroutine should have been the leader
@@ -204,28 +204,28 @@ test "Barrier: reusable for multiple cycles" {
     var phase3_done: u32 = 0;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, p1: *u32, p2: *u32, p3: *u32) !void {
+        fn worker(b: *Barrier, p1: *u32, p2: *u32, p3: *u32) !void {
             // Phase 1
             p1.* += 1;
-            _ = try b.wait(rt);
+            _ = try b.wait();
 
             // Phase 2
             p2.* += 1;
-            _ = try b.wait(rt);
+            _ = try b.wait();
 
             // Phase 3
             p3.* += 1;
-            _ = try b.wait(rt);
+            _ = try b.wait();
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &phase1_done, &phase2_done, &phase3_done });
+    try group.spawn(TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
+    try group.spawn(TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(2, phase1_done);
@@ -241,14 +241,14 @@ test "Barrier: single coroutine barrier" {
     var is_leader_result = false;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, leader: *bool) !void {
-            const is_leader = try b.wait(rt);
+        fn worker(b: *Barrier, leader: *bool) !void {
+            const is_leader = try b.wait();
             leader.* = is_leader;
         }
     };
 
-    var handle = try runtime.spawn(TestFn.worker, .{ runtime, &barrier, &is_leader_result });
-    try handle.join(runtime);
+    var handle = try runtime.spawn(TestFn.worker, .{ &barrier, &is_leader_result });
+    try handle.join();
 
     try std.testing.expect(is_leader_result);
 }
@@ -263,13 +263,13 @@ test "Barrier: ordering test" {
     var final_order: u32 = 0;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, order: *u32, my_arrival: *u32, final: *u32) !void {
+        fn worker(b: *Barrier, order: *u32, my_arrival: *u32, final: *u32) !void {
             // Record arrival order
             my_arrival.* = order.*;
             order.* += 1;
 
             // Wait at barrier
-            _ = try b.wait(rt);
+            _ = try b.wait();
 
             // After barrier, store final order value
             final.* = order.*;
@@ -277,13 +277,13 @@ test "Barrier: ordering test" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (&arrivals) |*my_arrival| {
-        try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &arrival_order, my_arrival, &final_order });
+        try group.spawn(TestFn.worker, .{ &barrier, &arrival_order, my_arrival, &final_order });
     }
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // All three should have unique arrival numbers (0, 1, 2 in some order)
@@ -307,21 +307,21 @@ test "Barrier: many coroutines" {
     var final_counts: [5]u32 = undefined;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, b: *Barrier, cnt: *u32, result: *u32) !void {
+        fn worker(b: *Barrier, cnt: *u32, result: *u32) !void {
             cnt.* += 1;
-            _ = try b.wait(rt);
+            _ = try b.wait();
             result.* = cnt.*;
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (&final_counts) |*result| {
-        try group.spawn(runtime, TestFn.worker, .{ runtime, &barrier, &counter, result });
+        try group.spawn(TestFn.worker, .{ &barrier, &counter, result });
     }
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     // All should see the final counter value

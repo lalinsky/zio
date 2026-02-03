@@ -17,14 +17,15 @@
 //! var mutex: zio.Mutex = .init;
 //! var shared_data: u32 = 0;
 //!
-//! try mutex.lock(rt);
-//! defer mutex.unlock(rt);
+//! try mutex.lock();
+//! defer mutex.unlock();
 //!
 //! shared_data += 1;
 //! ```
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const getCurrentTask = @import("../runtime.zig").getCurrentTask;
 const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -67,7 +68,7 @@ pub fn tryLock(self: *Mutex) bool {
 /// the zio runtime.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
-pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
+pub fn lock(self: *Mutex) Cancelable!void {
     // Fast path: try to acquire unlocked mutex
     if (self.queue.tryTransition(unlocked, locked_once)) {
         return;
@@ -76,7 +77,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
     // Slow path: add to FIFO wait queue
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Try to push to queue, or if mutex is unlocked, acquire it atomically
     // This prevents the race: unlocked -> has_waiters (skipping locked_once)
@@ -92,7 +93,7 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
         if (!self.queue.remove(&waiter.wait_node)) {
             // Already inherited the lock - wait for signal to complete, then unlock
             waiter.wait(1, .no_cancel);
-            self.unlock(runtime);
+            self.unlock();
         }
         return err;
     };
@@ -112,11 +113,12 @@ pub fn lock(self: *Mutex, runtime: *Runtime) Cancelable!void {
 /// of cancellation (e.g., cleanup operations like close(), post()).
 ///
 /// If you need to propagate cancellation after acquiring the lock, call
-/// `runtime.checkCancel()` after this function returns.
-pub fn lockUncancelable(self: *Mutex, runtime: *Runtime) void {
-    runtime.beginShield();
-    defer runtime.endShield();
-    self.lock(runtime) catch unreachable;
+/// `Runtime.checkCancel()` after this function returns.
+pub fn lockUncancelable(self: *Mutex) void {
+    const task = getCurrentTask();
+    task.beginShield();
+    defer task.endShield();
+    self.lock() catch unreachable;
 }
 
 /// Releases the mutex.
@@ -127,8 +129,7 @@ pub fn lockUncancelable(self: *Mutex, runtime: *Runtime) void {
 /// to the unlocked state.
 ///
 /// It is undefined behavior if the current coroutine does not hold the lock.
-pub fn unlock(self: *Mutex, runtime: *Runtime) void {
-    _ = runtime;
+pub fn unlock(self: *Mutex) void {
     // Pop one waiter or transition from locked_once to unlocked
     // Handles cancellation race by retrying internally
     if (self.queue.popOrTransition(locked_once, unlocked)) |wait_node| {
@@ -144,22 +145,22 @@ test "Mutex basic lock/unlock" {
     var mutex = Mutex.init;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) !void {
+        fn worker(counter: *u32, mtx: *Mutex) !void {
             for (0..100) |_| {
-                try mtx.lock(rt);
-                defer mtx.unlock(rt);
+                try mtx.lock();
+                defer mtx.unlock();
                 counter.* += 1;
             }
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
+    try group.spawn(TestFn.worker, .{ &shared_counter, &mutex });
+    try group.spawn(TestFn.worker, .{ &shared_counter, &mutex });
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(200, shared_counter);
@@ -173,7 +174,7 @@ test "Mutex tryLock" {
 
     try std.testing.expect(mutex.tryLock()); // Should succeed
     try std.testing.expect(!mutex.tryLock()); // Should fail (already locked)
-    mutex.unlock(rt);
+    mutex.unlock();
     try std.testing.expect(mutex.tryLock()); // Should succeed again
-    mutex.unlock(rt);
+    mutex.unlock();
 }

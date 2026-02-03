@@ -102,7 +102,7 @@ When you call `group.spawn()`, ZIO creates a new task and schedules it for execu
 
 The task group provides structured concurrency, which means the lifetime of child tasks is bound to the parent scope. When the group is cancelled, all tasks in it are cancelled too. This prevents tasks from leaking and makes it easier to reason about concurrent code.
 
-In our example, the `defer group.cancel(rt)` ensures that when `main` exits, all active client handlers are cancelled. This provides a clean shutdown.
+In our example, the `defer group.cancel()` ensures that when `main` exits, all active client handlers are cancelled. This provides a clean shutdown.
 
 ### Async I/O
 

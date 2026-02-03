@@ -9,21 +9,20 @@ const SearchResult = struct {
 
 // --8<-- [start:searchFile]
 fn searchFile(
-    rt: *zio.Runtime,
     gpa: std.mem.Allocator,
     dir: zio.Dir,
     path: []const u8,
     pattern: []const u8,
     results_channel: *zio.Channel(SearchResult),
 ) !void {
-    const file = dir.openFile(rt, path, .{}) catch |err| {
+    const file = dir.openFile(path, .{}) catch |err| {
         std.log.warn("Failed to open file {s}: {}", .{ path, err });
         return;
     };
-    defer file.close(rt);
+    defer file.close();
 
     var read_buffer: [4096]u8 = undefined;
-    var reader = file.reader(rt, &read_buffer);
+    var reader = file.reader(&read_buffer);
 
     var line_number: usize = 0;
     while (true) {
@@ -41,7 +40,7 @@ fn searchFile(
                 .line = try gpa.dupe(u8, line),
             };
             errdefer gpa.free(result.line);
-            try results_channel.send(rt, result);
+            try results_channel.send(result);
         }
     }
 }
@@ -49,7 +48,6 @@ fn searchFile(
 
 // --8<-- [start:worker]
 fn worker(
-    rt: *zio.Runtime,
     gpa: std.mem.Allocator,
     dir: zio.Dir,
     id: usize,
@@ -58,7 +56,7 @@ fn worker(
     pattern: []const u8,
 ) zio.Cancelable!void {
     while (true) {
-        const path = work_channel.receive(rt) catch |err| switch (err) {
+        const path = work_channel.receive() catch |err| switch (err) {
             error.ChannelClosed => {
                 std.log.info("Worker {} exiting", .{id});
                 return;
@@ -67,7 +65,7 @@ fn worker(
         };
 
         std.log.info("Worker {} searching {s}", .{ id, path });
-        searchFile(rt, gpa, dir, path, pattern, results_channel) catch |err| {
+        searchFile(gpa, dir, path, pattern, results_channel) catch |err| {
             std.log.warn("Worker {} error searching {s}: {}", .{ id, path, err });
         };
     }
@@ -76,16 +74,15 @@ fn worker(
 
 // --8<-- [start:collector]
 fn collector(
-    rt: *zio.Runtime,
     gpa: std.mem.Allocator,
     results_channel: *zio.Channel(SearchResult),
 ) !void {
     const stdout = zio.stdout();
     var write_buffer: [4096]u8 = undefined;
-    var writer = stdout.writer(rt, &write_buffer);
+    var writer = stdout.writer(&write_buffer);
 
     while (true) {
-        const result = results_channel.receive(rt) catch |err| switch (err) {
+        const result = results_channel.receive() catch |err| switch (err) {
             error.ChannelClosed => return,
             error.Canceled => return error.Canceled,
         };
@@ -130,24 +127,26 @@ pub fn main() !void {
     // --8<-- [end:channels]
 
     var workers_group: zio.Group = .init;
-    defer workers_group.cancel(rt);
+    defer workers_group.cancel();
 
     var collector_group: zio.Group = .init;
-    defer collector_group.cancel(rt);
+    defer collector_group.cancel();
 
     // --8<-- [start:coordination]
+    // --8<-- [start:spawn_workers]
     // Start worker tasks
     const num_workers = 4;
     for (0..num_workers) |i| {
-        try workers_group.spawn(rt, worker, .{ rt, gpa, cwd, i, &work_channel, &results_channel, pattern });
+        try workers_group.spawn(worker, .{ gpa, cwd, i, &work_channel, &results_channel, pattern });
     }
+    // --8<-- [end:spawn_workers]
 
     // Start collector task
-    try collector_group.spawn(rt, collector, .{ rt, gpa, &results_channel });
+    try collector_group.spawn(collector, .{ gpa, &results_channel });
 
     // Distribute work
     for (files) |file_path| {
-        work_channel.send(rt, file_path) catch |err| switch (err) {
+        work_channel.send(file_path) catch |err| switch (err) {
             error.ChannelClosed => break,
             error.Canceled => return error.Canceled,
         };
@@ -157,13 +156,13 @@ pub fn main() !void {
     work_channel.close(.graceful);
 
     // Wait for all workers to finish
-    try workers_group.wait(rt);
+    try workers_group.wait();
 
     // Now close results channel to signal collector to exit
     results_channel.close(.graceful);
 
     // Wait for collector to finish
-    try collector_group.wait(rt);
+    try collector_group.wait();
     // --8<-- [end:coordination]
 
     std.log.info("Search complete.", .{});

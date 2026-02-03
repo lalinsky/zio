@@ -11,6 +11,7 @@ const std = @import("std");
 const os = @import("os/root.zig");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
+const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const WaitNode = @import("runtime/WaitNode.zig");
 
 // Time configuration - adjust these for different platforms
@@ -455,7 +456,7 @@ pub const Timeout = union(enum) {
         wait_node: ?*WaitNode = null,
     };
 
-    pub fn asyncWait(self: *const Timeout, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncWait(self: *const Timeout, wait_node: *WaitNode, ctx: *WaitContext) bool {
         // Timeout.none means wait forever - never completes
         if (self.* == .none) {
             return true;
@@ -466,7 +467,7 @@ pub const Timeout = union(enum) {
         ctx.timer.c.userdata = ctx;
         ctx.timer.c.callback = timerCallback;
 
-        const executor = rt.getCurrentTask().getExecutor();
+        const executor = getCurrentExecutor();
         executor.loop.add(&ctx.timer.c);
         return true;
     }
@@ -478,8 +479,9 @@ pub const Timeout = union(enum) {
         }
     }
 
-    pub fn asyncCancelWait(self: *const Timeout, _: *Runtime, _: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncCancelWait(self: *const Timeout, wait_node: *WaitNode, ctx: *WaitContext) bool {
         _ = self;
+        _ = wait_node;
         const loop = ctx.timer.c.loop orelse return true;
         ctx.wait_node = null; // Prevent callback from waking a stale/reused wait node
         loop.clearTimer(&ctx.timer);
@@ -695,8 +697,8 @@ test "Timeout future: timeout wins select" {
     var channel = Channel(u32).init(&.{});
 
     const TestFn = struct {
-        fn run(rt: *Runtime, ch: *Channel(u32)) !void {
-            const result = try select(rt, .{
+        fn run(ch: *Channel(u32)) !void {
+            const result = try select(.{
                 .recv = ch.asyncReceive(),
                 .timeout = Timeout.fromMilliseconds(10),
             });
@@ -708,7 +710,7 @@ test "Timeout future: timeout wins select" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
-    try group.spawn(runtime, TestFn.run, .{ runtime, &channel });
-    try group.wait(runtime);
+    defer group.cancel();
+    try group.spawn(TestFn.run, .{&channel});
+    try group.wait();
 }

@@ -64,14 +64,14 @@ Basic TCP echo server:
 const std = @import("std");
 const zio = @import("zio");
 
-fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
-    defer stream.close(rt);
+fn handleClient(stream: zio.net.Stream) !void {
+    defer stream.close();
 
     var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(rt, &read_buffer);
+    var reader = stream.reader(&read_buffer);
 
     var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(rt, &write_buffer);
+    var writer = stream.writer(&write_buffer);
 
     while (true) {
         const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
@@ -91,19 +91,19 @@ pub fn main() !void {
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
-    const server = try addr.listen(rt, .{});
-    defer server.close(rt);
+    const server = try addr.listen(.{});
+    defer server.close();
 
     std.log.info("Listening on {f}", .{server.socket.address});
 
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
 
     while (true) {
-        const stream = try server.accept(rt);
-        errdefer stream.close(rt);
+        const stream = try server.accept();
+        errdefer stream.close();
 
-        try group.spawn(rt, handleClient, .{ rt, stream });
+        try group.spawn(handleClient, .{stream});
     }
 }
 ```

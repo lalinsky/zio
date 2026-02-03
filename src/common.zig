@@ -8,6 +8,7 @@ const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
 const Stopwatch = @import("time.zig").Stopwatch;
 const Runtime = @import("runtime.zig").Runtime;
+const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("runtime/WaitNode.zig");
@@ -32,7 +33,7 @@ pub const Timeoutable = error{
 ///
 /// Usage:
 /// ```zig
-/// var waiter: Waiter = .init(runtime);
+/// var waiter: Waiter = .init();
 /// // Setup operation (e.g., push to queue, submit I/O)
 /// try waiter.wait(1, .allow_cancel);
 /// ```
@@ -45,10 +46,10 @@ pub const Waiter = struct {
         .wake = wakeImpl,
     };
 
-    pub fn init(runtime: *Runtime) Waiter {
+    pub fn init() Waiter {
         return .{
             .wait_node = .{ .vtable = &vtable },
-            .task = runtime.getCurrentTaskOrNull(),
+            .task = getCurrentTaskOrNull(),
         };
     }
 
@@ -168,8 +169,8 @@ pub const Waiter = struct {
 
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
-pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
-    var waiter = Waiter.init(rt);
+pub fn waitForIo(c: *ev.Completion) Cancelable!void {
+    var waiter = Waiter.init();
     c.userdata = &waiter;
     c.callback = Waiter.callback;
 
@@ -203,9 +204,9 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
 /// Runs an I/O operation to completion with a timeout.
 /// If the timeout expires before the I/O completes, returns `error.Timeout`.
 /// If the timeout is `.none`, waits indefinitely (just calls `waitForIo`).
-pub fn timedWaitForIo(rt: *Runtime, c: *ev.Completion, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn timedWaitForIo(c: *ev.Completion, timeout: Timeout) (Timeoutable || Cancelable)!void {
     if (timeout == .none) {
-        return waitForIo(rt, c);
+        return waitForIo(c);
     }
 
     var group = ev.Group.init(.race);
@@ -214,7 +215,7 @@ pub fn timedWaitForIo(rt: *Runtime, c: *ev.Completion, timeout: Timeout) (Timeou
     group.add(c);
     group.add(&timer.c);
 
-    try waitForIo(rt, &group.c);
+    try waitForIo(&group.c);
 
     // Check if the IO was cancelled by the timeout
     // (both could complete in a race, so check if I/O was actually cancelled)
@@ -232,7 +233,7 @@ test "waitForIo: basic timer completion" {
     defer rt.deinit();
 
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    try waitForIo(rt, &timer.c);
+    try waitForIo(&timer.c);
 }
 
 test "timedWaitForIo: timeout interrupts long operation" {
@@ -241,7 +242,7 @@ test "timedWaitForIo: timeout interrupts long operation" {
 
     // Long timer (1 second) with short timeout (10ms)
     var timer = ev.Timer.init(.{ .duration = .fromSeconds(1) });
-    try std.testing.expectError(error.Timeout, timedWaitForIo(rt, &timer.c, .fromMilliseconds(10)));
+    try std.testing.expectError(error.Timeout, timedWaitForIo(&timer.c, .fromMilliseconds(10)));
 }
 
 test "timedWaitForIo: completes before timeout" {
@@ -250,7 +251,7 @@ test "timedWaitForIo: completes before timeout" {
 
     // Short timer (10ms) with long timeout (1 second)
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    try timedWaitForIo(rt, &timer.c, .{ .duration = .fromSeconds(1) });
+    try timedWaitForIo(&timer.c, .{ .duration = .fromSeconds(1) });
 }
 
 test "Waiter: futex-based timed wait with timeout" {

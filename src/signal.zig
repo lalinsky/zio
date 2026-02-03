@@ -238,7 +238,7 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
 /// ```zig
 /// var sig = try Signal.init(.interrupt);
 /// defer sig.deinit();
-/// try sig.wait(rt);  // Blocks until SIGINT is received
+/// try sig.wait();  // Blocks until SIGINT is received
 /// ```
 pub const Signal = struct {
     kind: SignalKind,
@@ -276,14 +276,14 @@ pub const Signal = struct {
     /// The internal counter is reset after each wait, ensuring signals are not lost.
     ///
     /// Returns error.Canceled if the task is cancelled while waiting (including due to timeout expiry).
-    pub fn wait(self: *Signal, rt: *Runtime) Cancelable!void {
+    pub fn wait(self: *Signal) Cancelable!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
         }
 
         // Stack-allocated waiter - separates operation wait node from task wait node
-        var waiter: Waiter = .init(rt);
+        var waiter: Waiter = .init();
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.wait_node);
@@ -314,24 +314,23 @@ pub const Signal = struct {
     /// The internal counter is reset after each wait, ensuring signals are not lost.
     ///
     /// Arguments:
-    /// - rt: Runtime context
     /// - timeout: Timeout
-    pub fn timedWait(self: *Signal, rt: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    pub fn timedWait(self: *Signal, timeout: Timeout) (Timeoutable || Cancelable)!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
         }
 
         // Stack-allocated waiter - separates operation wait node from task wait node
-        var waiter: Waiter = .init(rt);
+        var waiter: Waiter = .init();
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.wait_node);
 
         // Set up timeout timer
         var timer = AutoCancel.init;
-        defer timer.clear(rt);
-        timer.set(rt, timeout);
+        defer timer.clear();
+        timer.set(timeout);
 
         // Wait for signal, handling spurious wakeups internally
         waiter.wait(1, .allow_cancel) catch |err| {
@@ -343,7 +342,7 @@ pub const Signal = struct {
             }
 
             // Check if this auto-cancel triggered, otherwise it was user cancellation
-            if (timer.check(rt, err)) return error.Timeout;
+            if (timer.check(err)) return error.Timeout;
             return err;
         };
 
@@ -354,7 +353,7 @@ pub const Signal = struct {
     /// Registers a wait node to be notified when the signal is received.
     /// This is part of the Future protocol for select().
     /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
-    pub fn asyncWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *Signal, wait_node: *WaitNode) bool {
         // Fast path: signal already received
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return false;
@@ -368,7 +367,7 @@ pub const Signal = struct {
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
     /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Signal, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncCancelWait(self: *Signal, wait_node: *WaitNode) bool {
         // Simply remove from queue - no need to wake another waiter since signals broadcast to all
         return self.entry.waiters.remove(wait_node);
     }
@@ -392,19 +391,20 @@ test "Signal: basic signal handling" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.wait(r);
+            try sig.wait();
             self.signal_received = true;
         }
 
@@ -416,7 +416,7 @@ test "Signal: basic signal handling" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -432,21 +432,22 @@ test "Signal: multiple handlers for same signal" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignal(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.wait(r);
+            try sig.wait();
             _ = self.count.fetchAdd(1, .monotonic);
         }
 
@@ -458,7 +459,7 @@ test "Signal: multiple handlers for same signal" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expectEqual(3, ctx.count.load(.monotonic));
 }
@@ -473,10 +474,11 @@ test "Signal: timedWait timeout" {
         timed_out: bool = false,
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            sig.timedWait(r, .{ .duration = .fromMilliseconds(50) }) catch |err| {
+            sig.timedWait(.{ .duration = .fromMilliseconds(50) }) catch |err| {
                 if (err == error.Timeout) {
                     self.timed_out = true;
                     return;
@@ -488,7 +490,7 @@ test "Signal: timedWait timeout" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.timed_out);
 }
@@ -504,19 +506,20 @@ test "Signal: timedWait receives signal before timeout" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
-            try group.spawn(r, waitForSignalTimed, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignalTimed, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignalTimed(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
 
-            try sig.timedWait(r, .{ .duration = .fromSeconds(1) });
+            try sig.timedWait(.{ .duration = .fromSeconds(1) });
             self.signal_received = true;
         }
 
@@ -528,7 +531,7 @@ test "Signal: timedWait receives signal before timeout" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -546,21 +549,22 @@ test "Signal: select on multiple signals" {
 
         fn mainTask(self: *@This(), r: *Runtime) !void {
             var group: Group = .init;
-            defer group.cancel(r);
+            defer group.cancel();
 
-            try group.spawn(r, waitForSignals, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignals, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
-            try group.wait(r);
+            try group.wait();
         }
 
         fn waitForSignals(self: *@This(), r: *Runtime) !void {
+            _ = r;
             var sig1 = try Signal.init(.user1);
             defer sig1.deinit();
             var sig2 = try Signal.init(.user2);
             defer sig2.deinit();
 
-            const result = try select(r, .{ .sig1 = &sig1, .sig2 = &sig2 });
+            const result = try select(.{ .sig1 = &sig1, .sig2 = &sig2 });
             switch (result) {
                 .sig1 => self.signal_received.store(@intFromEnum(SignalKind.user1), .monotonic),
                 .sig2 => self.signal_received.store(@intFromEnum(SignalKind.user2), .monotonic),
@@ -575,7 +579,7 @@ test "Signal: select on multiple signals" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expectEqual(@intFromEnum(SignalKind.user2), ctx.signal_received.load(.monotonic));
 }
@@ -602,7 +606,7 @@ test "Signal: select with signal already received (fast path)" {
             try r.sleep(.fromMilliseconds(10));
 
             // Now select should return immediately (fast path)
-            const result = try select(r, .{ .sig = &sig });
+            const result = try select(.{ .sig = &sig });
             switch (result) {
                 .sig => self.signal_received = true,
             }
@@ -611,7 +615,7 @@ test "Signal: select with signal already received (fast path)" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expect(ctx.signal_received);
 }
@@ -637,13 +641,13 @@ test "Signal: select with signal and task" {
             defer sig.deinit();
 
             var task = try r.spawn(slowTask, .{r});
-            defer task.cancel(r);
+            defer task.cancel();
 
             var sender = try r.spawn(sendSignal, .{r});
-            defer sender.cancel(r);
+            defer sender.cancel();
 
             // Signal should win (arrives much sooner)
-            const result = try select(r, .{ .sig = &sig, .task = &task });
+            const result = try select(.{ .sig = &sig, .task = &task });
             switch (result) {
                 .sig => self.winner = .signal,
                 .task => |val| {
@@ -652,7 +656,7 @@ test "Signal: select with signal and task" {
                 },
             }
 
-            try sender.join(r);
+            try sender.join();
         }
 
         fn sendSignal(r: *Runtime) !void {
@@ -663,7 +667,7 @@ test "Signal: select with signal and task" {
 
     var ctx = TestContext{};
     var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join(rt);
+    try handle.join();
 
     try std.testing.expectEqual(.signal, ctx.winner);
 }

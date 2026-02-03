@@ -4,6 +4,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
+const getCurrentTask = @import("runtime.zig").getCurrentTask;
+const yield = @import("runtime.zig").yield;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Waiter = @import("common.zig").Waiter;
@@ -26,8 +28,8 @@ const NO_WINNER = std.math.maxInt(usize);
 //     asyncWait/asyncCancelWait. Useful for storing completions, results, or other
 //     data that varies per wait operation.
 //
-//   fn asyncWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) bool           // if WaitContext == void
-//   fn asyncWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
+//   fn asyncWait(self: *Self, wait_node: *WaitNode) bool           // if WaitContext == void
+//   fn asyncWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
 //     Register for notification when this future completes.
 //
 //     If WaitContext != void, the ctx parameter points to caller-allocated per-wait state
@@ -45,8 +47,8 @@ const NO_WINNER = std.math.maxInt(usize);
 //       - Thread-safe: can be called from any thread
 //       - The ctx pointer (if present) remains valid until asyncCancelWait() or wait_node.wake()
 //
-//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode) bool     // if WaitContext == void
-//   fn asyncCancelWait(self: *Self, rt: *Runtime, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
+//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode) bool     // if WaitContext == void
+//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
 //     Cancel a pending wait operation by removing the wait_node from internal queues.
 //
 //     Must be called if asyncWait() returned true and the caller no longer wants to wait
@@ -278,19 +280,19 @@ pub const SelectWaiter = struct {
 /// ```
 /// // JoinHandles must be passed by pointer (they mutate self)
 /// var h1 = try rt.spawn(task1, .{});
-/// const result = try select(rt, .{ .task = &h1, .recv = channel.asyncReceive() });
+/// const result = try select(.{ .task = &h1, .recv = channel.asyncReceive() });
 /// switch (result) {
 ///     .task => |val| ...,
 ///     .recv => |val| ...,
 /// }
 /// ```
-pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
+pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const S = @TypeOf(futures);
     const U = SelectResult(S);
     const fields = @typeInfo(S).@"struct".fields;
 
     // Self-wait detection: check all futures for self-wait
-    const task = rt.getCurrentTask();
+    const task = getCurrentTask();
     inline for (fields) |field| {
         checkSelfWait(task, @field(futures, field.name));
     }
@@ -299,7 +301,7 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
 
     // Parent waiter that SelectWaiters will signal when they win
-    var waiter = Waiter.init(rt);
+    var waiter = Waiter.init();
 
     // Allocate WaitContext struct on stack for futures that need per-wait state
     const ContextsType = WaitContextsType(S);
@@ -327,9 +329,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
             if (i < registered_count and winner_index != i) {
                 var future = @field(futures, field.name);
                 const was_removed = if (comptime hasWaitContext(field.type))
-                    future.asyncCancelWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name))
+                    future.asyncCancelWait(&select_waiters[i].wait_node, &@field(contexts, field.name))
                 else
-                    future.asyncCancelWait(rt, &select_waiters[i].wait_node);
+                    future.asyncCancelWait(&select_waiters[i].wait_node);
 
                 if (was_removed) {
                     // Successfully removed from queue - won't signal
@@ -346,9 +348,9 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
     inline for (fields, 0..) |field, i| {
         const future = @field(futures, field.name);
         const waiting = if (comptime hasWaitContext(field.type))
-            future.asyncWait(rt, &select_waiters[i].wait_node, &@field(contexts, field.name))
+            future.asyncWait(&select_waiters[i].wait_node, &@field(contexts, field.name))
         else
-            future.asyncWait(rt, &select_waiters[i].wait_node);
+            future.asyncWait(&select_waiters[i].wait_node);
 
         if (!waiting) {
             winner.store(i, .release);
@@ -387,14 +389,14 @@ pub fn select(rt: *Runtime, futures: anytype) !SelectResult(@TypeOf(futures)) {
 /// Select on a runtime slice of type-erased Awaitables.
 /// Returns the index of the first awaitable to complete.
 /// Used by std.Io.selectImpl.
-pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable!usize {
+pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     const max_awaitables = 64;
     if (awaitables.len > max_awaitables) {
         @panic("selectAwaitables: too many awaitables (max 64)");
     }
 
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiter = Waiter.init(rt);
+    var waiter = Waiter.init();
     var select_waiters: [max_awaitables]SelectWaiter = undefined;
 
     for (select_waiters[0..awaitables.len], 0..) |*sw, i| {
@@ -412,7 +414,7 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
         var expected: u32 = @intCast(registered_count);
         for (awaitables[0..registered_count], 0..) |awaitable, i| {
             if (winner_index != i) {
-                const was_removed = awaitable.asyncCancelWait(rt, &select_waiters[i].wait_node);
+                const was_removed = awaitable.asyncCancelWait(&select_waiters[i].wait_node);
                 if (was_removed) {
                     // Successfully removed from queue - won't signal
                     expected -= 1;
@@ -425,7 +427,7 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
     }
 
     for (awaitables, 0..) |awaitable, i| {
-        const waiting = awaitable.asyncWait(rt, &select_waiters[i].wait_node);
+        const waiting = awaitable.asyncWait(&select_waiters[i].wait_node);
 
         if (!waiting) {
             winner.store(i, .release);
@@ -442,15 +444,15 @@ pub fn selectAwaitables(rt: *Runtime, awaitables: []const *Awaitable) Cancelable
 }
 
 /// Internal wait implementation with configurable cancellation behavior.
-fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
-    const task = rt.getCurrentTask();
+fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
+    const task = getCurrentTask();
 
     // Self-wait detection: check if waiting on own task (would deadlock)
     checkSelfWait(task, future);
 
     // Winner tracking: for single future, winner is always 0 if signaled
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiter = Waiter.init(rt);
+    var waiter = Waiter.init();
     var select_waiter = SelectWaiter.init(&waiter, &winner, 0);
 
     // Allocate WaitContext if needed
@@ -461,9 +463,9 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     // Fast path: check if already complete
     var fut = future;
     const added = if (has_context)
-        fut.asyncWait(rt, &select_waiter.wait_node, &context)
+        fut.asyncWait(&select_waiter.wait_node, &context)
     else
-        fut.asyncWait(rt, &select_waiter.wait_node);
+        fut.asyncWait(&select_waiter.wait_node);
 
     if (!added) {
         winner.store(0, .release);
@@ -475,9 +477,9 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
     defer {
         if (winner.load(.acquire) == NO_WINNER) {
             const was_removed = if (has_context)
-                fut.asyncCancelWait(rt, &select_waiter.wait_node, &context)
+                fut.asyncCancelWait(&select_waiter.wait_node, &context)
             else
-                fut.asyncCancelWait(rt, &select_waiter.wait_node);
+                fut.asyncCancelWait(&select_waiter.wait_node);
 
             if (!was_removed) {
                 // Wake is in-flight, wait for it to complete (1 signal expected)
@@ -515,11 +517,11 @@ fn waitInternal(rt: *Runtime, future: anytype, comptime flags: WaitFlags) Cancel
 /// Example:
 /// ```
 /// // For Future(error{Foo}!i32)
-/// const result = try rt.wait(&future); // returns Cancelable!WaitResult(error{Foo}!i32)
+/// const result = try wait(&future); // returns Cancelable!WaitResult(error{Foo}!i32)
 /// const value = try result.value; // handle the inner error union
 /// ```
-pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
-    return waitInternal(rt, future, .{ .on_cancel = .propagate });
+pub fn wait(future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))) {
+    return waitInternal(future, .{ .on_cancel = .propagate });
 }
 
 /// Wait for a single future to complete, never propagating cancellation.
@@ -530,11 +532,11 @@ pub fn wait(rt: *Runtime, future: anytype) Cancelable!WaitResult(FutureResult(@T
 ///
 /// Example:
 /// ```
-/// const value = rt.waitUntilComplete(&future); // never returns error.Canceled
+/// const value = waitUntilComplete(&future); // never returns error.Canceled
 /// // value is directly FutureResult (e.g., error{Foo}!i32)
 /// ```
-pub fn waitUntilComplete(rt: *Runtime, future: anytype) FutureResult(@TypeOf(future)) {
-    const result = waitInternal(rt, future, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
+pub fn waitUntilComplete(future: anytype) FutureResult(@TypeOf(future)) {
+    const result = waitInternal(future, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
     return result.value;
 }
 
@@ -555,11 +557,11 @@ test "select: basic - first completes" {
 
         fn asyncTask(rt: *Runtime) !void {
             var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel(rt);
+            defer slow.cancel();
             var fast = try rt.spawn(fastTask, .{rt});
-            defer fast.cancel(rt);
+            defer fast.cancel();
 
-            const result = try select(rt, .{ .fast = &fast, .slow = &slow });
+            const result = try select(.{ .fast = &fast, .slow = &slow });
             switch (result) {
                 .slow => |val| try std.testing.expectEqual(42, val),
                 .fast => |val| try std.testing.expectEqual(99, val),
@@ -570,7 +572,7 @@ test "select: basic - first completes" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: already complete - fast path" {
@@ -589,17 +591,17 @@ test "select: already complete - fast path" {
 
         fn asyncTask(rt: *Runtime) !void {
             var immediate = try rt.spawn(immediateTask, .{});
-            defer immediate.cancel(rt);
+            defer immediate.cancel();
 
             // Give immediate task a chance to complete
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
 
             var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel(rt);
+            defer slow.cancel();
 
             // immediate should already be complete, select should return immediately
-            const result = try select(rt, .{ .immediate = &immediate, .slow = &slow });
+            const result = try select(.{ .immediate = &immediate, .slow = &slow });
             switch (result) {
                 .immediate => |val| try std.testing.expectEqual(123, val),
                 .slow => return error.TestUnexpectedResult,
@@ -608,7 +610,7 @@ test "select: already complete - fast path" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: heterogeneous types" {
@@ -633,13 +635,13 @@ test "select: heterogeneous types" {
 
         fn asyncTask(rt: *Runtime) !void {
             var int_handle = try rt.spawn(intTask, .{rt});
-            defer int_handle.cancel(rt);
+            defer int_handle.cancel();
             var string_handle = try rt.spawn(stringTask, .{rt});
-            defer string_handle.cancel(rt);
+            defer string_handle.cancel();
             var bool_handle = try rt.spawn(boolTask, .{rt});
-            defer bool_handle.cancel(rt);
+            defer bool_handle.cancel();
 
-            const result = try select(rt, .{
+            const result = try select(.{
                 .string = &string_handle,
                 .int = &int_handle,
                 .bool = &bool_handle,
@@ -663,7 +665,7 @@ test "select: heterogeneous types" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with cancellation" {
@@ -683,11 +685,11 @@ test "select: with cancellation" {
 
         fn selectTask(rt: *Runtime) !i32 {
             var h1 = try rt.spawn(slowTask1, .{rt});
-            defer h1.cancel(rt);
+            defer h1.cancel();
             var h2 = try rt.spawn(slowTask2, .{rt});
-            defer h2.cancel(rt);
+            defer h2.cancel();
 
-            const result = try select(rt, .{ .first = &h1, .second = &h2 });
+            const result = try select(.{ .first = &h1, .second = &h2 });
             return switch (result) {
                 .first => |v| v,
                 .second => |v| v,
@@ -696,23 +698,23 @@ test "select: with cancellation" {
 
         fn asyncTask(rt: *Runtime) !void {
             var select_handle = try rt.spawn(selectTask, .{rt});
-            defer select_handle.cancel(rt);
+            defer select_handle.cancel();
 
             // Give it a chance to start waiting
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
 
             // Cancel the select operation
-            select_handle.cancel(rt);
+            select_handle.cancel();
 
             // Should return error.Canceled
-            const result = select_handle.join(rt);
+            const result = select_handle.join();
             try std.testing.expectError(error.Canceled, result);
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with error unions - success case" {
@@ -735,11 +737,11 @@ test "select: with error unions - success case" {
 
         fn asyncTask(rt: *Runtime) !void {
             var parse_handle = try rt.spawn(parseTask, .{rt});
-            defer parse_handle.cancel(rt);
+            defer parse_handle.cancel();
             var validate_handle = try rt.spawn(validateTask, .{rt});
-            defer validate_handle.cancel(rt);
+            defer validate_handle.cancel();
 
-            const result = try select(rt, .{
+            const result = try select(.{
                 .validate = &validate_handle,
                 .parse = &parse_handle,
             });
@@ -769,7 +771,7 @@ test "select: with error unions - success case" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with error unions - error case" {
@@ -791,11 +793,11 @@ test "select: with error unions - error case" {
 
         fn asyncTask(rt: *Runtime) !void {
             var failing = try rt.spawn(failingTask, .{rt});
-            defer failing.cancel(rt);
+            defer failing.cancel();
             var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel(rt);
+            defer slow.cancel();
 
-            const result = try select(rt, .{ .failing = &failing, .slow = &slow });
+            const result = try select(.{ .failing = &failing, .slow = &slow });
 
             switch (result) {
                 .failing => |val_or_err| {
@@ -816,7 +818,7 @@ test "select: with error unions - error case" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "select: with mixed error types" {
@@ -844,15 +846,15 @@ test "select: with mixed error types" {
 
         fn asyncTask(rt: *Runtime) !void {
             var h1 = try rt.spawn(task1, .{rt});
-            defer h1.cancel(rt);
+            defer h1.cancel();
             var h2 = try rt.spawn(task2, .{rt});
-            defer h2.cancel(rt);
+            defer h2.cancel();
             var h3 = try rt.spawn(task3, .{rt});
-            defer h3.cancel(rt);
+            defer h3.cancel();
 
             // select returns Cancelable!SelectUnion(...)
             // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
-            const result = try select(rt, .{ .h2 = &h2, .h1 = &h1, .h3 = &h3 });
+            const result = try select(.{ .h2 = &h2, .h1 = &h1, .h3 = &h3 });
 
             switch (result) {
                 .h1 => |val_or_err| {
@@ -877,7 +879,7 @@ test "select: with mixed error types" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: plain type" {
@@ -896,16 +898,16 @@ test "wait: plain type" {
                     f.set(42);
                 }
             }.run, .{&future});
-            defer task.cancel(rt);
+            defer task.cancel();
 
             // Wait for the future
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             try std.testing.expectEqual(42, result.value);
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: error union" {
@@ -926,17 +928,17 @@ test "wait: error union" {
                     f.set(123);
                 }
             }.run, .{&future});
-            defer task.cancel(rt);
+            defer task.cancel();
 
             // Wait for the future
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             const value = try result.value;
             try std.testing.expectEqual(123, value);
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: error union with error" {
@@ -957,16 +959,16 @@ test "wait: error union with error" {
                     f.set(MyError.Foo);
                 }
             }.run, .{&future});
-            defer task.cancel(rt);
+            defer task.cancel();
 
             // Wait for the future
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             try std.testing.expectError(MyError.Foo, result.value);
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "wait: already complete (fast path)" {
@@ -976,18 +978,18 @@ test "wait: already complete (fast path)" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
+        fn asyncTask() !void {
             var future = Future(i32).init;
             future.set(99);
 
             // Wait should return immediately since already set
-            const result = try wait(rt, &future);
+            const result = try wait(&future);
             try std.testing.expectEqual(99, result.value);
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    var handle = try runtime.spawn(TestContext.asyncTask, .{});
+    try handle.join();
 }
 
 test "select: wait on JoinHandle from spawned task" {
@@ -1003,13 +1005,13 @@ test "select: wait on JoinHandle from spawned task" {
         fn asyncTask(rt: *Runtime) !void {
             // Spawn a task and get a JoinHandle
             var handle1 = try rt.spawn(workerTask, .{ rt, 21 });
-            defer handle1.cancel(rt);
+            defer handle1.cancel();
 
             var handle2 = try rt.spawn(workerTask, .{ rt, 100 });
-            defer handle2.cancel(rt);
+            defer handle2.cancel();
 
             // Wait on JoinHandles using select
-            const result = try select(rt, .{
+            const result = try select(.{
                 .first = &handle1,
                 .second = &handle2,
             });
@@ -1030,5 +1032,5 @@ test "select: wait on JoinHandle from spawned task" {
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }

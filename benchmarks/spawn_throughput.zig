@@ -25,13 +25,13 @@ pub fn main() !void {
     var timer = zio.time.Stopwatch.start();
 
     var group: zio.Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
     for (0..NUM_SPAWNS) |_| {
-        try group.spawn(runtime, task, .{runtime});
+        try group.spawn(task, .{runtime});
     }
 
-    try group.wait(runtime);
+    try group.wait();
 
     const elapsed = timer.read();
     const elapsed_ns = elapsed.toNanoseconds();

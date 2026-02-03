@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Cancelable = @import("../common.zig").Cancelable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
@@ -104,8 +105,8 @@ pub fn Future(comptime T: type) type {
         /// Wait for the future's value to be set.
         /// Returns immediately if the value is already available.
         /// Returns error.Canceled if the task is canceled while waiting.
-        pub fn wait(self: *Self, runtime: *Runtime) Cancelable!select.WaitResult(T) {
-            return select.wait(runtime, self);
+        pub fn wait(self: *Self) Cancelable!select.WaitResult(T) {
+            return select.wait(self);
         }
 
         // Future protocol implementation for use with select()
@@ -121,7 +122,7 @@ pub fn Future(comptime T: type) type {
         /// Registers a wait node to be notified when the future is set.
         /// This is part of the Future protocol for select().
         /// Returns false if the future is already set (no wait needed), true if added to queue.
-        pub fn asyncWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
             // Fast path: check if already set
             if (self.value.isSet()) {
                 return false;
@@ -134,7 +135,7 @@ pub fn Future(comptime T: type) type {
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *Self, _: *Runtime, wait_node: *WaitNode) bool {
+        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) bool {
             return self.wait_queue.remove(wait_node);
         }
     };
@@ -145,20 +146,20 @@ test "Future: basic set and get" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
+        fn asyncTask() !void {
             var future = Future(i32).init;
 
             // Set value
             future.set(42);
 
             // Get value (should return immediately since already set)
-            const result = try future.wait(rt);
+            const result = try future.wait();
             try std.testing.expectEqual(42, result.value);
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    var handle = try runtime.spawn(TestContext.asyncTask, .{});
+    try handle.join();
 }
 
 test "Future: await from coroutine" {
@@ -166,16 +167,16 @@ test "Future: await from coroutine" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
+        fn setterTask(future: *Future(i32)) !void {
             // Simulate async work
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
             future.set(123);
         }
 
-        fn getterTask(rt: *Runtime, future: *Future(i32)) !i32 {
+        fn getterTask(future: *Future(i32)) !i32 {
             // This will block until setter sets the value
-            const result = try future.wait(rt);
+            const result = try future.wait();
             return result.value;
         }
 
@@ -183,20 +184,20 @@ test "Future: await from coroutine" {
             var future = Future(i32).init;
 
             // Spawn setter coroutine
-            var setter_handle = try rt.spawn(setterTask, .{ rt, &future });
-            defer setter_handle.cancel(rt);
+            var setter_handle = try rt.spawn(setterTask, .{&future});
+            defer setter_handle.cancel();
 
             // Spawn getter coroutine
-            var getter_handle = try rt.spawn(getterTask, .{ rt, &future });
-            defer getter_handle.cancel(rt);
+            var getter_handle = try rt.spawn(getterTask, .{&future});
+            defer getter_handle.cancel();
 
-            const result = try getter_handle.join(rt);
+            const result = try getter_handle.join();
             try std.testing.expectEqual(123, result);
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "Future: multiple waiters" {
@@ -204,15 +205,15 @@ test "Future: multiple waiters" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn waiterTask(rt: *Runtime, future: *Future(i32), expected: i32) !void {
-            const result = try future.wait(rt);
+        fn waiterTask(future: *Future(i32), expected: i32) !void {
+            const result = try future.wait();
             try std.testing.expectEqual(expected, result.value);
         }
 
-        fn setterTask(rt: *Runtime, future: *Future(i32)) !void {
+        fn setterTask(future: *Future(i32)) !void {
             // Let waiters block first
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
             future.set(999);
         }
 
@@ -220,25 +221,25 @@ test "Future: multiple waiters" {
             var future = Future(i32).init;
 
             // Spawn multiple waiters
-            var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
-            defer waiter1.cancel(rt);
-            var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
-            defer waiter2.cancel(rt);
-            var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
-            defer waiter3.cancel(rt);
+            var waiter1 = try rt.spawn(waiterTask, .{ &future, 999 });
+            defer waiter1.cancel();
+            var waiter2 = try rt.spawn(waiterTask, .{ &future, 999 });
+            defer waiter2.cancel();
+            var waiter3 = try rt.spawn(waiterTask, .{ &future, 999 });
+            defer waiter3.cancel();
 
             // Spawn setter
-            var setter = try rt.spawn(setterTask, .{ rt, &future });
-            defer setter.cancel(rt);
+            var setter = try rt.spawn(setterTask, .{&future});
+            defer setter.cancel();
 
             // Wait for all to complete
-            _ = try waiter1.join(rt);
-            _ = try waiter2.join(rt);
-            _ = try waiter3.join(rt);
-            _ = try setter.join(rt);
+            _ = try waiter1.join();
+            _ = try waiter2.join();
+            _ = try waiter3.join();
+            _ = try setter.join();
         }
     };
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }

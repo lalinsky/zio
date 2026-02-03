@@ -16,8 +16,8 @@ pub fn main() !void {
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
-    const socket = try addr.bind(rt, .{});
-    defer socket.close(rt);
+    const socket = try addr.bind(.{});
+    defer socket.close();
 
     std.log.info("UDP echo server listening on {f}", .{socket.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
@@ -26,9 +26,9 @@ pub fn main() !void {
     var buffer: [1024]u8 = undefined;
 
     while (true) {
-        const result = try socket.receiveFrom(rt, &buffer, timeout);
+        const result = try socket.receiveFrom(&buffer, timeout);
         std.log.info("Received {d} bytes from {f}", .{ result.len, result.from });
-        const sent = try socket.sendTo(rt, result.from, buffer[0..result.len], timeout);
+        const sent = try socket.sendTo(result.from, buffer[0..result.len], timeout);
         std.debug.assert(sent == result.len);
     }
 }

@@ -22,9 +22,9 @@
 //! ## Example
 //!
 //! ```zig
-//! fn worker(rt: *Runtime, notify: *zio.Notify, id: u32) !void {
+//! fn worker(notify: *zio.Notify, id: u32) !void {
 //!     // Wait for notification
-//!     try notify.wait(rt);
+//!     try notify.wait();
 //!     std.debug.print("Worker {} notified\n", .{id});
 //! }
 //!
@@ -48,6 +48,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -106,9 +107,9 @@ pub fn broadcast(self: *Notify) void {
 /// for an explicit notification.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
+pub fn wait(self: *Notify) Cancelable!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Push to wait queue
     self.wait_queue.push(&waiter.wait_node);
@@ -141,9 +142,9 @@ pub fn wait(self: *Notify, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a signal is received.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Notify, runtime: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *Notify, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Push to wait queue
     self.wait_queue.push(&waiter.wait_node);
@@ -188,7 +189,7 @@ pub fn getResult(self: *const Notify) void {
 /// Registers a wait node to be notified when signal() or broadcast() is called.
 /// This is part of the Future protocol for select().
 /// Always returns true since Notify has no persistent state (never pre-completed).
-pub fn asyncWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) bool {
+pub fn asyncWait(self: *Notify, wait_node: *WaitNode) bool {
     self.wait_queue.push(wait_node);
     return true;
 }
@@ -196,7 +197,7 @@ pub fn asyncWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) bool {
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
 /// Returns true if removed, false if already removed by completion (wake in-flight).
-pub fn asyncCancelWait(self: *Notify, _: *Runtime, wait_node: *WaitNode) bool {
+pub fn asyncCancelWait(self: *Notify, wait_node: *WaitNode) bool {
     const was_in_queue = self.wait_queue.remove(wait_node);
     if (!was_in_queue) {
         // We were already removed by signal() which will wake us.
@@ -217,24 +218,24 @@ test "Notify basic signal/wait" {
     var waiter_finished = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, n: *Notify, finished: *bool) !void {
-            try n.wait(rt);
+        fn waiter(n: *Notify, finished: *bool) !void {
+            try n.wait();
             finished.* = true;
         }
 
-        fn signaler(rt: *Runtime, n: *Notify) !void {
-            try rt.yield(); // Give waiter time to start waiting
+        fn signaler(n: *Notify) !void {
+            try yield(); // Give waiter time to start waiting
             n.signal();
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_finished });
-    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_finished });
+    try group.spawn(TestFn.signaler, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(waiter_finished);
@@ -262,29 +263,29 @@ test "Notify broadcast to multiple waiters" {
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, n: *Notify, counter: *u32) !void {
-            try n.wait(rt);
+        fn waiter(n: *Notify, counter: *u32) !void {
+            try n.wait();
             counter.* += 1;
         }
 
-        fn broadcaster(rt: *Runtime, n: *Notify) !void {
+        fn broadcaster(n: *Notify) !void {
             // Give waiters time to start waiting
-            try rt.yield();
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
+            try yield();
             n.broadcast();
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.broadcaster, .{ runtime, &notify });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
+    try group.spawn(TestFn.broadcaster, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(3, waiter_count);
@@ -298,16 +299,16 @@ test "Notify multiple signals to multiple waiters" {
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, n: *Notify, counter: *u32) !void {
-            try n.wait(rt);
+        fn waiter(n: *Notify, counter: *u32) !void {
+            try n.wait();
             counter.* += 1;
         }
 
-        fn signaler(rt: *Runtime, n: *Notify) !void {
+        fn signaler(n: *Notify) !void {
             // Give waiters time to start waiting
-            try rt.yield();
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
+            try yield();
             // Signal three times to wake all three waiters one by one (FIFO)
             n.signal();
             n.signal();
@@ -316,14 +317,14 @@ test "Notify multiple signals to multiple waiters" {
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &waiter_count });
-    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
+    try group.spawn(TestFn.signaler, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(3, waiter_count);
@@ -337,9 +338,9 @@ test "Notify timedWait timeout" {
     var timed_out = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, n: *Notify, timeout_flag: *bool) !void {
+        fn waiter(n: *Notify, timeout_flag: *bool) !void {
             // Should timeout after 10ms
-            n.timedWait(rt, .{ .duration = .fromMilliseconds(10) }) catch |err| {
+            n.timedWait(.{ .duration = .fromMilliseconds(10) }) catch |err| {
                 if (err == error.Timeout) {
                     timeout_flag.* = true;
                 }
@@ -347,8 +348,8 @@ test "Notify timedWait timeout" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.waiter, .{ runtime, &notify, &timed_out });
-    try handle.join(runtime);
+    var handle = try runtime.spawn(TestFn.waiter, .{ &notify, &timed_out });
+    try handle.join();
 
     try std.testing.expect(timed_out);
 }
@@ -361,25 +362,25 @@ test "Notify timedWait success" {
     var wait_succeeded = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, n: *Notify, success_flag: *bool) !void {
+        fn waiter(n: *Notify, success_flag: *bool) !void {
             // Should be signaled before timeout
-            try n.timedWait(rt, .{ .duration = .fromSeconds(1) });
+            try n.timedWait(.{ .duration = .fromSeconds(1) });
             success_flag.* = true;
         }
 
-        fn signaler(rt: *Runtime, n: *Notify) !void {
-            try rt.yield(); // Give waiter time to start waiting
+        fn signaler(n: *Notify) !void {
+            try yield(); // Give waiter time to start waiting
             n.signal();
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &notify, &wait_succeeded });
-    try group.spawn(runtime, TestFn.signaler, .{ runtime, &notify });
+    try group.spawn(TestFn.waiter, .{ &notify, &wait_succeeded });
+    try group.spawn(TestFn.signaler, .{&notify});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(wait_succeeded);
@@ -404,9 +405,9 @@ test "Notify: select" {
             var notify = Notify.init;
 
             var task = try rt.spawn(signalerTask, .{ rt, &notify });
-            defer task.cancel(rt);
+            defer task.cancel();
 
-            const result = try select(rt, .{ .notify = &notify, .task = &task });
+            const result = try select(.{ .notify = &notify, .task = &task });
             try std.testing.expectEqual(.notify, result);
         }
     };
@@ -415,5 +416,5 @@ test "Notify: select" {
     defer runtime.deinit();
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }

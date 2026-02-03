@@ -60,7 +60,7 @@ pub const Awaitable = struct {
     /// Registers a wait node to be notified when the awaitable completes.
     /// This is part of the Future protocol for select().
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
-    pub fn asyncWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *Awaitable, wait_node: *WaitNode) bool {
         // Fast path: check if already complete
         if (self.waiting_list.getState() == complete) {
             return false;
@@ -73,7 +73,7 @@ pub const Awaitable = struct {
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
     /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Awaitable, _: *Runtime, wait_node: *WaitNode) bool {
+    pub fn asyncCancelWait(self: *Awaitable, wait_node: *WaitNode) bool {
         return self.waiting_list.remove(wait_node);
     }
 
@@ -117,15 +117,15 @@ pub const Awaitable = struct {
     }
 
     /// Release the awaitable, decrementing the reference count and destroying it if necessary.
-    pub fn release(self: *Awaitable, rt: *Runtime) void {
-        if (self.ref_count.decr()) self.destroy(rt);
+    pub fn release(self: *Awaitable) void {
+        if (self.ref_count.decr()) self.destroy();
     }
 
     /// Destroy the awaitable, freeing any associated resources.
-    pub fn destroy(self: *Awaitable, rt: *Runtime) void {
+    pub fn destroy(self: *Awaitable) void {
         switch (self.kind) {
-            .task => AnyTask.fromAwaitable(self).destroy(rt),
-            .blocking_task => AnyBlockingTask.fromAwaitable(self).destroy(rt),
+            .task => AnyTask.fromAwaitable(self).destroy(),
+            .blocking_task => AnyBlockingTask.fromAwaitable(self).destroy(),
         }
     }
 };

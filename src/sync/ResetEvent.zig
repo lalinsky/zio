@@ -22,9 +22,9 @@
 //! ## Example
 //!
 //! ```zig
-//! fn worker(rt: *Runtime, event: *zio.ResetEvent, id: u32) !void {
+//! fn worker(event: *zio.ResetEvent, id: u32) !void {
 //!     // Wait for event to be signaled
-//!     try event.wait(rt);
+//!     try event.wait();
 //!     std.debug.print("Worker {} proceeding\n", .{id});
 //! }
 //!
@@ -46,6 +46,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
+const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -113,7 +114,7 @@ pub fn reset(self: *ResetEvent) void {
 /// already set when called, returns immediately without suspending.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
+pub fn wait(self: *ResetEvent) Cancelable!void {
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -122,7 +123,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
     }
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
@@ -156,7 +157,7 @@ pub fn wait(self: *ResetEvent, runtime: *Runtime) Cancelable!void {
 ///
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable)!void {
     const state = self.wait_queue.getState();
 
     // Fast path: already set
@@ -165,7 +166,7 @@ pub fn timedWait(self: *ResetEvent, runtime: *Runtime, timeout: Timeout) (Timeou
     }
 
     // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init(runtime);
+    var waiter: Waiter = .init();
 
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
@@ -215,7 +216,7 @@ pub fn getResult(self: *const ResetEvent) void {
 /// Registers a wait node to be notified when the event is set.
 /// This is part of the Future protocol for select().
 /// Returns false if the event is already set (no wait needed), true if added to queue.
-pub fn asyncWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) bool {
+pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) bool {
     // Try to push to queue - only succeeds if event is not set
     // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
     return self.wait_queue.pushUnless(is_set, wait_node);
@@ -224,7 +225,7 @@ pub fn asyncWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) bool {
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
 /// Returns true if removed, false if already removed by completion (wake in-flight).
-pub fn asyncCancelWait(self: *ResetEvent, _: *Runtime, wait_node: *WaitNode) bool {
+pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) bool {
     return self.wait_queue.remove(wait_node);
 }
 
@@ -262,24 +263,24 @@ test "ResetEvent wait/set signaling" {
     var waiter_finished = false;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, finished: *bool) !void {
-            try event.wait(rt);
+        fn waiter(event: *ResetEvent, finished: *bool) !void {
+            try event.wait();
             finished.* = true;
         }
 
-        fn setter(rt: *Runtime, event: *ResetEvent) !void {
-            try rt.yield(); // Give waiter time to start waiting
+        fn setter(event: *ResetEvent) !void {
+            try yield(); // Give waiter time to start waiting
             event.set();
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_finished });
-    try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_finished });
+    try group.spawn(TestFn.setter, .{&reset_event});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(waiter_finished);
@@ -293,7 +294,7 @@ test "ResetEvent timedWait timeout" {
     var reset_event = ResetEvent.init;
 
     // Should timeout after 10ms
-    try std.testing.expectError(error.Timeout, reset_event.timedWait(rt, .fromMilliseconds(10)));
+    try std.testing.expectError(error.Timeout, reset_event.timedWait(.fromMilliseconds(10)));
     try std.testing.expect(!reset_event.isSet());
 }
 
@@ -305,29 +306,29 @@ test "ResetEvent multiple waiters broadcast" {
     var waiter_count: u32 = 0;
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, counter: *u32) !void {
-            try event.wait(rt);
+        fn waiter(event: *ResetEvent, counter: *u32) !void {
+            try event.wait();
             counter.* += 1;
         }
 
-        fn setter(rt: *Runtime, event: *ResetEvent) !void {
+        fn setter(event: *ResetEvent) !void {
             // Give waiters time to start waiting
-            try rt.yield();
-            try rt.yield();
-            try rt.yield();
+            try yield();
+            try yield();
+            try yield();
             event.set();
         }
     };
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ runtime, &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.setter, .{ runtime, &reset_event });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(TestFn.setter, .{&reset_event});
 
-    try group.wait(runtime);
+    try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(reset_event.isSet());
@@ -343,7 +344,7 @@ test "ResetEvent wait on already set event" {
     // Set event before waiting
     reset_event.set();
 
-    try reset_event.wait(rt); // Should return immediately
+    try reset_event.wait(); // Should return immediately
     try std.testing.expect(reset_event.isSet());
 }
 
@@ -361,26 +362,26 @@ test "ResetEvent: cancel waiting task" {
     var started = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(rt: *Runtime, event: *ResetEvent, started_flag: *std.atomic.Value(bool)) !void {
+        fn waiter(event: *ResetEvent, started_flag: *std.atomic.Value(bool)) !void {
             // Signal that we're about to wait
             started_flag.store(true, .release);
-            try event.wait(rt);
+            try event.wait();
         }
     };
 
-    var waiter_task = try runtime.spawn(TestFn.waiter, .{ runtime, &reset_event, &started });
-    defer waiter_task.cancel(runtime);
+    var waiter_task = try runtime.spawn(TestFn.waiter, .{ &reset_event, &started });
+    defer waiter_task.cancel();
 
     // Wait until waiter has actually started and is blocked
     while (!started.load(.acquire)) {
-        try runtime.yield();
+        try yield();
     }
     // One more yield to ensure waiter is actually blocked in wait()
-    try runtime.yield();
+    try yield();
 
-    waiter_task.cancel(runtime);
+    waiter_task.cancel();
 
-    try std.testing.expectError(error.Canceled, waiter_task.join(runtime));
+    try std.testing.expectError(error.Canceled, waiter_task.join());
 }
 
 test "ResetEvent: select" {
@@ -397,9 +398,9 @@ test "ResetEvent: select" {
             var reset_event = ResetEvent.init;
 
             var task = try rt.spawn(setterTask, .{ rt, &reset_event });
-            defer task.cancel(rt);
+            defer task.cancel();
 
-            const result = try select(rt, .{ .event = &reset_event, .task = &task });
+            const result = try select(.{ .event = &reset_event, .task = &task });
             try std.testing.expectEqual(.event, result);
         }
     };
@@ -408,7 +409,7 @@ test "ResetEvent: select" {
     defer runtime.deinit();
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join(runtime);
+    try handle.join();
 }
 
 test "ResetEvent: foreign thread signals async task" {
@@ -420,9 +421,9 @@ test "ResetEvent: foreign thread signals async task" {
     var finished = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn taskWait(rt: *Runtime, event: *ResetEvent, ready: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) !void {
+        fn taskWait(event: *ResetEvent, ready: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) !void {
             ready.store(true, .release);
-            try event.wait(rt);
+            try event.wait();
             done.store(true, .release);
         }
 
@@ -435,12 +436,12 @@ test "ResetEvent: foreign thread signals async task" {
         }
     };
 
-    var handle = try runtime.spawn(TestFn.taskWait, .{ runtime, &reset_event, &task_ready, &finished });
-    defer handle.cancel(runtime);
+    var handle = try runtime.spawn(TestFn.taskWait, .{ &reset_event, &task_ready, &finished });
+    defer handle.cancel();
 
     const thread = try std.Thread.spawn(.{}, TestFn.threadSet, .{ &reset_event, &task_ready });
 
-    try handle.join(runtime);
+    try handle.join();
     thread.join();
 
     try std.testing.expect(finished.load(.acquire));
@@ -456,27 +457,27 @@ test "ResetEvent: async task signals foreign thread" {
     var thread_done = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn threadWait(rt: *Runtime, event: *ResetEvent, ready: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) void {
+        fn threadWait(event: *ResetEvent, ready: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) void {
             ready.store(true, .release);
-            event.wait(rt) catch unreachable;
+            event.wait() catch unreachable;
             done.store(true, .release);
         }
 
-        fn taskSet(rt: *Runtime, event: *ResetEvent, ready: *std.atomic.Value(bool)) !void {
+        fn taskSet(event: *ResetEvent, ready: *std.atomic.Value(bool)) !void {
             // Wait for thread to be ready
             while (!ready.load(.acquire)) {
-                try rt.yield();
+                try yield();
             }
             event.set();
         }
     };
 
-    const thread = try std.Thread.spawn(.{}, TestFn.threadWait, .{ runtime, &reset_event, &thread_ready, &thread_done });
+    const thread = try std.Thread.spawn(.{}, TestFn.threadWait, .{ &reset_event, &thread_ready, &thread_done });
 
-    var handle = try runtime.spawn(TestFn.taskSet, .{ runtime, &reset_event, &thread_ready });
-    defer handle.cancel(runtime);
+    var handle = try runtime.spawn(TestFn.taskSet, .{ &reset_event, &thread_ready });
+    defer handle.cancel();
 
-    try handle.join(runtime);
+    try handle.join();
 
     thread.join();
 

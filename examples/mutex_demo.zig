@@ -9,13 +9,13 @@ const SharedData = struct {
     mutex: zio.Mutex,
 };
 
-fn incrementTask(rt: *zio.Runtime, data: *SharedData, id: u32) !void {
+fn incrementTask(data: *SharedData, id: u32) !void {
     for (0..1000) |_| {
-        try data.mutex.lock(rt);
-        defer data.mutex.unlock(rt);
+        try data.mutex.lock();
+        defer data.mutex.unlock();
 
         const old = data.counter;
-        try rt.yield(); // Yield to simulate preemption
+        try zio.yield(); // Yield to simulate preemption
         data.counter = old + 1;
 
         if (@rem(data.counter, 100) == 0) {
@@ -37,13 +37,13 @@ pub fn main() !void {
 
     // Spawn multiple tasks that increment shared counter
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
 
     for (0..4) |i| {
-        try group.spawn(rt, incrementTask, .{ rt, &shared_data, @intCast(i) });
+        try group.spawn(incrementTask, .{ &shared_data, @intCast(i) });
     }
 
-    try group.wait(rt);
+    try group.wait();
 
     std.log.info("Final counter value: {} (expected: {})", .{ shared_data.counter, 4000 });
 }

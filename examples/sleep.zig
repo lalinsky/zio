@@ -10,6 +10,6 @@ pub fn main() !void {
 
     for (0..10) |_| {
         std.log.info("Sleeping...", .{});
-        try rt.sleep(.fromSeconds(1));
+        try zio.sleep(.fromSeconds(1));
     }
 }

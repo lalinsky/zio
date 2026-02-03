@@ -2,16 +2,16 @@ const std = @import("std");
 const zio = @import("zio");
 
 // --8<-- [start:handleClient]
-fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
-    defer stream.close(rt);
+fn handleClient(stream: zio.net.Stream) !void {
+    defer stream.close();
 
     std.log.info("Client connected from {f}", .{stream.socket.address});
 
     var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(rt, &read_buffer);
+    var reader = stream.reader(&read_buffer);
 
     var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(rt, &write_buffer);
+    var writer = stream.writer(&write_buffer);
 
     while (true) {
         // Read a line from the client
@@ -23,7 +23,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
         std.log.info("Received: {s}", .{line});
 
         // Delay the response a little bit
-        try rt.sleep(.fromMilliseconds(1000));
+        try zio.sleep(.fromMilliseconds(1000));
 
         // Echo the line back
         try writer.interface.writeAll(line);
@@ -41,24 +41,24 @@ pub fn main() !void {
     // --8<-- [start:setup]
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
 
-    const server = try addr.listen(rt, .{});
+    const server = try addr.listen(.{});
     // --8<-- [end:setup]
-    defer server.close(rt);
+    defer server.close();
 
     std.log.info("TCP echo server listening on {f}", .{server.socket.address});
     std.log.info("Press Ctrl+C to stop the server", .{});
 
     // --8<-- [start:group]
     var group: zio.Group = .init;
-    defer group.cancel(rt);
+    defer group.cancel();
     // --8<-- [end:group]
 
     // --8<-- [start:accept]
     while (true) {
-        const stream = try server.accept(rt);
-        errdefer stream.close(rt);
+        const stream = try server.accept();
+        errdefer stream.close();
 
-        try group.spawn(rt, handleClient, .{ rt, stream });
+        try group.spawn(handleClient, .{stream});
     }
     // --8<-- [end:accept]
 }

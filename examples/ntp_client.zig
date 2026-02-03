@@ -2,9 +2,9 @@ const std = @import("std");
 const zio = @import("zio");
 
 // --8<-- [start:lookup]
-fn lookupHost(rt: *zio.Runtime, hostname: []const u8, port: u16) !zio.net.Address {
+fn lookupHost(hostname: []const u8, port: u16) !zio.net.Address {
     const host = try zio.net.HostName.init(hostname);
-    var iter = try host.lookup(rt, .{ .port = port });
+    var iter = try host.lookup(.{ .port = port });
     defer iter.deinit();
 
     while (iter.next()) |result| {
@@ -36,14 +36,16 @@ const NtpPacket = extern struct {
     transmit_timestamp: u64 = 0,
 };
 
-fn queryNtpServer(rt: *zio.Runtime, server: []const u8, port: u16, timeout: zio.Timeout) !void {
-    const addr = try lookupHost(rt, server, port);
+fn queryNtpServer(server: []const u8, port: u16, timeout: zio.Timeout) !void {
+    const addr = try lookupHost(server, port);
     std.log.info("Querying NTP server {s}:{d} ({f})", .{ server, port, addr });
 
+    // --8<-- [start:bind]
     // Create UDP socket (bind to any local port)
     const local_addr = try zio.net.IpAddress.parseIp4("0.0.0.0", 0);
-    const socket = try local_addr.bind(rt, .{});
-    defer socket.close(rt);
+    const socket = try local_addr.bind(.{});
+    defer socket.close();
+    // --8<-- [end:bind]
 
     // Prepare and send NTP request
     const request: NtpPacket = .{};
@@ -52,16 +54,20 @@ fn queryNtpServer(rt: *zio.Runtime, server: []const u8, port: u16, timeout: zio.
     var writer = std.Io.Writer.fixed(&buffer);
     try writer.writeStruct(request, .big);
 
-    const sent = try socket.sendTo(rt, addr, &buffer, timeout);
+    // --8<-- [start:sendTo]
+    const sent = try socket.sendTo(addr, &buffer, timeout);
+    // --8<-- [end:sendTo]
     if (sent != @sizeOf(NtpPacket)) {
         return error.IncompleteSend;
     }
 
+    // --8<-- [start:receiveFrom]
     // Receive response
-    const result = socket.receiveFrom(rt, &buffer, timeout) catch |err| {
+    const result = socket.receiveFrom(&buffer, timeout) catch |err| {
         std.log.warn("Failed to receive NTP response: {}", .{err});
         return err;
     };
+    // --8<-- [end:receiveFrom]
 
     if (result.len < @sizeOf(NtpPacket)) {
         std.log.warn("Received incomplete NTP packet: {} bytes", .{result.len});
@@ -126,13 +132,13 @@ pub fn main() !void {
 
     while (true) {
         // Query NTP server
-        queryNtpServer(rt, server, port, request_timeout) catch |err| {
+        queryNtpServer(server, port, request_timeout) catch |err| {
             std.log.err("NTP query failed: {}", .{err});
         };
 
         // --8<-- [start:select]
         // Wait for next query or shutdown signal
-        const result = try zio.select(rt, .{
+        const result = try zio.select(.{
             .interval = &interval,
             .shutdown = &signal,
         });

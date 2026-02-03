@@ -5,7 +5,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const runtime_mod = @import("runtime.zig");
+const Runtime = runtime_mod.Runtime;
+const getCurrentTask = runtime_mod.getCurrentTask;
+const spawnBlocking = runtime_mod.spawnBlocking;
 const Channel = @import("sync/channel.zig").Channel;
 const Group = @import("runtime/group.zig").Group;
 
@@ -152,19 +155,18 @@ pub const HostName = struct {
     /// Returns an iterator over the results. Call `deinit()` when done.
     pub fn lookup(
         self: HostName,
-        rt: *Runtime,
         options: LookupOptions,
     ) LookupError!LookupResultIterator {
-        var task = rt.spawnBlocking(
+        var task = spawnBlocking(
             lookupHostBlocking,
             .{ self.bytes, options.port, options.family, options.canonical_name },
         ) catch |err| switch (err) {
             error.ResultTooLarge, error.ContextTooLarge => unreachable,
             else => |e| return @as(LookupError, e),
         };
-        defer task.cancel(rt);
+        defer task.cancel();
 
-        const res = try task.join(rt);
+        const res = try task.join();
         return .{
             .head = res,
             .current = res,
@@ -173,15 +175,15 @@ pub const HostName = struct {
     }
 
     /// Resolves the hostname and connects to the first successful address.
-    pub fn connect(self: HostName, rt: *Runtime, port: u16, options: IpAddress.ConnectOptions) !Stream {
-        var iter = try self.lookup(rt, .{ .port = port });
+    pub fn connect(self: HostName, port: u16, options: IpAddress.ConnectOptions) !Stream {
+        var iter = try self.lookup(.{ .port = port });
         defer iter.deinit();
 
         var last_err: ?anyerror = null;
         while (iter.next()) |result| {
             switch (result) {
                 .address => |addr| {
-                    return addr.connect(rt, .{ .timeout = options.timeout }) catch |err| {
+                    return addr.connect(.{ .timeout = options.timeout }) catch |err| {
                         last_err = err;
                         continue;
                     };
@@ -595,38 +597,38 @@ pub const IpAddress = extern union {
         timeout: Timeout = .none,
     };
 
-    pub fn bind(self: IpAddress, rt: *Runtime, options: BindOptions) !Socket {
-        var socket = try Socket.open(rt, .dgram, .fromPosix(self.any.family), .ip);
-        errdefer socket.close(rt);
+    pub fn bind(self: IpAddress, options: BindOptions) !Socket {
+        var socket = try Socket.open(.dgram, .fromPosix(self.any.family), .ip);
+        errdefer socket.close();
 
         if (options.reuse_address) {
             try socket.setReuseAddress(true);
         }
 
-        try socket.bind(rt, .{ .ip = self });
+        try socket.bind(.{ .ip = self });
 
         return socket;
     }
 
-    pub fn listen(self: IpAddress, rt: *Runtime, options: ListenOptions) !Server {
-        var socket = try Socket.open(rt, .stream, .fromPosix(self.any.family), .ip);
-        errdefer socket.close(rt);
+    pub fn listen(self: IpAddress, options: ListenOptions) !Server {
+        var socket = try Socket.open(.stream, .fromPosix(self.any.family), .ip);
+        errdefer socket.close();
 
         if (options.reuse_address) {
             try socket.setReuseAddress(true);
         }
 
-        try socket.bind(rt, .{ .ip = self });
-        try socket.listen(rt, options.kernel_backlog);
+        try socket.bind(.{ .ip = self });
+        try socket.listen(options.kernel_backlog);
 
         return .{ .socket = socket };
     }
 
-    pub fn connect(self: IpAddress, rt: *Runtime, options: ConnectOptions) !Stream {
-        var socket = try Socket.open(rt, .stream, .fromPosix(self.any.family), .ip);
-        errdefer socket.close(rt);
+    pub fn connect(self: IpAddress, options: ConnectOptions) !Stream {
+        var socket = try Socket.open(.stream, .fromPosix(self.any.family), .ip);
+        errdefer socket.close();
 
-        try socket.connect(rt, .{ .ip = self }, .{ .timeout = options.timeout });
+        try socket.connect(.{ .ip = self }, .{ .timeout = options.timeout });
         return .{ .socket = socket };
     }
 };
@@ -666,40 +668,40 @@ pub const UnixAddress = extern union {
         }
     }
 
-    pub fn bind(self: UnixAddress, rt: *Runtime, options: BindOptions) !Socket {
+    pub fn bind(self: UnixAddress, options: BindOptions) !Socket {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .dgram, .unix, .ip);
-        errdefer socket.close(rt);
+        var socket = try Socket.open(.dgram, .unix, .ip);
+        errdefer socket.close();
 
         if (options.reuse_address) {
             try socket.setReuseAddress(true);
         }
 
-        try socket.bind(rt, .{ .unix = self });
+        try socket.bind(.{ .unix = self });
 
         return socket;
     }
 
-    pub fn listen(self: UnixAddress, rt: *Runtime, options: ListenOptions) !Server {
+    pub fn listen(self: UnixAddress, options: ListenOptions) !Server {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .stream, .unix, .ip);
-        errdefer socket.close(rt);
+        var socket = try Socket.open(.stream, .unix, .ip);
+        errdefer socket.close();
 
-        try socket.bind(rt, .{ .unix = self });
-        try socket.listen(rt, options.kernel_backlog);
+        try socket.bind(.{ .unix = self });
+        try socket.listen(options.kernel_backlog);
 
         return .{ .socket = socket };
     }
 
-    pub fn connect(self: UnixAddress, rt: *Runtime, options: ConnectOptions) !Stream {
+    pub fn connect(self: UnixAddress, options: ConnectOptions) !Stream {
         if (!has_unix_sockets) unreachable;
 
-        var socket = try Socket.open(rt, .stream, .unix, .ip);
-        errdefer socket.close(rt);
+        var socket = try Socket.open(.stream, .unix, .ip);
+        errdefer socket.close();
 
-        try socket.connect(rt, .{ .unix = self }, .{ .timeout = options.timeout });
+        try socket.connect(.{ .unix = self }, .{ .timeout = options.timeout });
         return .{ .socket = socket };
     }
 };
@@ -796,10 +798,10 @@ pub const Address = extern union {
         }
     }
 
-    pub fn connect(self: Address, rt: *Runtime, options: ConnectOptions) !Stream {
+    pub fn connect(self: Address, options: ConnectOptions) !Stream {
         switch (self.getType()) {
-            .ip => return self.ip.connect(rt, .{ .timeout = options.timeout }),
-            .unix => return self.unix.connect(rt, .{ .timeout = options.timeout }),
+            .ip => return self.ip.connect(.{ .timeout = options.timeout }),
+            .unix => return self.unix.connect(.{ .timeout = options.timeout }),
         }
     }
 
@@ -833,18 +835,18 @@ pub const Socket = struct {
     handle: Handle,
     address: Address,
 
-    pub fn open(rt: *Runtime, sock_type: os.net.Type, domain: os.net.Domain, protocol: os.net.Protocol) !Socket {
+    pub fn open(sock_type: os.net.Type, domain: os.net.Domain, protocol: os.net.Protocol) !Socket {
         var op = ev.NetOpen.init(domain, sock_type, protocol, .{});
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         const handle = try op.getResult();
         return .{ .handle = handle, .address = undefined };
     }
 
-    pub fn close(self: Socket, rt: *Runtime) void {
+    pub fn close(self: Socket) void {
         var op = ev.NetClose.init(self.handle);
-        rt.beginShield();
-        defer rt.endShield();
-        waitForIo(rt, &op.c) catch {};
+        getCurrentTask().beginShield();
+        defer getCurrentTask().endShield();
+        waitForIo(&op.c) catch {};
         _ = op.getResult() catch {};
     }
 
@@ -951,20 +953,20 @@ pub const Socket = struct {
     }
 
     /// Bind the socket to an address
-    pub fn bind(self: *Socket, rt: *Runtime, addr: Address) !void {
+    pub fn bind(self: *Socket, addr: Address) !void {
         // Copy addr to self.address so NetBind can update it with actual bound address
         self.address = addr;
         var addr_len = getSockAddrLen(&self.address.any);
 
         var op = ev.NetBind.init(self.handle, &self.address.any, &addr_len);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
     /// Mark the socket as a listening socket
-    pub fn listen(self: *Socket, rt: *Runtime, backlog: u31) !void {
+    pub fn listen(self: *Socket, backlog: u31) !void {
         var op = ev.NetListen.init(self.handle, backlog);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 
@@ -973,63 +975,63 @@ pub const Socket = struct {
     };
 
     /// Connect the socket to a remote address
-    pub fn connect(self: *Socket, rt: *Runtime, addr: Address, options: ConnectOptions) !void {
+    pub fn connect(self: *Socket, addr: Address, options: ConnectOptions) !void {
         self.address = addr;
         const addr_len = getSockAddrLen(&self.address.any);
 
         var op = ev.NetConnect.init(self.handle, &self.address.any, addr_len);
-        try timedWaitForIo(rt, &op.c, options.timeout);
+        try timedWaitForIo(&op.c, options.timeout);
         try op.getResult();
     }
 
     /// Receives data from the socket into the provided buffer.
     /// Returns the number of bytes received, which may be less than buf.len.
     /// A return value of 0 indicates the socket has been shut down.
-    pub fn receive(self: Socket, rt: *Runtime, buf: []u8, timeout: Timeout) !usize {
+    pub fn receive(self: Socket, buf: []u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec = undefined;
-        return self.receiveBuf(rt, .fromSlice(buf, &storage), timeout);
+        return self.receiveBuf(.fromSlice(buf, &storage), timeout);
     }
 
     /// Low-level receive function that accepts ev.ReadBuf directly.
-    pub fn receiveBuf(self: Socket, rt: *Runtime, buf: ev.ReadBuf, timeout: Timeout) !usize {
+    pub fn receiveBuf(self: Socket, buf: ev.ReadBuf, timeout: Timeout) !usize {
         var op = ev.NetRecv.init(self.handle, buf, .{});
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
     /// Sends data from the provided buffer to the socket.
     /// Returns the number of bytes sent, which may be less than buf.len.
-    pub fn send(self: Socket, rt: *Runtime, buf: []const u8, timeout: Timeout) !usize {
+    pub fn send(self: Socket, buf: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
-        return self.sendBuf(rt, .fromSlice(buf, &storage), timeout);
+        return self.sendBuf(.fromSlice(buf, &storage), timeout);
     }
 
     /// Low-level send function that accepts ev.WriteBuf directly.
-    pub fn sendBuf(self: Socket, rt: *Runtime, buf: ev.WriteBuf, timeout: Timeout) !usize {
+    pub fn sendBuf(self: Socket, buf: ev.WriteBuf, timeout: Timeout) !usize {
         var op = ev.NetSend.init(self.handle, buf, .{});
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
-    pub fn receiveFrom(self: Socket, rt: *Runtime, buf: []u8, timeout: Timeout) !ReceiveFromResult {
+    pub fn receiveFrom(self: Socket, buf: []u8, timeout: Timeout) !ReceiveFromResult {
         var storage: [1]os.iovec = undefined;
         var result: ReceiveFromResult = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
         var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         result.len = try op.getResult();
         return result;
     }
 
     /// Sends a datagram to the specified address.
     /// Used for UDP and other datagram-based protocols.
-    pub fn sendTo(self: Socket, rt: *Runtime, addr: Address, data: []const u8, timeout: Timeout) !usize {
+    pub fn sendTo(self: Socket, addr: Address, data: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
         const addr_len = getSockAddrLen(&addr.any);
         var op = ev.NetSendTo.init(self.handle, .fromSlice(data, &storage), .{}, &addr.any, addr_len);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
@@ -1038,7 +1040,6 @@ pub const Socket = struct {
     /// Returns sender address, bytes read, and message flags.
     pub fn receiveMsg(
         self: Socket,
-        rt: *Runtime,
         buf: ev.ReadBuf,
         control: ?[]u8,
         timeout: Timeout,
@@ -1046,7 +1047,7 @@ pub const Socket = struct {
         var result: ReceiveMsgResult = undefined;
         var addr_len: os.net.socklen_t = @sizeOf(Address);
         var op = ev.NetRecvMsg.init(self.handle, buf, .{}, &result.from.any, &addr_len, control);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         const os_result = try op.getResult();
         result.len = os_result.len;
         result.flags = os_result.flags;
@@ -1059,7 +1060,6 @@ pub const Socket = struct {
     /// Returns the number of bytes sent.
     pub fn sendMsg(
         self: Socket,
-        rt: *Runtime,
         buf: ev.WriteBuf,
         addr: ?Address,
         control: ?[]const u8,
@@ -1068,13 +1068,13 @@ pub const Socket = struct {
         const addr_ptr = if (addr) |a| &a.any else null;
         const addr_len = if (addr) |a| getSockAddrLen(&a.any) else 0;
         var op = ev.NetSendMsg.init(self.handle, buf, .{}, addr_ptr, addr_len, control);
-        try timedWaitForIo(rt, &op.c, timeout);
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
-    pub fn shutdown(self: Socket, rt: *Runtime, how: ShutdownHow) !void {
+    pub fn shutdown(self: Socket, how: ShutdownHow) !void {
         var op = ev.NetShutdown.init(self.handle, how);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         try op.getResult();
     }
 };
@@ -1082,22 +1082,22 @@ pub const Socket = struct {
 pub const Server = struct {
     socket: Socket,
 
-    pub fn accept(self: Server, rt: *Runtime) !Stream {
+    pub fn accept(self: Server) !Stream {
         var peer_addr: Address = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
 
         var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
-        try waitForIo(rt, &op.c);
+        try waitForIo(&op.c);
         const handle = try op.getResult();
         return .{ .socket = .{ .handle = handle, .address = peer_addr } };
     }
 
-    pub fn shutdown(self: Server, rt: *Runtime, how: ShutdownHow) !void {
-        return self.socket.shutdown(rt, how);
+    pub fn shutdown(self: Server, how: ShutdownHow) !void {
+        return self.socket.shutdown(how);
     }
 
-    pub fn close(self: Server, rt: *Runtime) void {
-        return self.socket.close(rt);
+    pub fn close(self: Server) void {
+        return self.socket.close();
     }
 };
 
@@ -1107,17 +1107,17 @@ pub const Stream = struct {
     /// Reads data from the stream into the provided buffer.
     /// Returns the number of bytes read, which may be less than buf.len.
     /// A return value of 0 indicates end-of-stream.
-    pub fn read(self: Stream, rt: *Runtime, buf: []u8, timeout: Timeout) !usize {
+    pub fn read(self: Stream, buf: []u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec = undefined;
-        return self.readBuf(rt, .fromSlice(buf, &storage), timeout);
+        return self.readBuf(.fromSlice(buf, &storage), timeout);
     }
 
     /// Reads data from the stream into the provided buffer until it is full or the stream is closed.
     /// A return value of 0 indicates end-of-stream.
-    pub fn readAll(self: Stream, rt: *Runtime, buf: []u8, timeout: Timeout) !void {
+    pub fn readAll(self: Stream, buf: []u8, timeout: Timeout) !void {
         var offset: usize = 0;
         while (offset < buf.len) {
-            const n = try self.read(rt, buf[offset..], timeout);
+            const n = try self.read(buf[offset..], timeout);
             if (n == 0) break;
             offset += n;
         }
@@ -1126,78 +1126,76 @@ pub const Stream = struct {
     /// Reads data from the stream into multiple buffers using vectored I/O.
     /// Returns the number of bytes read across all buffers, which may be less than the total capacity.
     /// A return value of 0 indicates end-of-stream.
-    pub fn readVec(self: Stream, rt: *Runtime, bufs: [][]u8, timeout: Timeout) !usize {
+    pub fn readVec(self: Stream, bufs: [][]u8, timeout: Timeout) !usize {
         var storage: [max_vecs]os.iovec = undefined;
-        return self.readBuf(rt, .fromSlices(bufs, &storage), timeout);
+        return self.readBuf(.fromSlices(bufs, &storage), timeout);
     }
 
     /// Low-level read function that accepts ev.ReadBuf directly.
     /// Returns the number of bytes read, which may be less than requested.
     /// A return value of 0 indicates end-of-stream.
-    pub fn readBuf(self: Stream, rt: *Runtime, buf: ev.ReadBuf, timeout: Timeout) !usize {
-        return self.socket.receiveBuf(rt, buf, timeout);
+    pub fn readBuf(self: Stream, buf: ev.ReadBuf, timeout: Timeout) !usize {
+        return self.socket.receiveBuf(buf, timeout);
     }
 
     /// Writes data from the provided buffer to the stream.
     /// Returns the number of bytes written, which may be less than buf.len.
-    pub fn write(self: Stream, rt: *Runtime, buf: []const u8, timeout: Timeout) !usize {
+    pub fn write(self: Stream, buf: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
-        return self.writeBuf(rt, .fromSlice(buf, &storage), timeout);
+        return self.writeBuf(.fromSlice(buf, &storage), timeout);
     }
 
     /// Writes data from the provided buffer to the stream until it is empty.
     /// Returns an error if the stream is closed or if the write fails.
-    pub fn writeAll(self: Stream, rt: *Runtime, buf: []const u8, timeout: Timeout) !void {
+    pub fn writeAll(self: Stream, buf: []const u8, timeout: Timeout) !void {
         var offset: usize = 0;
         while (offset < buf.len) {
-            const n = try self.write(rt, buf[offset..], timeout);
+            const n = try self.write(buf[offset..], timeout);
             offset += n;
         }
     }
 
     /// Writes data from multiple buffers to the stream using vectored I/O.
     /// Returns the number of bytes written across all buffers, which may be less than the total.
-    pub fn writeVec(self: Stream, rt: *Runtime, bufs: []const []const u8, timeout: Timeout) !usize {
+    pub fn writeVec(self: Stream, bufs: []const []const u8, timeout: Timeout) !usize {
         var storage: [max_vecs]os.iovec_const = undefined;
-        return self.writeBuf(rt, .fromSlices(bufs, &storage), timeout);
+        return self.writeBuf(.fromSlices(bufs, &storage), timeout);
     }
 
     /// Writes header followed by data slices, with optional splat (repeat) of the last slice.
     /// Used internally by the buffered Writer.
-    pub fn writeSplatHeader(self: Stream, rt: *Runtime, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
+    pub fn writeSplatHeader(self: Stream, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
         var splat_buf: [64]u8 = undefined;
         var slices: [max_vecs][]const u8 = undefined;
         const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
 
         var storage: [max_vecs]os.iovec_const = undefined;
-        return self.writeBuf(rt, .fromSlices(slices[0..buf_len], &storage), timeout);
+        return self.writeBuf(.fromSlices(slices[0..buf_len], &storage), timeout);
     }
 
     /// Low-level write function that accepts ev.WriteBuf directly.
-    pub fn writeBuf(self: Stream, rt: *Runtime, buf: ev.WriteBuf, timeout: Timeout) !usize {
-        return self.socket.sendBuf(rt, buf, timeout);
+    pub fn writeBuf(self: Stream, buf: ev.WriteBuf, timeout: Timeout) !usize {
+        return self.socket.sendBuf(buf, timeout);
     }
 
     /// Shuts down all or part of a full-duplex connection.
-    pub fn shutdown(self: Stream, rt: *Runtime, how: ShutdownHow) !void {
-        return self.socket.shutdown(rt, how);
+    pub fn shutdown(self: Stream, how: ShutdownHow) !void {
+        return self.socket.shutdown(how);
     }
 
     /// Closes the stream.
-    pub fn close(self: Stream, rt: *Runtime) void {
-        self.socket.close(rt);
+    pub fn close(self: Stream) void {
+        self.socket.close();
     }
 
     pub const Reader = struct {
-        rt: *Runtime,
         stream: Stream,
         interface: std.Io.Reader,
         timeout: Timeout = .none,
         err: ?(ev.NetRecv.Error || common.Timeoutable) = null,
 
-        pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
+        pub fn init(stream: Stream, buffer: []u8) Reader {
             return .{
-                .rt = rt,
                 .stream = stream,
                 .interface = .{
                     .vtable = &.{
@@ -1232,7 +1230,7 @@ pub const Stream = struct {
                 try io_r.writableVectorPosix(&storage, data);
             if (dest_n == 0) return 0;
 
-            const n = r.stream.readBuf(r.rt, .{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
+            const n = r.stream.readBuf(.{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -1249,15 +1247,13 @@ pub const Stream = struct {
     };
 
     pub const Writer = struct {
-        rt: *Runtime,
         stream: Stream,
         interface: std.Io.Writer,
         timeout: Timeout = .none,
         err: ?(ev.NetSend.Error || common.Timeoutable) = null,
 
-        pub fn init(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
+        pub fn init(stream: Stream, buffer: []u8) Writer {
             return .{
-                .rt = rt,
                 .stream = stream,
                 .interface = .{
                     .vtable = &.{
@@ -1275,7 +1271,7 @@ pub const Stream = struct {
         fn drainImpl(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
             const buffered = io_w.buffered();
-            const n = w.stream.writeSplatHeader(w.rt, buffered, data, splat, w.timeout) catch |err| {
+            const n = w.stream.writeSplatHeader(buffered, data, splat, w.timeout) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
@@ -1284,13 +1280,13 @@ pub const Stream = struct {
     };
 
     /// Creates a buffered reader for the given stream.
-    pub fn reader(stream: Stream, rt: *Runtime, buffer: []u8) Reader {
-        return .init(stream, rt, buffer);
+    pub fn reader(stream: Stream, buffer: []u8) Reader {
+        return .init(stream, buffer);
     }
 
     /// Creates a buffered writer for the given stream.
-    pub fn writer(stream: Stream, rt: *Runtime, buffer: []u8) Writer {
-        return .init(stream, rt, buffer);
+    pub fn writer(stream: Stream, buffer: []u8) Writer {
+        return .init(stream, buffer);
     }
 };
 
@@ -1350,17 +1346,16 @@ fn lookupHostBlocking(
 }
 
 pub fn tcpConnectToHost(
-    rt: *Runtime,
     name: []const u8,
     port: u16,
     options: IpAddress.ConnectOptions,
 ) !Stream {
     const host = try HostName.init(name);
-    return host.connect(rt, port, options);
+    return host.connect(port, options);
 }
 
-pub fn tcpConnectToAddress(rt: *Runtime, addr: IpAddress, options: IpAddress.ConnectOptions) !Stream {
-    return addr.connect(rt, options);
+pub fn tcpConnectToAddress(addr: IpAddress, options: IpAddress.ConnectOptions) !Stream {
+    return addr.connect(options);
 }
 
 test {
@@ -1412,7 +1407,7 @@ test "HostName: lookup" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80 });
+    var iter = try host.lookup(.{ .port = 80 });
     defer iter.deinit();
 
     var has_address = false;
@@ -1433,7 +1428,7 @@ test "HostName: lookup with family filter" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80, .family = .ipv4 });
+    var iter = try host.lookup(.{ .port = 80, .family = .ipv4 });
     defer iter.deinit();
 
     while (iter.next()) |result| {
@@ -1451,7 +1446,7 @@ test "HostName: lookup with canonical name" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80, .canonical_name = true });
+    var iter = try host.lookup(.{ .port = 80, .canonical_name = true });
     defer iter.deinit();
 
     var has_canonical_name = false;
@@ -1478,26 +1473,26 @@ test "HostName: connect" {
     defer rt.deinit();
 
     const Test = struct {
-        fn run(runtime: *Runtime) !void {
+        fn run() !void {
             // Start a server
             const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try server_addr.listen(runtime, .{});
-            defer server.close(runtime);
+            const server = try server_addr.listen(.{});
+            defer server.close();
 
             const port = server.socket.address.ip.getPort();
 
             // Connect via HostName
             const host = try HostName.init("localhost");
-            var stream = try host.connect(runtime, port, .{});
-            defer stream.close(runtime);
+            var stream = try host.connect(port, .{});
+            defer stream.close();
 
-            try stream.writeAll(runtime, "hello", .none);
+            try stream.writeAll("hello", .none);
         }
     };
 
-    var task = try rt.spawn(Test.run, .{rt});
-    defer task.cancel(rt);
-    try task.join(rt);
+    var task = try rt.spawn(Test.run, .{});
+    defer task.cancel();
+    try task.join();
 }
 
 test "IpAddress: getFamily" {
@@ -1513,7 +1508,7 @@ test "HostName: lookup localhost" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(rt, .{ .port = 80 });
+    var iter = try host.lookup(.{ .port = 80 });
     defer iter.deinit();
 
     var count: usize = 0;
@@ -1528,7 +1523,7 @@ test "HostName: lookup numeric IP" {
     defer rt.deinit();
 
     const host = try HostName.init("127.0.0.1");
-    var iter = try host.lookup(rt, .{ .port = 8080 });
+    var iter = try host.lookup(.{ .port = 8080 });
     defer iter.deinit();
 
     var count: usize = 0;
@@ -1551,18 +1546,18 @@ test "tcpConnectToAddress: basic" {
     defer runtime.deinit();
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
+        fn run(server_port: *Channel(u16)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try addr.listen(rt, .{});
-            defer server.close(rt);
+            const server = try addr.listen(.{});
+            defer server.close();
 
-            try server_port.send(rt, server.socket.address.ip.getPort());
+            try server_port.send(server.socket.address.ip.getPort());
 
-            var stream = try server.accept(rt);
-            defer stream.close(rt);
+            var stream = try server.accept();
+            defer stream.close();
 
             var read_buffer: [256]u8 = undefined;
-            var reader = stream.reader(rt, &read_buffer);
+            var reader = stream.reader(&read_buffer);
 
             const msg = try reader.interface.takeDelimiterExclusive('\n');
             try std.testing.expectEqualStrings("hello", msg);
@@ -1570,20 +1565,20 @@ test "tcpConnectToAddress: basic" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
-            const port = try server_port.receive(rt);
+        fn run(server_port: *Channel(u16)) !void {
+            const port = try server_port.receive();
             const addr = try IpAddress.parseIp4("127.0.0.1", port);
 
-            var stream = try tcpConnectToAddress(rt, addr, .{});
-            defer stream.close(rt);
+            var stream = try tcpConnectToAddress(addr, .{});
+            defer stream.close();
 
             var write_buffer: [256]u8 = undefined;
-            var writer = stream.writer(rt, &write_buffer);
+            var writer = stream.writer(&write_buffer);
 
             try writer.interface.writeAll("hello\n");
             try writer.interface.flush();
 
-            stream.shutdown(rt, .both) catch {};
+            stream.shutdown(.both) catch {};
         }
     };
 
@@ -1591,32 +1586,32 @@ test "tcpConnectToAddress: basic" {
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, ServerTask.run, .{ runtime, &server_port_ch });
-    try group.spawn(runtime, ClientTask.run, .{ runtime, &server_port_ch });
+    try group.spawn(ServerTask.run, .{&server_port_ch});
+    try group.spawn(ClientTask.run, .{&server_port_ch});
 
-    try group.wait(runtime);
+    try group.wait();
 }
 
 test "tcpConnectToHost: basic" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
 
     const ServerTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
+        fn run(server_port: *Channel(u16)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try addr.listen(rt, .{});
-            defer server.close(rt);
+            const server = try addr.listen(.{});
+            defer server.close();
 
             std.log.info("Server listening on port {}\n", .{server.socket.address.ip.getPort()});
 
-            try server_port.send(rt, server.socket.address.ip.getPort());
+            try server_port.send(server.socket.address.ip.getPort());
 
-            var stream = try server.accept(rt);
-            defer stream.close(rt);
+            var stream = try server.accept();
+            defer stream.close();
 
             var read_buffer: [256]u8 = undefined;
-            var reader = stream.reader(rt, &read_buffer);
+            var reader = stream.reader(&read_buffer);
 
             const msg = try reader.interface.takeDelimiterExclusive('\n');
             try std.testing.expectEqualStrings("hello", msg);
@@ -1624,20 +1619,20 @@ test "tcpConnectToHost: basic" {
     };
 
     const ClientTask = struct {
-        fn run(rt: *Runtime, server_port: *Channel(u16)) !void {
-            const port = try server_port.receive(rt);
+        fn run(server_port: *Channel(u16)) !void {
+            const port = try server_port.receive();
             std.log.info("Client connecting to port {}\n", .{port});
 
-            var stream = try tcpConnectToHost(rt, "localhost", port, .{});
-            defer stream.close(rt);
+            var stream = try tcpConnectToHost("localhost", port, .{});
+            defer stream.close();
 
             var write_buffer: [256]u8 = undefined;
-            var writer = stream.writer(rt, &write_buffer);
+            var writer = stream.writer(&write_buffer);
 
             try writer.interface.writeAll("hello\n");
             try writer.interface.flush();
 
-            try stream.shutdown(rt, .both);
+            try stream.shutdown(.both);
         }
     };
 
@@ -1648,12 +1643,12 @@ test "tcpConnectToHost: basic" {
     var server_port_ch = Channel(u16).init(&server_port_buf);
 
     var group: Group = .init;
-    defer group.cancel(runtime);
+    defer group.cancel();
 
-    try group.spawn(runtime, ServerTask.run, .{ runtime, &server_port_ch });
-    try group.spawn(runtime, ClientTask.run, .{ runtime, &server_port_ch });
+    try group.spawn(ServerTask.run, .{&server_port_ch});
+    try group.spawn(ClientTask.run, .{&server_port_ch});
 
-    try group.wait(runtime);
+    try group.wait();
 }
 
 test "IpAddress: initIp4" {
@@ -1955,87 +1950,87 @@ test "UnixAddress: init" {
 
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const Test = struct {
-        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
-            const server = try addr_inner.listen(rt, options_inner);
-            defer server.close(rt);
+        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
+            const server = try addr_inner.listen(options_inner);
+            defer server.close();
 
             var group: Group = .init;
-            defer group.cancel(rt);
+            defer group.cancel();
 
-            try group.spawn(rt, serverFn, .{ rt, server });
-            try group.spawn(rt, clientFn, .{ rt, server, write_buffer_inner });
+            try group.spawn(serverFn, .{server});
+            try group.spawn(clientFn, .{ server, write_buffer_inner });
 
-            try group.wait(rt);
+            try group.wait();
         }
 
-        pub fn serverFn(rt: *Runtime, server: Server) !void {
-            const client = try server.accept(rt);
-            defer client.close(rt);
+        pub fn serverFn(server: Server) !void {
+            const client = try server.accept();
+            defer client.close();
 
             var buf: [32]u8 = undefined;
-            var reader = client.reader(rt, &buf);
+            var reader = client.reader(&buf);
 
             const line = try reader.interface.takeDelimiterExclusive('\n');
             try std.testing.expectEqualStrings("hello", line);
 
-            client.shutdown(rt, .both) catch {};
+            client.shutdown(.both) catch {};
         }
 
-        pub fn clientFn(rt: *Runtime, server: Server, write_buffer_inner: []u8) !void {
-            const client = try server.socket.address.connect(rt, .{});
-            defer client.close(rt);
+        pub fn clientFn(server: Server, write_buffer_inner: []u8) !void {
+            const client = try server.socket.address.connect(.{});
+            defer client.close();
 
-            var writer = client.writer(rt, write_buffer_inner);
+            var writer = client.writer(write_buffer_inner);
 
             try writer.interface.writeAll("hello\n");
             try writer.interface.flush();
 
-            client.shutdown(rt, .both) catch {};
+            client.shutdown(.both) catch {};
         }
     };
 
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer });
-    try handle.join(runtime);
+    var handle = try runtime.spawn(Test.mainFn, .{ addr, options, write_buffer });
+    try handle.join();
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const Test = struct {
-        pub fn mainFn(rt: *Runtime, server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
-            const socket = try server_addr_inner.bind(rt, .{});
-            defer socket.close(rt);
+        pub fn mainFn(server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
+            const socket = try server_addr_inner.bind(.{});
+            defer socket.close();
 
             var group: Group = .init;
-            defer group.cancel(rt);
+            defer group.cancel();
 
-            try group.spawn(rt, serverFn, .{ rt, socket });
-            try group.spawn(rt, clientFn, .{ rt, socket, client_addr_inner });
+            try group.spawn(serverFn, .{socket});
+            try group.spawn(clientFn, .{ socket, client_addr_inner });
 
-            try group.wait(rt);
+            try group.wait();
         }
 
-        pub fn serverFn(rt: *Runtime, socket: Socket) !void {
+        pub fn serverFn(socket: Socket) !void {
             var buf: [1024]u8 = undefined;
-            const result = try socket.receiveFrom(rt, &buf, .none);
+            const result = try socket.receiveFrom(&buf, .none);
 
             try std.testing.expectEqualStrings("hello", buf[0..result.len]);
 
-            const bytes_sent = try socket.sendTo(rt, result.from, buf[0..result.len], .none);
+            const bytes_sent = try socket.sendTo(result.from, buf[0..result.len], .none);
             try std.testing.expectEqual(result.len, bytes_sent);
         }
 
-        pub fn clientFn(rt: *Runtime, server_socket: Socket, client_addr_inner: @TypeOf(client_addr)) !void {
-            const client_socket = try client_addr_inner.bind(rt, .{});
-            defer client_socket.close(rt);
+        pub fn clientFn(server_socket: Socket, client_addr_inner: @TypeOf(client_addr)) !void {
+            const client_socket = try client_addr_inner.bind(.{});
+            defer client_socket.close();
 
             const test_data = "hello";
-            const bytes_sent = try client_socket.sendTo(rt, server_socket.address, test_data, .none);
+            const bytes_sent = try client_socket.sendTo(server_socket.address, test_data, .none);
             try std.testing.expectEqual(test_data.len, bytes_sent);
 
             var buf: [1024]u8 = undefined;
-            const result = try client_socket.receiveFrom(rt, &buf, .none);
+            const result = try client_socket.receiveFrom(&buf, .none);
             try std.testing.expectEqualStrings(test_data, buf[0..result.len]);
         }
     };
@@ -2043,49 +2038,49 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr });
-    try handle.join(runtime);
+    var handle = try runtime.spawn(Test.mainFn, .{ server_addr, client_addr });
+    try handle.join();
 }
 
 pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const Test = struct {
-        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
-            const server = try addr_inner.listen(rt, options_inner);
-            defer server.close(rt);
+        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
+            const server = try addr_inner.listen(options_inner);
+            defer server.close();
 
             var group: Group = .init;
-            defer group.cancel(rt);
+            defer group.cancel();
 
-            try group.spawn(rt, serverFn, .{ rt, server });
-            try group.spawn(rt, clientFn, .{ rt, server });
+            try group.spawn(serverFn, .{server});
+            try group.spawn(clientFn, .{server});
 
-            try group.wait(rt);
+            try group.wait();
         }
 
-        pub fn serverFn(rt: *Runtime, server: Server) !void {
-            const client = try server.accept(rt);
-            defer client.close(rt);
-            client.shutdown(rt, .send) catch {};
+        pub fn serverFn(server: Server) !void {
+            const client = try server.accept();
+            defer client.close();
+            client.shutdown(.send) catch {};
         }
 
-        pub fn clientFn(rt: *Runtime, server: Server) !void {
-            const client = try server.socket.address.connect(rt, .{});
-            defer client.close(rt);
+        pub fn clientFn(server: Server) !void {
+            const client = try server.socket.address.connect(.{});
+            defer client.close();
 
             var buf: [32]u8 = undefined;
-            var reader = client.reader(rt, &buf);
+            var reader = client.reader(&buf);
 
             try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
 
-            client.shutdown(rt, .both) catch {};
+            client.shutdown(.both) catch {};
         }
     };
 
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options });
-    try handle.join(runtime);
+    var handle = try runtime.spawn(Test.mainFn, .{ addr, options });
+    try handle.join();
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
@@ -2181,8 +2176,8 @@ test "Socket: buffer size get/set" {
     defer runtime.deinit();
 
     // Create a UDP socket for testing
-    const socket = try Socket.open(runtime, .dgram, .ipv4, .udp);
-    defer socket.close(runtime);
+    const socket = try Socket.open(.dgram, .ipv4, .udp);
+    defer socket.close();
 
     // Test send buffer size
     const desired_send_size: usize = 128 * 1024; // 128 KB
