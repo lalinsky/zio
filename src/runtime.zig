@@ -935,10 +935,7 @@ pub const Runtime = struct {
     /// Returns error.Canceled if the task was canceled during sleep.
     pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
         var waiter = Waiter.init(self);
-        waiter.timedWait(1, .{ .duration = duration }, .allow_cancel) catch |err| switch (err) {
-            error.Timeout => return,
-            error.Canceled => return error.Canceled,
-        };
+        try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
     }
 
     /// Begin a cancellation shield to prevent being canceled during critical sections.

@@ -113,7 +113,7 @@ pub const Waiter = struct {
         }
     }
 
-    fn timedWaitFutex(self: *Waiter, expected: u32, timeout: Timeout) Timeoutable!void {
+    fn timedWaitFutex(self: *Waiter, expected: u32, timeout: Timeout) void {
         if (timeout == .none) {
             return self.waitFutex(expected);
         }
@@ -126,13 +126,13 @@ pub const Waiter = struct {
             }
             const remaining = deadline.durationFromNow();
             if (remaining.value <= 0) {
-                return error.Timeout;
+                return;
             }
             std.Thread.Futex.timedWait(&self.signaled, current, remaining.toNanoseconds()) catch {};
         }
     }
 
-    fn timedWaitTask(self: *Waiter, task: *AnyTask, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) !void {
+    fn timedWaitTask(self: *Waiter, task: *AnyTask, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (timeout == .none) {
             return self.waitTask(task, expected, cancel_mode);
         }
@@ -148,10 +148,9 @@ pub const Waiter = struct {
     }
 
     /// Wait for at least `expected` signals with a timeout.
-    /// Returns error.Timeout if the timeout expires before enough signals arrive.
     /// The caller must check their condition to determine if timeout actually won
     /// (e.g., by trying to remove from a wait queue).
-    pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) !void {
+    pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (self.task) |task| {
             return self.timedWaitTask(task, expected, timeout, cancel_mode);
         } else {
@@ -262,10 +261,10 @@ test "Waiter: futex-based timed wait with timeout" {
     };
 
     var timer = Stopwatch.start();
-    const result = waiter.timedWait(1, .fromMilliseconds(50), .no_cancel);
+    waiter.timedWait(1, .fromMilliseconds(50), .no_cancel);
     const elapsed = timer.read();
 
-    try std.testing.expectError(error.Timeout, result);
+    // Should return normally after timeout expires
     try std.testing.expect(elapsed.toMilliseconds() >= 50);
     try std.testing.expect(elapsed.toMilliseconds() < 200); // Sanity check
 }
