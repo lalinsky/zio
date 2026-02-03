@@ -352,6 +352,7 @@ pub const Executor = struct {
 
         std.debug.assert(Executor.current == null);
         Executor.current = self;
+        self.current_coroutine = &self.main_task.coro;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -392,7 +393,7 @@ pub const Executor = struct {
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        const is_main = self.current_coroutine == null;
+        const is_main = self.current_coroutine == &self.main_task.coro;
         const current_task = if (is_main) &self.main_task else AnyTask.fromCoroutine(self.current_coroutine.?);
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
@@ -461,11 +462,7 @@ pub const Executor = struct {
         if (std.debug.runtime_safety) {
             std.debug.assert(current == self);
         }
-        if (self.current_coroutine) |coro| {
-            return AnyTask.fromCoroutine(coro);
-        } else {
-            return &self.main_task;
-        }
+        return AnyTask.fromCoroutine(self.current_coroutine.?);
     }
 
     pub const RunMode = enum {
@@ -483,6 +480,8 @@ pub const Executor = struct {
     /// Run the executor event loop.
     pub fn run(self: *Executor, mode: RunMode) !void {
         std.debug.assert(Executor.current == self);
+        self.current_coroutine = null;
+        defer self.current_coroutine = &self.main_task.coro;
 
         switch (mode) {
             .until_ready => {},
@@ -508,24 +507,24 @@ pub const Executor = struct {
                 const task = AnyTask.fromWaitNode(wait_node);
 
                 self.current_coroutine = &task.coro;
-                defer self.current_coroutine = null;
-
                 task.coro.step();
 
+                // Back in scheduler - clear current_coroutine before any callbacks
+                const current_coro = self.current_coroutine.?;
+                self.current_coroutine = null;
+
                 // Handle finished tasks
-                if (self.current_coroutine) |current_coro| {
-                    const current_task = AnyTask.fromCoroutine(current_coro);
-                    if (current_task.state.load(.acquire) == .finished) {
-                        const current_awaitable = &current_task.awaitable;
+                const current_task = AnyTask.fromCoroutine(current_coro);
+                if (current_task.state.load(.acquire) == .finished) {
+                    const current_awaitable = &current_task.awaitable;
 
-                        // Release stack immediately
-                        if (current_coro.context.stack_info.allocation_len > 0) {
-                            self.runtime.stack_pool.release(current_coro.context.stack_info, self.loop.now());
-                            current_coro.context.stack_info.allocation_len = 0;
-                        }
-
-                        self.runtime.onTaskComplete(current_awaitable);
+                    // Release stack immediately
+                    if (current_coro.context.stack_info.allocation_len > 0) {
+                        self.runtime.stack_pool.release(current_coro.context.stack_info, self.loop.now());
+                        current_coro.context.stack_info.allocation_len = 0;
                     }
+
+                    self.runtime.onTaskComplete(current_awaitable);
                 }
             }
 
