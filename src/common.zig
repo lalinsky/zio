@@ -6,6 +6,7 @@ const std = @import("std");
 const ev = @import("ev/root.zig");
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
+const Stopwatch = @import("time.zig").Stopwatch;
 const Runtime = @import("runtime.zig").Runtime;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
@@ -37,7 +38,7 @@ pub const Timeoutable = error{
 /// ```
 pub const Waiter = struct {
     wait_node: WaitNode,
-    task: *AnyTask,
+    task: ?*AnyTask,
     signaled: std.atomic.Value(u32) = .init(0),
 
     const vtable: WaitNode.VTable = .{
@@ -47,7 +48,7 @@ pub const Waiter = struct {
     pub fn init(runtime: *Runtime) Waiter {
         return .{
             .wait_node = .{ .vtable = &vtable },
-            .task = runtime.getCurrentTask(),
+            .task = runtime.getCurrentTaskOrNull(),
         };
     }
 
@@ -55,7 +56,12 @@ pub const Waiter = struct {
     /// Increments the signal count and wakes the task.
     pub fn signal(self: *Waiter) void {
         _ = self.signaled.fetchAdd(1, .release);
-        self.task.wake();
+        if (self.task) |task| {
+            task.wake();
+        } else {
+            // TODO: use custom futex implementation (std.Thread stuff is being removed in Zig 0.16)
+            std.Thread.Futex.wake(&self.signaled, std.math.maxInt(u32));
+        }
     }
 
     fn wakeImpl(wait_node: *WaitNode) void {
@@ -65,19 +71,33 @@ pub const Waiter = struct {
 
     /// Wait for at least `expected` signals, handling spurious wakeups internally.
     pub fn wait(self: *Waiter, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        const task = self.task;
+        if (self.task) |task| {
+            return self.waitTask(task, expected, cancel_mode);
+        } else {
+            return self.waitFutex(expected);
+        }
+    }
 
+    fn waitFutex(self: *Waiter, expected: u32) void {
         while (true) {
-            task.state.store(.preparing_to_wait, .release);
-
-            // Check after setting state to handle the race where
-            // signal happens while we're in .ready state (e.g., after spurious wakeup).
-            if (self.signaled.load(.acquire) >= expected) {
-                task.state.store(.ready, .release);
+            const current = self.signaled.load(.acquire);
+            if (current >= expected) {
                 return;
             }
+            std.Thread.Futex.wait(&self.signaled, current);
+        }
+    }
 
-            // Get executor fresh each time - may change after cancel/reschedule
+    fn waitTask(self: *Waiter, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        task.state.store(.preparing_to_wait, .release);
+
+        var current = self.signaled.load(.acquire);
+        if (current >= expected) {
+            task.state.store(.ready, .release);
+            return;
+        }
+
+        while (true) {
             const executor = task.getExecutor();
             if (cancel_mode == .allow_cancel) {
                 try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
@@ -85,31 +105,57 @@ pub const Waiter = struct {
                 executor.yield(.preparing_to_wait, .waiting, .no_cancel);
             }
 
-            // Check completion - if not enough signals, it was a spurious wakeup
-            if (self.signaled.load(.acquire) >= expected) {
+            current = self.signaled.load(.acquire);
+            if (current >= expected) {
                 return;
             }
-            // Spurious wakeup - loop and wait again
+            task.state.store(.preparing_to_wait, .release);
         }
     }
 
-    /// Wait for at least `expected` signals with a timeout.
-    /// Returns error.Timeout if the timeout expires before enough signals arrive.
-    /// The caller must check their condition to determine if timeout actually won
-    /// (e.g., by trying to remove from a wait queue).
-    pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) !void {
+    fn timedWaitFutex(self: *Waiter, expected: u32, timeout: Timeout) void {
         if (timeout == .none) {
-            return self.wait(expected, cancel_mode);
+            return self.waitFutex(expected);
+        }
+
+        const deadline = timeout.toDeadline();
+        while (true) {
+            const current = self.signaled.load(.acquire);
+            if (current >= expected) {
+                return;
+            }
+            const remaining = deadline.durationFromNow();
+            if (remaining.value <= 0) {
+                return;
+            }
+            std.Thread.Futex.timedWait(&self.signaled, current, remaining.toNanoseconds()) catch {};
+        }
+    }
+
+    fn timedWaitTask(self: *Waiter, task: *AnyTask, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        if (timeout == .none) {
+            return self.waitTask(task, expected, cancel_mode);
         }
 
         var timer: ev.Timer = .init(timeout);
         timer.c.userdata = self;
         timer.c.callback = callback;
 
-        self.task.getExecutor().loop.setTimer(&timer, timeout);
+        task.getExecutor().loop.setTimer(&timer, timeout);
         defer timer.c.loop.?.clearTimer(&timer);
 
-        return self.wait(expected, cancel_mode);
+        return self.waitTask(task, expected, cancel_mode);
+    }
+
+    /// Wait for at least `expected` signals with a timeout.
+    /// The caller must check their condition to determine if timeout actually won
+    /// (e.g., by trying to remove from a wait queue).
+    pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        if (self.task) |task| {
+            return self.timedWaitTask(task, expected, timeout, cancel_mode);
+        } else {
+            return self.timedWaitFutex(expected, timeout);
+        }
     }
 
     /// Callback for ev.Completion - signals this waiter.
@@ -133,11 +179,12 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
     };
 
     // Submit to the event loop and wait for completion
-    waiter.task.getExecutor().loop.add(c);
+    const task = waiter.task orelse @panic("I/O operations require async context");
+    task.getExecutor().loop.add(c);
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
             // On cancellation, cancel the I/O and wait for completion
-            waiter.task.getExecutor().loop.cancel(c);
+            task.getExecutor().loop.cancel(c);
             waiter.wait(1, .no_cancel);
 
             // Check if I/O was actually canceled
@@ -147,7 +194,7 @@ pub fn waitForIo(rt: *Runtime, c: *ev.Completion) Cancelable!void {
                 }
             }
             // IO completed successfully despite cancel request - restore the pending cancel
-            waiter.task.recancel();
+            task.recancel();
             return;
         },
     };
@@ -204,4 +251,20 @@ test "timedWaitForIo: completes before timeout" {
     // Short timer (10ms) with long timeout (1 second)
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     try timedWaitForIo(rt, &timer.c, .{ .duration = .fromSeconds(1) });
+}
+
+test "Waiter: futex-based timed wait with timeout" {
+    // Create waiter without task (blocking context)
+    var waiter: Waiter = .{
+        .wait_node = .{ .vtable = &Waiter.vtable },
+        .task = null,
+    };
+
+    var timer = Stopwatch.start();
+    waiter.timedWait(1, .fromMilliseconds(50), .no_cancel);
+    const elapsed = timer.read();
+
+    // Should return normally after timeout expires
+    try std.testing.expect(elapsed.toMilliseconds() >= 50);
+    try std.testing.expect(elapsed.toMilliseconds() < 200); // Sanity check
 }
