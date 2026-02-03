@@ -6,8 +6,7 @@ const zio = @import("zio");
 
 const NUM_ROUNDS = 10_000_000;
 
-fn pinger(rt: *zio.Runtime, ping_tx: *zio.Channel(u32), pong_rx: *zio.Channel(u32), rounds: u32) !void {
-    _ = rt;
+fn pinger(ping_tx: *zio.Channel(u32), pong_rx: *zio.Channel(u32), rounds: u32) !void {
     var i: u32 = 0;
     while (i < rounds) : (i += 1) {
         try ping_tx.send(i);
@@ -15,8 +14,7 @@ fn pinger(rt: *zio.Runtime, ping_tx: *zio.Channel(u32), pong_rx: *zio.Channel(u3
     }
 }
 
-fn ponger(rt: *zio.Runtime, ping_rx: *zio.Channel(u32), pong_tx: *zio.Channel(u32), rounds: u32) !void {
-    _ = rt;
+fn ponger(ping_rx: *zio.Channel(u32), pong_tx: *zio.Channel(u32), rounds: u32) !void {
     var i: u32 = 0;
     while (i < rounds) : (i += 1) {
         const value = try ping_rx.receive();
@@ -46,8 +44,8 @@ pub fn main() !void {
     var group: zio.Group = .init;
     defer group.cancel();
 
-    try group.spawn(pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
-    try group.spawn(ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
+    try group.spawn(pinger, .{ &ping_channel, &pong_channel, NUM_ROUNDS });
+    try group.spawn(ponger, .{ &ping_channel, &pong_channel, NUM_ROUNDS });
 
     // Run until both tasks complete
     try group.wait();

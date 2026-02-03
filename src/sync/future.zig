@@ -146,8 +146,7 @@ test "Future: basic set and get" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
-            _ = rt;
+        fn asyncTask() !void {
             var future = Future(i32).init;
 
             // Set value
@@ -159,7 +158,7 @@ test "Future: basic set and get" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{});
     try handle.join();
 }
 
@@ -175,8 +174,7 @@ test "Future: await from coroutine" {
             future.set(123);
         }
 
-        fn getterTask(rt: *Runtime, future: *Future(i32)) !i32 {
-            _ = rt;
+        fn getterTask(future: *Future(i32)) !i32 {
             // This will block until setter sets the value
             const result = try future.wait();
             return result.value;
@@ -190,7 +188,7 @@ test "Future: await from coroutine" {
             defer setter_handle.cancel();
 
             // Spawn getter coroutine
-            var getter_handle = try rt.spawn(getterTask, .{ rt, &future });
+            var getter_handle = try rt.spawn(getterTask, .{&future});
             defer getter_handle.cancel();
 
             const result = try getter_handle.join();
@@ -207,8 +205,7 @@ test "Future: multiple waiters" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn waiterTask(rt: *Runtime, future: *Future(i32), expected: i32) !void {
-            _ = rt;
+        fn waiterTask(future: *Future(i32), expected: i32) !void {
             const result = try future.wait();
             try std.testing.expectEqual(expected, result.value);
         }
@@ -224,11 +221,11 @@ test "Future: multiple waiters" {
             var future = Future(i32).init;
 
             // Spawn multiple waiters
-            var waiter1 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
+            var waiter1 = try rt.spawn(waiterTask, .{ &future, 999 });
             defer waiter1.cancel();
-            var waiter2 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
+            var waiter2 = try rt.spawn(waiterTask, .{ &future, 999 });
             defer waiter2.cancel();
-            var waiter3 = try rt.spawn(waiterTask, .{ rt, &future, 999 });
+            var waiter3 = try rt.spawn(waiterTask, .{ &future, 999 });
             defer waiter3.cancel();
 
             // Spawn setter

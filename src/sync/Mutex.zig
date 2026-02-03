@@ -145,8 +145,7 @@ test "Mutex basic lock/unlock" {
     var mutex = Mutex.init;
 
     const TestFn = struct {
-        fn worker(rt: *Runtime, counter: *u32, mtx: *Mutex) !void {
-            _ = rt;
+        fn worker(counter: *u32, mtx: *Mutex) !void {
             for (0..100) |_| {
                 try mtx.lock();
                 defer mtx.unlock();
@@ -158,8 +157,8 @@ test "Mutex basic lock/unlock" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
-    try group.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
+    try group.spawn(TestFn.worker, .{ &shared_counter, &mutex });
+    try group.spawn(TestFn.worker, .{ &shared_counter, &mutex });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());

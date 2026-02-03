@@ -697,8 +697,7 @@ test "Timeout future: timeout wins select" {
     var channel = Channel(u32).init(&.{});
 
     const TestFn = struct {
-        fn run(rt: *Runtime, ch: *Channel(u32)) !void {
-            _ = rt;
+        fn run(ch: *Channel(u32)) !void {
             const result = try select(.{
                 .recv = ch.asyncReceive(),
                 .timeout = Timeout.fromMilliseconds(10),
@@ -712,6 +711,6 @@ test "Timeout future: timeout wins select" {
 
     var group: Group = .init;
     defer group.cancel();
-    try group.spawn(TestFn.run, .{ runtime, &channel });
+    try group.spawn(TestFn.run, .{&channel});
     try group.wait();
 }

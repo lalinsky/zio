@@ -978,8 +978,7 @@ test "wait: already complete (fast path)" {
     defer runtime.deinit();
 
     const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
-            _ = rt;
+        fn asyncTask() !void {
             var future = Future(i32).init;
             future.set(99);
 
@@ -989,7 +988,7 @@ test "wait: already complete (fast path)" {
         }
     };
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
+    var handle = try runtime.spawn(TestContext.asyncTask, .{});
     try handle.join();
 }
 

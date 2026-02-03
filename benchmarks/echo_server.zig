@@ -8,8 +8,7 @@ const NUM_CLIENTS = 10;
 const MESSAGES_PER_CLIENT = 50_000;
 const MESSAGE_SIZE = 64; // bytes
 
-fn handleClient(rt: *zio.Runtime, in_stream: zio.net.Stream) !void {
-    _ = rt;
+fn handleClient(in_stream: zio.net.Stream) !void {
     var stream = in_stream;
     defer stream.close();
 
@@ -22,7 +21,7 @@ fn handleClient(rt: *zio.Runtime, in_stream: zio.net.Stream) !void {
     }
 }
 
-fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !void {
+fn serverTask(ready: *zio.ResetEvent, done: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
 
     var server = try addr.listen(.{ .reuse_address = true });
@@ -38,17 +37,15 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
         var stream = try server.accept();
         errdefer stream.close();
 
-        try group.spawn(handleClient, .{ rt, stream });
+        try group.spawn(handleClient, .{stream});
     }
 
     try done.wait();
 }
 
 fn clientTask(
-    rt: *zio.Runtime,
     ready: *zio.ResetEvent,
 ) !void {
-    _ = rt;
     try ready.wait();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 45678);
@@ -97,7 +94,7 @@ pub fn main() !void {
 
     const total_messages = NUM_CLIENTS * MESSAGES_PER_CLIENT;
 
-    var server_task = try rt.spawn(serverTask, .{ rt, &server_ready, &server_done });
+    var server_task = try rt.spawn(serverTask, .{ &server_ready, &server_done });
     defer server_task.cancel();
 
     try server_ready.wait();
@@ -108,7 +105,7 @@ pub fn main() !void {
     defer client_group.cancel();
 
     for (0..NUM_CLIENTS) |_| {
-        try client_group.spawn(clientTask, .{ rt, &server_ready });
+        try client_group.spawn(clientTask, .{&server_ready});
     }
     try client_group.wait();
 
