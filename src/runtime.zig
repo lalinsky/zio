@@ -253,7 +253,7 @@ pub const Executor = struct {
 
     id: u6,
     loop: ev.Loop,
-    current_coroutine: ?*Coroutine = null,
+    current_task: ?*AnyTask = null,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
 
@@ -352,7 +352,7 @@ pub const Executor = struct {
 
         std.debug.assert(Executor.current == null);
         Executor.current = self;
-        self.current_coroutine = &self.main_task.coro;
+        self.current_task = &self.main_task;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -393,12 +393,16 @@ pub const Executor = struct {
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        const is_main = self.current_coroutine == &self.main_task.coro;
-        const current_task = if (is_main) &self.main_task else AnyTask.fromCoroutine(self.current_coroutine.?);
+        const current_task = self.current_task.?;
+        const is_main = current_task == &self.main_task;
+        self.current_task = null;
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCancel();
+            current_task.checkCancel() catch |err| {
+                self.current_task = current_task;
+                return err;
+            };
         }
 
         // Atomically transition state - if this fails, someone changed our state
@@ -406,6 +410,7 @@ pub const Executor = struct {
             // CAS failed - someone changed our state
             if (actual_state == .ready) {
                 // We were woken up before we could yield - don't suspend
+                self.current_task = current_task;
                 return;
             } else {
                 // Unexpected state - this is a bug
@@ -421,6 +426,8 @@ pub const Executor = struct {
 
         if (is_main) {
             // Main: always use scheduler loop (no direct scheduling)
+            // Restore current_task before calling run()
+            self.current_task = current_task;
             self.run(.until_ready) catch |err| {
                 std.debug.panic("Event loop error during yield: {}", .{err});
             };
@@ -429,19 +436,22 @@ pub const Executor = struct {
             const current_coro = &current_task.coro;
             if (self.getNextTask()) |next_wait_node| {
                 const next_task = AnyTask.fromWaitNode(next_wait_node);
-                self.current_coroutine = &next_task.coro;
+                self.current_task = next_task;
                 current_coro.yieldTo(&next_task.coro);
+                // After resuming from yieldTo, we may have migrated - restore current_task
+                const resumed_executor = Executor.current orelse unreachable;
+                resumed_executor.current_task = current_task;
             } else {
                 // No ready tasks: return to scheduler
+                // Restore current_task so run() knows which task yielded
+                self.current_task = current_task;
                 current_coro.yield();
+                // After resuming from yield, current_task is already set by run()
             }
         }
-
-        // After resuming, the task may have migrated to a different executor.
-        if (!is_main) {
-            const resumed_executor = Executor.current orelse unreachable;
-            std.debug.assert(resumed_executor.current_coroutine == &current_task.coro);
-        }
+        // After resuming, verify current_task is set correctly
+        const resumed_executor = Executor.current orelse unreachable;
+        std.debug.assert(resumed_executor.current_task == current_task);
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
@@ -462,7 +472,7 @@ pub const Executor = struct {
         if (std.debug.runtime_safety) {
             std.debug.assert(current == self);
         }
-        return AnyTask.fromCoroutine(self.current_coroutine.?);
+        return self.current_task.?;
     }
 
     pub const RunMode = enum {
@@ -480,8 +490,8 @@ pub const Executor = struct {
     /// Run the executor event loop.
     pub fn run(self: *Executor, mode: RunMode) !void {
         std.debug.assert(Executor.current == self);
-        self.current_coroutine = null;
-        defer self.current_coroutine = &self.main_task.coro;
+        self.current_task = null;
+        defer self.current_task = &self.main_task;
 
         switch (mode) {
             .until_ready => {},
@@ -506,25 +516,22 @@ pub const Executor = struct {
             while (self.getNextTask()) |wait_node| {
                 const task = AnyTask.fromWaitNode(wait_node);
 
-                self.current_coroutine = &task.coro;
+                self.current_task = task;
                 task.coro.step();
 
-                // Back in scheduler - clear current_coroutine before any callbacks
-                const current_coro = self.current_coroutine.?;
-                self.current_coroutine = null;
+                // Back in scheduler - clear current_task before any callbacks
+                const current_task = self.current_task.?;
+                self.current_task = null;
 
                 // Handle finished tasks
-                const current_task = AnyTask.fromCoroutine(current_coro);
                 if (current_task.state.load(.acquire) == .finished) {
-                    const current_awaitable = &current_task.awaitable;
-
                     // Release stack immediately
-                    if (current_coro.context.stack_info.allocation_len > 0) {
-                        self.runtime.stack_pool.release(current_coro.context.stack_info, self.loop.now());
-                        current_coro.context.stack_info.allocation_len = 0;
+                    if (current_task.coro.context.stack_info.allocation_len > 0) {
+                        self.runtime.stack_pool.release(current_task.coro.context.stack_info, self.loop.now());
+                        current_task.coro.context.stack_info.allocation_len = 0;
                     }
 
-                    self.runtime.onTaskComplete(current_awaitable);
+                    self.runtime.onTaskComplete(&current_task.awaitable);
                 }
             }
 
