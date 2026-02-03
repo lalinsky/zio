@@ -53,6 +53,15 @@ pub const Waiter = struct {
         };
     }
 
+    /// Recover Waiter pointer from embedded WaitNode.
+    /// Only valid for WaitNodes that are part of a Waiter.
+    pub inline fn fromWaitNode(wait_node: *WaitNode) *Waiter {
+        if (std.debug.runtime_safety) {
+            std.debug.assert(wait_node.vtable == &vtable);
+        }
+        return @alignCast(@fieldParentPtr("wait_node", wait_node));
+    }
+
     /// Signal this waiter and wake the task.
     /// Increments the signal count and wakes the task.
     pub fn signal(self: *Waiter) void {
@@ -66,8 +75,7 @@ pub const Waiter = struct {
     }
 
     fn wakeImpl(wait_node: *WaitNode) void {
-        const self: *Waiter = @fieldParentPtr("wait_node", wait_node);
-        self.signal();
+        fromWaitNode(wait_node).signal();
     }
 
     /// Wait for at least `expected` signals, handling spurious wakeups internally.
