@@ -25,8 +25,6 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const beginShield = @import("../runtime.zig").beginShield;
-const endShield = @import("../runtime.zig").endShield;
 const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -104,11 +102,10 @@ pub fn lock(self: *Mutex) Cancelable!void {
     _ = self.queue.getState();
 }
 
-/// Acquires the mutex with cancellation shielding.
+/// Acquires the mutex, ignoring cancellation.
 ///
-/// Like `lock()`, but guarantees the mutex is held when returning, even if
-/// cancellation occurs during acquisition. Cancellation requests are ignored
-/// during the lock operation.
+/// Like `lock()`, but cancellation requests are ignored during the lock
+/// acquisition. This always acquires the lock and never returns an error.
 ///
 /// This is useful in critical sections where you must hold the mutex regardless
 /// of cancellation (e.g., cleanup operations like close(), post()).
@@ -116,9 +113,26 @@ pub fn lock(self: *Mutex) Cancelable!void {
 /// If you need to propagate cancellation after acquiring the lock, call
 /// `Runtime.checkCancel()` after this function returns.
 pub fn lockUncancelable(self: *Mutex) void {
-    beginShield();
-    defer endShield();
-    self.lock() catch unreachable;
+    // Fast path: try to acquire unlocked mutex
+    if (self.queue.tryTransition(unlocked, locked_once)) {
+        return;
+    }
+
+    // Slow path: add to FIFO wait queue
+    var waiter: Waiter = .init();
+
+    // Try to push to queue, or if mutex is unlocked, acquire it atomically
+    const result = self.queue.pushOrTransition(unlocked, locked_once, &waiter.wait_node);
+    if (result == .transitioned) {
+        // Mutex was unlocked, we acquired it via transition to locked_once
+        return;
+    }
+
+    // Wait with .no_cancel - ignores cancellation
+    waiter.wait(1, .no_cancel);
+
+    // Acquire fence: synchronize-with unlock()'s .release in pop()
+    _ = self.queue.getState();
 }
 
 /// Releases the mutex.
