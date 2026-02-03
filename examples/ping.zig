@@ -135,6 +135,6 @@ pub fn main() !void {
         }
 
         // Wait 1 second before next ping
-        try rt.sleep(.fromSeconds(1));
+        try zio.sleep(.fromSeconds(1));
     }
 }
