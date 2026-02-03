@@ -4,12 +4,17 @@
 const std = @import("std");
 const zio = @import("zio");
 
+fn sleepTask() !void {
+    for (0..10) |_| {
+        std.log.info("Sleeping...", .{});
+        try zio.sleep(.fromSeconds(1));
+    }
+}
+
 pub fn main() !void {
     var rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
-    for (0..10) |_| {
-        std.log.info("Sleeping...", .{});
-        try rt.sleep(.fromSeconds(1));
-    }
+    var handle = try rt.spawn(sleepTask, .{});
+    try handle.join();
 }
