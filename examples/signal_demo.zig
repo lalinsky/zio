@@ -6,7 +6,7 @@ const zio = @import("zio");
 
 /// Demonstration of graceful shutdown using signal handling.
 /// Press Ctrl+C to trigger a graceful shutdown.
-fn serverTask(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
+fn serverTask(shutdown: *std.atomic.Value(bool)) !void {
     std.log.info("Server started. Press Ctrl+C to stop.", .{});
 
     var counter: u64 = 0;
@@ -23,14 +23,13 @@ fn serverTask(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
             std.log.info("Server is running... processed {d} items", .{counter});
         }
 
-        try rt.sleep(.fromMilliseconds(100)); // Sleep for 100ms
+        try zio.sleep(.fromMilliseconds(100)); // Sleep for 100ms
     }
 
     std.log.info("Server stopped. Total items processed: {d}", .{counter});
 }
 
-fn signalHandler(rt: *zio.Runtime, shutdown: *std.atomic.Value(bool)) !void {
-    _ = rt;
+fn signalHandler(shutdown: *std.atomic.Value(bool)) !void {
     // Create signal handler for SIGINT (Ctrl+C)
     var sig = try zio.Signal.init(.interrupt);
     defer sig.deinit();
@@ -58,10 +57,10 @@ pub fn main() !void {
     defer group.cancel();
 
     // Spawn server task
-    try group.spawn(serverTask, .{ rt, &shutdown });
+    try group.spawn(serverTask, .{&shutdown});
 
     // Spawn signal handler task
-    try group.spawn(signalHandler, .{ rt, &shutdown });
+    try group.spawn(signalHandler, .{&shutdown});
 
     // Run until all tasks complete
     try group.wait();

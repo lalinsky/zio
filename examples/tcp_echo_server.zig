@@ -2,7 +2,7 @@ const std = @import("std");
 const zio = @import("zio");
 
 // --8<-- [start:handleClient]
-fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
+fn handleClient(stream: zio.net.Stream) !void {
     defer stream.close();
 
     std.log.info("Client connected from {f}", .{stream.socket.address});
@@ -23,7 +23,7 @@ fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
         std.log.info("Received: {s}", .{line});
 
         // Delay the response a little bit
-        try rt.sleep(.fromMilliseconds(1000));
+        try zio.sleep(.fromMilliseconds(1000));
 
         // Echo the line back
         try writer.interface.writeAll(line);
@@ -58,7 +58,7 @@ pub fn main() !void {
         const stream = try server.accept();
         errdefer stream.close();
 
-        try group.spawn(handleClient, .{ rt, stream });
+        try group.spawn(handleClient, .{stream});
     }
     // --8<-- [end:accept]
 }

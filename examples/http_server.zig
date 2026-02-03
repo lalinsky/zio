@@ -4,8 +4,7 @@ const zio = @import("zio");
 // Maximum size of the request headers
 const MAX_REQUEST_HEADER_SIZE = 64 * 1024;
 
-fn handleClient(rt: *zio.Runtime, stream: zio.net.Stream) !void {
-    _ = rt;
+fn handleClient(stream: zio.net.Stream) !void {
     defer stream.close();
 
     std.log.info("HTTP client connected from {f}", .{stream.socket.address});
@@ -80,6 +79,6 @@ pub fn main() !void {
         const stream = try server.accept();
         errdefer stream.close();
 
-        try group.spawn(handleClient, .{ rt, stream });
+        try group.spawn(handleClient, .{stream});
     }
 }
