@@ -11,6 +11,7 @@ const WaitNode = @import("../runtime/WaitNode.zig");
 const Barrier = @import("Barrier.zig");
 const select = @import("../select.zig").select;
 const Waiter = @import("../common.zig").Waiter;
+const Mutex = @import("Mutex.zig");
 
 /// Consumer position tracker.
 /// This is separate from the generic BroadcastChannel(T) since it only stores positions.
@@ -30,7 +31,7 @@ const BroadcastChannelImpl = struct {
     write_pos: usize = 0,
 
     consumers: SimpleQueue(BroadcastChannelConsumer) = .{},
-    mutex: std.Thread.Mutex = .{},
+    mutex: Mutex = .init,
     wait_queue: SimpleWaitQueue(WaitNode) = .empty,
 
     closed: bool = false,
@@ -42,7 +43,7 @@ const BroadcastChannelImpl = struct {
     }
 
     fn subscribe(self: *Self, consumer: *BroadcastChannelConsumer) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
         defer self.mutex.unlock();
 
         consumer.read_pos = self.write_pos;
@@ -50,7 +51,7 @@ const BroadcastChannelImpl = struct {
     }
 
     fn unsubscribe(self: *Self, consumer: *BroadcastChannelConsumer) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
         defer self.mutex.unlock();
 
         _ = self.consumers.remove(consumer);
@@ -60,7 +61,7 @@ const BroadcastChannelImpl = struct {
         var waiter: Waiter = .init();
 
         while (true) {
-            self.mutex.lock();
+            self.mutex.lockUncancelable();
 
             const unread = self.write_pos -% consumer.read_pos;
             if (unread > self.capacity) {
@@ -86,12 +87,12 @@ const BroadcastChannelImpl = struct {
             self.mutex.unlock();
 
             waiter.wait(1, .allow_cancel) catch |err| {
-                self.mutex.lock();
+                self.mutex.lockUncancelable();
                 const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
                 if (!was_in_queue) {
                     self.mutex.unlock();
                     waiter.wait(1, .no_cancel);
-                    self.mutex.lock();
+                    self.mutex.lockUncancelable();
                     const next_consumer = self.wait_queue.pop();
                     self.mutex.unlock();
                     if (next_consumer) |node| {
@@ -106,7 +107,7 @@ const BroadcastChannelImpl = struct {
     }
 
     fn tryReceive(self: *Self, consumer: *BroadcastChannelConsumer, elem_ptr: [*]u8) !void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
         defer self.mutex.unlock();
 
         const unread = self.write_pos -% consumer.read_pos;
@@ -129,7 +130,7 @@ const BroadcastChannelImpl = struct {
     }
 
     fn send(self: *Self, elem_ptr: [*]const u8) !void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
 
         if (self.closed) {
             self.mutex.unlock();
@@ -149,7 +150,7 @@ const BroadcastChannelImpl = struct {
     }
 
     fn close(self: *Self) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
 
         self.closed = true;
 
@@ -178,7 +179,7 @@ const AsyncReceiveImpl = struct {
         ctx.result_ptr = result_ptr;
         ctx.result = null;
 
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
 
         const unread = self.channel.write_pos -% self.consumer.read_pos;
 
@@ -215,7 +216,7 @@ const AsyncReceiveImpl = struct {
 
     pub fn asyncCancelWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext) bool {
         _ = ctx;
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
         const was_in_queue = self.channel.wait_queue.remove(wait_node);
         self.channel.mutex.unlock();
         return was_in_queue;
@@ -228,7 +229,7 @@ const AsyncReceiveImpl = struct {
         }
 
         // Slow path: woken from wait, read from buffer now
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
 
         const unread = self.channel.write_pos -% self.consumer.read_pos;
 
@@ -1075,7 +1076,7 @@ test "BroadcastChannel: position counter overflow handling" {
             // This tests that wrapping arithmetic works correctly
             const near_max = std.math.maxInt(usize) - 5;
 
-            ch.impl.mutex.lock();
+            ch.impl.mutex.lockUncancelable();
             ch.impl.write_pos = near_max;
             consumer.read_pos = near_max;
             ch.impl.mutex.unlock();

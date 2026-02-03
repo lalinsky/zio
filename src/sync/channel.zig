@@ -10,6 +10,7 @@ const WaitNode = @import("../runtime/WaitNode.zig");
 const SelectWaiter = @import("../select.zig").SelectWaiter;
 const select = @import("../select.zig").select;
 const Waiter = @import("../common.zig").Waiter;
+const Mutex = @import("Mutex.zig");
 
 /// Specifies how a channel should be closed.
 pub const CloseMode = enum {
@@ -29,7 +30,7 @@ const ChannelImpl = struct {
     tail: usize = 0,
     count: usize = 0,
 
-    mutex: std.Thread.Mutex = .{},
+    mutex: Mutex = .init,
     receiver_queue: SimpleWaitQueue(WaitNode) = .empty,
     sender_queue: SimpleWaitQueue(WaitNode) = .empty,
 
@@ -44,14 +45,14 @@ const ChannelImpl = struct {
 
     /// Checks if the channel is empty.
     fn isEmpty(self: *Self) bool {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
         defer self.mutex.unlock();
         return self.count == 0;
     }
 
     /// Checks if the channel is full.
     fn isFull(self: *Self) bool {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
         defer self.mutex.unlock();
         return self.count == self.capacity;
     }
@@ -80,7 +81,7 @@ const ChannelImpl = struct {
 
     /// Tries to receive a value without blocking.
     fn tryReceive(self: *Self, elem_ptr: [*]u8) !void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
 
         if (self.count > 0) {
             return self.takeItemAndWakeSender(elem_ptr);
@@ -147,7 +148,7 @@ const ChannelImpl = struct {
     }
 
     fn trySend(self: *Self, elem_ptr: [*]const u8) !void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
 
         if (self.closed) {
             self.mutex.unlock();
@@ -177,7 +178,7 @@ const ChannelImpl = struct {
     }
 
     fn close(self: *Self, mode: CloseMode) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable();
 
         self.closed = true;
 
@@ -216,7 +217,7 @@ const AsyncSendImpl = struct {
     pub fn asyncWait(self: *const SendSelf, wait_node: *WaitNode, ctx: *WaitContext, item_ptr: [*]const u8) bool {
         ctx.item_ptr = item_ptr;
 
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
 
         if (self.channel.closed) {
             self.channel.mutex.unlock();
@@ -252,7 +253,7 @@ const AsyncSendImpl = struct {
 
     pub fn asyncCancelWait(self: *const SendSelf, wait_node: *WaitNode, ctx: *WaitContext) bool {
         _ = ctx;
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
         const was_in_queue = self.channel.sender_queue.remove(wait_node);
         self.channel.mutex.unlock();
 
@@ -287,7 +288,7 @@ const AsyncReceiveImpl = struct {
         ctx.result_ptr = result_ptr;
         ctx.result_set = false;
 
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
 
         if (self.channel.count > 0) {
             self.channel.takeItemAndWakeSender(ctx.result_ptr);
@@ -320,7 +321,7 @@ const AsyncReceiveImpl = struct {
 
     pub fn asyncCancelWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext) bool {
         _ = ctx;
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
         const was_in_queue = self.channel.receiver_queue.remove(wait_node);
         self.channel.mutex.unlock();
 
@@ -338,7 +339,7 @@ const AsyncReceiveImpl = struct {
         }
 
         // Woken by close, check if there are items left (graceful close)
-        self.channel.mutex.lock();
+        self.channel.mutex.lockUncancelable();
 
         if (self.channel.count > 0) {
             self.channel.takeItemAndWakeSender(ctx.result_ptr);
