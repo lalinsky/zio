@@ -25,7 +25,8 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const getCurrentTask = @import("../runtime.zig").getCurrentTask;
+const beginShield = @import("../runtime.zig").beginShield;
+const endShield = @import("../runtime.zig").endShield;
 const Group = @import("../runtime/group.zig").Group;
 const Executor = @import("../runtime.zig").Executor;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -115,9 +116,8 @@ pub fn lock(self: *Mutex) Cancelable!void {
 /// If you need to propagate cancellation after acquiring the lock, call
 /// `Runtime.checkCancel()` after this function returns.
 pub fn lockUncancelable(self: *Mutex) void {
-    const task = getCurrentTask();
-    task.beginShield();
-    defer task.endShield();
+    beginShield();
+    defer endShield();
     self.lock() catch unreachable;
 }
 

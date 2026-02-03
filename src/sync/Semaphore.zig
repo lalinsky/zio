@@ -42,7 +42,8 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const getCurrentTask = @import("../runtime.zig").getCurrentTask;
+const beginShield = @import("../runtime.zig").beginShield;
+const endShield = @import("../runtime.zig").endShield;
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -101,11 +102,10 @@ pub fn wait(self: *Semaphore) Cancelable!void {
 /// of cancellation (e.g., cleanup operations that need resource access).
 ///
 /// If you need to propagate cancellation after acquiring the permit, call
-/// `getCurrentTask().checkCancel()` after this function returns.
+/// `Runtime.checkCancel()` after this function returns.
 pub fn waitUncancelable(self: *Semaphore) void {
-    const task = getCurrentTask();
-    task.beginShield();
-    defer task.endShield();
+    beginShield();
+    defer endShield();
     self.wait() catch unreachable;
 }
 
