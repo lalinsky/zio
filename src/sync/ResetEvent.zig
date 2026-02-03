@@ -410,3 +410,76 @@ test "ResetEvent: select" {
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
     try handle.join(runtime);
 }
+
+test "ResetEvent: foreign thread signals async task" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var reset_event = ResetEvent.init;
+    var task_ready = std.atomic.Value(bool).init(false);
+    var finished = std.atomic.Value(bool).init(false);
+
+    const TestFn = struct {
+        fn taskWait(rt: *Runtime, event: *ResetEvent, ready: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) !void {
+            ready.store(true, .release);
+            try event.wait(rt);
+            done.store(true, .release);
+        }
+
+        fn threadSet(event: *ResetEvent, ready: *std.atomic.Value(bool)) void {
+            // Wait for task to be ready
+            while (!ready.load(.acquire)) {
+                std.Thread.yield() catch {};
+            }
+            event.set();
+        }
+    };
+
+    var handle = try runtime.spawn(TestFn.taskWait, .{ runtime, &reset_event, &task_ready, &finished });
+    defer handle.cancel(runtime);
+
+    const thread = try std.Thread.spawn(.{}, TestFn.threadSet, .{ &reset_event, &task_ready });
+
+    try handle.join(runtime);
+    thread.join();
+
+    try std.testing.expect(finished.load(.acquire));
+    try std.testing.expect(reset_event.isSet());
+}
+
+test "ResetEvent: async task signals foreign thread" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var reset_event = ResetEvent.init;
+    var thread_ready = std.atomic.Value(bool).init(false);
+    var thread_done = std.atomic.Value(bool).init(false);
+
+    const TestFn = struct {
+        fn threadWait(rt: *Runtime, event: *ResetEvent, ready: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) void {
+            ready.store(true, .release);
+            event.wait(rt) catch unreachable;
+            done.store(true, .release);
+        }
+
+        fn taskSet(rt: *Runtime, event: *ResetEvent, ready: *std.atomic.Value(bool)) !void {
+            // Wait for thread to be ready
+            while (!ready.load(.acquire)) {
+                try rt.yield();
+            }
+            event.set();
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, TestFn.threadWait, .{ runtime, &reset_event, &thread_ready, &thread_done });
+
+    var handle = try runtime.spawn(TestFn.taskSet, .{ runtime, &reset_event, &thread_ready });
+    defer handle.cancel(runtime);
+
+    try handle.join(runtime);
+
+    thread.join();
+
+    try std.testing.expect(thread_done.load(.acquire));
+    try std.testing.expect(reset_event.isSet());
+}
