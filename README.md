@@ -9,7 +9,7 @@ The project consists of a few high-level components:
 - Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
 - Asynchronous I/O layer that makes it look like operations are blocking for easy state management, but using event-driven OS APIs under the hood.
 - Synchronization primitives that cooperate with this runtime.
-- Integration with standard library interfaces, like [`std.Io`], [`std.Io.Reader`] and [`std.Io.Writer`].
+- Integration with standard library interfaces, like [`std.Io.Reader`] and [`std.Io.Writer`].
 
 It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
 
@@ -19,7 +19,7 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 [`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io.Writer
 [goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
 
-*The `main` branch works with Zig 0.15. If you want to use the library with the development version of Zig with the `std.Io` interface, use the [`zig-0.16`] branch. Keep in mind that the development version Zig has frequent breaking changes, so the branch might not be always up to date. Contributions are welcome.*
+*The `main` branch works with Zig 0.15. I used to support the development version of Zig as much as I could in the [`zig-0.16`] branch. That also included an implemented the `std.Io` interface. However, this effort stopped with the [removal of `std.Thread.*` synchronization primitives](https://codeberg.org/ziglang/zig/pulls/31084) from Zig's standard library. I'll revisit Zig 0.16 support once it's released.*
 
 [`zig-0.16`]: https://github.com/lalinsky/zio/tree/zig-0.16
 
