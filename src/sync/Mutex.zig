@@ -147,7 +147,7 @@ pub fn unlock(self: *Mutex) void {
     // Pop one waiter or transition from locked_once to unlocked
     // Handles cancellation race by retrying internally
     if (self.queue.popOrTransition(locked_once, unlocked)) |wait_node| {
-        wait_node.wake();
+        Waiter.fromWaitNode(wait_node).signal();
     }
 }
 

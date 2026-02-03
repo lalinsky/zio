@@ -110,7 +110,7 @@ pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
-                next_waiter.wake();
+                Waiter.fromWaitNode(next_waiter).signal();
             }
         }
         // Must reacquire mutex before returning
@@ -176,7 +176,7 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
-                next_waiter.wake();
+                Waiter.fromWaitNode(next_waiter).signal();
             }
         }
 
@@ -215,7 +215,7 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
 /// ```
 pub fn signal(self: *Condition) void {
     if (self.wait_queue.pop()) |wait_node| {
-        wait_node.wake();
+        Waiter.fromWaitNode(wait_node).signal();
     }
 }
 
@@ -236,7 +236,7 @@ pub fn signal(self: *Condition) void {
 /// ```
 pub fn broadcast(self: *Condition) void {
     while (self.wait_queue.pop()) |wait_node| {
-        wait_node.wake();
+        Waiter.fromWaitNode(wait_node).signal();
     }
 }
 
