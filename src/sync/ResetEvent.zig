@@ -277,8 +277,8 @@ test "ResetEvent wait/set signaling" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_finished });
-    try group.spawn(runtime, TestFn.setter, .{&reset_event});
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_finished });
+    try group.spawn(TestFn.setter, .{&reset_event});
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -323,10 +323,10 @@ test "ResetEvent multiple waiters broadcast" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ &reset_event, &waiter_count });
-    try group.spawn(runtime, TestFn.setter, .{&reset_event});
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
+    try group.spawn(TestFn.setter, .{&reset_event});
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());

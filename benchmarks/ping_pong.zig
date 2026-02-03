@@ -46,8 +46,8 @@ pub fn main() !void {
     var group: zio.Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
-    try group.spawn(runtime, ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
+    try group.spawn(pinger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
+    try group.spawn(ponger, .{ runtime, &ping_channel, &pong_channel, NUM_ROUNDS });
 
     // Run until both tasks complete
     try group.wait();

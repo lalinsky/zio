@@ -40,7 +40,7 @@ pub fn main() !void {
     defer group.cancel();
 
     for (0..4) |i| {
-        try group.spawn(rt, incrementTask, .{ rt, &shared_data, @intCast(i) });
+        try group.spawn(incrementTask, .{ rt, &shared_data, @intCast(i) });
     }
 
     try group.wait();

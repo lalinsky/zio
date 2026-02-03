@@ -56,8 +56,8 @@ pub fn main() !void {
     defer group.cancel();
 
     for (0..2) |i| {
-        try group.spawn(rt, producer, .{ rt, &channel, @intCast(i) });
-        try group.spawn(rt, consumer, .{ rt, &channel, @intCast(i) });
+        try group.spawn(producer, .{ rt, &channel, @intCast(i) });
+        try group.spawn(consumer, .{ rt, &channel, @intCast(i) });
     }
 
     try group.wait();

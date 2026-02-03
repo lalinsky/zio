@@ -271,8 +271,8 @@ test "Condition basic wait/signal" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready });
-    try group.spawn(runtime, TestFn.signaler, .{ &mutex, &condition, &ready });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready });
+    try group.spawn(TestFn.signaler, .{ &mutex, &condition, &ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -345,10 +345,10 @@ test "Condition broadcast" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(runtime, TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(runtime, TestFn.broadcaster, .{ &mutex, &condition, &ready });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
+    try group.spawn(TestFn.broadcaster, .{ &mutex, &condition, &ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());

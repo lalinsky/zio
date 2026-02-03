@@ -58,7 +58,7 @@ pub fn main() !void {
         const stream = try server.accept();
         errdefer stream.close();
 
-        try group.spawn(rt, handleClient, .{ rt, stream });
+        try group.spawn(handleClient, .{ rt, stream });
     }
     // --8<-- [end:accept]
 }

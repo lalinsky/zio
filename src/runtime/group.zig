@@ -8,6 +8,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const getCurrentExecutor = @import("../runtime.zig").getCurrentExecutor;
 const beginShield = @import("../runtime.zig").beginShield;
 const endShield = @import("../runtime.zig").endShield;
+const sleep = @import("../runtime.zig").sleep;
 const JoinHandle = @import("../runtime.zig").JoinHandle;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
@@ -102,7 +103,8 @@ pub const Group = struct {
         return (@atomicLoad(u32, self.getState(), .acquire) & closed_bit) != 0;
     }
 
-    pub fn spawn(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+    pub fn spawn(self: *Group, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+        const rt = getCurrentExecutor().runtime;
         const Args = @TypeOf(args);
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
         const Context = struct { group: *Group, args: Args };
@@ -129,7 +131,8 @@ pub const Group = struct {
         return groupSpawnTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start);
     }
 
-    pub fn spawnBlocking(self: *Group, rt: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+    pub fn spawnBlocking(self: *Group, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+        const rt = getCurrentExecutor().runtime;
         const Args = @TypeOf(args);
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
         const Context = struct { group: *Group, args: Args };
@@ -278,17 +281,17 @@ test "Group: spawn" {
     defer rt.deinit();
 
     const TestContext = struct {
-        fn asyncTask(runtime: *Runtime) !void {
+        fn asyncTask() !void {
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(runtime, testFn, .{0});
+            try group.spawn(testFn, .{0});
 
             try group.wait();
         }
     };
 
-    var handle = try rt.spawn(TestContext.asyncTask, .{rt});
+    var handle = try rt.spawn(TestContext.asyncTask, .{});
     try handle.join();
 }
 
@@ -299,19 +302,19 @@ test "Group: wait for multiple tasks" {
     const TestContext = struct {
         var completed: usize = 0;
 
-        fn task(_: *Runtime) void {
+        fn task() void {
             _ = @atomicRmw(usize, &completed, .Add, 1, .monotonic);
         }
 
-        fn asyncTask(runtime: *Runtime) !void {
+        fn asyncTask() !void {
             completed = 0;
 
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(runtime, task, .{runtime});
-            try group.spawn(runtime, task, .{runtime});
-            try group.spawn(runtime, task, .{runtime});
+            try group.spawn(task, .{});
+            try group.spawn(task, .{});
+            try group.spawn(task, .{});
 
             try group.wait();
 
@@ -319,7 +322,7 @@ test "Group: wait for multiple tasks" {
         }
     };
 
-    var handle = try rt.spawn(TestContext.asyncTask, .{rt});
+    var handle = try rt.spawn(TestContext.asyncTask, .{});
     try handle.join();
 }
 
@@ -331,9 +334,9 @@ test "Group: cancellation while waiting" {
         var started: usize = 0;
         var canceled: usize = 0;
 
-        fn slowTask(runtime: *Runtime) void {
+        fn slowTask() void {
             _ = @atomicRmw(usize, &started, .Add, 1, .monotonic);
-            runtime.sleep(.fromMilliseconds(1000)) catch {
+            sleep(.fromMilliseconds(1000)) catch {
                 _ = @atomicRmw(usize, &canceled, .Add, 1, .monotonic);
             };
         }
@@ -345,14 +348,14 @@ test "Group: cancellation while waiting" {
             group_handle.awaitable.?.cancel();
         }
 
-        fn groupTask(runtime: *Runtime) anyerror!void {
+        fn groupTask() anyerror!void {
             var group: Group = .init;
             defer group.cancel();
 
             // Spawn multiple slow tasks
-            try group.spawn(runtime, slowTask, .{runtime});
-            try group.spawn(runtime, slowTask, .{runtime});
-            try group.spawn(runtime, slowTask, .{runtime});
+            try group.spawn(slowTask, .{});
+            try group.spawn(slowTask, .{});
+            try group.spawn(slowTask, .{});
 
             // This wait should be interrupted by cancellation
             group.wait() catch {};
@@ -363,7 +366,7 @@ test "Group: cancellation while waiting" {
             canceled = 0;
 
             // Spawn the group task
-            var group_handle = try runtime.spawn(groupTask, .{runtime});
+            var group_handle = try runtime.spawn(groupTask, .{});
 
             // Spawn a task that will cancel the group task
             var canceller = try runtime.spawn(cancellerTask, .{ runtime, &group_handle });

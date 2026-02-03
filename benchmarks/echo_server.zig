@@ -38,7 +38,7 @@ fn serverTask(rt: *zio.Runtime, ready: *zio.ResetEvent, done: *zio.ResetEvent) !
         var stream = try server.accept();
         errdefer stream.close();
 
-        try group.spawn(rt, handleClient, .{ rt, stream });
+        try group.spawn(handleClient, .{ rt, stream });
     }
 
     try done.wait();
@@ -108,7 +108,7 @@ pub fn main() !void {
     defer client_group.cancel();
 
     for (0..NUM_CLIENTS) |_| {
-        try client_group.spawn(rt, clientTask, .{ rt, &server_ready });
+        try client_group.spawn(clientTask, .{ rt, &server_ready });
     }
     try client_group.wait();
 

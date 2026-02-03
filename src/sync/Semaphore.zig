@@ -181,9 +181,9 @@ test "Semaphore: basic wait/post" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{ &sem, &n });
-    try group.spawn(runtime, TestFn.worker, .{ &sem, &n });
-    try group.spawn(runtime, TestFn.worker, .{ &sem, &n });
+    try group.spawn(TestFn.worker, .{ &sem, &n });
+    try group.spawn(TestFn.worker, .{ &sem, &n });
+    try group.spawn(TestFn.worker, .{ &sem, &n });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -237,8 +237,8 @@ test "Semaphore: timedWait success" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.waiter, .{ &sem, &got_permit });
-    try group.spawn(runtime, TestFn.poster, .{&sem});
+    try group.spawn(TestFn.waiter, .{ &sem, &got_permit });
+    try group.spawn(TestFn.poster, .{&sem});
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -263,9 +263,9 @@ test "Semaphore: multiple permits" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{&sem});
-    try group.spawn(runtime, TestFn.worker, .{&sem});
-    try group.spawn(runtime, TestFn.worker, .{&sem});
+    try group.spawn(TestFn.worker, .{&sem});
+    try group.spawn(TestFn.worker, .{&sem});
+    try group.spawn(TestFn.worker, .{&sem});
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());

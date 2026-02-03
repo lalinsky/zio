@@ -393,8 +393,8 @@ test "Signal: basic signal handling" {
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
             try group.wait();
         }
@@ -434,10 +434,10 @@ test "Signal: multiple handlers for same signal" {
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, waitForSignal, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(waitForSignal, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
             try group.wait();
         }
@@ -508,8 +508,8 @@ test "Signal: timedWait receives signal before timeout" {
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(r, waitForSignalTimed, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignalTimed, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
             try group.wait();
         }
@@ -551,8 +551,8 @@ test "Signal: select on multiple signals" {
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(r, waitForSignals, .{ self, r });
-            try group.spawn(r, sendSignal, .{r});
+            try group.spawn(waitForSignals, .{ self, r });
+            try group.spawn(sendSignal, .{r});
 
             try group.wait();
         }

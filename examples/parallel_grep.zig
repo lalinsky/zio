@@ -136,11 +136,11 @@ pub fn main() !void {
     // Start worker tasks
     const num_workers = 4;
     for (0..num_workers) |i| {
-        try workers_group.spawn(rt, worker, .{ gpa, cwd, i, &work_channel, &results_channel, pattern });
+        try workers_group.spawn(worker, .{ gpa, cwd, i, &work_channel, &results_channel, pattern });
     }
 
     // Start collector task
-    try collector_group.spawn(rt, collector, .{ gpa, &results_channel });
+    try collector_group.spawn(collector, .{ gpa, &results_channel });
 
     // Distribute work
     for (files) |file_path| {

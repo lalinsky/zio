@@ -58,10 +58,10 @@ pub fn main() !void {
     defer group.cancel();
 
     // Spawn server task
-    try group.spawn(rt, serverTask, .{ rt, &shutdown });
+    try group.spawn(serverTask, .{ rt, &shutdown });
 
     // Spawn signal handler task
-    try group.spawn(rt, signalHandler, .{ rt, &shutdown });
+    try group.spawn(signalHandler, .{ rt, &shutdown });
 
     // Run until all tasks complete
     try group.wait();

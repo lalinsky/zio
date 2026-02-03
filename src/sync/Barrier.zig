@@ -152,7 +152,7 @@ test "Barrier: basic synchronization" {
     defer group.cancel();
 
     for (&results) |*result| {
-        try group.spawn(runtime, TestFn.worker, .{ &barrier, &counter, result });
+        try group.spawn(TestFn.worker, .{ &barrier, &counter, result });
     }
 
     try group.wait();
@@ -183,9 +183,9 @@ test "Barrier: leader detection" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{ &barrier, &leader_count });
-    try group.spawn(runtime, TestFn.worker, .{ &barrier, &leader_count });
-    try group.spawn(runtime, TestFn.worker, .{ &barrier, &leader_count });
+    try group.spawn(TestFn.worker, .{ &barrier, &leader_count });
+    try group.spawn(TestFn.worker, .{ &barrier, &leader_count });
+    try group.spawn(TestFn.worker, .{ &barrier, &leader_count });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -222,8 +222,8 @@ test "Barrier: reusable for multiple cycles" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
-    try group.spawn(runtime, TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
+    try group.spawn(TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
+    try group.spawn(TestFn.worker, .{ &barrier, &phase1_done, &phase2_done, &phase3_done });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -280,7 +280,7 @@ test "Barrier: ordering test" {
     defer group.cancel();
 
     for (&arrivals) |*my_arrival| {
-        try group.spawn(runtime, TestFn.worker, .{ &barrier, &arrival_order, my_arrival, &final_order });
+        try group.spawn(TestFn.worker, .{ &barrier, &arrival_order, my_arrival, &final_order });
     }
 
     try group.wait();
@@ -318,7 +318,7 @@ test "Barrier: many coroutines" {
     defer group.cancel();
 
     for (&final_counts) |*result| {
-        try group.spawn(runtime, TestFn.worker, .{ &barrier, &counter, result });
+        try group.spawn(TestFn.worker, .{ &barrier, &counter, result });
     }
 
     try group.wait();

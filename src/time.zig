@@ -700,6 +700,6 @@ test "Timeout future: timeout wins select" {
 
     var group: Group = .init;
     defer group.cancel();
-    try group.spawn(runtime, TestFn.run, .{ runtime, &channel });
+    try group.spawn(TestFn.run, .{ runtime, &channel });
     try group.wait();
 }

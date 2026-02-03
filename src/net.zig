@@ -1588,8 +1588,8 @@ test "tcpConnectToAddress: basic" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, ServerTask.run, .{&server_port_ch});
-    try group.spawn(runtime, ClientTask.run, .{&server_port_ch});
+    try group.spawn(ServerTask.run, .{&server_port_ch});
+    try group.spawn(ClientTask.run, .{&server_port_ch});
 
     try group.wait();
 }
@@ -1645,8 +1645,8 @@ test "tcpConnectToHost: basic" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, ServerTask.run, .{&server_port_ch});
-    try group.spawn(runtime, ClientTask.run, .{&server_port_ch});
+    try group.spawn(ServerTask.run, .{&server_port_ch});
+    try group.spawn(ClientTask.run, .{&server_port_ch});
 
     try group.wait();
 }
@@ -1950,15 +1950,15 @@ test "UnixAddress: init" {
 
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const Test = struct {
-        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
+        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
             const server = try addr_inner.listen(options_inner);
             defer server.close();
 
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(rt, serverFn, .{server});
-            try group.spawn(rt, clientFn, .{ server, write_buffer_inner });
+            try group.spawn(serverFn, .{server});
+            try group.spawn(clientFn, .{ server, write_buffer_inner });
 
             try group.wait();
         }
@@ -1992,21 +1992,21 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options, write_buffer });
+    var handle = try runtime.spawn(Test.mainFn, .{ addr, options, write_buffer });
     try handle.join();
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const Test = struct {
-        pub fn mainFn(rt: *Runtime, server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
+        pub fn mainFn(server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
             const socket = try server_addr_inner.bind(.{});
             defer socket.close();
 
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(rt, serverFn, .{socket});
-            try group.spawn(rt, clientFn, .{ socket, client_addr_inner });
+            try group.spawn(serverFn, .{socket});
+            try group.spawn(clientFn, .{ socket, client_addr_inner });
 
             try group.wait();
         }
@@ -2038,21 +2038,21 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, server_addr, client_addr });
+    var handle = try runtime.spawn(Test.mainFn, .{ server_addr, client_addr });
     try handle.join();
 }
 
 pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const Test = struct {
-        pub fn mainFn(rt: *Runtime, addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
+        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
             const server = try addr_inner.listen(options_inner);
             defer server.close();
 
             var group: Group = .init;
             defer group.cancel();
 
-            try group.spawn(rt, serverFn, .{server});
-            try group.spawn(rt, clientFn, .{server});
+            try group.spawn(serverFn, .{server});
+            try group.spawn(clientFn, .{server});
 
             try group.wait();
         }
@@ -2079,7 +2079,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ runtime, addr, options });
+    var handle = try runtime.spawn(Test.mainFn, .{ addr, options });
     try handle.join();
 }
 

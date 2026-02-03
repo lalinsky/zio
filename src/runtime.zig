@@ -743,6 +743,12 @@ pub fn endShield() void {
     getCurrentTask().endShield();
 }
 
+/// Sleep for a specified duration.
+pub fn sleep(duration: Duration) Cancelable!void {
+    const rt = getCurrentExecutor().runtime;
+    return rt.sleep(duration);
+}
+
 // Runtime - orchestrator for one or more Executors
 pub const Runtime = struct {
     thread_pool: ev.ThreadPool,
@@ -1308,7 +1314,7 @@ test "runtime: multi-threaded execution with 2 executors" {
     defer group.cancel();
 
     for (0..4) |_| {
-        try group.spawn(runtime, TestContext.task, .{runtime});
+        try group.spawn(TestContext.task, .{runtime});
     }
 
     try group.wait();

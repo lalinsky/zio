@@ -28,7 +28,7 @@ pub fn main() !void {
     defer group.cancel();
 
     for (0..NUM_SPAWNS) |_| {
-        try group.spawn(runtime, task, .{runtime});
+        try group.spawn(task, .{runtime});
     }
 
     try group.wait();

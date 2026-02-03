@@ -158,8 +158,8 @@ test "Mutex basic lock/unlock" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
-    try group.spawn(runtime, TestFn.worker, .{ runtime, &shared_counter, &mutex });
+    try group.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
+    try group.spawn(TestFn.worker, .{ runtime, &shared_counter, &mutex });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
