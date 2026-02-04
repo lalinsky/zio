@@ -7,6 +7,7 @@ pub const path = std.fs.path;
 
 pub const posix = @import("posix.zig");
 pub const windows = @import("windows.zig");
+pub const thread_wait = @import("thread_wait.zig");
 
 pub const iovec = fs.iovec;
 pub const iovec_const = fs.iovec_const;

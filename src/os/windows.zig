@@ -28,6 +28,7 @@ pub const TRUE: BOOL = 1;
 pub const FALSE: BOOL = 0;
 pub const NAME_MAX = std.os.windows.NAME_MAX;
 pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
+pub const INFINITE: DWORD = std.os.windows.INFINITE;
 
 /// Sentinel value representing the current working directory.
 /// Similar to POSIX AT_FDCWD. This is not a real handle - it must be
@@ -260,6 +261,23 @@ pub extern "kernel32" fn SleepEx(
     dwMilliseconds: DWORD,
     bAlertable: BOOL,
 ) callconv(.winapi) DWORD;
+
+// Thread synchronization functions (Windows 8+)
+// Use ntdll versions to avoid linking against synchronization.lib
+pub extern "ntdll" fn RtlWaitOnAddress(
+    Address: ?*const anyopaque,
+    CompareAddress: ?*const anyopaque,
+    AddressSize: SIZE_T,
+    Timeout: ?*const LARGE_INTEGER,
+) callconv(.winapi) NTSTATUS;
+
+pub extern "ntdll" fn RtlWakeAddressSingle(
+    Address: ?*const anyopaque,
+) callconv(.winapi) void;
+
+pub extern "ntdll" fn RtlWakeAddressAll(
+    Address: ?*const anyopaque,
+) callconv(.winapi) void;
 
 // Console functions
 pub extern "kernel32" fn SetConsoleCtrlHandler(

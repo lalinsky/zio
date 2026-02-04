@@ -12,6 +12,7 @@ const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("runtime/WaitNode.zig");
+const thread_wait = @import("os/thread_wait.zig");
 
 /// Error set for operations that can be cancelled
 pub const Cancelable = error{
@@ -69,8 +70,7 @@ pub const Waiter = struct {
         if (self.task) |task| {
             task.wake();
         } else {
-            // TODO: use custom futex implementation (std.Thread stuff is being removed in Zig 0.16)
-            std.Thread.Futex.wake(&self.signaled, std.math.maxInt(u32));
+            thread_wait.wake(&self.signaled, 1);
         }
     }
 
@@ -93,7 +93,7 @@ pub const Waiter = struct {
             if (current >= expected) {
                 return;
             }
-            std.Thread.Futex.wait(&self.signaled, current);
+            thread_wait.wait(&self.signaled, current);
         }
     }
 
@@ -137,7 +137,7 @@ pub const Waiter = struct {
             if (remaining.value <= 0) {
                 return;
             }
-            std.Thread.Futex.timedWait(&self.signaled, current, remaining.toNanoseconds()) catch {};
+            thread_wait.timedWait(&self.signaled, current, remaining.toNanoseconds());
         }
     }
 
