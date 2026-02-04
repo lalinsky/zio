@@ -30,9 +30,12 @@ pub const FUTEX_PRIVATE_FLAG: u32 = 128;
 /// - FUTEX_WAIT: Block if *uaddr == val, wake on FUTEX_WAKE
 /// - FUTEX_WAKE: Wake up to val waiters on uaddr
 /// - FUTEX_PRIVATE_FLAG: Optimize for process-private futex (no cross-process wake)
+///
+/// Note: On newer architectures (e.g., RISC-V 32-bit), the old futex syscall
+/// doesn't exist and futex_time64 is used instead.
 pub fn futex(uaddr: *const u32, futex_op: u32, val: u32, timeout: ?*const std.posix.timespec, uaddr2: ?*const u32, val3: u32) usize {
     return linux.syscall6(
-        .futex,
+        if (@hasField(linux.SYS, "futex")) .futex else .futex_time64,
         @intFromPtr(uaddr),
         futex_op,
         val,
