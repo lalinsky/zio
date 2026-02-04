@@ -74,6 +74,25 @@ pub const Event = switch (builtin.os.tag) {
     else => EventFutex,
 };
 
+/// Mutex for thread synchronization.
+///
+/// A blocking mutex that uses futex-based locking where available and falls back
+/// to pthread on platforms without futex support.
+///
+/// Example usage:
+/// ```zig
+/// var mutex: Mutex = .init();
+/// defer mutex.deinit();
+///
+/// mutex.lock();
+/// defer mutex.unlock();
+/// // critical section
+/// ```
+pub const Mutex = switch (builtin.os.tag) {
+    .netbsd => MutexPthread,
+    else => MutexFutex,
+};
+
 const FutexLinux = struct {
     fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
         const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
@@ -322,6 +341,139 @@ const EventNetBSD = struct {
 };
 
 // ============================================================================
+// Mutex implementations
+// ============================================================================
+
+/// Futex-based mutex for platforms with futex-like primitives.
+///
+/// Uses a three-state model:
+/// - 0b00 (0): unlocked
+/// - 0b01 (1): locked, no waiters
+/// - 0b11 (3): locked, with waiters
+///
+/// The contended state uses 0b11 instead of 0b10 to keep bit 0 set when locked.
+/// This enables x86 optimization using `lock bts` instead of `lock cmpxchg` for tryLock.
+///
+/// This minimizes futex syscalls in the uncontended case.
+const MutexFutex = struct {
+    // TODO(darwin): Consider using os_unfair_lock for better performance
+    // TODO(windows): Consider using SRWLOCK or CRITICAL_SECTION for better performance
+    state: std.atomic.Value(u32) = .init(0),
+
+    const UNLOCKED: u32 = 0b00;
+    const LOCKED: u32 = 0b01;
+    const LOCKED_WITH_WAITERS: u32 = 0b11; // must contain the `locked` bit for x86 optimization
+
+    pub fn init() MutexFutex {
+        return .{};
+    }
+
+    pub fn deinit(self: *MutexFutex) void {
+        _ = self;
+    }
+
+    pub fn lock(self: *MutexFutex) void {
+        // Fast path: try to acquire unlocked mutex
+        if (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) == null) {
+            return;
+        }
+
+        // Slow path: mutex is contended
+        self.lockSlow();
+    }
+
+    fn lockSlow(self: *MutexFutex) void {
+        // First try spinning a bit
+        var spin: u32 = 0;
+        while (spin < 100) : (spin += 1) {
+            const state = self.state.load(.monotonic);
+            if (state == UNLOCKED) {
+                if (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) == null) {
+                    return;
+                }
+            }
+            std.atomic.spinLoopHint();
+        }
+
+        // Avoid doing an atomic swap below if we already know the state is contended.
+        // An atomic swap unconditionally stores which marks the cache-line as modified unnecessarily.
+        if (self.state.load(.monotonic) == LOCKED_WITH_WAITERS) {
+            Futex.wait(&self.state, LOCKED_WITH_WAITERS, null);
+        }
+
+        // Try to acquire the lock while also telling the existing lock holder that there are threads waiting.
+        //
+        // Once we sleep on the Futex, we must acquire the mutex using `LOCKED_WITH_WAITERS` rather than `LOCKED`.
+        // If not, threads sleeping on the Futex wouldn't see the state change in unlock and potentially deadlock.
+        // The downside is that the last mutex unlocker will see `LOCKED_WITH_WAITERS` and do an unnecessary Futex wake
+        // but this is better than having to wake all waiting threads on mutex unlock.
+        //
+        // Acquire barrier ensures grabbing the lock happens before the critical section
+        // and that the previous lock holder's critical section happens before we grab the lock.
+        while (self.state.swap(LOCKED_WITH_WAITERS, .acquire) != UNLOCKED) {
+            Futex.wait(&self.state, LOCKED_WITH_WAITERS, null);
+        }
+    }
+
+    pub fn unlock(self: *MutexFutex) void {
+        // Unlock the mutex and wake up a waiting thread if any.
+        //
+        // A waiting thread will acquire with `LOCKED_WITH_WAITERS` instead of `LOCKED`
+        // which ensures that it wakes up another thread on the next unlock().
+        //
+        // Release barrier ensures the critical section happens before we let go of the lock
+        // and that our critical section happens before the next lock holder grabs the lock.
+        const state = self.state.swap(UNLOCKED, .release);
+        std.debug.assert(state != UNLOCKED);
+
+        if (state == LOCKED_WITH_WAITERS) {
+            Futex.wake(&self.state, .one);
+        }
+    }
+
+    pub fn tryLock(self: *MutexFutex) bool {
+        // On x86, use `lock bts` instead of `lock cmpxchg` as:
+        // - they both seem to mark the cache-line as modified regardless: https://stackoverflow.com/a/63350048
+        // - `lock bts` is smaller instruction-wise which makes it better for inlining
+        if (builtin.target.cpu.arch.isX86()) {
+            const locked_bit = @ctz(LOCKED);
+            return self.state.bitSet(locked_bit, .acquire) == 0;
+        }
+
+        // Acquire barrier ensures grabbing the lock happens before the critical section
+        // and that the previous lock holder's critical section happens before we grab the lock.
+        return self.state.cmpxchgStrong(UNLOCKED, LOCKED, .acquire, .monotonic) == null;
+    }
+};
+
+/// Pthread-based mutex for platforms without futex support.
+const MutexPthread = struct {
+    mutex: sys.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+
+    pub fn init() MutexPthread {
+        return .{};
+    }
+
+    pub fn deinit(self: *MutexPthread) void {
+        _ = sys.pthread_mutex_destroy(&self.mutex);
+    }
+
+    pub fn lock(self: *MutexPthread) void {
+        const rc = sys.pthread_mutex_lock(&self.mutex);
+        std.debug.assert(rc == 0);
+    }
+
+    pub fn unlock(self: *MutexPthread) void {
+        const rc = sys.pthread_mutex_unlock(&self.mutex);
+        std.debug.assert(rc == 0);
+    }
+
+    pub fn tryLock(self: *MutexPthread) bool {
+        return sys.pthread_mutex_trylock(&self.mutex) == 0;
+    }
+};
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -420,4 +572,74 @@ test "Event - timeout" {
     // Allow some slack for scheduling
     try std.testing.expect(elapsed >= 40 * std.time.ns_per_ms);
     try std.testing.expect(elapsed < 200 * std.time.ns_per_ms);
+}
+
+test "Mutex - basic lock and unlock" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+
+    mutex.lock();
+    mutex.unlock();
+}
+
+test "Mutex - tryLock" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+
+    try std.testing.expect(mutex.tryLock());
+    try std.testing.expect(!mutex.tryLock());
+    mutex.unlock();
+    try std.testing.expect(mutex.tryLock());
+    mutex.unlock();
+}
+
+test "Mutex - contention" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+
+    var counter: u32 = 0;
+    var ready = std.atomic.Value(u32).init(0);
+
+    const Context = struct {
+        mutex: *Mutex,
+        counter: *u32,
+        ready: *std.atomic.Value(u32),
+    };
+
+    const worker = struct {
+        fn run(ctx: *Context) void {
+            _ = ctx.ready.fetchAdd(1, .release);
+
+            // Wait for all threads to be ready
+            while (ctx.ready.load(.acquire) < 4) {
+                std.Thread.yield() catch {};
+            }
+
+            var i: u32 = 0;
+            while (i < 100) : (i += 1) {
+                ctx.mutex.lock();
+                ctx.counter.* += 1;
+                ctx.mutex.unlock();
+            }
+        }
+    }.run;
+
+    var ctx = Context{ .mutex = &mutex, .counter = &counter, .ready = &ready };
+    var threads: [4]std.Thread = undefined;
+
+    for (&threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, worker, .{&ctx});
+    }
+
+    for (threads) |t| {
+        t.join();
+    }
+
+    try std.testing.expectEqual(@as(u32, 400), counter);
 }
