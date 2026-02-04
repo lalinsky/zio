@@ -277,6 +277,15 @@ const EventFutex = struct {
 };
 
 /// NetBSD event using native _lwp_park/_lwp_unpark
+///
+/// Implementation note: _lwp_park/_lwp_unpark handles signal-before-wait races safely.
+/// If _lwp_unpark() is called before the LWP calls _lwp_park(), the kernel sets the
+/// LW_UNPARKED flag on the target LWP. When that LWP later calls _lwp_park(), it
+/// immediately returns EALREADY without blocking. This means signal() can be called
+/// before wait() without losing the wakeup.
+///
+/// The lwp_id is captured at init() time, so this Event must be created on the same
+/// thread that will call wait(). Other threads can safely call signal().
 const EventNetBSD = struct {
     state: std.atomic.Value(u32) = .init(0),
     lwp_id: c_int,
@@ -293,6 +302,8 @@ const EventNetBSD = struct {
 
         const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
+        // Safe to call even if signal() was already called - the kernel remembers
+        // the unpark and will return EALREADY immediately without blocking.
         _ = sys.___lwp_park60(
             @intFromEnum(std.posix.CLOCK.MONOTONIC),
             0,
@@ -305,6 +316,7 @@ const EventNetBSD = struct {
 
     pub fn signal(self: *EventNetBSD) void {
         _ = self.state.fetchAdd(1, .release);
+        // Safe to call before wait() - sets LW_UNPARKED flag that park() will check
         _ = sys._lwp_unpark(self.lwp_id, null);
     }
 };
