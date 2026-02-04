@@ -10,6 +10,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Duration = @import("../time.zig").Duration;
+const Timeout = @import("../time.zig").Timeout;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 
@@ -97,6 +98,40 @@ pub const Mutex = switch (builtin.os.tag) {
     .windows => MutexWindows,
     .netbsd => MutexEvent,
     else => |t| if (t.isDarwin()) MutexDarwin else MutexFutex,
+};
+
+/// Condition variable for thread synchronization.
+///
+/// A blocking condition variable that uses platform-specific primitives:
+/// - Windows: CONDITION_VARIABLE
+/// - Other platforms: Event-based with WaitQueue
+///
+/// Condition variables allow threads to wait for certain conditions to become true
+/// while cooperating with other threads. They are always used in conjunction with
+/// a Mutex to protect the shared state being checked.
+///
+/// Example usage:
+/// ```zig
+/// var mutex: Mutex = .init();
+/// var cond: Condition = .init();
+/// var ready = false;
+///
+/// // Waiter thread
+/// mutex.lock();
+/// while (!ready) {
+///     cond.wait(&mutex);
+/// }
+/// mutex.unlock();
+///
+/// // Signaler thread
+/// mutex.lock();
+/// ready = true;
+/// mutex.unlock();
+/// cond.signal();
+/// ```
+pub const Condition = switch (builtin.os.tag) {
+    .windows => ConditionWindows,
+    else => ConditionEvent,
 };
 
 const FutexLinux = struct {
@@ -509,33 +544,6 @@ const MutexDarwin = struct {
     }
 };
 
-/// Pthread-based mutex for platforms without futex support.
-const MutexPthread = struct {
-    mutex: sys.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
-
-    pub fn init() MutexPthread {
-        return .{};
-    }
-
-    pub fn deinit(self: *MutexPthread) void {
-        _ = sys.pthread_mutex_destroy(&self.mutex);
-    }
-
-    pub fn lock(self: *MutexPthread) void {
-        const rc = sys.pthread_mutex_lock(&self.mutex);
-        std.debug.assert(rc == 0);
-    }
-
-    pub fn unlock(self: *MutexPthread) void {
-        const rc = sys.pthread_mutex_unlock(&self.mutex);
-        std.debug.assert(rc == 0);
-    }
-
-    pub fn tryLock(self: *MutexPthread) bool {
-        return sys.pthread_mutex_trylock(&self.mutex) == 0;
-    }
-};
-
 /// Event-based mutex using WaitQueue for platforms with Event support.
 ///
 /// Uses the same pattern as zio.Mutex but for blocking OS threads:
@@ -603,6 +611,172 @@ const MutexEvent = struct {
         // Pop one waiter or transition from locked_once to unlocked
         // Last waiter stays in locked_once (inherits the lock)
         if (self.queue.popOrTransition(locked_once, unlocked, locked_once)) |wait_node| {
+            const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
+            waiter.event.signal();
+        }
+    }
+};
+
+/// Windows CONDITION_VARIABLE-based condition variable (Vista+).
+const ConditionWindows = struct {
+    cond: sys.CONDITION_VARIABLE = sys.CONDITION_VARIABLE_INIT,
+
+    pub fn init() ConditionWindows {
+        return .{};
+    }
+
+    pub fn deinit(self: *ConditionWindows) void {
+        _ = self;
+        // CONDITION_VARIABLE doesn't require cleanup
+    }
+
+    /// Wait for a signal. The mutex must be held when calling this.
+    /// The mutex is atomically released and the thread blocks.
+    /// When signaled, the mutex is automatically reacquired before returning.
+    pub fn wait(self: *ConditionWindows, mutex: *Mutex) void {
+        const result = sys.SleepConditionVariableSRW(&self.cond, &mutex.srwlock, sys.INFINITE, 0);
+        std.debug.assert(result != sys.FALSE);
+    }
+
+    /// Wait for a signal with a timeout.
+    /// Returns error.Timeout if the timeout expires before being signaled.
+    pub fn timedWait(self: *ConditionWindows, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
+        if (timeout == .none) {
+            return self.wait(mutex);
+        }
+
+        const duration = timeout.durationFromNow();
+        const ms = @min(duration.toMilliseconds(), std.math.maxInt(sys.DWORD));
+        const result = sys.SleepConditionVariableSRW(&self.cond, &mutex.srwlock, @intCast(ms), 0);
+        if (result == sys.FALSE) {
+            const err = std.os.windows.kernel32.GetLastError();
+            if (err == .TIMEOUT) {
+                return error.Timeout;
+            }
+            std.debug.panic("SleepConditionVariableSRW failed with error {}", .{err});
+        }
+    }
+
+    /// Wake one waiting thread.
+    pub fn signal(self: *ConditionWindows) void {
+        sys.WakeConditionVariable(&self.cond);
+    }
+
+    /// Wake all waiting threads.
+    pub fn broadcast(self: *ConditionWindows) void {
+        sys.WakeAllConditionVariable(&self.cond);
+    }
+};
+
+/// Event-based condition variable using WaitQueue.
+///
+/// Uses the same pattern as zio.Condition but for blocking OS threads:
+/// - WaitQueue manages the list of waiting threads
+/// - Stack-allocated waiters block on Events instead of suspending coroutines
+/// - Works with any Mutex type
+const ConditionEvent = struct {
+    /// Stack-allocated waiter that blocks an OS thread
+    const Waiter = struct {
+        wait_node: WaitNode,
+        event: Event,
+
+        fn init() Waiter {
+            return .{
+                .wait_node = .{ .vtable = &.{} },
+                .event = Event.init(),
+            };
+        }
+    };
+
+    wait_queue: WaitQueue(WaitNode) = .empty,
+
+    pub fn init() ConditionEvent {
+        return .{};
+    }
+
+    pub fn deinit(self: *ConditionEvent) void {
+        _ = self;
+    }
+
+    /// Wait for a signal. The mutex must be held when calling this.
+    /// The mutex is atomically released and the thread blocks.
+    /// When signaled, the mutex is automatically reacquired before returning.
+    pub fn wait(self: *ConditionEvent, mutex: *Mutex) void {
+        var waiter = Waiter.init();
+
+        // Add to wait queue before releasing mutex
+        self.wait_queue.push(&waiter.wait_node);
+
+        // Atomically release mutex
+        mutex.unlock();
+
+        // Wait for signal - handles spurious wakeups
+        while (true) {
+            const current = waiter.event.state.load(.acquire);
+            if (current >= 1) break;
+            waiter.event.wait(current, null);
+        }
+
+        // Re-acquire mutex after waking
+        mutex.lock();
+    }
+
+    /// Wait for a signal with a timeout.
+    /// Returns error.Timeout if the timeout expires before being signaled.
+    pub fn timedWait(self: *ConditionEvent, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
+        if (timeout == .none) {
+            return self.wait(mutex);
+        }
+
+        var waiter = Waiter.init();
+
+        self.wait_queue.push(&waiter.wait_node);
+
+        // Atomically release mutex
+        mutex.unlock();
+
+        // Wait for signal or timeout - handles spurious wakeups
+        const deadline = timeout.toDeadline();
+        while (true) {
+            const current = waiter.event.state.load(.acquire);
+            if (current >= 1) break;
+
+            const remaining = deadline.durationFromNow();
+            if (remaining.value <= 0) break;
+
+            waiter.event.wait(current, remaining);
+        }
+
+        // Determine winner: can we remove ourselves from queue?
+        const timed_out = self.wait_queue.remove(&waiter.wait_node);
+
+        // Re-acquire mutex
+        mutex.lock();
+
+        if (timed_out) {
+            // We successfully removed ourselves - we timed out
+            return error.Timeout;
+        }
+
+        // We were already removed by signal() - ensure signal completed
+        while (true) {
+            const current = waiter.event.state.load(.acquire);
+            if (current >= 1) break;
+            waiter.event.wait(current, null);
+        }
+    }
+
+    /// Wake one waiting thread.
+    pub fn signal(self: *ConditionEvent) void {
+        if (self.wait_queue.pop()) |wait_node| {
+            const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
+            waiter.event.signal();
+        }
+    }
+
+    /// Wake all waiting threads.
+    pub fn broadcast(self: *ConditionEvent) void {
+        while (self.wait_queue.pop()) |wait_node| {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
             waiter.event.signal();
         }
@@ -778,4 +952,143 @@ test "Mutex - contention" {
     }
 
     try std.testing.expectEqual(@as(u32, 400), counter);
+}
+
+test "Condition - basic wait and signal" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+    var cond = Condition.init();
+    defer cond.deinit();
+    var ready = std.atomic.Value(bool).init(false);
+    var thread_ready = std.atomic.Value(bool).init(false);
+
+    const Context = struct {
+        mutex: *Mutex,
+        cond: *Condition,
+        ready: *std.atomic.Value(bool),
+        thread_ready: *std.atomic.Value(bool),
+    };
+
+    const waiter = struct {
+        fn run(ctx: *Context) void {
+            ctx.mutex.lock();
+            ctx.thread_ready.store(true, .release);
+            while (!ctx.ready.load(.acquire)) {
+                ctx.cond.wait(ctx.mutex);
+            }
+            ctx.mutex.unlock();
+        }
+    }.run;
+
+    var ctx = Context{ .mutex = &mutex, .cond = &cond, .ready = &ready, .thread_ready = &thread_ready };
+    const thread = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    defer thread.join();
+
+    // Wait for thread to be ready
+    while (!thread_ready.load(.acquire)) {
+        std.Thread.yield() catch {};
+    }
+
+    // Signal the condition
+    mutex.lock();
+    ready.store(true, .release);
+    mutex.unlock();
+    cond.signal();
+}
+
+test "Condition - broadcast" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+    var cond = Condition.init();
+    defer cond.deinit();
+    var ready = std.atomic.Value(bool).init(false);
+    var count = std.atomic.Value(u32).init(0);
+    var threads_ready = std.atomic.Value(u32).init(0);
+
+    const Context = struct {
+        mutex: *Mutex,
+        cond: *Condition,
+        ready: *std.atomic.Value(bool),
+        count: *std.atomic.Value(u32),
+        threads_ready: *std.atomic.Value(u32),
+    };
+
+    const waiter = struct {
+        fn run(ctx: *Context) void {
+            ctx.mutex.lock();
+            _ = ctx.threads_ready.fetchAdd(1, .release);
+            while (!ctx.ready.load(.acquire)) {
+                ctx.cond.wait(ctx.mutex);
+            }
+            _ = ctx.count.fetchAdd(1, .acq_rel);
+            ctx.mutex.unlock();
+        }
+    }.run;
+
+    var ctx = Context{ .mutex = &mutex, .cond = &cond, .ready = &ready, .count = &count, .threads_ready = &threads_ready };
+    const t1 = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    const t2 = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    const t3 = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    defer t1.join();
+    defer t2.join();
+    defer t3.join();
+
+    // Wait for all threads to be ready
+    while (threads_ready.load(.acquire) < 3) {
+        std.Thread.yield() catch {};
+    }
+
+    // Broadcast to all waiters
+    mutex.lock();
+    ready.store(true, .release);
+    mutex.unlock();
+    cond.broadcast();
+}
+
+test "Condition - timedWait timeout" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+    var cond = Condition.init();
+    defer cond.deinit();
+    var timed_out = std.atomic.Value(bool).init(false);
+    var thread_ready = std.atomic.Value(bool).init(false);
+
+    const Context = struct {
+        mutex: *Mutex,
+        cond: *Condition,
+        timed_out: *std.atomic.Value(bool),
+        thread_ready: *std.atomic.Value(bool),
+    };
+
+    const waiter = struct {
+        fn run(ctx: *Context) void {
+            ctx.mutex.lock();
+            defer ctx.mutex.unlock();
+            ctx.thread_ready.store(true, .release);
+            ctx.cond.timedWait(ctx.mutex, .{ .duration = .fromMilliseconds(10) }) catch |err| {
+                if (err == error.Timeout) {
+                    ctx.timed_out.store(true, .release);
+                }
+            };
+        }
+    }.run;
+
+    var ctx = Context{ .mutex = &mutex, .cond = &cond, .timed_out = &timed_out, .thread_ready = &thread_ready };
+    const thread = try std.Thread.spawn(.{}, waiter, .{&ctx});
+
+    // Wait for thread to be ready
+    while (!thread_ready.load(.acquire)) {
+        std.Thread.yield() catch {};
+    }
+
+    // Don't signal - let it timeout
+    thread.join();
+
+    try std.testing.expect(timed_out.load(.acquire));
 }

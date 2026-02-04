@@ -302,6 +302,32 @@ pub extern "kernel32" fn ReleaseSRWLockExclusive(
     SRWLock: *SRWLOCK,
 ) callconv(.winapi) void;
 
+// CONDITION_VARIABLE synchronization (Windows Vista+)
+pub const CONDITION_VARIABLE = extern struct {
+    ptr: ?*anyopaque,
+};
+
+pub const CONDITION_VARIABLE_INIT: CONDITION_VARIABLE = .{ .ptr = null };
+
+pub extern "kernel32" fn InitializeConditionVariable(
+    ConditionVariable: *CONDITION_VARIABLE,
+) callconv(.winapi) void;
+
+pub extern "kernel32" fn SleepConditionVariableSRW(
+    ConditionVariable: *CONDITION_VARIABLE,
+    SRWLock: *SRWLOCK,
+    dwMilliseconds: DWORD,
+    Flags: ULONG,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn WakeConditionVariable(
+    ConditionVariable: *CONDITION_VARIABLE,
+) callconv(.winapi) void;
+
+pub extern "kernel32" fn WakeAllConditionVariable(
+    ConditionVariable: *CONDITION_VARIABLE,
+) callconv(.winapi) void;
+
 // Console functions
 pub extern "kernel32" fn SetConsoleCtrlHandler(
     HandlerRoutine: ?HANDLER_ROUTINE,

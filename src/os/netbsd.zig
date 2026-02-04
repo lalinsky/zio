@@ -20,10 +20,10 @@ pub extern "c" fn ___lwp_park60(
 
 pub extern "c" fn _lwp_unpark(target: c_int, hint: ?*const anyopaque) c_int;
 
-// pthread types and functions (forward to std.c)
-pub const pthread_mutex_t = std.c.pthread_mutex_t;
-pub const pthread_mutex_init = std.c.pthread_mutex_init;
-pub const pthread_mutex_destroy = std.c.pthread_mutex_destroy;
-pub const pthread_mutex_lock = std.c.pthread_mutex_lock;
-pub const pthread_mutex_unlock = std.c.pthread_mutex_unlock;
-pub const pthread_mutex_trylock = std.c.pthread_mutex_trylock;
+pub const pthread_cond_t = std.c.pthread_cond_t;
+pub const pthread_cond_init = std.c.pthread_cond_init;
+pub const pthread_cond_destroy = std.c.pthread_cond_destroy;
+pub const pthread_cond_wait = std.c.pthread_cond_wait;
+pub const pthread_cond_timedwait = std.c.pthread_cond_timedwait;
+pub const pthread_cond_signal = std.c.pthread_cond_signal;
+pub const pthread_cond_broadcast = std.c.pthread_cond_broadcast;
