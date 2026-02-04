@@ -147,18 +147,16 @@ const FutexWindows = struct {
 // ============================================================================
 
 const FutexDarwin = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
-        // __ulock_wait is undocumented but stable (Darwin 16+, macOS 10.12+)
-        // Used by LLVM libc++ internally
-        const UL_COMPARE_AND_WAIT = 1;
+    const darwin = @import("darwin.zig");
 
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
         const timeout_us: u32 = if (timeout_ns) |ns| blk: {
             const us = ns / std.time.ns_per_us;
             break :blk std.math.cast(u32, us) orelse std.math.maxInt(u32);
         } else 0;
 
-        _ = __ulock_wait(
-            UL_COMPARE_AND_WAIT,
+        _ = darwin.__ulock_wait(
+            darwin.UL_COMPARE_AND_WAIT,
             @constCast(&ptr.raw),
             current,
             timeout_us,
@@ -167,20 +165,13 @@ const FutexDarwin = struct {
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
-        const UL_COMPARE_AND_WAIT = 1;
-        const ULF_WAKE_THREAD = 0x100;
-        const ULF_WAKE_ALL = 0x200;
-
         const flags: u32 = switch (count) {
-            .one => UL_COMPARE_AND_WAIT | ULF_WAKE_THREAD,
-            .all => UL_COMPARE_AND_WAIT | ULF_WAKE_ALL,
+            .one => darwin.UL_COMPARE_AND_WAIT | darwin.ULF_WAKE_THREAD,
+            .all => darwin.UL_COMPARE_AND_WAIT | darwin.ULF_WAKE_ALL,
         };
 
-        _ = __ulock_wake(flags, @constCast(&ptr.raw), 0);
+        _ = darwin.__ulock_wake(flags, @constCast(&ptr.raw), 0);
     }
-
-    extern "c" fn __ulock_wait(operation: u32, addr: *u32, value: u64, timeout_us: u32) c_int;
-    extern "c" fn __ulock_wake(operation: u32, addr: *u32, wake_value: u64) c_int;
 };
 
 // ============================================================================
@@ -188,8 +179,7 @@ const FutexDarwin = struct {
 // ============================================================================
 
 const FutexFreeBSD = struct {
-    const UMTX_OP_WAIT_UINT = 11;
-    const UMTX_OP_WAKE = 3;
+    const freebsd = @import("freebsd.zig");
 
     fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
         const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
@@ -197,9 +187,9 @@ const FutexFreeBSD = struct {
             .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
         } else null;
 
-        _ = _umtx_op(
+        _ = freebsd._umtx_op(
             @constCast(&ptr.raw),
-            UMTX_OP_WAIT_UINT,
+            freebsd.UMTX_OP_WAIT_UINT,
             current,
             null,
             if (timeout_ts) |*ts| @ptrCast(@constCast(ts)) else null,
@@ -211,16 +201,14 @@ const FutexFreeBSD = struct {
             .one => 1,
             .all => std.math.maxInt(u32),
         };
-        _ = _umtx_op(
+        _ = freebsd._umtx_op(
             @constCast(&ptr.raw),
-            UMTX_OP_WAKE,
+            freebsd.UMTX_OP_WAKE,
             n,
             null,
             null,
         );
     }
-
-    extern "c" fn _umtx_op(obj: *u32, op: c_int, val: c_ulong, uaddr: ?*anyopaque, uaddr2: ?*anyopaque) c_int;
 };
 
 // ============================================================================
@@ -228,9 +216,7 @@ const FutexFreeBSD = struct {
 // ============================================================================
 
 const FutexOpenBSD = struct {
-    const FUTEX_WAIT = 1;
-    const FUTEX_WAKE = 2;
-    const FUTEX_PRIVATE_FLAG = 128;
+    const openbsd = @import("openbsd.zig");
 
     fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
         const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
@@ -238,9 +224,9 @@ const FutexOpenBSD = struct {
             .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
         } else null;
 
-        _ = futex(
+        _ = openbsd.futex(
             @constCast(&ptr.raw),
-            FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+            openbsd.FUTEX_WAIT | openbsd.FUTEX_PRIVATE_FLAG,
             @intCast(current),
             if (timeout_ts) |*ts| ts else null,
             null,
@@ -252,16 +238,14 @@ const FutexOpenBSD = struct {
             .one => 1,
             .all => std.math.maxInt(c_int),
         };
-        _ = futex(
+        _ = openbsd.futex(
             @constCast(&ptr.raw),
-            FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+            openbsd.FUTEX_WAKE | openbsd.FUTEX_PRIVATE_FLAG,
             n,
             null,
             null,
         );
     }
-
-    extern "c" fn futex(uaddr: *u32, op: c_int, val: c_int, timeout: ?*const std.posix.timespec, uaddr2: ?*u32) c_int;
 };
 
 // ============================================================================
@@ -269,12 +253,11 @@ const FutexOpenBSD = struct {
 // ============================================================================
 
 const FutexDragonFly = struct {
+    const dragonfly = @import("dragonfly.zig");
+
     fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
-        // Note: umtx_sleep's comparison is NOT atomic with sleep, but is
-        // "properly interlocked" with umtx_wakeup. This works correctly
-        // with our counter + loop pattern in Waiter.
-        _ = umtx_sleep(
-            @constCast(&ptr.raw),
+        _ = dragonfly.umtx_sleep(
+            &ptr.raw,
             @intCast(current),
             @intCast(timeout_ns orelse 0),
         );
@@ -285,11 +268,8 @@ const FutexDragonFly = struct {
             .one => 1,
             .all => std.math.maxInt(c_int),
         };
-        _ = umtx_wakeup(@constCast(&ptr.raw), n);
+        _ = dragonfly.umtx_wakeup(&ptr.raw, n);
     }
-
-    extern "c" fn umtx_sleep(addr: *const u32, value: c_int, timeout: c_int) c_int;
-    extern "c" fn umtx_wakeup(addr: *const u32, count: c_int) c_int;
 };
 
 // ============================================================================
@@ -316,12 +296,14 @@ const EventFutex = struct {
 
 /// NetBSD event using native _lwp_park/_lwp_unpark
 const EventNetBSD = struct {
+    const netbsd = @import("netbsd.zig");
+
     state: std.atomic.Value(u32) = .init(0),
     lwp_id: c_int,
 
     pub fn init() EventNetBSD {
         return .{
-            .lwp_id = _lwp_self(),
+            .lwp_id = netbsd._lwp_self(),
         };
     }
 
@@ -334,7 +316,7 @@ const EventNetBSD = struct {
             .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
         } else null;
 
-        _ = ___lwp_park60(
+        _ = netbsd.___lwp_park60(
             @intFromEnum(std.posix.CLOCK.MONOTONIC),
             0,
             if (timeout_ts) |*ts| ts else null,
@@ -346,17 +328,6 @@ const EventNetBSD = struct {
 
     pub fn signal(self: *EventNetBSD) void {
         _ = self.state.fetchAdd(1, .release);
-        _ = _lwp_unpark(self.lwp_id, null);
+        _ = netbsd._lwp_unpark(self.lwp_id, null);
     }
-
-    extern "c" fn _lwp_self() c_int;
-    extern "c" fn ___lwp_park60(
-        clock_id: c_int,
-        flags: c_int,
-        ts: ?*const std.posix.timespec,
-        unpark: c_int,
-        hint: ?*const anyopaque,
-        unparkhint: ?*const anyopaque,
-    ) c_int;
-    extern "c" fn _lwp_unpark(target: c_int, hint: ?*const anyopaque) c_int;
 };
