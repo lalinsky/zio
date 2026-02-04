@@ -14,3 +14,18 @@ pub const ULF_WAKE_ALL: u32 = 0x200;
 
 pub extern "c" fn __ulock_wait(operation: u32, addr: *u32, value: u64, timeout_us: u32) c_int;
 pub extern "c" fn __ulock_wake(operation: u32, addr: *u32, wake_value: u64) c_int;
+
+// os_unfair_lock operations
+// Efficient low-level lock (macOS 10.12+, iOS 10.0+)
+// Reference: https://developer.apple.com/documentation/os/os_unfair_lock
+
+pub const os_unfair_lock_t = *os_unfair_lock_s;
+pub const os_unfair_lock_s = extern struct {
+    _os_unfair_lock_opaque: u32,
+};
+
+pub const OS_UNFAIR_LOCK_INIT: os_unfair_lock_s = .{ ._os_unfair_lock_opaque = 0 };
+
+pub extern "c" fn os_unfair_lock_lock(lock: os_unfair_lock_t) void;
+pub extern "c" fn os_unfair_lock_unlock(lock: os_unfair_lock_t) void;
+pub extern "c" fn os_unfair_lock_trylock(lock: os_unfair_lock_t) bool;

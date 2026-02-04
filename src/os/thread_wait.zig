@@ -78,6 +78,7 @@ pub const Event = switch (builtin.os.tag) {
 ///
 /// A blocking mutex that uses platform-specific optimal primitives:
 /// - Windows: SRWLOCK (Slim Reader/Writer Lock)
+/// - Darwin/macOS: os_unfair_lock
 /// - NetBSD: pthread mutex
 /// - Other platforms: futex-based implementation
 ///
@@ -93,7 +94,7 @@ pub const Event = switch (builtin.os.tag) {
 pub const Mutex = switch (builtin.os.tag) {
     .windows => MutexSRWLock,
     .netbsd => MutexPthread,
-    else => MutexFutex,
+    else => |t| if (t.isDarwin()) MutexUnfairLock else MutexFutex,
 };
 
 const FutexLinux = struct {
@@ -359,7 +360,6 @@ const EventNetBSD = struct {
 ///
 /// This minimizes futex syscalls in the uncontended case.
 const MutexFutex = struct {
-    // TODO(darwin): Consider using os_unfair_lock for better performance
     state: std.atomic.Value(u32) = .init(0),
 
     const UNLOCKED: u32 = 0b00;
@@ -474,6 +474,36 @@ const MutexSRWLock = struct {
 
     pub fn tryLock(self: *MutexSRWLock) bool {
         return sys.TryAcquireSRWLockExclusive(&self.srwlock) != 0;
+    }
+};
+
+/// Darwin/macOS os_unfair_lock-based mutex (10.12+, iOS 10.0+).
+///
+/// os_unfair_lock is Apple's recommended low-level lock primitive.
+/// It's highly optimized, only 32 bits in size, and uses efficient kernel waits when contended.
+/// Unlike OSSpinLock (deprecated), it doesn't suffer from priority inversion issues.
+const MutexUnfairLock = struct {
+    unfair_lock: sys.os_unfair_lock_s = sys.OS_UNFAIR_LOCK_INIT,
+
+    pub fn init() MutexUnfairLock {
+        return .{};
+    }
+
+    pub fn deinit(self: *MutexUnfairLock) void {
+        _ = self;
+        // os_unfair_lock doesn't require cleanup
+    }
+
+    pub fn lock(self: *MutexUnfairLock) void {
+        sys.os_unfair_lock_lock(&self.unfair_lock);
+    }
+
+    pub fn unlock(self: *MutexUnfairLock) void {
+        sys.os_unfair_lock_unlock(&self.unfair_lock);
+    }
+
+    pub fn tryLock(self: *MutexUnfairLock) bool {
+        return sys.os_unfair_lock_trylock(&self.unfair_lock);
     }
 };
 
