@@ -70,7 +70,7 @@ pub const Waiter = struct {
         if (self.task) |task| {
             task.wake();
         } else {
-            thread_wait.wake(&self.signaled, 1);
+            thread_wait.wake(&self.signaled, .one);
         }
     }
 

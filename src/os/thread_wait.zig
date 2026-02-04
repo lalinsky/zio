@@ -43,6 +43,14 @@ const Sys = switch (builtin.os.tag) {
     else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
 };
 
+/// Number of waiters to wake
+pub const WakeCount = enum {
+    /// Wake one waiter
+    one,
+    /// Wake all waiters
+    all,
+};
+
 /// Wait until *ptr != expected, or until woken by wake().
 /// The kernel atomically checks if *ptr == expected before sleeping,
 /// preventing the lost wakeup race condition.
@@ -52,9 +60,9 @@ pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
     Sys.wait(ptr, expected, null);
 }
 
-/// Wake up to max_waiters threads waiting on ptr.
-pub fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-    Sys.wake(ptr, max_waiters);
+/// Wake waiters waiting on ptr.
+pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+    Sys.wake(ptr, count);
 }
 
 /// Wait with timeout (in nanoseconds).
@@ -86,14 +94,16 @@ const Linux = struct {
         // Ignore errors - spurious wakeups and timeouts are both fine
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-        if (max_waiters == 0) return;
-
+    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const linux = std.os.linux;
+        const n: u32 = switch (count) {
+            .one => 1,
+            .all => std.math.maxInt(u32),
+        };
         _ = linux.futex_3arg(
             &ptr.raw,
             .{ .cmd = .WAKE, .private = true },
-            max_waiters,
+            n,
         );
     }
 };
@@ -124,9 +134,11 @@ const Windows = struct {
         // Return value doesn't matter - we handle spurious wakeups in the caller's loop
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-        _ = max_waiters; // Windows doesn't support waking specific count with this API
-        windows.RtlWakeAddressSingle(&ptr.raw);
+    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+        switch (count) {
+            .one => windows.RtlWakeAddressSingle(&ptr.raw),
+            .all => windows.RtlWakeAddressAll(&ptr.raw),
+        }
     }
 };
 
@@ -154,17 +166,17 @@ const Darwin = struct {
         // Ignore errors - spurious wakeups and timeouts are fine
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-        _ = max_waiters; // Darwin doesn't support waking specific count with this API
-
+    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const UL_COMPARE_AND_WAIT = 1;
         const ULF_WAKE_THREAD = 0x100;
+        const ULF_WAKE_ALL = 0x200;
 
-        _ = __ulock_wake(
-            UL_COMPARE_AND_WAIT | ULF_WAKE_THREAD,
-            @constCast(&ptr.raw),
-            0,
-        );
+        const flags: u32 = switch (count) {
+            .one => UL_COMPARE_AND_WAIT | ULF_WAKE_THREAD,
+            .all => UL_COMPARE_AND_WAIT | ULF_WAKE_ALL,
+        };
+
+        _ = __ulock_wake(flags, @constCast(&ptr.raw), 0);
     }
 
     extern "c" fn __ulock_wait(operation: u32, addr: *u32, value: u64, timeout_us: u32) c_int;
@@ -194,13 +206,15 @@ const FreeBSD = struct {
         );
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-        if (max_waiters == 0) return;
-
+    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+        const n: u32 = switch (count) {
+            .one => 1,
+            .all => std.math.maxInt(u32),
+        };
         _ = _umtx_op(
             @constCast(&ptr.raw),
             UMTX_OP_WAKE,
-            max_waiters,
+            n,
             null,
             null,
         );
@@ -233,13 +247,15 @@ const OpenBSD = struct {
         );
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-        if (max_waiters == 0) return;
-
+    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+        const n: c_int = switch (count) {
+            .one => 1,
+            .all => std.math.maxInt(c_int),
+        };
         _ = futex(
             @constCast(&ptr.raw),
             FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
-            @intCast(max_waiters),
+            n,
             null,
             null,
         );
@@ -273,13 +289,15 @@ const NetBSD = struct {
         );
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-        if (max_waiters == 0) return;
-
+    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+        const n: c_int = switch (count) {
+            .one => 1,
+            .all => std.math.maxInt(c_int),
+        };
         _ = futex(
             @constCast(&ptr.raw),
             FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
-            @intCast(max_waiters),
+            n,
             null,
             null,
         );
@@ -304,13 +322,12 @@ const DragonFly = struct {
         );
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), max_waiters: u32) void {
-        if (max_waiters == 0) return;
-
-        _ = umtx_wakeup(
-            @constCast(&ptr.raw),
-            @intCast(max_waiters),
-        );
+    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+        const n: c_int = switch (count) {
+            .one => 1,
+            .all => std.math.maxInt(c_int),
+        };
+        _ = umtx_wakeup(@constCast(&ptr.raw), n);
     }
 
     extern "c" fn umtx_sleep(addr: *const u32, value: c_int, timeout: c_int) c_int;
