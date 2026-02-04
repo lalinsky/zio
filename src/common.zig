@@ -41,7 +41,7 @@ pub const Timeoutable = error{
 pub const Waiter = struct {
     wait_node: WaitNode,
     task: ?*AnyTask,
-    signaled: std.atomic.Value(u32) = .init(0),
+    event: thread_wait.Event,
 
     const vtable: WaitNode.VTable = .{
         .wake = wakeImpl,
@@ -51,6 +51,7 @@ pub const Waiter = struct {
         return .{
             .wait_node = .{ .vtable = &vtable },
             .task = getCurrentTaskOrNull(),
+            .event = .init(),
         };
     }
 
@@ -66,11 +67,11 @@ pub const Waiter = struct {
     /// Signal this waiter and wake the task.
     /// Increments the signal count and wakes the task.
     pub fn signal(self: *Waiter) void {
-        _ = self.signaled.fetchAdd(1, .release);
         if (self.task) |task| {
+            _ = self.event.state.fetchAdd(1, .release);
             task.wake();
         } else {
-            thread_wait.wake(&self.signaled, .one);
+            self.event.signal(.one);
         }
     }
 
@@ -88,19 +89,13 @@ pub const Waiter = struct {
     }
 
     fn waitFutex(self: *Waiter, expected: u32) void {
-        while (true) {
-            const current = self.signaled.load(.acquire);
-            if (current >= expected) {
-                return;
-            }
-            thread_wait.wait(&self.signaled, current);
-        }
+        self.event.wait(expected);
     }
 
     fn waitTask(self: *Waiter, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         task.state.store(.preparing_to_wait, .release);
 
-        var current = self.signaled.load(.acquire);
+        var current = self.event.state.load(.acquire);
         if (current >= expected) {
             task.state.store(.ready, .release);
             return;
@@ -114,7 +109,7 @@ pub const Waiter = struct {
                 executor.yield(.preparing_to_wait, .waiting, .no_cancel);
             }
 
-            current = self.signaled.load(.acquire);
+            current = self.event.state.load(.acquire);
             if (current >= expected) {
                 return;
             }
@@ -129,7 +124,7 @@ pub const Waiter = struct {
 
         const deadline = timeout.toDeadline();
         while (true) {
-            const current = self.signaled.load(.acquire);
+            const current = self.event.state.load(.acquire);
             if (current >= expected) {
                 return;
             }
@@ -137,7 +132,7 @@ pub const Waiter = struct {
             if (remaining.value <= 0) {
                 return;
             }
-            thread_wait.timedWait(&self.signaled, current, remaining.toNanoseconds());
+            self.event.timedWait(current, remaining.toNanoseconds());
         }
     }
 
@@ -267,6 +262,7 @@ test "Waiter: futex-based timed wait with timeout" {
     var waiter: Waiter = .{
         .wait_node = .{ .vtable = &Waiter.vtable },
         .task = null,
+        .event = .init(),
     };
 
     var timer = Stopwatch.start();

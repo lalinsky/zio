@@ -38,7 +38,7 @@ const Sys = switch (builtin.os.tag) {
     .macos, .ios, .tvos, .watchos, .visionos => Darwin,
     .freebsd => FreeBSD,
     .openbsd => OpenBSD,
-    .netbsd => NetBSD,
+    .netbsd => @compileError("NetBSD uses Event, not raw wait/wake"),
     .dragonfly => DragonFly,
     else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
 };
@@ -49,6 +49,19 @@ pub const WakeCount = enum {
     one,
     /// Wake all waiters
     all,
+};
+
+/// Thread synchronization event.
+///
+/// A higher-level abstraction over platform wait primitives that owns its state.
+/// Use this instead of raw wait/wake functions when you need to own the state.
+///
+/// On futex-style platforms (Linux, Windows, macOS, *BSD except NetBSD), this uses
+/// the generic futex implementation. On NetBSD, it uses the native _lwp_park/_lwp_unpark
+/// which requires storing the LWP ID.
+pub const Event = switch (builtin.os.tag) {
+    .netbsd => EventNetBSD,
+    else => EventFutex,
 };
 
 /// Wait until *ptr != expected, or until woken by wake().
@@ -265,48 +278,6 @@ const OpenBSD = struct {
 };
 
 // ============================================================================
-// NetBSD implementation
-// ============================================================================
-
-const NetBSD = struct {
-    const FUTEX_WAIT = 1;
-    const FUTEX_WAKE = 2;
-    const FUTEX_PRIVATE_FLAG = 128;
-
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: ?u64) void {
-        const timeout_ts: ?std.os.linux.timespec = if (timeout_ns) |ns| .{
-            .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
-            .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
-        } else null;
-
-        // NetBSD provides futex() for Linux compatibility
-        _ = futex(
-            @constCast(&ptr.raw),
-            FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
-            if (timeout_ts) |*ts| ts else null,
-            null,
-        );
-    }
-
-    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
-        const n: c_int = switch (count) {
-            .one => 1,
-            .all => std.math.maxInt(c_int),
-        };
-        _ = futex(
-            @constCast(&ptr.raw),
-            FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
-            n,
-            null,
-            null,
-        );
-    }
-
-    extern "c" fn futex(uaddr: *u32, op: c_int, val: c_int, timeout: ?*const std.os.linux.timespec, uaddr2: ?*u32) c_int;
-};
-
-// ============================================================================
 // DragonFly BSD implementation
 // ============================================================================
 
@@ -332,4 +303,93 @@ const DragonFly = struct {
 
     extern "c" fn umtx_sleep(addr: *const u32, value: c_int, timeout: c_int) c_int;
     extern "c" fn umtx_wakeup(addr: *const u32, count: c_int) c_int;
+};
+
+// ============================================================================
+// Event implementations
+// ============================================================================
+
+/// Futex-based event for platforms with futex-like primitives
+const EventFutex = struct {
+    state: std.atomic.Value(u32) = .init(0),
+
+    pub fn init() EventFutex {
+        return .{};
+    }
+
+    pub fn wait(self: *EventFutex, expected: u32) void {
+        while (self.state.load(.acquire) < expected) {
+            Sys.wait(&self.state, self.state.load(.monotonic), null);
+        }
+    }
+
+    pub fn timedWait(self: *EventFutex, expected: u32, timeout_ns: u64) void {
+        const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ns);
+        while (self.state.load(.acquire) < expected) {
+            const now = std.time.nanoTimestamp();
+            const remaining = deadline - now;
+            if (remaining <= 0) return;
+            Sys.wait(&self.state, self.state.load(.monotonic), @intCast(remaining));
+        }
+    }
+
+    pub fn signal(self: *EventFutex, count: WakeCount) void {
+        _ = self.state.fetchAdd(1, .release);
+        Sys.wake(&self.state, count);
+    }
+};
+
+/// NetBSD event using native _lwp_park/_lwp_unpark
+const EventNetBSD = struct {
+    state: std.atomic.Value(u32) = .init(0),
+    lwp_id: c_int,
+
+    pub fn init() EventNetBSD {
+        return .{
+            .lwp_id = _lwp_self(),
+        };
+    }
+
+    pub fn wait(self: *EventNetBSD, expected: u32) void {
+        self.timedWaitImpl(expected, null);
+    }
+
+    pub fn timedWait(self: *EventNetBSD, expected: u32, timeout_ns: u64) void {
+        self.timedWaitImpl(expected, timeout_ns);
+    }
+
+    fn timedWaitImpl(self: *EventNetBSD, expected: u32, timeout_ns: ?u64) void {
+        const timeout_ts: ?std.os.linux.timespec = if (timeout_ns) |ns| .{
+            .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
+            .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
+        } else null;
+
+        while (self.state.load(.acquire) < expected) {
+            _ = ___lwp_park60(
+                @intFromEnum(std.posix.CLOCK.MONOTONIC),
+                0,
+                if (timeout_ts) |*ts| ts else null,
+                0, // unpark: don't unpark anyone
+                null, // hint
+                null, // unparkhint
+            );
+        }
+    }
+
+    pub fn signal(self: *EventNetBSD, count: WakeCount) void {
+        _ = count; // NetBSD _lwp_unpark always wakes one LWP
+        _ = self.state.fetchAdd(1, .release);
+        _ = _lwp_unpark(self.lwp_id, null);
+    }
+
+    extern "c" fn _lwp_self() c_int;
+    extern "c" fn ___lwp_park60(
+        clock_id: c_int,
+        flags: c_int,
+        ts: ?*const std.os.linux.timespec,
+        unpark: c_int,
+        hint: ?*const anyopaque,
+        unparkhint: ?*const anyopaque,
+    ) c_int;
+    extern "c" fn _lwp_unpark(target: c_int, hint: ?*const anyopaque) c_int;
 };
