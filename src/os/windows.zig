@@ -279,6 +279,29 @@ pub extern "ntdll" fn RtlWakeAddressAll(
     Address: ?*const anyopaque,
 ) callconv(.winapi) void;
 
+// SRWLOCK synchronization (Windows Vista+)
+pub const SRWLOCK = extern struct {
+    ptr: ?*anyopaque,
+};
+
+pub const SRWLOCK_INIT: SRWLOCK = .{ .ptr = null };
+
+pub extern "kernel32" fn InitializeSRWLock(
+    SRWLock: *SRWLOCK,
+) callconv(.winapi) void;
+
+pub extern "kernel32" fn AcquireSRWLockExclusive(
+    SRWLock: *SRWLOCK,
+) callconv(.winapi) void;
+
+pub extern "kernel32" fn TryAcquireSRWLockExclusive(
+    SRWLock: *SRWLOCK,
+) callconv(.winapi) BOOLEAN;
+
+pub extern "kernel32" fn ReleaseSRWLockExclusive(
+    SRWLock: *SRWLOCK,
+) callconv(.winapi) void;
+
 // Console functions
 pub extern "kernel32" fn SetConsoleCtrlHandler(
     HandlerRoutine: ?HANDLER_ROUTINE,

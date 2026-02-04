@@ -76,8 +76,10 @@ pub const Event = switch (builtin.os.tag) {
 
 /// Mutex for thread synchronization.
 ///
-/// A blocking mutex that uses futex-based locking where available and falls back
-/// to pthread on platforms without futex support.
+/// A blocking mutex that uses platform-specific optimal primitives:
+/// - Windows: SRWLOCK (Slim Reader/Writer Lock)
+/// - NetBSD: pthread mutex
+/// - Other platforms: futex-based implementation
 ///
 /// Example usage:
 /// ```zig
@@ -89,6 +91,7 @@ pub const Event = switch (builtin.os.tag) {
 /// // critical section
 /// ```
 pub const Mutex = switch (builtin.os.tag) {
+    .windows => MutexSRWLock,
     .netbsd => MutexPthread,
     else => MutexFutex,
 };
@@ -357,7 +360,6 @@ const EventNetBSD = struct {
 /// This minimizes futex syscalls in the uncontended case.
 const MutexFutex = struct {
     // TODO(darwin): Consider using os_unfair_lock for better performance
-    // TODO(windows): Consider using SRWLOCK or CRITICAL_SECTION for better performance
     state: std.atomic.Value(u32) = .init(0),
 
     const UNLOCKED: u32 = 0b00;
@@ -443,6 +445,35 @@ const MutexFutex = struct {
         // Acquire barrier ensures grabbing the lock happens before the critical section
         // and that the previous lock holder's critical section happens before we grab the lock.
         return self.state.cmpxchgStrong(UNLOCKED, LOCKED, .acquire, .monotonic) == null;
+    }
+};
+
+/// Windows SRWLOCK-based mutex (Vista+).
+///
+/// SRWLOCK (Slim Reader/Writer Lock) is highly optimized for exclusive access.
+/// It's a pointer-sized lock that uses efficient kernel wait mechanisms when contended.
+const MutexSRWLock = struct {
+    srwlock: sys.SRWLOCK = sys.SRWLOCK_INIT,
+
+    pub fn init() MutexSRWLock {
+        return .{};
+    }
+
+    pub fn deinit(self: *MutexSRWLock) void {
+        _ = self;
+        // SRWLOCK doesn't require cleanup
+    }
+
+    pub fn lock(self: *MutexSRWLock) void {
+        sys.AcquireSRWLockExclusive(&self.srwlock);
+    }
+
+    pub fn unlock(self: *MutexSRWLock) void {
+        sys.ReleaseSRWLockExclusive(&self.srwlock);
+    }
+
+    pub fn tryLock(self: *MutexSRWLock) bool {
+        return sys.TryAcquireSRWLockExclusive(&self.srwlock) != 0;
     }
 };
 
