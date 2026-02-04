@@ -92,9 +92,9 @@ pub const Event = switch (builtin.os.tag) {
 /// // critical section
 /// ```
 pub const Mutex = switch (builtin.os.tag) {
-    .windows => MutexSRWLock,
+    .windows => MutexWindows,
     .netbsd => MutexPthread,
-    else => |t| if (t.isDarwin()) MutexUnfairLock else MutexFutex,
+    else => |t| if (t.isDarwin()) MutexDarwin else MutexFutex,
 };
 
 const FutexLinux = struct {
@@ -452,27 +452,27 @@ const MutexFutex = struct {
 ///
 /// SRWLOCK (Slim Reader/Writer Lock) is highly optimized for exclusive access.
 /// It's a pointer-sized lock that uses efficient kernel wait mechanisms when contended.
-const MutexSRWLock = struct {
+const MutexWindows = struct {
     srwlock: sys.SRWLOCK = sys.SRWLOCK_INIT,
 
-    pub fn init() MutexSRWLock {
+    pub fn init() MutexWindows {
         return .{};
     }
 
-    pub fn deinit(self: *MutexSRWLock) void {
+    pub fn deinit(self: *MutexWindows) void {
         _ = self;
         // SRWLOCK doesn't require cleanup
     }
 
-    pub fn lock(self: *MutexSRWLock) void {
+    pub fn lock(self: *MutexWindows) void {
         sys.AcquireSRWLockExclusive(&self.srwlock);
     }
 
-    pub fn unlock(self: *MutexSRWLock) void {
+    pub fn unlock(self: *MutexWindows) void {
         sys.ReleaseSRWLockExclusive(&self.srwlock);
     }
 
-    pub fn tryLock(self: *MutexSRWLock) bool {
+    pub fn tryLock(self: *MutexWindows) bool {
         return sys.TryAcquireSRWLockExclusive(&self.srwlock) != 0;
     }
 };
@@ -482,27 +482,27 @@ const MutexSRWLock = struct {
 /// os_unfair_lock is Apple's recommended low-level lock primitive.
 /// It's highly optimized, only 32 bits in size, and uses efficient kernel waits when contended.
 /// Unlike OSSpinLock (deprecated), it doesn't suffer from priority inversion issues.
-const MutexUnfairLock = struct {
+const MutexDarwin = struct {
     unfair_lock: sys.os_unfair_lock_s = sys.OS_UNFAIR_LOCK_INIT,
 
-    pub fn init() MutexUnfairLock {
+    pub fn init() MutexDarwin {
         return .{};
     }
 
-    pub fn deinit(self: *MutexUnfairLock) void {
+    pub fn deinit(self: *MutexDarwin) void {
         _ = self;
         // os_unfair_lock doesn't require cleanup
     }
 
-    pub fn lock(self: *MutexUnfairLock) void {
+    pub fn lock(self: *MutexDarwin) void {
         sys.os_unfair_lock_lock(&self.unfair_lock);
     }
 
-    pub fn unlock(self: *MutexUnfairLock) void {
+    pub fn unlock(self: *MutexDarwin) void {
         sys.os_unfair_lock_unlock(&self.unfair_lock);
     }
 
-    pub fn tryLock(self: *MutexUnfairLock) bool {
+    pub fn tryLock(self: *MutexDarwin) bool {
         return sys.os_unfair_lock_trylock(&self.unfair_lock);
     }
 };
