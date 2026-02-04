@@ -10,6 +10,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Duration = @import("../time.zig").Duration;
+const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 
 const sys = switch (builtin.os.tag) {
     .linux => @import("linux.zig"),
@@ -79,7 +81,7 @@ pub const Event = switch (builtin.os.tag) {
 /// A blocking mutex that uses platform-specific optimal primitives:
 /// - Windows: SRWLOCK (Slim Reader/Writer Lock)
 /// - Darwin/macOS: os_unfair_lock
-/// - NetBSD: pthread mutex
+/// - NetBSD: Event-based with WaitQueue
 /// - Other platforms: futex-based implementation
 ///
 /// Example usage:
@@ -93,7 +95,7 @@ pub const Event = switch (builtin.os.tag) {
 /// ```
 pub const Mutex = switch (builtin.os.tag) {
     .windows => MutexWindows,
-    .netbsd => MutexPthread,
+    .netbsd => MutexEvent,
     else => |t| if (t.isDarwin()) MutexDarwin else MutexFutex,
 };
 
@@ -531,6 +533,79 @@ const MutexPthread = struct {
 
     pub fn tryLock(self: *MutexPthread) bool {
         return sys.pthread_mutex_trylock(&self.mutex) == 0;
+    }
+};
+
+/// Event-based mutex using WaitQueue for platforms with Event support.
+///
+/// Uses the same pattern as zio.Mutex but for blocking OS threads:
+/// - Queue state encodes lock status with sentinels
+/// - Stack-allocated waiters block on Events instead of suspending coroutines
+/// - FIFO ordering ensures fairness
+const MutexEvent = struct {
+    /// Stack-allocated waiter that blocks an OS thread
+    const Waiter = struct {
+        wait_node: WaitNode,
+        event: Event,
+
+        fn init() Waiter {
+            return .{
+                .wait_node = .{ .vtable = &.{} },
+                .event = Event.init(),
+            };
+        }
+    };
+
+    queue: WaitQueue(WaitNode) = .initWithState(.sentinel1),
+
+    const State = WaitQueue(WaitNode).State;
+    const locked_once: State = .sentinel0;
+    const unlocked: State = .sentinel1;
+
+    pub fn init() MutexEvent {
+        return .{};
+    }
+
+    pub fn deinit(self: *MutexEvent) void {
+        _ = self;
+    }
+
+    pub fn tryLock(self: *MutexEvent) bool {
+        return self.queue.tryTransition(unlocked, locked_once);
+    }
+
+    pub fn lock(self: *MutexEvent) void {
+        // Fast path: try to acquire unlocked mutex
+        if (self.queue.tryTransition(unlocked, locked_once)) {
+            return;
+        }
+
+        // Slow path: add to FIFO wait queue
+        var waiter = Waiter.init();
+
+        // Try to push to queue, or if mutex is unlocked, acquire it atomically
+        const result = self.queue.pushOrTransition(unlocked, locked_once, &waiter.wait_node);
+        if (result == .transitioned) {
+            // Mutex was unlocked, we acquired it via transition to locked_once
+            return;
+        }
+
+        // Wait for lock - block on event, handling spurious wakeups
+        while (waiter.event.state.load(.acquire) == 0) {
+            waiter.event.wait(0, null);
+        }
+
+        // Acquire fence: synchronize-with unlock()'s .release in pop()
+        _ = self.queue.getState();
+    }
+
+    pub fn unlock(self: *MutexEvent) void {
+        // Pop one waiter or transition from locked_once to unlocked
+        // Last waiter stays in locked_once (inherits the lock)
+        if (self.queue.popOrTransition(locked_once, unlocked, locked_once)) |wait_node| {
+            const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
+            waiter.event.signal();
+        }
     }
 };
 

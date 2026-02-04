@@ -185,7 +185,7 @@ pub const Group = struct {
         group.setCanceled();
 
         // Pop all tasks and cancel them
-        while (group.getTasks().popOrTransition(.sentinel0, .sentinel1)) |node| {
+        while (group.getTasks().popOrTransition(.sentinel0, .sentinel1, .sentinel1)) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             awaitable.cancel();
             awaitable.release();

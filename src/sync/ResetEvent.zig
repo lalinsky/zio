@@ -91,9 +91,9 @@ pub fn set(self: *ResetEvent) void {
     // Pop and wake all waiters, then transition to is_set
     // Loop continues until popOrTransition successfully transitions unset->is_set
     // This handles: already set (is_set->is_set fails, pop returns null),
-    // has waiters (pops them all until last pop transitions to unset),
+    // has waiters (pops them all until last pop transitions to is_set),
     // and cancellation races (retry loop inside popOrTransition)
-    while (self.wait_queue.popOrTransition(unset, is_set)) |wait_node| {
+    while (self.wait_queue.popOrTransition(unset, is_set, is_set)) |wait_node| {
         wait_node.wake();
     }
 }
