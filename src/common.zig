@@ -71,7 +71,7 @@ pub const Waiter = struct {
             _ = self.event.state.fetchAdd(1, .release);
             task.wake();
         } else {
-            self.event.signal(.one);
+            self.event.signal();
         }
     }
 
@@ -89,7 +89,11 @@ pub const Waiter = struct {
     }
 
     fn waitFutex(self: *Waiter, expected: u32) void {
-        self.event.wait(expected);
+        while (true) {
+            const current = self.event.state.load(.acquire);
+            if (current >= expected) return;
+            self.event.wait(current, null);
+        }
     }
 
     fn waitTask(self: *Waiter, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
@@ -132,7 +136,7 @@ pub const Waiter = struct {
             if (remaining.value <= 0) {
                 return;
             }
-            self.event.timedWait(current, remaining.toNanoseconds());
+            self.event.wait(current, remaining.toNanoseconds());
         }
     }
 

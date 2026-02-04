@@ -32,23 +32,23 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const Sys = switch (builtin.os.tag) {
-    .linux => Linux,
-    .windows => Windows,
-    .macos, .ios, .tvos, .watchos, .visionos => Darwin,
-    .freebsd => FreeBSD,
-    .openbsd => OpenBSD,
-    .netbsd => @compileError("NetBSD uses Event, not raw wait/wake"),
-    .dragonfly => DragonFly,
-    else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
-};
-
 /// Number of waiters to wake
 pub const WakeCount = enum {
     /// Wake one waiter
     one,
     /// Wake all waiters
     all,
+};
+
+const Futex = switch (builtin.os.tag) {
+    .linux => FutexLinux,
+    .windows => FutexWindows,
+    .macos, .ios, .tvos, .watchos, .visionos => FutexDarwin,
+    .freebsd => FutexFreeBSD,
+    .openbsd => FutexOpenBSD,
+    .netbsd => @compileError("NetBSD uses Event, not raw wait/wake"),
+    .dragonfly => FutexDragonFly,
+    else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
 };
 
 /// Thread synchronization event.
@@ -59,41 +59,29 @@ pub const WakeCount = enum {
 /// On futex-style platforms (Linux, Windows, macOS, *BSD except NetBSD), this uses
 /// the generic futex implementation. On NetBSD, it uses the native _lwp_park/_lwp_unpark
 /// which requires storing the LWP ID.
+///
+/// Example usage:
+/// ```zig
+/// var event: Event = .init();
+///
+/// // Waiter thread
+/// event.wait(1, null); // Wait indefinitely
+/// // or
+/// event.wait(1, 1000 * std.time.ns_per_ms); // Wait with 1s timeout
+///
+/// // Signaler thread
+/// event.signal();
+/// ```
 pub const Event = switch (builtin.os.tag) {
     .netbsd => EventNetBSD,
     else => EventFutex,
 };
 
-/// Wait until *ptr != expected, or until woken by wake().
-/// The kernel atomically checks if *ptr == expected before sleeping,
-/// preventing the lost wakeup race condition.
-///
-/// Spurious wakeups may occur - caller should loop checking their condition.
-pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
-    Sys.wait(ptr, expected, null);
-}
-
-/// Wake waiters waiting on ptr.
-pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
-    Sys.wake(ptr, count);
-}
-
-/// Wait with timeout (in nanoseconds).
-/// Returns normally on wakeup or timeout - caller must check their condition
-/// to determine which occurred.
-pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: u64) void {
-    Sys.wait(ptr, expected, timeout_ns);
-}
-
-// ============================================================================
-// Linux implementation
-// ============================================================================
-
-const Linux = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: ?u64) void {
+const FutexLinux = struct {
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
         const linux = std.os.linux;
 
-        const timeout_ts: ?std.os.linux.timespec = if (timeout_ns) |ns| .{
+        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
             .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
             .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
         } else null;
@@ -101,7 +89,7 @@ const Linux = struct {
         _ = linux.futex_4arg(
             &ptr.raw,
             .{ .cmd = .WAIT, .private = true },
-            expected,
+            current,
             if (timeout_ts) |*ts| ts else null,
         );
         // Ignore errors - spurious wakeups and timeouts are both fine
@@ -125,10 +113,10 @@ const Linux = struct {
 // Windows implementation
 // ============================================================================
 
-const Windows = struct {
+const FutexWindows = struct {
     const windows = @import("windows.zig");
 
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: ?u64) void {
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
         // RtlWaitOnAddress takes timeout in 100ns units (negative = relative)
         const timeout_li: ?windows.LARGE_INTEGER = if (timeout_ns) |ns| blk: {
             const units_100ns = ns / 100;
@@ -136,11 +124,10 @@ const Windows = struct {
             break :blk -i64_val; // Negative means relative timeout
         } else null;
 
-        // RtlWaitOnAddress atomically checks if *ptr == expected before sleeping
-        const compare_value = expected;
+        // RtlWaitOnAddress atomically checks if *ptr == current before sleeping
         _ = windows.RtlWaitOnAddress(
             &ptr.raw,
-            &compare_value,
+            &current,
             @sizeOf(u32),
             if (timeout_li) |*t| t else null,
         );
@@ -159,8 +146,8 @@ const Windows = struct {
 // macOS/Darwin implementation
 // ============================================================================
 
-const Darwin = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: ?u64) void {
+const FutexDarwin = struct {
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
         // __ulock_wait is undocumented but stable (Darwin 16+, macOS 10.12+)
         // Used by LLVM libc++ internally
         const UL_COMPARE_AND_WAIT = 1;
@@ -173,7 +160,7 @@ const Darwin = struct {
         _ = __ulock_wait(
             UL_COMPARE_AND_WAIT,
             @constCast(&ptr.raw),
-            expected,
+            current,
             timeout_us,
         );
         // Ignore errors - spurious wakeups and timeouts are fine
@@ -200,12 +187,12 @@ const Darwin = struct {
 // FreeBSD implementation
 // ============================================================================
 
-const FreeBSD = struct {
+const FutexFreeBSD = struct {
     const UMTX_OP_WAIT_UINT = 11;
     const UMTX_OP_WAKE = 3;
 
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: ?u64) void {
-        const timeout_ts: ?std.os.linux.timespec = if (timeout_ns) |ns| .{
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
+        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
             .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
             .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
         } else null;
@@ -213,7 +200,7 @@ const FreeBSD = struct {
         _ = _umtx_op(
             @constCast(&ptr.raw),
             UMTX_OP_WAIT_UINT,
-            expected,
+            current,
             null,
             if (timeout_ts) |*ts| @ptrCast(@constCast(ts)) else null,
         );
@@ -240,13 +227,13 @@ const FreeBSD = struct {
 // OpenBSD implementation
 // ============================================================================
 
-const OpenBSD = struct {
+const FutexOpenBSD = struct {
     const FUTEX_WAIT = 1;
     const FUTEX_WAKE = 2;
     const FUTEX_PRIVATE_FLAG = 128;
 
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: ?u64) void {
-        const timeout_ts: ?std.os.linux.timespec = if (timeout_ns) |ns| .{
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
+        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
             .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
             .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
         } else null;
@@ -254,7 +241,7 @@ const OpenBSD = struct {
         _ = futex(
             @constCast(&ptr.raw),
             FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
+            @intCast(current),
             if (timeout_ts) |*ts| ts else null,
             null,
         );
@@ -274,21 +261,21 @@ const OpenBSD = struct {
         );
     }
 
-    extern "c" fn futex(uaddr: *u32, op: c_int, val: c_int, timeout: ?*const std.os.linux.timespec, uaddr2: ?*u32) c_int;
+    extern "c" fn futex(uaddr: *u32, op: c_int, val: c_int, timeout: ?*const std.posix.timespec, uaddr2: ?*u32) c_int;
 };
 
 // ============================================================================
 // DragonFly BSD implementation
 // ============================================================================
 
-const DragonFly = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32, timeout_ns: ?u64) void {
+const FutexDragonFly = struct {
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
         // Note: umtx_sleep's comparison is NOT atomic with sleep, but is
         // "properly interlocked" with umtx_wakeup. This works correctly
         // with our counter + loop pattern in Waiter.
         _ = umtx_sleep(
             @constCast(&ptr.raw),
-            @intCast(expected),
+            @intCast(current),
             @intCast(timeout_ns orelse 0),
         );
     }
@@ -317,25 +304,13 @@ const EventFutex = struct {
         return .{};
     }
 
-    pub fn wait(self: *EventFutex, expected: u32) void {
-        while (self.state.load(.acquire) < expected) {
-            Sys.wait(&self.state, self.state.load(.monotonic), null);
-        }
+    pub fn wait(self: *EventFutex, current: u32, timeout_ns: ?u64) void {
+        Futex.wait(&self.state, current, timeout_ns);
     }
 
-    pub fn timedWait(self: *EventFutex, expected: u32, timeout_ns: u64) void {
-        const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ns);
-        while (self.state.load(.acquire) < expected) {
-            const now = std.time.nanoTimestamp();
-            const remaining = deadline - now;
-            if (remaining <= 0) return;
-            Sys.wait(&self.state, self.state.load(.monotonic), @intCast(remaining));
-        }
-    }
-
-    pub fn signal(self: *EventFutex, count: WakeCount) void {
+    pub fn signal(self: *EventFutex) void {
         _ = self.state.fetchAdd(1, .release);
-        Sys.wake(&self.state, count);
+        Futex.wake(&self.state, .one);
     }
 };
 
@@ -350,34 +325,26 @@ const EventNetBSD = struct {
         };
     }
 
-    pub fn wait(self: *EventNetBSD, expected: u32) void {
-        self.timedWaitImpl(expected, null);
-    }
+    pub fn wait(self: *EventNetBSD, current: u32, timeout_ns: ?u64) void {
+        _ = self;
+        _ = current; // Caller checks state, we just park
 
-    pub fn timedWait(self: *EventNetBSD, expected: u32, timeout_ns: u64) void {
-        self.timedWaitImpl(expected, timeout_ns);
-    }
-
-    fn timedWaitImpl(self: *EventNetBSD, expected: u32, timeout_ns: ?u64) void {
-        const timeout_ts: ?std.os.linux.timespec = if (timeout_ns) |ns| .{
+        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
             .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
             .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
         } else null;
 
-        while (self.state.load(.acquire) < expected) {
-            _ = ___lwp_park60(
-                @intFromEnum(std.posix.CLOCK.MONOTONIC),
-                0,
-                if (timeout_ts) |*ts| ts else null,
-                0, // unpark: don't unpark anyone
-                null, // hint
-                null, // unparkhint
-            );
-        }
+        _ = ___lwp_park60(
+            @intFromEnum(std.posix.CLOCK.MONOTONIC),
+            0,
+            if (timeout_ts) |*ts| ts else null,
+            0, // unpark: don't unpark anyone
+            null, // hint
+            null, // unparkhint
+        );
     }
 
-    pub fn signal(self: *EventNetBSD, count: WakeCount) void {
-        _ = count; // NetBSD _lwp_unpark always wakes one LWP
+    pub fn signal(self: *EventNetBSD) void {
         _ = self.state.fetchAdd(1, .release);
         _ = _lwp_unpark(self.lwp_id, null);
     }
@@ -386,7 +353,7 @@ const EventNetBSD = struct {
     extern "c" fn ___lwp_park60(
         clock_id: c_int,
         flags: c_int,
-        ts: ?*const std.os.linux.timespec,
+        ts: ?*const std.posix.timespec,
         unpark: c_int,
         hint: ?*const anyopaque,
         unparkhint: ?*const anyopaque,
