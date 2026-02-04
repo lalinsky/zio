@@ -9,6 +9,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Duration = @import("../time.zig").Duration;
+
 const sys = switch (builtin.os.tag) {
     .linux => @import("linux.zig"),
     .windows => @import("windows.zig"),
@@ -34,7 +36,7 @@ pub const WakeCount = enum {
 /// functions or the `Event` type instead.
 ///
 /// Methods:
-/// - `wait(ptr, current, timeout_ns)`: Block if *ptr == current, with optional timeout
+/// - `wait(ptr, current, timeout)`: Block if *ptr == current, with optional timeout
 /// - `wake(ptr, count)`: Wake waiting threads (one or all)
 ///
 /// The implementation is selected at compile time based on the target OS.
@@ -62,7 +64,7 @@ const Futex = switch (builtin.os.tag) {
 /// // Waiter thread
 /// event.wait(1, null); // Wait indefinitely
 /// // or
-/// event.wait(1, 1000 * std.time.ns_per_ms); // Wait with 1s timeout
+/// event.wait(1, .fromSeconds(1)); // Wait with 1s timeout
 ///
 /// // Signaler thread
 /// event.signal();
@@ -73,11 +75,8 @@ pub const Event = switch (builtin.os.tag) {
 };
 
 const FutexLinux = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
-        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
-            .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
-            .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
-        } else null;
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
+        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
         _ = sys.futex(
             &ptr.raw,
@@ -111,9 +110,10 @@ const FutexLinux = struct {
 // ============================================================================
 
 const FutexWindows = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
         // RtlWaitOnAddress takes timeout in 100ns units (negative = relative)
-        const timeout_li: ?sys.LARGE_INTEGER = if (timeout_ns) |ns| blk: {
+        const timeout_li: ?sys.LARGE_INTEGER = if (timeout) |t| blk: {
+            const ns = t.toNanoseconds();
             const units_100ns = ns / 100;
             const i64_val = std.math.cast(i64, units_100ns) orelse std.math.maxInt(i64);
             break :blk -i64_val; // Negative means relative timeout
@@ -142,9 +142,9 @@ const FutexWindows = struct {
 // ============================================================================
 
 const FutexDarwin = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
-        const timeout_us: u32 = if (timeout_ns) |ns| blk: {
-            const us = ns / std.time.ns_per_us;
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
+        const timeout_us: u32 = if (timeout) |t| blk: {
+            const us = t.toMicroseconds();
             break :blk std.math.cast(u32, us) orelse std.math.maxInt(u32);
         } else 0;
 
@@ -172,11 +172,8 @@ const FutexDarwin = struct {
 // ============================================================================
 
 const FutexFreeBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
-        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
-            .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
-            .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
-        } else null;
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
+        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
         _ = sys._umtx_op(
             @constCast(&ptr.raw),
@@ -207,11 +204,8 @@ const FutexFreeBSD = struct {
 // ============================================================================
 
 const FutexOpenBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
-        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
-            .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
-            .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
-        } else null;
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
+        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
         _ = sys.futex(
             @constCast(&ptr.raw),
@@ -242,11 +236,12 @@ const FutexOpenBSD = struct {
 // ============================================================================
 
 const FutexDragonFly = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout_ns: ?u64) void {
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
+        const timeout_ns = if (timeout) |t| t.toNanoseconds() else 0;
         _ = sys.umtx_sleep(
             &ptr.raw,
             @intCast(current),
-            @intCast(timeout_ns orelse 0),
+            @intCast(timeout_ns),
         );
     }
 
@@ -271,8 +266,8 @@ const EventFutex = struct {
         return .{};
     }
 
-    pub fn wait(self: *EventFutex, current: u32, timeout_ns: ?u64) void {
-        Futex.wait(&self.state, current, timeout_ns);
+    pub fn wait(self: *EventFutex, current: u32, timeout: ?Duration) void {
+        Futex.wait(&self.state, current, timeout);
     }
 
     pub fn signal(self: *EventFutex) void {
@@ -292,14 +287,11 @@ const EventNetBSD = struct {
         };
     }
 
-    pub fn wait(self: *EventNetBSD, current: u32, timeout_ns: ?u64) void {
+    pub fn wait(self: *EventNetBSD, current: u32, timeout: ?Duration) void {
         _ = self;
         _ = current; // Caller checks state, we just park
 
-        const timeout_ts: ?std.posix.timespec = if (timeout_ns) |ns| .{
-            .sec = @intCast(@divFloor(ns, std.time.ns_per_s)),
-            .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
-        } else null;
+        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
         _ = sys.___lwp_park60(
             @intFromEnum(std.posix.CLOCK.MONOTONIC),
@@ -342,7 +334,7 @@ test "Event - basic signal and wait" {
             // Wait for signal
             var state = ctx.event.state.load(.monotonic);
             while (!ctx.done.load(.acquire)) {
-                ctx.event.wait(state, 100 * std.time.ns_per_ms);
+                ctx.event.wait(state, .fromMilliseconds(100));
                 state = ctx.event.state.load(.monotonic);
             }
         }
@@ -380,7 +372,7 @@ test "Event - multiple signals" {
             ctx.ready.store(true, .release);
             var state = ctx.event.state.load(.monotonic);
             while (ctx.counter.load(.acquire) < 3) {
-                ctx.event.wait(state, 100 * std.time.ns_per_ms);
+                ctx.event.wait(state, .fromMilliseconds(100));
                 state = ctx.event.state.load(.monotonic);
             }
         }
@@ -410,7 +402,7 @@ test "Event - timeout" {
     const start = std.time.nanoTimestamp();
 
     // Wait with timeout, should return after approximately 50ms
-    event.wait(0, 50 * std.time.ns_per_ms);
+    event.wait(0, .fromMilliseconds(50));
 
     const elapsed = std.time.nanoTimestamp() - start;
     // Allow some slack for scheduling

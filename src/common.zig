@@ -136,7 +136,7 @@ pub const Waiter = struct {
             if (remaining.value <= 0) {
                 return;
             }
-            self.event.wait(current, remaining.toNanoseconds());
+            self.event.wait(current, remaining);
         }
     }
 
