@@ -14,6 +14,7 @@ const Group = @import("runtime/group.zig").Group;
 
 const common = @import("common.zig");
 const waitForIo = common.waitForIo;
+const waitForIoUncancelable = common.waitForIoUncancelable;
 const timedWaitForIo = common.timedWaitForIo;
 const Timeout = @import("time.zig").Timeout;
 const fillBuf = @import("utils/writer.zig").fillBuf;
@@ -844,9 +845,7 @@ pub const Socket = struct {
 
     pub fn close(self: Socket) void {
         var op = ev.NetClose.init(self.handle);
-        getCurrentTask().beginShield();
-        defer getCurrentTask().endShield();
-        waitForIo(&op.c) catch {};
+        waitForIoUncancelable(&op.c);
         _ = op.getResult() catch {};
     }
 

@@ -178,6 +178,9 @@ pub const Waiter = struct {
 
 /// Runs an I/O operation to completion.
 /// Sets up the callback, submits to the event loop, and waits for completion.
+///
+/// If called from a context with an async runtime, uses the event loop.
+/// If called from a context without a runtime, executes the operation synchronously.
 pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
@@ -188,8 +191,14 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
         c.userdata = null;
     };
 
-    // Submit to the event loop and wait for completion
-    const task = waiter.task orelse @panic("I/O operations require async context");
+    // Blocking path: Execute synchronously without event loop
+    const task = waiter.task orelse {
+        // TODO: Don't use std.heap.smp_allocator - it should be passed as a parameter
+        ev.executeBlocking(c, std.heap.smp_allocator);
+        return;
+    };
+
+    // Async path: Submit to the event loop and wait for completion
     task.getExecutor().loop.add(c);
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
@@ -208,6 +217,33 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
             return;
         },
     };
+}
+
+/// Runs an I/O operation to completion without allowing cancellation.
+/// This is used for cleanup operations like close() that must complete.
+///
+/// If called from a context with an async runtime, uses the event loop (no cancel).
+/// If called from a context without a runtime, executes the operation synchronously.
+pub fn waitForIoUncancelable(c: *ev.Completion) void {
+    var waiter = Waiter.init();
+    c.userdata = &waiter;
+    c.callback = Waiter.callback;
+
+    defer if (std.debug.runtime_safety) {
+        c.callback = null;
+        c.userdata = null;
+    };
+
+    // Blocking path: Execute synchronously without event loop
+    const task = waiter.task orelse {
+        // TODO: Don't use std.heap.smp_allocator - it should be passed as a parameter
+        ev.executeBlocking(c, std.heap.smp_allocator);
+        return;
+    };
+
+    // Async path: Submit to the event loop and wait for completion (no cancel)
+    task.getExecutor().loop.add(c);
+    waiter.wait(1, .no_cancel);
 }
 
 /// Runs an I/O operation to completion with a timeout.
