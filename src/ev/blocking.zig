@@ -51,6 +51,9 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .dir_access => common.handleDirAccess(c, allocator),
         .dir_real_path => common.handleDirRealPath(c),
         .dir_real_path_file => common.handleDirRealPathFile(c, allocator),
+        .dir_read => common.handleDirRead(c),
+        .file_real_path => common.handleFileRealPath(c),
+        .file_hard_link => common.handleFileHardLink(c, allocator),
 
         // Pipe operations (create/close only in blocking mode)
         .pipe_create => handlePipeCreate(c),
@@ -82,11 +85,6 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .work,
         .group,
         => @panic("Timer/async operations not supported in blocking mode (requires event loop)"),
-
-        .dir_read,
-        .file_real_path,
-        .file_hard_link,
-        => @panic("Operation not yet implemented in blocking mode"),
     }
 }
 
