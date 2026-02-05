@@ -62,6 +62,8 @@ jobs:
           - { os: macos-latest, target: native, backends: 'kqueue poll' }
           - { os: macos-15-intel, target: native, backends: 'kqueue poll' }
           - { os: windows-latest, target: native, backends: 'iocp poll' }
+          - { os: ubuntu-latest, target: riscv64-linux, qemu: true, backends: 'epoll poll' }
+          - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
           - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd, backends: 'kqueue poll' }
 
@@ -76,17 +78,23 @@ jobs:
       with:
         version: ${{ matrix.zig_version }}
 
+    - name: Install QEMU
+      if: matrix.config.qemu
+      run: |
+        sudo apt-get update -q -y
+        sudo apt-get install -q -y qemu-user-static
+
     - name: Build and test for each backend
       shell: bash
       run: |
         for backend in ${{ matrix.config.backends }}; do
           echo "Building with backend: $backend"
-          ./check.sh --full --no-exec --backend $backend \
-            ${{ matrix.config.target != 'native' && format('--target {0}', matrix.config.target) || '' }}
+          ./check.sh --full --backend $backend \
+            ${{ matrix.config.target != 'native' && format('--target {0}', matrix.config.target) || '' }} \
+            ${{ matrix.config.qemu && '--qemu' || '' }} \
+            ${{ matrix.config.vm && '--no-exec' || '' }}
           if [ -n "${{ matrix.config.vm }}" ]; then
             cp zig-out/bin/test zig-out/bin/test-$backend
-          else
-            zig-out/bin/test
           fi
         done
       timeout-minutes: 10
