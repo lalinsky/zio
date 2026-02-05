@@ -244,8 +244,7 @@ pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!voi
 
 /// Unregister an awaitable from a group.
 /// Removes from task list, releases ref, decrements counter, and wakes waiters if last task.
-pub fn unregisterGroupTask(rt: *Runtime, group: *Group, awaitable: *Awaitable) void {
-    _ = rt;
+pub fn unregisterGroupTask(group: *Group, awaitable: *Awaitable) void {
     // Only release if we successfully removed it (cancel might have popped it first)
     if (group.getTasks().remove(&awaitable.group_node)) {
         awaitable.release();
