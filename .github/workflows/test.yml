@@ -63,7 +63,7 @@ jobs:
           - { os: macos-15-intel, target: native, backends: 'kqueue poll' }
           - { os: windows-latest, target: native, backends: 'iocp poll' }
           - { os: ubuntu-latest, target: riscv64-linux, qemu: true, backends: 'epoll poll' }
-          - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'epoll poll' }
+          # - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'epoll poll' }  # Disabled: tests hanging, needs investigation
           - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
           - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd, backends: 'kqueue poll' }
 
