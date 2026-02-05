@@ -1,4 +1,4 @@
-name: Test ev
+name: CI (extended)
 
 on:
   push:
@@ -45,7 +45,7 @@ jobs:
       run: |
         for backend in ${{ matrix.config.backends }}; do
           echo "Testing with backend: $backend"
-          zig build test -Dtest-filter="ev." -Dbackend=$backend --summary all \
+          zig build test -Dbackend=$backend --summary all \
             ${{ matrix.config.target != 'native' && format('-Dtarget={0}', matrix.config.target) || '' }}
         done
       timeout-minutes: 10
@@ -58,7 +58,7 @@ jobs:
       run: |
         for backend in ${{ matrix.config.backends }}; do
           echo "Building with backend: $backend"
-          zig build test -Dtest-filter="ev." -Dbackend=$backend -Dtarget=${{ matrix.config.target }} -Demit-test-bin
+          zig build test -Dbackend=$backend -Dtarget=${{ matrix.config.target }} -Demit-test-bin
           cp zig-out/bin/test zig-out/bin/test-$backend
         done
       timeout-minutes: 5
