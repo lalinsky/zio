@@ -5,6 +5,13 @@ on:
     branches: [ main ]
     tags:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_extended:
+        description: 'Run extended platform tests'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   changes:
@@ -68,7 +75,8 @@ jobs:
     needs: [changes]
     if: |
       github.event_name == 'push' ||
-      needs.changes.outputs.ev == 'true'
+      needs.changes.outputs.ev == 'true' ||
+      github.event.inputs.run_extended == 'true'
     strategy:
       fail-fast: false
       matrix:
