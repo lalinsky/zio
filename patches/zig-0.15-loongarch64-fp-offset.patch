@@ -1,0 +1,15 @@
+--- a/lib/std/debug.zig
++++ b/lib/std/debug.zig
+@@ -848,9 +848,9 @@
+     }
+
+     // Offset of the saved BP wrt the frame pointer.
+-    const fp_offset = if (native_arch.isRISCV())
+-        // On RISC-V the frame pointer points to the top of the saved register
+-        // area, on pretty much every other architecture it points to the stack
++    const fp_offset = if (native_arch.isRISCV() or native_arch.isLoongArch())
++        // On RISC-V and LoongArch the frame pointer points to the top of the saved register
++        // area, on pretty much every other architecture it points to the stack
+         // slot where the previous frame pointer is saved.
+         2 * @sizeOf(usize)
+     else if (native_arch.isSPARC())

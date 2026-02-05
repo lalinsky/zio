@@ -1113,9 +1113,6 @@ test "Coroutine: allocator inside coroutine" {
 
 
 test "Coroutine: stack trace" {
-    // Skip on loongarch64 - stack trace capture is not yet supported
-    if (builtin.cpu.arch == .loongarch64) return error.SkipZigTest;
-
     const stack = @import("stack.zig");
 
     var parent_ctx: Context = undefined;
