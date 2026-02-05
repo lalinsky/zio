@@ -19,10 +19,6 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 [`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io.Writer
 [goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
 
-*The `main` branch works with Zig 0.15. I used to support the development version of Zig as much as I could in the [`zig-0.16`] branch. That also included an implemented the `std.Io` interface. However, this effort stopped with the [removal of `std.Thread.*` synchronization primitives](https://codeberg.org/ziglang/zig/pulls/31084) from Zig's standard library. I'll revisit Zig 0.16 support once it's released.*
-
-[`zig-0.16`]: https://github.com/lalinsky/zio/tree/zig-0.16
-
 ## Features
 
 - Support for Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and many other systems (`poll`).
