@@ -306,7 +306,7 @@ const FutexDarwin = struct {
 
         if (result == -1) {
             const err = std.posix.errno(result);
-            if (err == .ETIMEDOUT) {
+            if (err == .TIMEDOUT) {
                 return error.Timeout;
             }
         }
