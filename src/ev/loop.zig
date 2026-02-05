@@ -33,7 +33,7 @@ const time = @import("../os/time.zig");
 const net = @import("../os/net.zig");
 const common = @import("backends/common.zig");
 
-const log = std.log.scoped(.zevent_loop);
+const log = @import("../common.zig").log;
 
 const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 

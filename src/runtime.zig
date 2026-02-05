@@ -12,6 +12,7 @@ const os = @import("os/root.zig");
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
+const log = @import("common.zig").log;
 const time = @import("time.zig");
 const Duration = time.Duration;
 const Timestamp = time.Timestamp;
@@ -836,7 +837,7 @@ pub const Runtime = struct {
         errdefer self.shutdownWorkers();
 
         for (0..num_workers) |i| {
-            std.log.debug("Spawning worker thread {}", .{i + 1});
+            log.debug("Spawning worker thread {}", .{i + 1});
             const worker = self.workers.addOneAssumeCapacity();
             errdefer _ = self.workers.pop();
             worker.* = .{};
@@ -844,7 +845,7 @@ pub const Runtime = struct {
         }
 
         for (self.workers.items, 0..) |*worker, i| {
-            std.log.debug("Waiting for worker thread {}", .{i + 1});
+            log.debug("Waiting for worker thread {}", .{i + 1});
             worker.ready.wait();
             if (worker.err) |e| {
                 return e;
@@ -981,7 +982,7 @@ pub const Runtime = struct {
 
         while (!self.shutting_down.load(.acquire)) {
             worker.executor.run(.until_stopped) catch |e| {
-                std.log.err("Worker executor error: {}, retrying in {f}", .{ e, backoff });
+                log.err("Worker executor error: {}, retrying in {f}", .{ e, backoff });
                 os.time.sleep(backoff);
                 backoff = .{ .value = @min(backoff.value *| 2, max_backoff.value) };
                 continue;

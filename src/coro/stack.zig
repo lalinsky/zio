@@ -8,6 +8,8 @@ const fs = @import("../os/fs.zig");
 const w = @import("../os/windows.zig");
 const coroutines = @import("coroutines.zig");
 
+const log = @import("../common.zig").log;
+
 pub const page_size = if (builtin.os.tag == .freestanding) 1 else std.heap.page_size_min;
 
 // Signal type changed from c_int to enum in Zig 0.16
@@ -49,7 +51,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     const adjusted_size = @max(maximum_size + page_size, page_size * min_pages);
 
     const size = std.math.ceilPowerOfTwo(usize, adjusted_size) catch |err| {
-        std.log.err("Failed to calculate stack size: {}", .{err});
+        log.err("Failed to calculate stack size: {}", .{err});
         return error.OutOfMemory;
     };
 
@@ -72,7 +74,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
         -1, // File descriptor (not applicable)
         0, // Offset within the file (not applicable)
     ) catch |err| {
-        std.log.err("Failed to allocate stack memory: {}", .{err});
+        log.err("Failed to allocate stack memory: {}", .{err});
         return error.OutOfMemory;
     };
     errdefer posix.munmap(allocation) catch {};
@@ -90,7 +92,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
 
     // Validate that committed size doesn't exceed available space (minus guard page)
     if (commit_size > size - page_size) {
-        std.log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, size - page_size });
+        log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, size - page_size });
         return error.OutOfMemory;
     }
 
@@ -99,7 +101,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     const initial_commit_start = stack_top - commit_size;
     const initial_region: [*]align(page_size) u8 = @ptrFromInt(initial_commit_start);
     posix.mprotect(initial_region[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
-        std.log.err("Failed to commit initial stack region: {}", .{err});
+        log.err("Failed to commit initial stack region: {}", .{err});
         return error.OutOfMemory;
     };
 
@@ -238,7 +240,7 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
 
     // Validate that committed size doesn't exceed maximum size
     if (commit_size > max_size) {
-        std.log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, max_size });
+        log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, max_size });
         return error.OutOfMemory;
     }
 
@@ -256,7 +258,7 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
     );
 
     if (status != .SUCCESS) {
-        std.log.err("RtlCreateUserStack failed with status: 0x{x}", .{@intFromEnum(status)});
+        log.err("RtlCreateUserStack failed with status: 0x{x}", .{@intFromEnum(status)});
         return error.OutOfMemory;
     }
 

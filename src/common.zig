@@ -3,6 +3,8 @@
 
 const std = @import("std");
 
+pub const log = std.log.scoped(.zio);
+
 const ev = @import("ev/root.zig");
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;

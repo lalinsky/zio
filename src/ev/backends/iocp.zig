@@ -259,7 +259,7 @@ pub const NetShutdownError = error{
 
 const Self = @This();
 
-const log = std.log.scoped(.ev_iocp);
+const log = @import("../../common.zig").log;
 
 allocator: std.mem.Allocator,
 shared_state: *SharedState,

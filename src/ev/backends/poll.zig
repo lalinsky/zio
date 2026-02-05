@@ -63,7 +63,7 @@ const PollEntry = struct {
 
 const Self = @This();
 
-const log = std.log.scoped(.zio_poll);
+const log = @import("../../common.zig").log;
 
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,

@@ -53,7 +53,7 @@ pub const NetShutdownError = error{
 
 const Self = @This();
 
-const log = std.log.scoped(.zio_kqueue);
+const log = @import("../../common.zig").log;
 
 // These are not defined in std.c for FreeBSD/NetBSD,
 // but the values are the same across all systems using kqueue

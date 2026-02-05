@@ -6,7 +6,7 @@ const windows = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 
-const log = std.log.scoped(.zio_socket);
+const log = @import("../common.zig").log;
 
 // Windows addrinfo definitions
 const windows_addrinfo = if (builtin.os.tag == .windows) extern struct {

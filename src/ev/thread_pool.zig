@@ -6,6 +6,8 @@ const thread_wait = @import("../os/thread_wait.zig");
 const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
 
+const log = @import("../common.zig").log;
+
 pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
 
@@ -73,7 +75,7 @@ pub const ThreadPool = struct {
         const worker_id = self.next_worker_id;
         self.next_worker_id +%= 1;
 
-        std.log.debug("Spawning thread {}", .{worker_id});
+        log.debug("Spawning thread {}", .{worker_id});
 
         const worker = self.workers.addOneAssumeCapacity();
         worker.worker_id = worker_id;
@@ -87,7 +89,7 @@ pub const ThreadPool = struct {
         const allow_removal = after_shutdown or self.workers.items.len > self.min_threads;
         if (!allow_removal) return false;
 
-        std.log.debug("Removing thread {}", .{worker_id});
+        log.debug("Removing thread {}", .{worker_id});
 
         for (self.workers.items, 0..) |*worker, i| {
             if (worker.worker_id == worker_id) {
@@ -139,7 +141,7 @@ pub const ThreadPool = struct {
         const should_spawn = running < self.min_threads or (idle == 0 and queued >= running * self.scale_threshold and running < self.max_threads);
         if (should_spawn) {
             self.spawnThread() catch |err| {
-                std.log.err("Failed to spawn thread: {}", .{err});
+                log.err("Failed to spawn thread: {}", .{err});
             };
         }
     }
