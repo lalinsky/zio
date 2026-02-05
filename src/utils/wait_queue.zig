@@ -41,7 +41,7 @@ const SimpleStack = @import("simple_stack.zig").SimpleStack;
 ///     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 ///     data: i32,
 /// };
-/// var mutex: std.Thread.Mutex = .{};
+/// var mutex: os.Mutex = .init();
 /// var queue: SimpleWaitQueue(MyNode) = .empty;
 ///
 /// mutex.lock();

@@ -13,6 +13,7 @@ const Timeout = @import("../time.zig").Timeout;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
+const os = @import("../os/root.zig");
 const FileOpen = @import("completion.zig").FileOpen;
 const FileCreate = @import("completion.zig").FileCreate;
 const FileClose = @import("completion.zig").FileClose;
@@ -128,7 +129,7 @@ pub const LoopState = struct {
     //   - On timer fire: cancel linked operation (same thread, direct)
     // The cross-thread cancel mechanism remains for general cancellation (task migration,
     // external cancellation), but timeouts become zero-overhead pointer unlinking.
-    timer_mutex: std.Thread.Mutex = .{},
+    timer_mutex: os.Mutex = .init(),
 
     async_handles: Queue(Completion) = .{},
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const os = @import("../../os/root.zig");
 const windows = @import("../../os/windows.zig");
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
@@ -194,7 +195,7 @@ const ExtensionFunctions = struct {
 };
 
 pub const SharedState = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: os.Mutex = .init(),
     refcount: usize = 0,
     iocp: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
 
