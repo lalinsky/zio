@@ -159,7 +159,6 @@ pub const Group = struct {
     }
 
     pub fn wait(group: *Group) Cancelable!void {
-        const rt = getCurrentExecutor().runtime;
         group.setClosed();
         errdefer group.cancel();
 
@@ -169,7 +168,7 @@ pub const Group = struct {
             const state = @atomicLoad(u32, state_ptr, .acquire);
             const counter = state & counter_mask;
             if (counter == 0) break;
-            try Futex.wait(rt, state_ptr, state);
+            try Futex.wait(state_ptr, state);
         }
 
         // All tasks completed - verify list is empty (sentinel0)
@@ -178,7 +177,6 @@ pub const Group = struct {
     }
 
     pub fn cancel(group: *Group) void {
-        const rt = getCurrentExecutor().runtime;
         beginShield();
         defer endShield();
 
@@ -197,7 +195,7 @@ pub const Group = struct {
             const state = @atomicLoad(u32, state_ptr, .acquire);
             const counter = state & counter_mask;
             if (counter == 0) break;
-            Futex.wait(rt, state_ptr, state) catch unreachable;
+            Futex.wait(state_ptr, state) catch unreachable;
         }
 
         // Transition back to idle
@@ -247,6 +245,7 @@ pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!voi
 /// Unregister an awaitable from a group.
 /// Removes from task list, releases ref, decrements counter, and wakes waiters if last task.
 pub fn unregisterGroupTask(rt: *Runtime, group: *Group, awaitable: *Awaitable) void {
+    _ = rt;
     // Only release if we successfully removed it (cancel might have popped it first)
     if (group.getTasks().remove(&awaitable.group_node)) {
         awaitable.release();
@@ -256,7 +255,7 @@ pub fn unregisterGroupTask(rt: *Runtime, group: *Group, awaitable: *Awaitable) v
     const prev_state = @atomicRmw(u32, state_ptr, .Sub, 1, .acq_rel);
     const prev_counter = prev_state & Group.counter_mask;
     if (prev_counter == 1) {
-        Futex.wake(rt, state_ptr, std.math.maxInt(u32));
+        Futex.wake(state_ptr, std.math.maxInt(u32));
     }
 }
 
