@@ -45,6 +45,9 @@ jobs:
       with:
         version: ${{ matrix.zig_version }}
 
+    - name: Apply Zig stdlib patches
+      run: ./patches/apply-zig-patches.sh
+
     - name: Install QEMU
       if: matrix.config.qemu
       run: |

@@ -43,6 +43,9 @@ jobs:
       with:
         version: 0.15.2
 
+    - name: Apply Zig stdlib patches
+      run: ./patches/apply-zig-patches.sh
+
     - name: Run check script
       run: ./check.sh --full
       timeout-minutes: 10
@@ -63,7 +66,7 @@ jobs:
           - { os: macos-15-intel, target: native, backends: 'kqueue poll' }
           - { os: windows-latest, target: native, backends: 'iocp poll' }
           - { os: ubuntu-latest, target: riscv64-linux, qemu: true, backends: 'epoll poll' }
-          # - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'epoll poll' }  # Disabled: tests hanging, needs investigation
+          - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
           - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd, backends: 'kqueue poll' }
 
@@ -77,6 +80,9 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ matrix.zig_version }}
+
+    - name: Apply Zig stdlib patches
+      run: ./patches/apply-zig-patches.sh
 
     - name: Install QEMU
       if: matrix.config.qemu
