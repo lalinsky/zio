@@ -11,6 +11,7 @@ pub const thread_wait = @import("thread_wait.zig");
 
 pub const Mutex = thread_wait.Mutex;
 pub const Condition = thread_wait.Condition;
+pub const ResetEvent = thread_wait.ResetEvent;
 
 pub const iovec = fs.iovec;
 pub const iovec_const = fs.iovec_const;

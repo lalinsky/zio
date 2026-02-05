@@ -136,6 +136,54 @@ pub const Condition = switch (builtin.os.tag) {
     else => ConditionEvent,
 };
 
+/// ResetEvent is a thread-safe bool which can be set to true/false.
+/// Threads can block until the event is set.
+pub const ResetEvent = struct {
+    mutex: Mutex,
+    cond: Condition,
+    is_set: bool,
+
+    pub fn init() ResetEvent {
+        return .{
+            .mutex = Mutex.init(),
+            .cond = Condition.init(),
+            .is_set = false,
+        };
+    }
+
+    pub fn deinit(self: *ResetEvent) void {
+        self.mutex.deinit();
+        self.cond.deinit();
+    }
+
+    pub fn isSet(self: *ResetEvent) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.is_set;
+    }
+
+    pub fn wait(self: *ResetEvent) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (!self.is_set) {
+            self.cond.wait(&self.mutex);
+        }
+    }
+
+    pub fn set(self: *ResetEvent) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.is_set = true;
+        self.cond.broadcast();
+    }
+
+    pub fn reset(self: *ResetEvent) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.is_set = false;
+    }
+};
+
 const FutexLinux = struct {
     fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
         const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;

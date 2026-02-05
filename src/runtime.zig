@@ -801,7 +801,7 @@ pub const Runtime = struct {
 
     const Worker = struct {
         thread: std.Thread = undefined,
-        ready: std.Thread.ResetEvent = .{},
+        ready: os.ResetEvent = .init(),
         err: ?anyerror = null,
         executor: Executor = undefined,
     };
