@@ -94,7 +94,7 @@ pub const Waiter = struct {
         while (true) {
             const current = self.event.state.load(.acquire);
             if (current >= expected) return;
-            self.event.wait(current, null);
+            self.event.wait(current);
         }
     }
 
@@ -138,7 +138,7 @@ pub const Waiter = struct {
             if (remaining.value <= 0) {
                 return;
             }
-            self.event.wait(current, remaining);
+            self.event.timedWait(current, remaining) catch return;
         }
     }
 
