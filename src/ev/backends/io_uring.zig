@@ -143,7 +143,7 @@ pub const DirOpenData = struct {
 
 const Self = @This();
 
-const log = std.log.scoped(.zio_uring);
+const log = @import("../../common.zig").log;
 
 allocator: std.mem.Allocator,
 ring: linux.IoUring,
