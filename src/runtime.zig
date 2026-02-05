@@ -1079,7 +1079,7 @@ pub const Runtime = struct {
 
         // For group tasks, decrement counter and release group's reference
         if (awaitable.group_node.group) |group| {
-            unregisterGroupTask(self, group, awaitable);
+            unregisterGroupTask(group, awaitable);
         }
 
         // Decref for task completion
