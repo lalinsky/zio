@@ -21,6 +21,8 @@ pub const ThreadPool = @import("thread_pool.zig").ThreadPool;
 pub const ReadBuf = @import("buf.zig").ReadBuf;
 pub const WriteBuf = @import("buf.zig").WriteBuf;
 
+pub const executeBlocking = @import("blocking.zig").executeBlocking;
+
 const completion = @import("completion.zig");
 pub const Completion = completion.Completion;
 pub const Op = completion.Op;

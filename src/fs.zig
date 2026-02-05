@@ -7,10 +7,10 @@ const builtin = @import("builtin");
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
-const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const waitForIo = @import("common.zig").waitForIo;
+const waitForIoUncancelable = @import("common.zig").waitForIoUncancelable;
 const timedWaitForIo = @import("common.zig").timedWaitForIo;
 const fillBuf = @import("utils/writer.zig").fillBuf;
 const Timeout = @import("time.zig").Timeout;
@@ -133,9 +133,7 @@ pub const Dir = struct {
 
     pub fn close(self: Dir) void {
         var op = ev.DirClose.init(self.fd);
-        getCurrentTask().beginShield();
-        defer getCurrentTask().endShield();
-        waitForIo(&op.c) catch unreachable;
+        waitForIoUncancelable(&op.c);
         _ = op.getResult() catch {};
     }
 
@@ -355,9 +353,7 @@ pub const File = struct {
 
     pub fn close(self: File) void {
         var op = ev.FileClose.init(self.fd);
-        getCurrentTask().beginShield();
-        defer getCurrentTask().endShield();
-        waitForIo(&op.c) catch unreachable;
+        waitForIoUncancelable(&op.c);
         _ = op.getResult() catch {};
     }
 
@@ -652,9 +648,7 @@ pub const Pipe = struct {
     /// Close this end of the pipe
     pub fn close(self: Pipe) void {
         var op = ev.PipeClose.init(self.fd);
-        getCurrentTask().beginShield();
-        defer getCurrentTask().endShield();
-        waitForIo(&op.c) catch unreachable;
+        waitForIoUncancelable(&op.c);
         _ = op.getResult() catch {};
     }
 
@@ -1328,4 +1322,34 @@ test "Pipe: half-close read end" {
     const write_data = "Data after close";
     const result = pipe.write.write(write_data, .none);
     try std.testing.expectError(error.BrokenPipe, result);
+}
+
+test "File: blocking mode without runtime" {
+    // This test verifies that file operations work in blocking mode
+    // when called without an async runtime
+    const file_path = "test_blocking_mode.txt";
+
+    // Create and write to file (no runtime!)
+    var file = try createFile(file_path, .{ .read = true });
+    defer {
+        file.close();
+        deleteFile(file_path) catch {};
+    }
+
+    const write_data = "Blocking mode works!";
+    const bytes_written = try file.write(write_data, 0);
+    try std.testing.expectEqual(write_data.len, bytes_written);
+
+    // Read from file
+    var buffer: [100]u8 = undefined;
+    const bytes_read = try file.read(&buffer, 0);
+    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
+
+    // Test file size
+    const size = try file.size();
+    try std.testing.expectEqual(write_data.len, size);
+
+    // Test file stat
+    const info = try file.stat();
+    try std.testing.expectEqual(write_data.len, info.size);
 }
