@@ -2,17 +2,20 @@ const std = @import("std");
 const Queue = @import("queue.zig").Queue;
 const Completion = @import("completion.zig").Completion;
 const Work = @import("completion.zig").Work;
+const thread_wait = @import("../os/thread_wait.zig");
+const Duration = @import("../time.zig").Duration;
+const Timeout = @import("../time.zig").Timeout;
 
 pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
 
     workers: std.ArrayList(Worker) = .empty,
-    workers_mutex: std.Thread.Mutex = .{},
+    workers_mutex: thread_wait.Mutex = .init(),
     next_worker_id: u64 = 0,
 
     queue: Queue(Completion) = .{},
-    queue_mutex: std.Thread.Mutex = .{},
-    queue_not_empty: std.Thread.Condition = .{},
+    queue_mutex: thread_wait.Mutex = .init(),
+    queue_not_empty: thread_wait.Condition = .init(),
     queue_size: usize = 0,
     shutdown: bool = false,
 
@@ -185,7 +188,8 @@ pub const ThreadPool = struct {
                 defer _ = self.idle_threads.fetchSub(1, .monotonic);
 
                 if (self.running_threads.load(.monotonic) >= self.min_threads) {
-                    self.queue_not_empty.timedWait(&self.queue_mutex, self.idle_timeout_ns) catch return false;
+                    const timeout: Timeout = .{ .duration = .fromNanoseconds(self.idle_timeout_ns) };
+                    self.queue_not_empty.timedWait(&self.queue_mutex, timeout) catch return false;
                 } else {
                     self.queue_not_empty.wait(&self.queue_mutex);
                 }
