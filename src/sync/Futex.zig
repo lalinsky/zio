@@ -37,6 +37,7 @@ const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
+const os = @import("../os/root.zig");
 
 const Futex = @This();
 
@@ -65,7 +66,7 @@ pub const Table = struct {
 };
 
 const Bucket = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: os.Mutex = .init(),
     waiters: SimpleWaitQueue(FutexWaiter) = .empty,
 };
 

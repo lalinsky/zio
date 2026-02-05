@@ -145,8 +145,9 @@ pub fn lockUncancelable(self: *Mutex) void {
 /// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex) void {
     // Pop one waiter or transition from locked_once to unlocked
+    // Last waiter stays in locked_once (inherits the lock)
     // Handles cancellation race by retrying internally
-    if (self.queue.popOrTransition(locked_once, unlocked)) |wait_node| {
+    if (self.queue.popOrTransition(locked_once, unlocked, locked_once)) |wait_node| {
         Waiter.fromWaitNode(wait_node).signal();
     }
 }

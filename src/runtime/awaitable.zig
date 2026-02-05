@@ -86,7 +86,7 @@ pub const Awaitable = struct {
         // preventing a race where woken tasks check hasResult() before the transition completes.
         var waiters: SimpleQueue(WaitNode) = .empty;
 
-        while (self.waiting_list.popOrTransition(not_complete, complete)) |wait_node| {
+        while (self.waiting_list.popOrTransition(not_complete, complete, complete)) |wait_node| {
             waiters.push(wait_node);
         }
 

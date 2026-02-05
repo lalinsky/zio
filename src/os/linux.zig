@@ -5,6 +5,46 @@ const unexpectedError = @import("base.zig").unexpectedError;
 
 const linux = std.os.linux;
 
+/// Futex operation flags
+pub const FUTEX_WAIT: u32 = 0;
+pub const FUTEX_WAKE: u32 = 1;
+pub const FUTEX_PRIVATE_FLAG: u32 = 128;
+
+/// Fast userspace mutex (futex) system call.
+///
+/// Provides low-level thread synchronization primitives for blocking threads
+/// until a condition is met or waking blocked threads.
+///
+/// Parameters:
+/// - `uaddr`: Address of the futex word (must be 32-bit aligned)
+/// - `futex_op`: Operation to perform (FUTEX_WAIT, FUTEX_WAKE, etc.)
+/// - `val`: Operation-specific value (expected value for WAIT, wake count for WAKE)
+/// - `timeout`: Optional timeout for WAIT operations (null for infinite wait)
+/// - `uaddr2`: Optional second futex address (used by some operations)
+/// - `val3`: Operation-specific value (used by some operations)
+///
+/// Returns the raw syscall result. Errors are indicated by values > -4096.
+/// Caller is responsible for checking and handling errors.
+///
+/// Common patterns:
+/// - FUTEX_WAIT: Block if *uaddr == val, wake on FUTEX_WAKE
+/// - FUTEX_WAKE: Wake up to val waiters on uaddr
+/// - FUTEX_PRIVATE_FLAG: Optimize for process-private futex (no cross-process wake)
+///
+/// Note: On newer architectures (e.g., RISC-V 32-bit), the old futex syscall
+/// doesn't exist and futex_time64 is used instead.
+pub fn futex(uaddr: *const u32, futex_op: u32, val: u32, timeout: ?*const std.posix.timespec, uaddr2: ?*const u32, val3: u32) usize {
+    return linux.syscall6(
+        if (@hasField(linux.SYS, "futex")) .futex else .futex_time64,
+        @intFromPtr(uaddr),
+        futex_op,
+        val,
+        @intFromPtr(timeout),
+        @intFromPtr(uaddr2),
+        val3,
+    );
+}
+
 /// Extended arguments for io_uring_enter2 with IORING_ENTER_EXT_ARG
 pub const io_uring_getevents_arg = extern struct {
     sigmask: u64 = 0,

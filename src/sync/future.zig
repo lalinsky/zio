@@ -97,7 +97,7 @@ pub fn Future(comptime T: type) type {
 
             // Pop and wake all waiters, then transition to done
             // Loop continues until popOrTransition successfully transitions not_set->done
-            while (self.wait_queue.popOrTransition(not_set, done)) |wait_node| {
+            while (self.wait_queue.popOrTransition(not_set, done, done)) |wait_node| {
                 wait_node.wake();
             }
         }

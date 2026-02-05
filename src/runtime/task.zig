@@ -15,6 +15,7 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
+const os = @import("../os/root.zig");
 
 pub const Closure = struct {
     start: Start,
@@ -500,7 +501,7 @@ pub const TaskPool = struct {
     pub const pool_item_size = std.mem.alignForward(usize, @sizeOf(AnyTask) + 128, 128);
 
     pool: MemoryPoolAligned([pool_item_size]u8, .fromByteUnits(Closure.task_alignment)),
-    mutex: std.Thread.Mutex = .{},
+    mutex: os.Mutex = .init(),
 
     pub fn init(allocator: std.mem.Allocator) TaskPool {
         return .{

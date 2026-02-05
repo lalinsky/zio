@@ -6,6 +6,7 @@ const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 const Timestamp = @import("../time.zig").Timestamp;
 const Duration = @import("../time.zig").Duration;
+const os = @import("../os/root.zig");
 
 /// A node in the free list, stored at the base of an unused stack.
 const FreeNode = struct {
@@ -36,7 +37,7 @@ pub const Config = struct {
 
 pub const StackPool = struct {
     config: Config,
-    mutex: std.Thread.Mutex,
+    mutex: os.Mutex,
     head: ?*FreeNode,
     tail: ?*FreeNode,
     pool_size: usize,
@@ -44,7 +45,7 @@ pub const StackPool = struct {
     pub fn init(config: Config) StackPool {
         return .{
             .config = config,
-            .mutex = .{},
+            .mutex = .init(),
             .head = null,
             .tail = null,
             .pool_size = 0,

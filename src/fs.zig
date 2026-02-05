@@ -69,7 +69,7 @@ pub fn createPipe() (os.fs.PipeError || Cancelable)!PipePair {
 
 // Global state to track if stdio fds have been set to non-blocking mode
 // TODO: This should be handled more generically by the backend
-var stdio_nonblocking_mutex: std.Thread.Mutex = .{};
+var stdio_nonblocking_mutex: os.Mutex = .init();
 var stdio_nonblocking = [3]bool{ false, false, false };
 
 pub fn stdin() Pipe {

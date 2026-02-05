@@ -41,7 +41,7 @@ const SimpleStack = @import("simple_stack.zig").SimpleStack;
 ///     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 ///     data: i32,
 /// };
-/// var mutex: std.Thread.Mutex = .{};
+/// var mutex: os.Mutex = .init();
 /// var queue: SimpleWaitQueue(MyNode) = .empty;
 ///
 /// mutex.lock();
@@ -519,10 +519,12 @@ pub fn WaitQueue(comptime T: type) type {
         }
 
         /// Pop one item, or if queue is empty (in from_sentinel state), transition to to_sentinel.
+        /// When popping the last item, transitions to last_waiter_sentinel.
         /// Returns the popped item, or null if queue was/became empty.
-        pub fn popOrTransition(self: *Self, from_sentinel: State, to_sentinel: State) ?*T {
+        pub fn popOrTransition(self: *Self, from_sentinel: State, to_sentinel: State, last_waiter_sentinel: State) ?*T {
             std.debug.assert(!from_sentinel.isPointer());
             std.debug.assert(!to_sentinel.isPointer());
+            std.debug.assert(!last_waiter_sentinel.isPointer());
 
             const old_state = self.acquireMutationLock();
 
@@ -558,8 +560,8 @@ pub fn WaitQueue(comptime T: type) type {
             old_head.prev = null;
 
             if (next == null) {
-                // Last waiter - transition to to_sentinel
-                self.head.store(@intFromEnum(to_sentinel), .release);
+                // Last waiter - transition to last_waiter_sentinel
+                self.head.store(@intFromEnum(last_waiter_sentinel), .release);
             } else {
                 // Transfer tail pointer to new head
                 next.?.userdata = old_head.userdata;
@@ -1101,7 +1103,7 @@ test "WaitQueue popOrTransition with concurrent removals" {
         fn popItems(q: *Queue, count: *std.atomic.Value(usize), done: *std.atomic.Value(bool)) void {
             var local_count: usize = 0;
             while (true) {
-                if (q.popOrTransition(.sentinel0, .sentinel1)) |_| {
+                if (q.popOrTransition(.sentinel0, .sentinel1, .sentinel1)) |_| {
                     local_count += 1;
                 } else {
                     break;

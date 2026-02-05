@@ -12,6 +12,7 @@ const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("runtime/WaitNode.zig");
+const thread_wait = @import("os/thread_wait.zig");
 
 /// Error set for operations that can be cancelled
 pub const Cancelable = error{
@@ -40,7 +41,7 @@ pub const Timeoutable = error{
 pub const Waiter = struct {
     wait_node: WaitNode,
     task: ?*AnyTask,
-    signaled: std.atomic.Value(u32) = .init(0),
+    event: thread_wait.Event,
 
     const vtable: WaitNode.VTable = .{
         .wake = wakeImpl,
@@ -50,6 +51,7 @@ pub const Waiter = struct {
         return .{
             .wait_node = .{ .vtable = &vtable },
             .task = getCurrentTaskOrNull(),
+            .event = .init(),
         };
     }
 
@@ -65,12 +67,11 @@ pub const Waiter = struct {
     /// Signal this waiter and wake the task.
     /// Increments the signal count and wakes the task.
     pub fn signal(self: *Waiter) void {
-        _ = self.signaled.fetchAdd(1, .release);
         if (self.task) |task| {
+            _ = self.event.state.fetchAdd(1, .release);
             task.wake();
         } else {
-            // TODO: use custom futex implementation (std.Thread stuff is being removed in Zig 0.16)
-            std.Thread.Futex.wake(&self.signaled, std.math.maxInt(u32));
+            self.event.signal();
         }
     }
 
@@ -89,18 +90,16 @@ pub const Waiter = struct {
 
     fn waitFutex(self: *Waiter, expected: u32) void {
         while (true) {
-            const current = self.signaled.load(.acquire);
-            if (current >= expected) {
-                return;
-            }
-            std.Thread.Futex.wait(&self.signaled, current);
+            const current = self.event.state.load(.acquire);
+            if (current >= expected) return;
+            self.event.wait(current, null);
         }
     }
 
     fn waitTask(self: *Waiter, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         task.state.store(.preparing_to_wait, .release);
 
-        var current = self.signaled.load(.acquire);
+        var current = self.event.state.load(.acquire);
         if (current >= expected) {
             task.state.store(.ready, .release);
             return;
@@ -114,7 +113,7 @@ pub const Waiter = struct {
                 executor.yield(.preparing_to_wait, .waiting, .no_cancel);
             }
 
-            current = self.signaled.load(.acquire);
+            current = self.event.state.load(.acquire);
             if (current >= expected) {
                 return;
             }
@@ -129,7 +128,7 @@ pub const Waiter = struct {
 
         const deadline = timeout.toDeadline();
         while (true) {
-            const current = self.signaled.load(.acquire);
+            const current = self.event.state.load(.acquire);
             if (current >= expected) {
                 return;
             }
@@ -137,7 +136,7 @@ pub const Waiter = struct {
             if (remaining.value <= 0) {
                 return;
             }
-            std.Thread.Futex.timedWait(&self.signaled, current, remaining.toNanoseconds()) catch {};
+            self.event.wait(current, remaining);
         }
     }
 
@@ -267,6 +266,7 @@ test "Waiter: futex-based timed wait with timeout" {
     var waiter: Waiter = .{
         .wait_node = .{ .vtable = &Waiter.vtable },
         .task = null,
+        .event = .init(),
     };
 
     var timer = Stopwatch.start();
