@@ -211,7 +211,7 @@ const FutexDarwin = struct {
 
         _ = sys.__ulock_wait(
             sys.UL_COMPARE_AND_WAIT,
-            @constCast(&ptr.raw),
+            &ptr.raw,
             current,
             timeout_us,
         );
@@ -224,7 +224,7 @@ const FutexDarwin = struct {
             .all => sys.UL_COMPARE_AND_WAIT | sys.ULF_WAKE_ALL,
         };
 
-        _ = sys.__ulock_wake(flags, @constCast(&ptr.raw), 0);
+        _ = sys.__ulock_wake(flags, &ptr.raw, 0);
     }
 };
 
@@ -237,7 +237,7 @@ const FutexFreeBSD = struct {
         const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
         _ = sys._umtx_op(
-            @constCast(&ptr.raw),
+            &ptr.raw,
             sys.UMTX_OP_WAIT_UINT,
             current,
             null,
@@ -251,7 +251,7 @@ const FutexFreeBSD = struct {
             .all => std.math.maxInt(u32),
         };
         _ = sys._umtx_op(
-            @constCast(&ptr.raw),
+            &ptr.raw,
             sys.UMTX_OP_WAKE,
             n,
             null,
@@ -269,7 +269,7 @@ const FutexOpenBSD = struct {
         const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
         _ = sys.futex(
-            @constCast(&ptr.raw),
+            &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
             @intCast(current),
             if (timeout_ts) |*ts| ts else null,
@@ -283,7 +283,7 @@ const FutexOpenBSD = struct {
             .all => std.math.maxInt(c_int),
         };
         _ = sys.futex(
-            @constCast(&ptr.raw),
+            &ptr.raw,
             sys.FUTEX_WAKE | sys.FUTEX_PRIVATE_FLAG,
             n,
             null,
