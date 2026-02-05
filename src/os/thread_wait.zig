@@ -205,7 +205,8 @@ const FutexDarwin = struct {
     fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
         const timeout_us: u32 = if (timeout) |t| blk: {
             const us = t.toMicroseconds();
-            break :blk std.math.cast(u32, us) orelse std.math.maxInt(u32);
+            const clamped = std.math.cast(u32, us) orelse std.math.maxInt(u32);
+            break :blk @max(1, clamped);
         } else 0;
 
         _ = sys.__ulock_wait(
