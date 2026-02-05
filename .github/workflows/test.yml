@@ -18,6 +18,7 @@ jobs:
         with:
           filters: |
             extended:
+              - 'src/coro/**'
               - 'src/ev/**'
               - 'src/os/**'
               - '.github/workflows/test.yml'
@@ -65,6 +66,9 @@ jobs:
           - { os: macos-latest, target: native, backends: 'kqueue poll' }
           - { os: macos-15-intel, target: native, backends: 'kqueue poll' }
           - { os: windows-latest, target: native, backends: 'iocp poll' }
+          - { os: ubuntu-latest, target: arm-linux, qemu: true, backends: 'epoll poll' }
+          - { os: ubuntu-latest, target: thumb-linux, qemu: true, backends: 'epoll poll' }
+          - { os: ubuntu-latest, target: riscv32-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: riscv64-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
