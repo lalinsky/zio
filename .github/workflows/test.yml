@@ -81,8 +81,8 @@ jobs:
       run: |
         for backend in ${{ matrix.config.backends }}; do
           echo "Building with backend: $backend"
-          ./check.sh --full --no-exec --backend=$backend \
-            ${{ matrix.config.target != 'native' && format('--target={0}', matrix.config.target) || '' }}
+          ./check.sh --full --no-exec --backend $backend \
+            ${{ matrix.config.target != 'native' && format('--target {0}', matrix.config.target) || '' }}
           if [ -n "${{ matrix.config.vm }}" ]; then
             cp zig-out/bin/test zig-out/bin/test-$backend
           else
