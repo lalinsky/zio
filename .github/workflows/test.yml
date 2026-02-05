@@ -7,7 +7,24 @@ on:
   pull_request:
 
 jobs:
-  test:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      extended: ${{ steps.filter.outputs.extended }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            extended:
+              - 'src/ev/**'
+              - 'src/os/**'
+              - '.github/workflows/test.yml'
+
+  basic:
+    needs: changes
+    if: needs.changes.outputs.extended != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -26,16 +43,73 @@ jobs:
       with:
         version: 0.15.2
 
-    - name: Build tests
-      run: zig build test --summary all
-      timeout-minutes: 5
+    - name: Run check script
+      run: ./check.sh --full
+      timeout-minutes: 10
       env:
         TEST_VERBOSE: true
 
-    - name: Build examples
-      run: zig build examples
-      timeout-minutes: 5
+  extended:
+    needs: changes
+    if: needs.changes.outputs.extended == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        zig_version: ['0.15.2']
+        config:
+          - { os: ubuntu-24.04, target: native, backends: 'io_uring epoll poll' }
+          - { os: ubuntu-24.04-arm, target: native, backends: 'io_uring epoll poll' }
+          - { os: macos-latest, target: native, backends: 'kqueue poll' }
+          - { os: macos-15-intel, target: native, backends: 'kqueue poll' }
+          - { os: windows-latest, target: native, backends: 'iocp poll' }
+          - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
+          - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd, backends: 'kqueue poll' }
 
-    - name: Build benchmarks
-      run: zig build benchmarks
-      timeout-minutes: 5
+    runs-on: ${{ matrix.config.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ matrix.zig_version }}
+
+    - name: Build and test for each backend
+      shell: bash
+      run: |
+        for backend in ${{ matrix.config.backends }}; do
+          echo "Building with backend: $backend"
+          ./check.sh --full --no-exec --backend=$backend \
+            ${{ matrix.config.target != 'native' && format('--target={0}', matrix.config.target) || '' }}
+          if [ -n "${{ matrix.config.vm }}" ]; then
+            cp zig-out/bin/test zig-out/bin/test-$backend
+          else
+            zig-out/bin/test
+          fi
+        done
+      timeout-minutes: 10
+      env:
+        TEST_VERBOSE: true
+
+    - name: Run tests (FreeBSD VM)
+      if: matrix.config.vm == 'freebsd'
+      uses: vmactions/freebsd-vm@v1
+      with:
+        run: |
+          for test in zig-out/bin/test-*; do
+            echo "Running $test"
+            ./$test
+          done
+
+    - name: Run tests (NetBSD VM)
+      if: matrix.config.vm == 'netbsd'
+      uses: vmactions/netbsd-vm@v1
+      with:
+        release: '10.1'
+        run: |
+          for test in zig-out/bin/test-*; do
+            echo "Running $test"
+            ./$test
+          done
