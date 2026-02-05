@@ -96,6 +96,7 @@ pub const Event = switch (builtin.os.tag) {
 /// ```
 pub const Mutex = switch (builtin.os.tag) {
     .windows => MutexWindows,
+    .freebsd => MutexFreeBSD,
     .netbsd => MutexEvent,
     else => |t| if (t.isDarwin()) MutexDarwin else MutexFutex,
 };
@@ -131,6 +132,7 @@ pub const Mutex = switch (builtin.os.tag) {
 /// ```
 pub const Condition = switch (builtin.os.tag) {
     .windows => ConditionWindows,
+    .freebsd => ConditionFreeBSD,
     else => ConditionEvent,
 };
 
@@ -257,6 +259,114 @@ const FutexFreeBSD = struct {
             null,
             null,
         );
+    }
+};
+
+/// FreeBSD umutex-based mutex.
+///
+/// Uses FreeBSD's native UMTX_OP_MUTEX_* operations which provide
+/// kernel-assisted locking with automatic priority inheritance support.
+const MutexFreeBSD = struct {
+    mutex: sys.umutex = .{
+        .m_owner = sys.UMUTEX_UNOWNED,
+        .m_flags = 0,
+        .m_ceilings = .{ 0, 0 },
+        .m_rb_lnk = 0,
+        .m_spare = .{ 0, 0 },
+    },
+
+    pub fn init() MutexFreeBSD {
+        return .{};
+    }
+
+    pub fn deinit(self: *MutexFreeBSD) void {
+        _ = self;
+    }
+
+    pub fn lock(self: *MutexFreeBSD) void {
+        // UMTX_OP_MUTEX_LOCK blocks until the mutex is acquired
+        _ = sys._umtx_op(&self.mutex, sys.UMTX_OP_MUTEX_LOCK, 0, null, null);
+    }
+
+    pub fn unlock(self: *MutexFreeBSD) void {
+        // UMTX_OP_MUTEX_UNLOCK releases the mutex and wakes one waiter if any
+        _ = sys._umtx_op(&self.mutex, sys.UMTX_OP_MUTEX_UNLOCK, 0, null, null);
+    }
+
+    pub fn tryLock(self: *MutexFreeBSD) bool {
+        // UMTX_OP_MUTEX_TRYLOCK returns 0 on success, EBUSY if already locked
+        const result = sys._umtx_op(&self.mutex, sys.UMTX_OP_MUTEX_TRYLOCK, 0, null, null);
+        return result == 0;
+    }
+};
+
+/// FreeBSD ucond-based condition variable.
+///
+/// Uses FreeBSD's native UMTX_OP_CV_* operations which provide
+/// kernel-assisted condition variables with automatic signal-before-wait race handling.
+const ConditionFreeBSD = struct {
+    cond: sys.ucond = .{
+        .c_has_waiters = 0,
+        .c_flags = 0,
+        .c_clockid = 0,
+        .c_spare = .{0},
+    },
+
+    pub fn init() ConditionFreeBSD {
+        return .{};
+    }
+
+    pub fn deinit(self: *ConditionFreeBSD) void {
+        _ = self;
+    }
+
+    /// Wait for a signal. The mutex must be held when calling this.
+    /// The mutex is atomically released and the thread blocks.
+    /// When signaled, the mutex is automatically reacquired before returning.
+    pub fn wait(self: *ConditionFreeBSD, mutex: *Mutex) void {
+        // UMTX_OP_CV_WAIT atomically releases the mutex and waits
+        // The kernel ensures no signal is lost between unlock and wait
+        _ = sys._umtx_op(&self.cond, sys.UMTX_OP_CV_WAIT, 0, &mutex.mutex, null);
+    }
+
+    /// Wait for a signal with a timeout.
+    /// Returns error.Timeout if the timeout expires before being signaled.
+    pub fn timedWait(self: *ConditionFreeBSD, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
+        if (timeout == .none) {
+            return self.wait(mutex);
+        }
+
+        const deadline = timeout.toDeadline();
+        const remaining = deadline.durationFromNow();
+        if (remaining.value <= 0) {
+            return error.Timeout;
+        }
+
+        const timeout_ts = remaining.toTimespec();
+
+        // UMTX_OP_CV_WAIT with relative timeout (no CVWAIT_ABSTIME flag)
+        const result = sys._umtx_op(
+            &self.cond,
+            sys.UMTX_OP_CV_WAIT,
+            0, // No flags = relative timeout
+            &mutex.mutex,
+            @ptrCast(@constCast(&timeout_ts)),
+        );
+
+        // Check if we timed out
+        if (result == -1 and std.posix.errno(result) == .TIMEDOUT) {
+            return error.Timeout;
+        }
+    }
+
+    /// Wake one waiting thread.
+    pub fn signal(self: *ConditionFreeBSD) void {
+        _ = sys._umtx_op(&self.cond, sys.UMTX_OP_CV_SIGNAL, 0, null, null);
+    }
+
+    /// Wake all waiting threads.
+    pub fn broadcast(self: *ConditionFreeBSD) void {
+        _ = sys._umtx_op(&self.cond, sys.UMTX_OP_CV_BROADCAST, 0, null, null);
     }
 };
 
