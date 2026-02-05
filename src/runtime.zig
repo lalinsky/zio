@@ -797,7 +797,6 @@ pub const Runtime = struct {
     workers: std.ArrayList(Worker) = .empty,
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    futex_table: Futex.Table, // Global futex wait table
 
     const Worker = struct {
         thread: std.Thread = undefined,
@@ -812,9 +811,6 @@ pub const Runtime = struct {
 
         const num_executors = options.executors.resolve();
 
-        var futex_table = try Futex.Table.init(allocator, num_executors);
-        errdefer futex_table.deinit(allocator);
-
         self.* = .{
             .allocator = allocator,
             .options = options,
@@ -822,7 +818,6 @@ pub const Runtime = struct {
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
             .task_pool = .init(allocator),
-            .futex_table = futex_table,
         };
 
         try self.thread_pool.init(allocator, options.thread_pool);
@@ -907,9 +902,6 @@ pub const Runtime = struct {
 
         // Clean up task pool
         self.task_pool.deinit();
-
-        // Clean up futex table
-        self.futex_table.deinit(allocator);
 
         // Free the Runtime allocation
         allocator.destroy(self);

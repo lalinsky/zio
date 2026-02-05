@@ -5,7 +5,7 @@
 //!
 //! This provides futex-like semantics (wait on address, wake waiters) within
 //! the coroutine scheduler. Unlike kernel futex, this only works for coroutines
-//! within the same zio Runtime, but works across all executors.
+//! within the same process, but works across all runtimes and executors.
 //!
 //! API mirrors `std.Thread.Futex`:
 //!
@@ -13,16 +13,16 @@
 //! const Futex = @import("zio").Futex;
 //!
 //! // Wait until *ptr != expect or woken
-//! try Futex.wait(runtime, ptr, expect);
+//! try Futex.wait(ptr, expect);
 //!
 //! // Wait with timeout
-//! Futex.timedWait(runtime, ptr, expect, .{ .duration = .fromMilliseconds(100) }) catch |err| switch (err) {
+//! Futex.timedWait(ptr, expect, .{ .duration = .fromMilliseconds(100) }) catch |err| switch (err) {
 //!     error.Timeout => // timed out,
 //!     error.Canceled => // task was cancelled,
 //! };
 //!
 //! // Wake up to N waiters
-//! Futex.wake(runtime, ptr, 1);
+//! Futex.wake(ptr, 1);
 //! ```
 
 const std = @import("std");
@@ -41,40 +41,24 @@ const os = @import("../os/root.zig");
 
 const Futex = @This();
 
-const buckets_per_executor = 1024;
-
-/// Futex wait table stored in Runtime. Dynamically sized based on executor count.
-pub const Table = struct {
-    buckets: []Bucket,
-    shift: std.math.Log2Int(usize),
-
-    pub fn init(allocator: std.mem.Allocator, num_executors: usize) !Table {
-        // Round up to power of 2 for efficient hashing
-        const min_buckets = buckets_per_executor * num_executors;
-        const bucket_count = try std.math.ceilPowerOfTwo(usize, min_buckets);
-        const buckets = try allocator.alloc(Bucket, bucket_count);
-        @memset(buckets, .{});
-        return .{
-            .buckets = buckets,
-            .shift = @intCast(@bitSizeOf(usize) - @ctz(bucket_count)),
-        };
-    }
-
-    pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
-        allocator.free(self.buckets);
-    }
-};
+/// Fixed-size global futex bucket table.
+/// 1024 buckets provides good distribution for most workloads.
+const num_buckets = 1024;
+const bucket_shift = @bitSizeOf(usize) - @ctz(@as(usize, num_buckets));
 
 const Bucket = struct {
     mutex: os.Mutex = .init(),
     waiters: SimpleWaitQueue(FutexWaiter) = .empty,
 };
 
-fn getBucket(table: *Table, address: usize) *Bucket {
+/// Global static bucket table for futex operations.
+var global_buckets: [num_buckets]Bucket = [_]Bucket{.{}} ** num_buckets;
+
+fn getBucket(address: usize) *Bucket {
     // Fibonacci hash - golden ratio distributes addresses evenly
     const fibonacci_multiplier = 0x9E3779B97F4A7C15 >> (64 - @bitSizeOf(usize));
-    const index = (address *% fibonacci_multiplier) >> table.shift;
-    return &table.buckets[index];
+    const index = (address *% fibonacci_multiplier) >> bucket_shift;
+    return &global_buckets[index];
 }
 
 /// Checks if `ptr` still contains the value `expect` and, if so, blocks the caller until either:
@@ -82,14 +66,14 @@ fn getBucket(table: *Table, address: usize) *Bucket {
 /// - The caller is unblocked by a matching `wake()`.
 /// - The caller is unblocked spuriously.
 /// - The caller's task is cancelled, in which case `error.Canceled` is returned.
-pub fn wait(runtime: *Runtime, ptr: *const u32, expect: u32) Cancelable!void {
+pub fn wait(ptr: *const u32, expect: u32) Cancelable!void {
     // Fast path: check if value already changed
     if (@atomicLoad(u32, ptr, .acquire) != expect) {
         return;
     }
 
     const address = @intFromPtr(ptr);
-    const bucket = getBucket(&runtime.futex_table, address);
+    const bucket = getBucket(address);
 
     // Use a stack-allocated waiter
     var futex_waiter = FutexWaiter{
@@ -137,14 +121,14 @@ const FutexWaiter = struct {
 };
 
 /// Like `wait`, but also returns `error.Timeout` if the timeout elapses.
-pub fn timedWait(runtime: *Runtime, ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn timedWait(ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Fast path: check if value already changed
     if (@atomicLoad(u32, ptr, .acquire) != expect) {
         return;
     }
 
     const address = @intFromPtr(ptr);
-    const bucket = getBucket(&runtime.futex_table, address);
+    const bucket = getBucket(address);
 
     // Use a stack-allocated waiter with its own WaitNode
     var futex_waiter = FutexWaiter{
@@ -193,11 +177,11 @@ fn removeFromBucket(bucket: *Bucket, waiter: *FutexWaiter) bool {
 }
 
 /// Unblocks at most `max_waiters` callers blocked in a `wait()` call on `ptr`.
-pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
+pub fn wake(ptr: *const u32, max_waiters: u32) void {
     if (max_waiters == 0) return;
 
     const address = @intFromPtr(ptr);
-    const bucket = getBucket(&runtime.futex_table, address);
+    const bucket = getBucket(address);
 
     bucket.mutex.lock();
 
@@ -235,26 +219,26 @@ pub fn wake(runtime: *Runtime, ptr: *const u32, max_waiters: u32) void {
 
 test "Futex: basic wait/wake" {
     const Main = struct {
-        fn waiterFunc(io: *Runtime, v: *u32, w: *bool) !void {
+        fn waiterFunc(v: *u32, w: *bool) !void {
             while (@atomicLoad(u32, v, .acquire) == 0) {
-                try Futex.wait(io, v, 0);
+                try Futex.wait(v, 0);
             }
             @atomicStore(bool, w, true, .release);
         }
 
-        fn wakerFunc(io: *Runtime, val: *u32) !void {
+        fn wakerFunc(val: *u32) !void {
             @atomicStore(u32, val, 1, .release);
-            Futex.wake(io, val, 1);
+            Futex.wake(val, 1);
         }
 
         fn run(io: *Runtime) !void {
             var value: u32 = 0;
             var woken: bool = false;
 
-            var waiter = try io.spawn(waiterFunc, .{ io, &value, &woken });
+            var waiter = try io.spawn(waiterFunc, .{ &value, &woken });
             defer waiter.cancel();
 
-            var waker = try io.spawn(wakerFunc, .{ io, &value });
+            var waker = try io.spawn(wakerFunc, .{&value});
             try waker.join();
 
             var timeout: AutoCancel = .init;
@@ -280,7 +264,7 @@ test "Futex: spurious wakeup - value already changed" {
     var value: u32 = 1; // Already != 0
 
     // Should return immediately since value != expect
-    try Futex.wait(rt, &value, 0);
+    try Futex.wait(&value, 0);
 }
 
 test "Futex: wake with no waiters" {
@@ -290,40 +274,40 @@ test "Futex: wake with no waiters" {
     var value: u32 = 0;
 
     // Wake with no waiters should be a no-op
-    Futex.wake(rt, &value, 1);
-    Futex.wake(rt, &value, std.math.maxInt(u32));
+    Futex.wake(&value, 1);
+    Futex.wake(&value, std.math.maxInt(u32));
 }
 
 test "Futex: multiple waiters same address" {
     const Main = struct {
-        fn waiterFunc(io: *Runtime, v: *u32, w: *u32) !void {
+        fn waiterFunc(v: *u32, w: *u32) !void {
             while (@atomicLoad(u32, v, .acquire) == 0) {
-                try Futex.wait(io, v, 0);
+                try Futex.wait(v, 0);
             }
             _ = @atomicRmw(u32, w, .Add, 1, .monotonic);
         }
 
-        fn wakerFunc(io: *Runtime, val: *u32) !void {
+        fn wakerFunc(val: *u32) !void {
             // Yield multiple times to ensure waiters have time to block
             var i: usize = 0;
             while (i < 10) : (i += 1) {
                 try yield();
             }
             @atomicStore(u32, val, 1, .release);
-            Futex.wake(io, val, 2);
+            Futex.wake(val, 2);
         }
 
         fn run(io: *Runtime) !void {
             var value: u32 = 0;
             var woken: u32 = 0;
 
-            var waiter1 = try io.spawn(waiterFunc, .{ io, &value, &woken });
+            var waiter1 = try io.spawn(waiterFunc, .{ &value, &woken });
             defer waiter1.cancel();
 
-            var waiter2 = try io.spawn(waiterFunc, .{ io, &value, &woken });
+            var waiter2 = try io.spawn(waiterFunc, .{ &value, &woken });
             defer waiter2.cancel();
 
-            var waker = try io.spawn(wakerFunc, .{ io, &value });
+            var waker = try io.spawn(wakerFunc, .{&value});
             try waker.join();
 
             var timeout: AutoCancel = .init;
@@ -345,29 +329,29 @@ test "Futex: multiple waiters same address" {
 
 test "Futex: multiple waiters different addresses" {
     const Main = struct {
-        fn waiterFunc(io: *Runtime, v: *u32, w: *u32) !void {
+        fn waiterFunc(v: *u32, w: *u32) !void {
             while (@atomicLoad(u32, v, .acquire) == 0) {
-                try Futex.wait(io, v, 0);
+                try Futex.wait(v, 0);
             }
             _ = @atomicRmw(u32, w, .Add, 1, .monotonic);
         }
 
-        fn wakerFunc(io: *Runtime, val: *u32) !void {
+        fn wakerFunc(val: *u32) !void {
             @atomicStore(u32, val, 1, .release);
-            Futex.wake(io, val, 1);
+            Futex.wake(val, 1);
         }
 
         fn run(io: *Runtime, w: *u32) !void {
             var value1: u32 = 0;
             var value2: u32 = 0;
 
-            var waiter1 = try io.spawn(waiterFunc, .{ io, &value1, w });
+            var waiter1 = try io.spawn(waiterFunc, .{ &value1, w });
             defer waiter1.cancel();
 
-            var waiter2 = try io.spawn(waiterFunc, .{ io, &value2, w });
+            var waiter2 = try io.spawn(waiterFunc, .{ &value2, w });
             defer waiter2.cancel();
 
-            var waker = try io.spawn(wakerFunc, .{ io, &value1 });
+            var waker = try io.spawn(wakerFunc, .{&value1});
             try waker.join();
 
             var timeout: AutoCancel = .init;
@@ -402,6 +386,6 @@ test "Futex: timedWait timeout" {
     var value: u32 = 0;
 
     // Wait with timeout, no one will wake it, so should timeout
-    const result = Futex.timedWait(rt, &value, 0, .{ .duration = .fromMilliseconds(10) });
+    const result = Futex.timedWait(&value, 0, .{ .duration = .fromMilliseconds(10) });
     try std.testing.expectError(error.Timeout, result);
 }
