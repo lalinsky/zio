@@ -72,15 +72,36 @@ pub fn sleep(duration: Duration) void {
         else => {
             var req = duration.toTimespec();
             var rem: posix.system.timespec = undefined;
-            while (true) {
-                const rc = posix.system.nanosleep(&req, &rem);
-                switch (posix.errno(rc)) {
-                    .SUCCESS => return,
-                    .INTR => {
-                        req = rem;
-                        continue;
-                    },
-                    else => return,
+
+            // riscv32 doesn't have nanosleep, use clock_nanosleep instead
+            if (builtin.cpu.arch == .riscv32) {
+                while (true) {
+                    const rc = posix.system.clock_nanosleep(
+                        posix.system.CLOCK.MONOTONIC,
+                        .{ .ABSTIME = false },
+                        &req,
+                        &rem,
+                    );
+                    switch (posix.errno(rc)) {
+                        .SUCCESS => return,
+                        .INTR => {
+                            req = rem;
+                            continue;
+                        },
+                        else => return,
+                    }
+                }
+            } else {
+                while (true) {
+                    const rc = posix.system.nanosleep(&req, &rem);
+                    switch (posix.errno(rc)) {
+                        .SUCCESS => return,
+                        .INTR => {
+                            req = rem;
+                            continue;
+                        },
+                        else => return,
+                    }
                 }
             }
         },
