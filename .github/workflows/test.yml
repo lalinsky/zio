@@ -7,14 +7,38 @@ on:
   pull_request:
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ev: ${{ steps.check.outputs.ev }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check for ev/os changes
+      id: check
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          git fetch origin ${{ github.base_ref }}
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -qE '^src/(ev|os)/'; then
+            echo "ev=true" >> $GITHUB_OUTPUT
+          else
+            echo "ev=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "ev=true" >> $GITHUB_OUTPUT
+        fi
+
   test:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-          - os: macos-latest
-          - os: windows-latest
+          - { os: ubuntu-latest }
+          - { os: macos-latest }
+          - { os: windows-latest }
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -39,3 +63,61 @@ jobs:
     - name: Build benchmarks
       run: zig build benchmarks
       timeout-minutes: 5
+
+  test-extended:
+    needs: [changes]
+    if: |
+      github.event_name == 'push' ||
+      needs.changes.outputs.ev == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04-arm }
+          - { os: macos-15-intel }
+          - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd }
+          - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd }
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Build tests
+      run: zig build test -Demit-test-bin ${{ matrix.target && format('-Dtarget={0}', matrix.target) || '' }}
+      timeout-minutes: 5
+
+    - name: Build examples
+      if: ${{ !matrix.vm }}
+      run: zig build examples
+      timeout-minutes: 5
+
+    - name: Build benchmarks
+      if: ${{ !matrix.vm }}
+      run: zig build benchmarks
+      timeout-minutes: 5
+
+    - name: Run tests
+      if: ${{ !matrix.vm }}
+      run: ./zig-out/bin/test
+      timeout-minutes: 5
+      env:
+        TEST_VERBOSE: true
+
+    - name: Run tests (FreeBSD)
+      if: matrix.vm == 'freebsd'
+      uses: vmactions/freebsd-vm@v1
+      with:
+        run: ./zig-out/bin/test
+
+    - name: Run tests (NetBSD)
+      if: matrix.vm == 'netbsd'
+      uses: vmactions/netbsd-vm@v1
+      with:
+        release: '10.1'
+        run: ./zig-out/bin/test
