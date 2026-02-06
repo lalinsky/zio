@@ -634,7 +634,13 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             const has_error = (event.flags & EV_ERROR) != 0;
             const has_eof = (event.flags & EV_EOF) != 0;
             if (has_error and event.data != 0) {
-                comp.setError(fs.errnoToFileWriteError(@enumFromInt(@as(i32, @intCast(event.data)))));
+                // BSD systems return EBADF (NotOpenForWriting) when writing to closed pipe
+                // Normalize to BrokenPipe for consistency with Linux
+                const err = fs.errnoToFileWriteError(@enumFromInt(@as(i32, @intCast(event.data))));
+                comp.setError(switch (err) {
+                    error.NotOpenForWriting => error.BrokenPipe,
+                    else => err,
+                });
                 return .completed;
             }
             if (has_eof) {
@@ -647,6 +653,12 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,
+                // BSD systems return EBADF (NotOpenForWriting) when writing to closed pipe
+                // Normalize to BrokenPipe for consistency with Linux
+                error.NotOpenForWriting => {
+                    comp.setError(error.BrokenPipe);
+                    return .completed;
+                },
                 else => {
                     comp.setError(err);
                     return .completed;

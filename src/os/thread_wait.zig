@@ -1153,25 +1153,28 @@ test "Event - multiple signals" {
 test "Event - timedWait success (signaled before timeout)" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    var event = Event.init();
     var ready = std.atomic.Value(bool).init(false);
+    var event_ptr = std.atomic.Value(?*Event).init(null);
 
     const Context = struct {
-        event: *Event,
+        event_ptr: *std.atomic.Value(?*Event),
         ready: *std.atomic.Value(bool),
     };
 
     const waiter = struct {
         fn run(ctx: *Context) void {
+            // Create Event on the waiting thread (required for NetBSD)
+            var event = Event.init();
+            ctx.event_ptr.store(&event, .release);
             ctx.ready.store(true, .release);
             // Wait with long timeout (1 second), but should be signaled quickly
-            ctx.event.timedWait(0, .fromSeconds(1)) catch |err| {
+            event.timedWait(0, .fromSeconds(1)) catch |err| {
                 std.debug.panic("timedWait failed: {}", .{err});
             };
         }
     }.run;
 
-    var ctx = Context{ .event = &event, .ready = &ready };
+    var ctx = Context{ .event_ptr = &event_ptr, .ready = &ready };
     const thread = try std.Thread.spawn(.{}, waiter, .{&ctx});
     defer thread.join();
 
@@ -1184,18 +1187,34 @@ test "Event - timedWait success (signaled before timeout)" {
     std.Thread.sleep(10 * std.time.ns_per_ms);
 
     // Signal the event - should wake up without timeout
-    event.signal();
+    event_ptr.load(.acquire).?.signal();
 }
 
 test "Event - timeout" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var event = Event.init();
-    const start = std.time.nanoTimestamp();
 
-    // Wait with timeout, should return error.Timeout after approximately 50ms
-    const result = event.timedWait(0, .fromMilliseconds(50));
-    try std.testing.expectError(error.Timeout, result);
+    // Loop to handle spurious wakeups (e.g., stale EALREADY from previous tests)
+    const start = std.time.nanoTimestamp();
+    while (true) {
+        const result = event.timedWait(0, .fromMilliseconds(50));
+
+        // Check if event state changed (spurious wakeup if not)
+        if (event.state.load(.acquire) != 0) {
+            return error.TestUnexpectedSignal; // Event was signaled, shouldn't happen
+        }
+
+        // State unchanged, check if we got timeout or spurious wakeup
+        if (result) |_| {
+            // Spurious wakeup, retry
+            continue;
+        } else |err| {
+            // Got timeout
+            try std.testing.expectEqual(error.Timeout, err);
+            break;
+        }
+    }
 
     const elapsed = std.time.nanoTimestamp() - start;
     // Allow some slack for scheduling

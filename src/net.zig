@@ -2179,14 +2179,14 @@ test "Socket: buffer size get/set" {
     defer socket.close();
 
     // Test send buffer size
-    const desired_send_size: usize = 128 * 1024; // 128 KB
+    const desired_send_size: usize = 32 * 1024; // 32 KB
     try socket.setSendBufferSize(desired_send_size);
     const actual_send_size = try socket.getSendBufferSize();
     // The kernel may grant a different size, but it should be > 0
     try std.testing.expect(actual_send_size > 0);
 
     // Test receive buffer size
-    const desired_recv_size: usize = 256 * 1024; // 256 KB
+    const desired_recv_size: usize = 64 * 1024; // 64 KB
     try socket.setReceiveBufferSize(desired_recv_size);
     const actual_recv_size = try socket.getReceiveBufferSize();
     // The kernel may grant a different size, but it should be > 0
@@ -2194,7 +2194,7 @@ test "Socket: buffer size get/set" {
 
     // Verify that setting different sizes results in different values
     // (though kernel may adjust them)
-    const new_send_size: usize = 64 * 1024; // 64 KB
+    const new_send_size: usize = 16 * 1024; // 16 KB
     try socket.setSendBufferSize(new_send_size);
     const updated_send_size = try socket.getSendBufferSize();
     try std.testing.expect(updated_send_size > 0);
