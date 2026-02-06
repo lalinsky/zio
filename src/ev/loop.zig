@@ -185,12 +185,13 @@ pub const LoopState = struct {
 
             // Race mode: first to clear the flag wins, cancels siblings
             if (group.race.swap(false, .acq_rel)) {
-                var child = group.head;
-                while (child) |c| {
+                var node = group.head;
+                while (node) |n| {
+                    const c: *Completion = @fieldParentPtr("group", n);
                     if (c != completion) {
                         self.loop.cancel(c);
                     }
-                    child = c.group.next;
+                    node = n.next;
                 }
             }
 
@@ -437,11 +438,12 @@ pub const Loop = struct {
         switch (completion.op) {
             .group => {
                 const group = completion.cast(Group);
-                var child = group.head;
-                while (child) |c| {
-                    const next = c.group.next;
+                var node = group.head;
+                while (node) |n| {
+                    const next = n.next;
+                    const c: *Completion = @fieldParentPtr("group", n);
                     self.cancel(c);
-                    child = next;
+                    node = next;
                 }
             },
             .timer => {
@@ -545,11 +547,12 @@ pub const Loop = struct {
                     self.state.markCompleted(&group.c);
                 } else {
                     // Add all children to the loop
-                    var child = group.head;
-                    while (child) |c| {
-                        const next = c.group.next;
+                    var node = group.head;
+                    while (node) |n| {
+                        const next = n.next;
+                        const c: *Completion = @fieldParentPtr("group", n);
                         self.addInternal(c);
-                        child = next;
+                        node = next;
                     }
                 }
                 return;
