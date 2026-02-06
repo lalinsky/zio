@@ -66,9 +66,9 @@ pub const CompletionQueue = struct {
     }
 
     /// Submit a completion to the queue and event loop.
-    /// Note: this claims `c.userdata` and `c.callback` for internal use.
+    /// Note: this claims `c.group.owner` and `c.callback` for internal use.
     pub fn submit(self: *CompletionQueue, c: *Completion) void {
-        c.userdata = self;
+        c.group.owner = self;
         c.callback = completionCallback;
 
         self.mutex.lock();
@@ -231,7 +231,7 @@ pub const CompletionQueue = struct {
     }
 
     fn completionCallback(_: *ev.Loop, c: *Completion) void {
-        const self: *CompletionQueue = @ptrCast(@alignCast(c.userdata.?));
+        const self: *CompletionQueue = @ptrCast(@alignCast(c.group.owner.?));
 
         self.mutex.lock();
         const removed = self.pending.remove(&c.group);

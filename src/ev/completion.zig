@@ -256,7 +256,7 @@ pub const Completion = struct {
     group: struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        owner: ?*Group = null,
+        owner: ?*anyopaque = null,
         userdata: usize = 0,
         in_list: if (std.debug.runtime_safety) bool else void =
             if (std.debug.runtime_safety) false else {},

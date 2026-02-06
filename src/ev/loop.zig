@@ -180,7 +180,8 @@ pub const LoopState = struct {
         self.active -= 1;
 
         // Notify group owner if this completion belongs to one
-        if (completion.group.owner) |group| {
+        if (completion.group.owner) |owner| {
+            const group: *Group = @ptrCast(@alignCast(owner));
             const prev = group.remaining.fetchSub(1, .acq_rel);
 
             // Race mode: first to clear the flag wins, cancels siblings
