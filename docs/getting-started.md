@@ -20,7 +20,7 @@ info: see `zig build --help` for a menu of options
 Then add ZIO as a dependency to the project:
 
 ```sh
-$ zig fetch --save "git+https://github.com/lalinsky/zio#v0.6.0"
+$ zig fetch --save "git+https://github.com/lalinsky/zio#v0.7.0"
 info: resolved to commit 0000000000000000000000000000000000000000
 ```
 

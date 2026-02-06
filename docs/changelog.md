@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-02-06
+
+### Added
+
+- Added CI for 32-bit ARM/Thumb and RISC-V CPUs to make sure these don't break.
+
+### Changed
+
+- **BREAKING**: Removed `rt` parameter from most functions. It's no longer needed.
+  You can now use `zio.spawn`, `zio.sleep`, or `zio.yield` instead of calling
+  them as `rt` methods.
+- Synchronization primitives like `Mutex`, `Condition` or `Channel` can be now used
+  from any thread, outside of coroutines, or across multiple runtimes.
+- `Dir` and `File` I/O operations can be now called from any thread and then will
+  run regular blocking syscalls.
+- Internal: Update our user-mode futex implemenentation to a global hash table,
+  to allow it to be used from any thread.
+- Internal: Replaced `std.Thread` synchronization primitives with custom OS wrappers.
+
 ## [0.6.0] - 2026-01-31
 
 ### Added
@@ -143,6 +162,7 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.7.0]: https://github.com/lalinsky/zio/releases/tag/v0.7.0
 [0.6.0]: https://github.com/lalinsky/zio/releases/tag/v0.6.0
 [0.5.1]: https://github.com/lalinsky/zio/releases/tag/v0.5.1
 [0.5.0]: https://github.com/lalinsky/zio/releases/tag/v0.5.0
