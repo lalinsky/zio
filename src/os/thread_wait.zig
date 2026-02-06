@@ -35,11 +35,11 @@ pub const WakeCount = enum {
 /// Low-level futex operations for thread synchronization.
 ///
 /// Provides platform-specific wait/wake primitives that operate on atomic values.
-/// This is an internal implementation detail - use the public `wait()` and `wake()`
-/// functions or the `Event` type instead.
+/// This is an internal implementation detail - use the `Event` type instead.
 ///
 /// Methods:
-/// - `wait(ptr, current, timeout)`: Block if *ptr == current, with optional timeout
+/// - `wait(ptr, current)`: Block indefinitely if *ptr == current
+/// - `timedWait(ptr, current, timeout)`: Block with timeout if *ptr == current, returns error.Timeout
 /// - `wake(ptr, count)`: Wake waiting threads (one or all)
 ///
 /// The implementation is selected at compile time based on the target OS.
@@ -65,9 +65,11 @@ const Futex = switch (builtin.os.tag) {
 /// var event: Event = .init();
 ///
 /// // Waiter thread
-/// event.wait(1, null); // Wait indefinitely
+/// event.wait(1); // Wait indefinitely
 /// // or
-/// event.wait(1, .fromSeconds(1)); // Wait with 1s timeout
+/// event.timedWait(1, .fromSeconds(1)) catch |err| {
+///     // Handle timeout
+/// };
 ///
 /// // Signaler thread
 /// event.signal();
@@ -185,18 +187,35 @@ pub const ResetEvent = struct {
 };
 
 const FutexLinux = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
-        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
+    const linux = std.os.linux;
 
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
         _ = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
             current,
-            if (timeout_ts) |*ts| ts else null,
+            null,
             null,
             0,
         );
-        // Ignore errors - spurious wakeups and timeouts are both fine
+        // Ignore errors - spurious wakeups are fine
+    }
+
+    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+        const timeout_ts = timeout.toTimespec();
+
+        const rc = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            current,
+            &timeout_ts,
+            null,
+            0,
+        );
+
+        if (linux.E.init(rc) == .TIMEDOUT) {
+            return error.Timeout;
+        }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -220,23 +239,35 @@ const FutexLinux = struct {
 // ============================================================================
 
 const FutexWindows = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
-        // RtlWaitOnAddress takes timeout in 100ns units (negative = relative)
-        const timeout_li: ?sys.LARGE_INTEGER = if (timeout) |t| blk: {
-            const ns = t.toNanoseconds();
-            const units_100ns = ns / 100;
-            const i64_val = std.math.cast(i64, units_100ns) orelse std.math.maxInt(i64);
-            break :blk -i64_val; // Negative means relative timeout
-        } else null;
-
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
         // RtlWaitOnAddress atomically checks if *ptr == current before sleeping
         _ = sys.RtlWaitOnAddress(
             &ptr.raw,
             &current,
             @sizeOf(u32),
-            if (timeout_li) |*t| t else null,
+            null,
         );
         // Return value doesn't matter - we handle spurious wakeups in the caller's loop
+    }
+
+    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+        // RtlWaitOnAddress takes timeout in 100ns units (negative = relative)
+        const ns = timeout.toNanoseconds();
+        const units_100ns = ns / 100;
+        const i64_val = std.math.cast(i64, units_100ns) orelse std.math.maxInt(i64);
+        var timeout_li: sys.LARGE_INTEGER = -i64_val; // Negative means relative timeout
+
+        // RtlWaitOnAddress atomically checks if *ptr == current before sleeping
+        const rc = sys.RtlWaitOnAddress(
+            &ptr.raw,
+            &current,
+            @sizeOf(u32),
+            &timeout_li,
+        );
+
+        if (rc == .TIMEOUT) {
+            return error.Timeout;
+        }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -252,20 +283,33 @@ const FutexWindows = struct {
 // ============================================================================
 
 const FutexDarwin = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
-        const timeout_us: u32 = if (timeout) |t| blk: {
-            const us = t.toMicroseconds();
-            const clamped = std.math.cast(u32, us) orelse std.math.maxInt(u32);
-            break :blk @max(1, clamped);
-        } else 0;
-
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
         _ = sys.__ulock_wait(
+            sys.UL_COMPARE_AND_WAIT,
+            &ptr.raw,
+            current,
+            0, // 0 means infinite wait
+        );
+        // Ignore errors - spurious wakeups are fine
+    }
+
+    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+        const us = timeout.toMicroseconds();
+        const timeout_us: u32 = @max(1, std.math.cast(u32, us) orelse std.math.maxInt(u32));
+
+        const result = sys.__ulock_wait(
             sys.UL_COMPARE_AND_WAIT,
             &ptr.raw,
             current,
             timeout_us,
         );
-        // Ignore errors - spurious wakeups and timeouts are fine
+
+        if (result == -1) {
+            const err = std.posix.errno(result);
+            if (err == .TIMEDOUT) {
+                return error.Timeout;
+            }
+        }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -283,16 +327,33 @@ const FutexDarwin = struct {
 // ============================================================================
 
 const FutexFreeBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
-        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
-
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
         _ = sys._umtx_op(
             &ptr.raw,
             sys.UMTX_OP_WAIT_UINT,
             current,
             null,
-            if (timeout_ts) |*ts| @ptrCast(@constCast(ts)) else null,
+            null,
         );
+    }
+
+    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+        const timeout_ts = timeout.toTimespec();
+
+        const result = sys._umtx_op(
+            &ptr.raw,
+            sys.UMTX_OP_WAIT_UINT,
+            current,
+            null,
+            @ptrCast(@constCast(&timeout_ts)),
+        );
+
+        if (result == -1) {
+            const err = std.posix.errno(result);
+            if (err == .TIMEDOUT) {
+                return error.Timeout;
+            }
+        }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -423,16 +484,33 @@ const ConditionFreeBSD = struct {
 // ============================================================================
 
 const FutexOpenBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
-        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
-
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
         _ = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
             @intCast(current),
-            if (timeout_ts) |*ts| ts else null,
+            null,
             null,
         );
+    }
+
+    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+        const timeout_ts = timeout.toTimespec();
+
+        const result = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            @intCast(current),
+            &timeout_ts,
+            null,
+        );
+
+        if (result == -1) {
+            const err = std.posix.errno(result);
+            if (err == .TIMEDOUT) {
+                return error.Timeout;
+            }
+        }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -455,13 +533,30 @@ const FutexOpenBSD = struct {
 // ============================================================================
 
 const FutexDragonFly = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32, timeout: ?Duration) void {
-        const timeout_ns = if (timeout) |t| t.toNanoseconds() else 0;
+    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
         _ = sys.umtx_sleep(
             &ptr.raw,
             @intCast(current),
-            @intCast(timeout_ns),
+            0, // 0 means infinite wait
         );
+    }
+
+    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+        const us = timeout.toMicroseconds();
+        const timeout_us: c_int = @max(1, std.math.cast(c_int, us) orelse std.math.maxInt(c_int));
+
+        const result = sys.umtx_sleep(
+            &ptr.raw,
+            @intCast(current),
+            timeout_us,
+        );
+
+        if (result == -1) {
+            const err = std.posix.errno(result);
+            if (err == .TIMEDOUT or err == .WOULDBLOCK) {
+                return error.Timeout;
+            }
+        }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -485,8 +580,12 @@ const EventFutex = struct {
         return .{};
     }
 
-    pub fn wait(self: *EventFutex, current: u32, timeout: ?Duration) void {
-        Futex.wait(&self.state, current, timeout);
+    pub fn wait(self: *EventFutex, current: u32) void {
+        Futex.wait(&self.state, current);
+    }
+
+    pub fn timedWait(self: *EventFutex, current: u32, timeout: Duration) error{Timeout}!void {
+        return Futex.timedWait(&self.state, current, timeout);
     }
 
     pub fn signal(self: *EventFutex) void {
@@ -515,22 +614,45 @@ const EventNetBSD = struct {
         };
     }
 
-    pub fn wait(self: *EventNetBSD, current: u32, timeout: ?Duration) void {
+    pub fn wait(self: *EventNetBSD, current: u32) void {
         _ = self;
         _ = current; // Caller checks state, we just park
-
-        const timeout_ts: ?std.posix.timespec = if (timeout) |t| t.toTimespec() else null;
 
         // Safe to call even if signal() was already called - the kernel remembers
         // the unpark and will return EALREADY immediately without blocking.
         _ = sys.___lwp_park60(
             @intFromEnum(std.posix.CLOCK.MONOTONIC),
             0,
-            if (timeout_ts) |*ts| ts else null,
+            null,
             0, // unpark: don't unpark anyone
             null, // hint
             null, // unparkhint
         );
+    }
+
+    pub fn timedWait(self: *EventNetBSD, current: u32, timeout: Duration) error{Timeout}!void {
+        _ = self;
+        _ = current; // Caller checks state, we just park
+
+        const timeout_ts = timeout.toTimespec();
+
+        // Safe to call even if signal() was already called - the kernel remembers
+        // the unpark and will return EALREADY immediately without blocking.
+        const result = sys.___lwp_park60(
+            @intFromEnum(std.posix.CLOCK.MONOTONIC),
+            0,
+            &timeout_ts,
+            0, // unpark: don't unpark anyone
+            null, // hint
+            null, // unparkhint
+        );
+
+        if (result == -1) {
+            const err = std.posix.errno(result);
+            if (err == .TIMEDOUT) {
+                return error.Timeout;
+            }
+        }
     }
 
     pub fn signal(self: *EventNetBSD) void {
@@ -596,7 +718,7 @@ const MutexFutex = struct {
         // Avoid doing an atomic swap below if we already know the state is contended.
         // An atomic swap unconditionally stores which marks the cache-line as modified unnecessarily.
         if (self.state.load(.monotonic) == LOCKED_WITH_WAITERS) {
-            Futex.wait(&self.state, LOCKED_WITH_WAITERS, null);
+            Futex.wait(&self.state, LOCKED_WITH_WAITERS);
         }
 
         // Try to acquire the lock while also telling the existing lock holder that there are threads waiting.
@@ -609,7 +731,7 @@ const MutexFutex = struct {
         // Acquire barrier ensures grabbing the lock happens before the critical section
         // and that the previous lock holder's critical section happens before we grab the lock.
         while (self.state.swap(LOCKED_WITH_WAITERS, .acquire) != UNLOCKED) {
-            Futex.wait(&self.state, LOCKED_WITH_WAITERS, null);
+            Futex.wait(&self.state, LOCKED_WITH_WAITERS);
         }
     }
 
@@ -759,7 +881,7 @@ const MutexEvent = struct {
 
         // Wait for lock - block on event, handling spurious wakeups
         while (waiter.event.state.load(.acquire) == 0) {
-            waiter.event.wait(0, null);
+            waiter.event.wait(0);
         }
 
         // Acquire fence: synchronize-with unlock()'s .release in pop()
@@ -873,7 +995,7 @@ const ConditionEvent = struct {
         while (true) {
             const current = waiter.event.state.load(.acquire);
             if (current >= 1) break;
-            waiter.event.wait(current, null);
+            waiter.event.wait(current);
         }
 
         // Re-acquire mutex after waking
@@ -903,7 +1025,7 @@ const ConditionEvent = struct {
             const remaining = deadline.durationFromNow();
             if (remaining.value <= 0) break;
 
-            waiter.event.wait(current, remaining);
+            waiter.event.timedWait(current, remaining) catch {};
         }
 
         // Determine winner: can we remove ourselves from queue?
@@ -921,7 +1043,7 @@ const ConditionEvent = struct {
         while (true) {
             const current = waiter.event.state.load(.acquire);
             if (current >= 1) break;
-            waiter.event.wait(current, null);
+            waiter.event.wait(current);
         }
     }
 
@@ -967,7 +1089,7 @@ test "Event - basic signal and wait" {
             // Wait for signal
             var state = ctx.event.state.load(.monotonic);
             while (!ctx.done.load(.acquire)) {
-                ctx.event.wait(state, .fromMilliseconds(100));
+                ctx.event.timedWait(state, .fromMilliseconds(100)) catch {};
                 state = ctx.event.state.load(.monotonic);
             }
         }
@@ -1005,7 +1127,7 @@ test "Event - multiple signals" {
             ctx.ready.store(true, .release);
             var state = ctx.event.state.load(.monotonic);
             while (ctx.counter.load(.acquire) < 3) {
-                ctx.event.wait(state, .fromMilliseconds(100));
+                ctx.event.timedWait(state, .fromMilliseconds(100)) catch {};
                 state = ctx.event.state.load(.monotonic);
             }
         }
@@ -1028,14 +1150,52 @@ test "Event - multiple signals" {
     }
 }
 
+test "Event - timedWait success (signaled before timeout)" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var event = Event.init();
+    var ready = std.atomic.Value(bool).init(false);
+
+    const Context = struct {
+        event: *Event,
+        ready: *std.atomic.Value(bool),
+    };
+
+    const waiter = struct {
+        fn run(ctx: *Context) void {
+            ctx.ready.store(true, .release);
+            // Wait with long timeout (1 second), but should be signaled quickly
+            ctx.event.timedWait(0, .fromSeconds(1)) catch |err| {
+                std.debug.panic("timedWait failed: {}", .{err});
+            };
+        }
+    }.run;
+
+    var ctx = Context{ .event = &event, .ready = &ready };
+    const thread = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    defer thread.join();
+
+    // Wait for waiter to be ready
+    while (!ready.load(.acquire)) {
+        std.Thread.yield() catch {};
+    }
+
+    // Give thread time to start waiting
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    // Signal the event - should wake up without timeout
+    event.signal();
+}
+
 test "Event - timeout" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var event = Event.init();
     const start = std.time.nanoTimestamp();
 
-    // Wait with timeout, should return after approximately 50ms
-    event.wait(0, .fromMilliseconds(50));
+    // Wait with timeout, should return error.Timeout after approximately 50ms
+    const result = event.timedWait(0, .fromMilliseconds(50));
+    try std.testing.expectError(error.Timeout, result);
 
     const elapsed = std.time.nanoTimestamp() - start;
     // Allow some slack for scheduling
