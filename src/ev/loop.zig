@@ -187,11 +187,12 @@ pub const LoopState = struct {
             if (group.race.swap(false, .acq_rel)) {
                 var node = group.head;
                 while (node) |n| {
+                    const next = n.next;
                     const c: *Completion = @fieldParentPtr("group", n);
                     if (c != completion) {
                         self.loop.cancel(c);
                     }
-                    node = n.next;
+                    node = next;
                 }
             }
 

@@ -66,6 +66,7 @@ pub const CompletionQueue = struct {
     }
 
     /// Submit a completion to the queue and event loop.
+    /// Note: this claims `c.userdata` and `c.callback` for internal use.
     pub fn submit(self: *CompletionQueue, c: *Completion) void {
         c.userdata = self;
         c.callback = completionCallback;
