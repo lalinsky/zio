@@ -43,7 +43,6 @@ pub const CompletionQueue = struct {
     pending: Queue,
     completed: Queue,
     waiter: Waiter,
-    expected_signals: u32,
 
     const GroupNode = @FieldType(Completion, "group");
     const Queue = SimpleWaitQueue(GroupNode);
@@ -54,7 +53,6 @@ pub const CompletionQueue = struct {
             .pending = .empty,
             .completed = .empty,
             .waiter = Waiter.init(),
-            .expected_signals = 0,
         };
     }
 
@@ -79,10 +77,19 @@ pub const CompletionQueue = struct {
         self.getLoop().add(c);
     }
 
+    /// Reset the signal counter before checking the completed queue.
+    /// This must be called BEFORE checking the completed queue to avoid
+    /// a race where a signal is lost between checking and waiting.
+    fn resetSignals(self: *CompletionQueue) void {
+        self.waiter.event.state.store(0, .monotonic);
+    }
+
     /// Wait for the next completion. Blocks until one is available.
     /// Returns null when there are no more pending or completed operations.
     pub fn wait(self: *CompletionQueue) Cancelable!?*Completion {
         while (true) {
+            self.resetSignals();
+
             self.mutex.lock();
             const completed_node = self.completed.pop();
             const pending_empty = self.pending.isEmpty();
@@ -96,8 +103,7 @@ pub const CompletionQueue = struct {
                 return null;
             }
 
-            self.expected_signals += 1;
-            self.waiter.wait(self.expected_signals, .allow_cancel) catch |err| switch (err) {
+            self.waiter.wait(1, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     self.cancelAll();
                     self.drainPending();
@@ -116,6 +122,8 @@ pub const CompletionQueue = struct {
         }
 
         while (true) {
+            self.resetSignals();
+
             self.mutex.lock();
             const completed_node = self.completed.pop();
             const pending_empty = self.pending.isEmpty();
@@ -129,8 +137,7 @@ pub const CompletionQueue = struct {
                 return null;
             }
 
-            self.expected_signals += 1;
-            self.waiter.timedWait(self.expected_signals, timeout, .allow_cancel) catch |err| switch (err) {
+            self.waiter.timedWait(1, timeout, .allow_cancel) catch |err| switch (err) {
                 error.Canceled => {
                     self.cancelAll();
                     self.drainPending();
@@ -208,20 +215,18 @@ pub const CompletionQueue = struct {
 
     fn drainPending(self: *CompletionQueue) void {
         while (true) {
+            self.resetSignals();
+
             self.mutex.lock();
             const pending_empty = self.pending.isEmpty();
+            // Discard completed items during drain
+            while (self.completed.pop()) |_| {}
             self.mutex.unlock();
 
             if (pending_empty) break;
 
-            self.expected_signals += 1;
-            self.waiter.wait(self.expected_signals, .no_cancel);
+            self.waiter.wait(1, .no_cancel);
         }
-
-        // Discard any completed items
-        self.mutex.lock();
-        while (self.completed.pop()) |_| {}
-        self.mutex.unlock();
     }
 
     fn completionCallback(_: *ev.Loop, c: *Completion) void {
@@ -316,6 +321,25 @@ test "CompletionQueue: dynamic submit during iteration" {
         }
     }
     try std.testing.expectEqual(2, count);
+}
+
+test "CompletionQueue: wait then timedWait does not false-timeout" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    // First: submit and wait() — pops without blocking, consuming a signal
+    var timer1 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
+    cq.submit(&timer1.c);
+    const c1 = try cq.wait();
+    try std.testing.expectEqual(&timer1.c, c1.?);
+
+    // Second: submit and timedWait() — must not return false Timeout
+    var timer2 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
+    cq.submit(&timer2.c);
+    const c2 = try cq.timedWait(.{ .duration = .fromSeconds(1) });
+    try std.testing.expectEqual(&timer2.c, c2.?);
 }
 
 test "CompletionQueue: timedWait completes before timeout" {
