@@ -151,6 +151,27 @@ pub const CompletionQueue = struct {
         }
     }
 
+    /// Returns true if there are no pending or completed operations.
+    pub fn isEmpty(self: *CompletionQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.pending.isEmpty() and self.completed.isEmpty();
+    }
+
+    /// Returns true if there are operations still in flight.
+    pub fn hasPending(self: *CompletionQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return !self.pending.isEmpty();
+    }
+
+    /// Returns true if there are completed operations ready to be consumed.
+    pub fn hasCompleted(self: *CompletionQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return !self.completed.isEmpty();
+    }
+
     /// Non-blocking poll for the next completed operation.
     /// Returns null if no completions are ready yet.
     pub fn next(self: *CompletionQueue) ?*Completion {
@@ -221,6 +242,10 @@ test "CompletionQueue: wait on empty queue returns null" {
     defer rt.deinit();
 
     var cq = CompletionQueue.init();
+    try std.testing.expect(cq.isEmpty());
+    try std.testing.expect(!cq.hasPending());
+    try std.testing.expect(!cq.hasCompleted());
+
     const result = try cq.wait();
     try std.testing.expectEqual(null, result);
 }
@@ -234,11 +259,18 @@ test "CompletionQueue: single timer" {
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     cq.submit(&timer.c);
 
+    try std.testing.expect(!cq.isEmpty());
+    try std.testing.expect(cq.hasPending());
+
     const c = try cq.wait();
     try std.testing.expect(c != null);
     try std.testing.expectEqual(&timer.c, c.?);
 
     // Queue is now empty
+    try std.testing.expect(cq.isEmpty());
+    try std.testing.expect(!cq.hasPending());
+    try std.testing.expect(!cq.hasCompleted());
+
     const end = try cq.wait();
     try std.testing.expectEqual(null, end);
 }
