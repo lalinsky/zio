@@ -308,6 +308,7 @@ pub const Completion = struct {
         c.group.next = null;
         c.group.prev = null;
         c.group.owner = null;
+        c.group.owner_callback = null;
         c.group.userdata = 0;
         if (std.debug.runtime_safety) {
             c.group.in_list = false;
