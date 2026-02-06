@@ -20,6 +20,7 @@ pub const checkCancel = runtime.checkCancel;
 pub const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 
 pub const Group = @import("runtime/group.zig").Group;
+pub const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
 
 const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;

@@ -250,10 +250,16 @@ pub const Completion = struct {
     /// Cancel queue intrusive linked list
     cancel_next: ?*Completion = null,
 
-    /// Group this completion belongs to
+    /// Intrusive node for group/queue membership.
+    /// Used by ev.Group to link children, and by CompletionQueue for pending/completed tracking.
+    /// A completion can only be in one group or queue at a time.
     group: struct {
-        next: ?*Completion = null,
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
         owner: ?*Group = null,
+        userdata: usize = 0,
+        in_list: if (std.debug.runtime_safety) bool else void =
+            if (std.debug.runtime_safety) false else {},
     } = .{},
 
     /// Error result - null means success, error means failure.
@@ -299,7 +305,12 @@ pub const Completion = struct {
         c.cancel_state.store(.{}, .release);
         c.cancel_next = null;
         c.group.next = null;
+        c.group.prev = null;
         c.group.owner = null;
+        c.group.userdata = 0;
+        if (std.debug.runtime_safety) {
+            c.group.in_list = false;
+        }
     }
 
     pub fn call(c: *Completion, loop: *Loop) void {
@@ -342,9 +353,11 @@ pub const Cancelable = error{Canceled};
 pub const Group = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    head: ?*Completion = null,
+    head: ?*GroupNode = null,
     remaining: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     race: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    pub const GroupNode = @FieldType(Completion, "group");
 
     pub const Error = Cancelable;
 
@@ -364,7 +377,7 @@ pub const Group = struct {
         std.debug.assert(c.group.owner == null);
         c.group.next = self.head;
         c.group.owner = self;
-        self.head = c;
+        self.head = &c.group;
         _ = self.remaining.fetchAdd(1, .monotonic);
     }
 
