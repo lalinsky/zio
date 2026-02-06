@@ -542,12 +542,12 @@ const FutexDragonFly = struct {
     }
 
     fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
-        const timeout_ns = timeout.toNanoseconds();
+        const timeout_us = timeout.toMicroseconds();
 
         const result = sys.umtx_sleep(
             &ptr.raw,
             @intCast(current),
-            @intCast(timeout_ns),
+            @intCast(timeout_us),
         );
 
         if (result == -1) {
