@@ -256,7 +256,8 @@ pub const Completion = struct {
     group: struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
-        owner: ?*Group = null,
+        owner: ?*anyopaque = null,
+        owner_callback: ?*const fn (*Loop, *Completion) void = null,
         userdata: usize = 0,
         in_list: if (std.debug.runtime_safety) bool else void =
             if (std.debug.runtime_safety) false else {},
@@ -377,8 +378,36 @@ pub const Group = struct {
         std.debug.assert(c.group.owner == null);
         c.group.next = self.head;
         c.group.owner = self;
+        c.group.owner_callback = &groupCallback;
         self.head = &c.group;
         _ = self.remaining.fetchAdd(1, .monotonic);
+    }
+
+    fn groupCallback(loop: *Loop, completion: *Completion) void {
+        const self: *Group = @ptrCast(@alignCast(completion.group.owner.?));
+        const prev = self.remaining.fetchSub(1, .acq_rel);
+
+        // Race mode: first to clear the flag wins, cancels siblings
+        if (self.race.swap(false, .acq_rel)) {
+            var node = self.head;
+            while (node) |n| {
+                const next = n.next;
+                const c: *Completion = @fieldParentPtr("group", n);
+                if (c != completion) {
+                    loop.cancel(c);
+                }
+                node = next;
+            }
+        }
+
+        if (prev == 1) {
+            if (self.c.cancel_state.load(.acquire).requested) {
+                self.c.setError(error.Canceled);
+            } else {
+                self.c.setResult(.group, {});
+            }
+            loop.state.markCompleted(&self.c);
+        }
     }
 
     pub fn getResult(self: *const Group) Error!void {

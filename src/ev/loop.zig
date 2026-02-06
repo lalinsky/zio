@@ -179,31 +179,9 @@ pub const LoopState = struct {
         completion.state = .dead;
         self.active -= 1;
 
-        // Notify group owner if this completion belongs to one
-        if (completion.group.owner) |group| {
-            const prev = group.remaining.fetchSub(1, .acq_rel);
-
-            // Race mode: first to clear the flag wins, cancels siblings
-            if (group.race.swap(false, .acq_rel)) {
-                var node = group.head;
-                while (node) |n| {
-                    const next = n.next;
-                    const c: *Completion = @fieldParentPtr("group", n);
-                    if (c != completion) {
-                        self.loop.cancel(c);
-                    }
-                    node = next;
-                }
-            }
-
-            if (prev == 1) {
-                if (group.c.cancel_state.load(.acquire).requested) {
-                    group.c.setError(error.Canceled);
-                } else {
-                    group.c.setResult(.group, {});
-                }
-                self.markCompleted(&group.c);
-            }
+        // Notify group/queue owner if this completion belongs to one
+        if (completion.group.owner_callback) |cb| {
+            cb(self.loop, completion);
         }
 
         completion.call(self.loop);
