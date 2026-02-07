@@ -240,7 +240,7 @@ pub fn broadcast(self: *Condition) void {
 }
 
 test "Condition basic wait/signal" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -309,7 +309,7 @@ test "Condition timedWait timeout" {
 }
 
 test "Condition broadcast" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
     var mutex = Mutex.init;

@@ -163,7 +163,7 @@ test "Future: basic set and get" {
 }
 
 test "Future: await from coroutine" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     const TestContext = struct {
@@ -201,7 +201,7 @@ test "Future: await from coroutine" {
 }
 
 test "Future: multiple waiters" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
     const TestContext = struct {

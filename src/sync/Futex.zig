@@ -249,7 +249,7 @@ test "Futex: basic wait/wake" {
         }
     };
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var task = try rt.spawn(Main.run, .{rt});
@@ -319,7 +319,7 @@ test "Futex: multiple waiters same address" {
         }
     };
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var task = try rt.spawn(Main.run, .{rt});
@@ -365,7 +365,7 @@ test "Futex: multiple waiters different addresses" {
         }
     };
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var woken: u32 = 0;
