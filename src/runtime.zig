@@ -385,73 +385,62 @@ pub const Executor = struct {
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        const is_main = self.current_task == &self.main_task;
-        const current_task = self.current_task.?;
-        self.current_task = null;
+        var executor = self;
+
+        const task = executor.current_task.?;
+        executor.current_task = null;
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            current_task.checkCancel() catch |err| {
-                self.current_task = current_task;
+            task.checkCancel() catch |err| {
+                task.state.store(.ready, .release);
+                executor.current_task = task;
                 return err;
             };
         }
 
         // Atomically transition state - if this fails, someone changed our state
-        if (current_task.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
-            // CAS failed - someone changed our state
+        if (task.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
             if (actual_state == .ready) {
                 // We were woken up before we could yield - don't suspend
-                self.current_task = current_task;
+                self.current_task = task;
                 return;
-            } else {
-                // Unexpected state - this is a bug
-                std.debug.panic("Yield CAS failed with unexpected state: task {*} expected {} but was {} (not .ready)", .{ current_task, expected_state, actual_state });
             }
-        }
-        // If yielding with .ready state (cooperative yield), schedule for later execution
-        // This bypasses LIFO slot for fairness - yields always go to back of queue
-        // main_task is never queued - it just checks state in run()
-        if (desired_state == .ready and !is_main) {
-            self.scheduleTaskLocal(current_task, true); // is_yield = true
+            // Unexpected state - this is a bug
+            std.debug.panic("Yield CAS failed with unexpected state: task {*} expected {} but was {} (not .ready)", .{ task, expected_state, actual_state });
         }
 
-        if (is_main) {
-            // Main: always use scheduler loop (no direct scheduling)
-            // Restore current_task before calling run()
-            self.current_task = current_task;
-            self.run(.until_ready) catch |err| {
-                std.debug.panic("Event loop error during yield: {}", .{err});
+        // Run scheduler if this is the main task
+        if (task == &executor.main_task) {
+            executor.run(.until_ready) catch |err| {
+                std.log.err("Event loop error during yield: {}", .{err});
             };
-        } else {
-            // Spawned task: try direct scheduling via yieldTo
-            const current_coro = &current_task.coro;
-            if (self.getNextTask()) |next_wait_node| {
-                const next_task = AnyTask.fromWaitNode(next_wait_node);
-                self.current_task = next_task;
-                current_coro.yieldTo(&next_task.coro);
-                // After resuming from yieldTo, we may have migrated - restore current_task
-                // Use getExecutor() instead of Executor.current (threadlocal) because
-                // on aarch64-macos, the threadlocal read can return a stale value from
-                // the thread this coroutine previously ran on.
-                const resumed_executor = current_task.getExecutor();
-                resumed_executor.current_task = current_task;
-            } else {
-                // No ready tasks: return to scheduler
-                // Restore current_task so run() knows which task yielded
-                self.current_task = current_task;
-                current_coro.yield();
-                // After resuming from yield, current_task is already set by run()
-            }
+            std.debug.assert(task.state.load(.acquire) == .ready);
+            return;
         }
 
-        // After resuming, verify current_task is set correctly
-        const resumed_executor = current_task.getExecutor();
-        std.debug.assert(resumed_executor.current_task == current_task);
+        // If yielding with .ready state (cooperative yield), schedule for later execution
+        if (desired_state == .ready) {
+            executor.scheduleTaskLocal(task, true);
+        }
+
+        // Try direct scheduling or yield back to the scheduler
+        if (executor.getNextTask()) |next_task| {
+            executor.current_task = next_task;
+            task.coro.yieldTo(&next_task.coro);
+        } else {
+            executor.current_task = task;
+            task.coro.yield();
+        }
+        std.debug.assert(task.state.load(.acquire) == .ready);
+
+        // We could be on a different executor now
+        executor = task.getExecutor();
+        executor.current_task = task;
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
-            try current_task.checkCancel();
+            try task.checkCancel();
         }
     }
 
@@ -509,25 +498,21 @@ pub const Executor = struct {
 
         while (true) {
             // Process ready coroutines
-            while (self.getNextTask()) |wait_node| {
-                const task = AnyTask.fromWaitNode(wait_node);
+            while (self.getNextTask()) |next_task| {
+                self.current_task = next_task;
+                next_task.coro.step();
 
-                self.current_task = task;
-                task.coro.step();
-
-                // Back in scheduler - clear current_task before any callbacks
-                const current_task = self.current_task.?;
+                // Due to direct scheduling, this doesn't have to be the same task we stepped into
+                const last_task = self.current_task.?;
                 self.current_task = null;
 
-                // Handle finished tasks
-                if (current_task.state.load(.acquire) == .finished) {
-                    // Release stack immediately
-                    if (current_task.coro.context.stack_info.allocation_len > 0) {
-                        self.runtime.stack_pool.release(current_task.coro.context.stack_info, self.loop.now());
-                        current_task.coro.context.stack_info.allocation_len = 0;
+                // If it's finished, handle cleanup
+                if (last_task.state.load(.acquire) == .finished) {
+                    if (last_task.coro.context.stack_info.allocation_len > 0) {
+                        self.runtime.stack_pool.release(last_task.coro.context.stack_info, self.loop.now());
+                        last_task.coro.context.stack_info.allocation_len = 0;
                     }
-
-                    self.runtime.onTaskComplete(&current_task.awaitable);
+                    self.runtime.onTaskComplete(&last_task.awaitable);
                 }
             }
 
@@ -567,7 +552,7 @@ pub const Executor = struct {
     ///
     /// Returns null if no tasks are available, or if EVENT_INTERVAL tasks have
     /// been run since the last event loop tick (to ensure I/O responsiveness).
-    fn getNextTask(self: *Executor) ?*WaitNode {
+    fn getNextTask(self: *Executor) ?*AnyTask {
         // Maximum tasks to run before forcing an event loop tick (from Go's scheduler)
         const EVENT_INTERVAL = 61;
 
@@ -588,7 +573,7 @@ pub const Executor = struct {
                     self.lifo_slot_used += 1;
                     self.tick_task_count += 1;
                     self.ready_count -= 1;
-                    return task;
+                    return .fromWaitNode(task);
                 }
             } else {
                 // Hit starvation limit - move LIFO slot task to ready_queue (back of FIFO)
@@ -607,7 +592,7 @@ pub const Executor = struct {
             self.lifo_slot_used = 0; // Reset LIFO starvation counter
             self.tick_task_count += 1;
             self.ready_count -= 1;
-            return task;
+            return .fromWaitNode(task);
         }
 
         return null;
