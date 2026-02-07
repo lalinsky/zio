@@ -163,7 +163,7 @@ pub fn post(self: *Semaphore) void {
 }
 
 test "Semaphore: basic wait/post" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var sem = Semaphore{ .permits = 1 };
@@ -216,7 +216,7 @@ test "Semaphore: timedWait timeout" {
 }
 
 test "Semaphore: timedWait success" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var sem = Semaphore{};
@@ -248,7 +248,7 @@ test "Semaphore: timedWait success" {
 }
 
 test "Semaphore: multiple permits" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var sem = Semaphore{ .permits = 3 };
