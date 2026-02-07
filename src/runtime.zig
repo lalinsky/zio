@@ -25,9 +25,9 @@ const cleanupStackGrowth = @import("coro/stack.zig").cleanupStackGrowth;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const TaskPool = @import("runtime/task.zig").TaskPool;
 const spawnTask = @import("runtime/task.zig").spawnTask;
+const finishTask = @import("runtime/task.zig").finishTask;
 const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
 const Group = @import("runtime/group.zig").Group;
-const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
@@ -493,7 +493,7 @@ pub const Executor = struct {
                         self.runtime.stack_pool.release(last_task.coro.context.stack_info, self.loop.now());
                         last_task.coro.context.stack_info.allocation_len = 0;
                     }
-                    self.runtime.onTaskComplete(&last_task.awaitable);
+                    finishTask(self.runtime, &last_task.awaitable);
                 }
             }
 
@@ -1031,30 +1031,6 @@ pub const Runtime = struct {
     /// This uses the event loop's cached time for efficiency.
     pub fn now(self: *Runtime) Timestamp {
         return self.getCurrentExecutor().loop.now();
-    }
-
-    pub fn onTaskComplete(self: *Runtime, awaitable: *Awaitable) void {
-        // Decrement task count BEFORE marking complete to prevent race where
-        // waiting thread wakes up and sees non-zero task_count in deinit()
-        const prev_count = self.task_count.fetchSub(1, .acq_rel);
-
-        // Mark awaitable as complete and wake all waiters
-        awaitable.markComplete();
-
-        // For group tasks, decrement counter and release group's reference
-        if (awaitable.group_node.group) |group| {
-            unregisterGroupTask(group, awaitable);
-        }
-
-        // Decref for task completion
-        awaitable.release();
-
-        // Wake main executor if last task completed and it's waiting in run() mode
-        if (prev_count == 1) {
-            if (self.main_executor.main_task.state.cmpxchgStrong(.new, .ready, .release, .acquire) == null) {
-                self.main_executor.loop.wake();
-            }
-        }
     }
 };
 

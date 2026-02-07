@@ -9,6 +9,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const WaitNode = @import("WaitNode.zig");
 const Closure = @import("task.zig").Closure;
+const finishTask = @import("task.zig").finishTask;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
@@ -121,7 +122,7 @@ fn threadPoolCompletion(ctx: ?*anyopaque, work: *ev.Work) void {
     // TODO: Handle error case (work.c.err) when task was canceled
     _ = work;
 
-    task.runtime.onTaskComplete(&task.awaitable);
+    finishTask(task.runtime, &task.awaitable);
 }
 
 /// Register a blocking task with the runtime and submit it for execution.
