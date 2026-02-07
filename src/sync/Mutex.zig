@@ -190,3 +190,33 @@ test "Mutex tryLock" {
     try std.testing.expect(mutex.tryLock()); // Should succeed again
     mutex.unlock();
 }
+
+test "Mutex contention" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer runtime.deinit();
+
+    var counter: u32 = 0;
+    var mutex = Mutex.init;
+
+    const TestFn = struct {
+        fn worker(ctr: *u32, mtx: *Mutex) !void {
+            for (0..100) |_| {
+                try mtx.lock();
+                defer mtx.unlock();
+                ctr.* += 1;
+            }
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    for (0..4) |_| {
+        try group.spawn(TestFn.worker, .{ &counter, &mutex });
+    }
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expectEqual(400, counter);
+}
