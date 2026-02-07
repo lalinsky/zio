@@ -431,7 +431,10 @@ pub const Executor = struct {
                 self.current_task = next_task;
                 current_coro.yieldTo(&next_task.coro);
                 // After resuming from yieldTo, we may have migrated - restore current_task
-                const resumed_executor = Executor.current orelse unreachable;
+                // Use getExecutor() instead of Executor.current (threadlocal) because
+                // on aarch64-macos, the threadlocal read can return a stale value from
+                // the thread this coroutine previously ran on.
+                const resumed_executor = current_task.getExecutor();
                 resumed_executor.current_task = current_task;
             } else {
                 // No ready tasks: return to scheduler
@@ -443,7 +446,7 @@ pub const Executor = struct {
         }
 
         // After resuming, verify current_task is set correctly
-        const resumed_executor = Executor.current orelse unreachable;
+        const resumed_executor = current_task.getExecutor();
         std.debug.assert(resumed_executor.current_task == current_task);
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
