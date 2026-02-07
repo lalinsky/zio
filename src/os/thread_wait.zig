@@ -1289,7 +1289,7 @@ test "Mutex - contention" {
         t.join();
     }
 
-    try std.testing.expectEqual(@as(u32, 400), counter);
+    try std.testing.expectEqual(400, counter);
 }
 
 test "Condition - basic wait and signal" {

@@ -1565,11 +1565,11 @@ test "Domain, Type, and Protocol conversions" {
 
     // Test unknown value uses catch-all _
     const t_unknown = Type.fromPosix(999);
-    try std.testing.expectEqual(@as(c_int, 999), t_unknown.toPosix());
+    try std.testing.expectEqual(999, t_unknown.toPosix());
 
     const d_unknown = Domain.fromPosix(999);
-    try std.testing.expectEqual(@as(c_int, 999), d_unknown.toPosix());
+    try std.testing.expectEqual(999, d_unknown.toPosix());
 
     const p_unknown = Protocol.fromPosix(999);
-    try std.testing.expectEqual(@as(c_int, 999), p_unknown.toPosix());
+    try std.testing.expectEqual(999, p_unknown.toPosix());
 }
