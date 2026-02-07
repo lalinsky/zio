@@ -1014,12 +1014,15 @@ test "BroadcastChannel: select with multiple broadcast channels" {
     var buffer2: [5]u32 = undefined;
     var channel2 = BroadcastChannel(u32).init(&buffer2);
 
+    var subscribed: std.atomic.Value(bool) = .init(false);
+
     const TestFn = struct {
-        fn selectTask(ch1: *BroadcastChannel(u32), ch2: *BroadcastChannel(u32), c1: *BroadcastChannel(u32).Consumer, c2: *BroadcastChannel(u32).Consumer, which: *u8) !void {
+        fn selectTask(ch1: *BroadcastChannel(u32), ch2: *BroadcastChannel(u32), c1: *BroadcastChannel(u32).Consumer, c2: *BroadcastChannel(u32).Consumer, which: *u8, ready: *std.atomic.Value(bool)) !void {
             ch1.subscribe(c1);
             defer ch1.unsubscribe(c1);
             ch2.subscribe(c2);
             defer ch2.unsubscribe(c2);
+            ready.store(true, .release);
 
             var recv1 = ch1.asyncReceive(c1);
             var recv2 = ch2.asyncReceive(c2);
@@ -1037,8 +1040,8 @@ test "BroadcastChannel: select with multiple broadcast channels" {
             }
         }
 
-        fn sender2(ch: *BroadcastChannel(u32)) !void {
-            try yield();
+        fn sender2(ch: *BroadcastChannel(u32), ready: *std.atomic.Value(bool)) !void {
+            while (!ready.load(.acquire)) try yield();
             try ch.send(99);
         }
     };
@@ -1050,8 +1053,8 @@ test "BroadcastChannel: select with multiple broadcast channels" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.selectTask, .{ &channel1, &channel2, &consumer1, &consumer2, &which });
-    try group.spawn(TestFn.sender2, .{&channel2});
+    try group.spawn(TestFn.selectTask, .{ &channel1, &channel2, &consumer1, &consumer2, &which, &subscribed });
+    try group.spawn(TestFn.sender2, .{ &channel2, &subscribed });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
