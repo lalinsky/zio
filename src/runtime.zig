@@ -464,9 +464,6 @@ pub const Executor = struct {
         /// Run until main_task.state becomes .ready.
         /// Caller must set up the state before calling (e.g., .waiting for I/O).
         until_ready,
-        /// Run until all tasks complete (task_count reaches 0).
-        /// Sets main_task.state to .new, which is transitioned to .ready by onTaskComplete.
-        until_idle,
         /// Run until explicitly stopped via loop.stop().
         /// Used for worker executor threads.
         until_stopped,
@@ -477,22 +474,6 @@ pub const Executor = struct {
         std.debug.assert(Executor.current == self);
         self.current_task = null;
         defer self.current_task = &self.main_task;
-
-        switch (mode) {
-            .until_ready => {},
-            .until_idle => {
-                // Set state to .new first to avoid race with onTaskComplete.
-                // If the last task completes between our check and state change,
-                // its CAS(.new, .ready) will succeed and wake us.
-                self.main_task.state.store(.new, .release);
-                // If no tasks, restore state and return
-                if (self.runtime.task_count.load(.acquire) == 0) {
-                    self.main_task.state.store(.ready, .release);
-                    return;
-                }
-            },
-            .until_stopped => {},
-        }
 
         const check_ready = mode != .until_stopped;
 
