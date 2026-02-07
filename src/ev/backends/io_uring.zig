@@ -764,7 +764,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompletedFromBackend(c);
                 return;
             };
-            sqe.prep_readv(data.handle, data.buffer.iovecs, 0);
+            sqe.prep_readv(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
             sqe.user_data = @intFromPtr(c);
         },
         .pipe_write => {
@@ -775,7 +775,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompletedFromBackend(c);
                 return;
             };
-            sqe.prep_writev(data.handle, data.buffer.iovecs, 0);
+            sqe.prep_writev(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
             sqe.user_data = @intFromPtr(c);
         },
         .pipe_close => {
