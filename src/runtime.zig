@@ -449,10 +449,8 @@ pub const Executor = struct {
 
         // After resuming, verify current_task is set correctly
         const resumed_executor = Executor.current orelse unreachable;
-        const home_executor = current_task.getExecutor();
-        std.debug.print("E{} resumed task {*} (home E{})\n", .{ resumed_executor.id, current_task, home_executor.id });
         if (resumed_executor.current_task != current_task) {
-            std.debug.panic("E{} current_task mismatch: expected {*} but got {?*} (home E{})\n", .{ resumed_executor.id, current_task, resumed_executor.current_task, home_executor.id });
+            std.debug.panic("E{} current_task mismatch: expected {*} but got {?*}\n", .{ resumed_executor.id, current_task, resumed_executor.current_task });
         }
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
