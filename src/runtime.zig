@@ -293,6 +293,11 @@ pub const Executor = struct {
     // Executor dedicated to this thread
     pub threadlocal var current: ?*Executor = null;
 
+    fn setCurrentTask(self: *Executor, task: ?*AnyTask, comptime src: std.builtin.SourceLocation) void {
+        std.debug.print("E{} current_task: {?*} -> {?*} ({s}:{})\n", .{ self.id, self.current_task, task, src.fn_name, src.line });
+        self.current_task = task;
+    }
+
     /// Get the Executor instance from any coroutine that belongs to it.
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
     /// so we navigate: context -> coro -> main_task -> executor
@@ -387,12 +392,12 @@ pub const Executor = struct {
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const is_main = self.current_task == &self.main_task;
         const current_task = self.current_task.?;
-        self.current_task = null;
+        self.setCurrentTask(null, @src());
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
             current_task.checkCancel() catch |err| {
-                self.current_task = current_task;
+                self.setCurrentTask(current_task, @src());
                 return err;
             };
         }
@@ -402,7 +407,7 @@ pub const Executor = struct {
             // CAS failed - someone changed our state
             if (actual_state == .ready) {
                 // We were woken up before we could yield - don't suspend
-                self.current_task = current_task;
+                self.setCurrentTask(current_task, @src());
                 return;
             } else {
                 // Unexpected state - this is a bug
@@ -419,7 +424,7 @@ pub const Executor = struct {
         if (is_main) {
             // Main: always use scheduler loop (no direct scheduling)
             // Restore current_task before calling run()
-            self.current_task = current_task;
+            self.setCurrentTask(current_task, @src());
             self.run(.until_ready) catch |err| {
                 std.debug.panic("Event loop error during yield: {}", .{err});
             };
@@ -428,15 +433,15 @@ pub const Executor = struct {
             const current_coro = &current_task.coro;
             if (self.getNextTask()) |next_wait_node| {
                 const next_task = AnyTask.fromWaitNode(next_wait_node);
-                self.current_task = next_task;
+                self.setCurrentTask(next_task, @src());
                 current_coro.yieldTo(&next_task.coro);
                 // After resuming from yieldTo, we may have migrated - restore current_task
                 const resumed_executor = Executor.current orelse unreachable;
-                resumed_executor.current_task = current_task;
+                resumed_executor.setCurrentTask(current_task, @src());
             } else {
                 // No ready tasks: return to scheduler
                 // Restore current_task so run() knows which task yielded
-                self.current_task = current_task;
+                self.setCurrentTask(current_task, @src());
                 current_coro.yield();
                 // After resuming from yield, current_task is already set by run()
             }
@@ -444,7 +449,9 @@ pub const Executor = struct {
 
         // After resuming, verify current_task is set correctly
         const resumed_executor = Executor.current orelse unreachable;
-        std.debug.assert(resumed_executor.current_task == current_task);
+        if (resumed_executor.current_task != current_task) {
+            std.debug.panic("E{} current_task mismatch: expected {*} but got {?*}\n", .{ resumed_executor.id, current_task, resumed_executor.current_task });
+        }
 
         // Check after resuming in case we were canceled while suspended (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
@@ -483,8 +490,8 @@ pub const Executor = struct {
     /// Run the executor event loop.
     pub fn run(self: *Executor, mode: RunMode) !void {
         std.debug.assert(Executor.current == self);
-        self.current_task = null;
-        defer self.current_task = &self.main_task;
+        self.setCurrentTask(null, @src());
+        defer self.setCurrentTask(&self.main_task, @src());
 
         switch (mode) {
             .until_ready => {},
@@ -509,12 +516,12 @@ pub const Executor = struct {
             while (self.getNextTask()) |wait_node| {
                 const task = AnyTask.fromWaitNode(wait_node);
 
-                self.current_task = task;
+                self.setCurrentTask(task, @src());
                 task.coro.step();
 
                 // Back in scheduler - clear current_task before any callbacks
                 const current_task = self.current_task.?;
-                self.current_task = null;
+                self.setCurrentTask(null, @src());
 
                 // Handle finished tasks
                 if (current_task.state.load(.acquire) == .finished) {
@@ -686,6 +693,7 @@ pub const Executor = struct {
             //       for re-balancing them
             if (current_exec.runtime == self.runtime and old_state != .new) {
                 if (current_exec != self) {
+                    std.debug.print("E{} migrate task {*} from E{} to E{}\n", .{ current_exec.id, task, self.id, current_exec.id });
                     task.coro.parent_context_ptr = &current_exec.main_task.coro.context;
                 }
                 current_exec.scheduleTaskLocal(task, false);
