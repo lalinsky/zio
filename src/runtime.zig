@@ -403,7 +403,7 @@ pub const Executor = struct {
         if (task.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
             if (actual_state == .ready) {
                 // We were woken up before we could yield - don't suspend
-                self.current_task = task;
+                executor.current_task = task;
                 return;
             }
             // Unexpected state - this is a bug
