@@ -33,7 +33,6 @@ const yield = @import("../runtime.zig").yield;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Waiter = @import("../common.zig").Waiter;
-const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;

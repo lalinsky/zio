@@ -11,33 +11,25 @@ const os = @import("os/root.zig");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
-const Timeoutable = @import("common.zig").Timeoutable;
 const log = @import("common.zig").log;
 const time = @import("time.zig");
 const Duration = time.Duration;
 const Timestamp = time.Timestamp;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
-const Context = @import("coro/coroutines.zig").Context;
 const StackPool = @import("coro/stack_pool.zig").StackPool;
 const StackPoolConfig = @import("coro/stack_pool.zig").Config;
 const setupStackGrowth = @import("coro/stack.zig").setupStackGrowth;
 const cleanupStackGrowth = @import("coro/stack.zig").cleanupStackGrowth;
 
-const RefCounter = @import("utils/ref_counter.zig").RefCounter;
-
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const TaskPool = @import("runtime/task.zig").TaskPool;
 const spawnTask = @import("runtime/task.zig").spawnTask;
-const AnyBlockingTask = @import("runtime/blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
-const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 const Group = @import("runtime/group.zig").Group;
 const unregisterGroupTask = @import("runtime/group.zig").unregisterGroupTask;
 
 const select = @import("select.zig");
-const Futex = @import("sync/Futex.zig");
-const waitForIo = @import("common.zig").waitForIo;
 const Waiter = @import("common.zig").Waiter;
 
 /// Number of executor threads to run (including main).
@@ -231,7 +223,6 @@ pub fn JoinHandle(comptime T: type) type {
 // Generic data structures (private)
 const WaitNode = @import("runtime/WaitNode.zig");
 const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
-const SimpleStack = @import("utils/simple_stack.zig").SimpleStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 
 comptime {

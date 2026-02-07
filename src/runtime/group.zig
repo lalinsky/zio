@@ -11,11 +11,8 @@ const endShield = @import("../runtime.zig").endShield;
 const sleep = @import("../runtime.zig").sleep;
 const JoinHandle = @import("../runtime.zig").JoinHandle;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
-const AnyTask = @import("task.zig").AnyTask;
 const spawnTask = @import("task.zig").spawnTask;
-const AnyBlockingTask = @import("blocking_task.zig").AnyBlockingTask;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Futex = @import("../sync/Futex.zig");
 

@@ -3,7 +3,6 @@ const Queue = @import("queue.zig").Queue;
 const Completion = @import("completion.zig").Completion;
 const Work = @import("completion.zig").Work;
 const thread_wait = @import("../os/thread_wait.zig");
-const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
 
 const log = @import("../common.zig").log;

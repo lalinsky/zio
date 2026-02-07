@@ -8,7 +8,6 @@ const ev = @import("../ev/root.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const WaitNode = @import("WaitNode.zig");
-const meta = @import("../meta.zig");
 const Closure = @import("task.zig").Closure;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;

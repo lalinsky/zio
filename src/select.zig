@@ -7,7 +7,6 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const yield = @import("runtime.zig").yield;
 const Cancelable = @import("common.zig").Cancelable;
-const Timeoutable = @import("common.zig").Timeoutable;
 const Waiter = @import("common.zig").Waiter;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Awaitable = @import("runtime/awaitable.zig").Awaitable;

@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
-const time = @import("time.zig");
 const windows = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;

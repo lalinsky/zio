@@ -57,7 +57,6 @@ const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
-const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
 const Mutex = @import("Mutex.zig");
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;

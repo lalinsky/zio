@@ -3,12 +3,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Group = @import("runtime/group.zig").Group;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
-const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("runtime/WaitNode.zig");

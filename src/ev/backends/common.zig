@@ -1,5 +1,4 @@
 const std = @import("std");
-const Loop = @import("../loop.zig").Loop;
 const Completion = @import("../completion.zig").Completion;
 const Work = @import("../completion.zig").Work;
 const NetOpen = @import("../completion.zig").NetOpen;

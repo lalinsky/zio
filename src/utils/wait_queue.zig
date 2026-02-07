@@ -13,8 +13,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Runtime = @import("../runtime.zig").Runtime;
-const Executor = @import("../runtime.zig").Executor;
 const SimpleStack = @import("simple_stack.zig").SimpleStack;
 
 /// Simple wait queue for use under external synchronization (e.g., mutex).

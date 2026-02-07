@@ -84,7 +84,6 @@ fn autoCancelCallback(
 }
 
 const Cancelable = @import("../common.zig").Cancelable;
-const Timeoutable = @import("../common.zig").Timeoutable;
 
 test "AutoCancel: smoke test" {
     const rt = try Runtime.init(std.testing.allocator, .{});

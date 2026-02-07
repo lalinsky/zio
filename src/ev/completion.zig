@@ -7,7 +7,6 @@ const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
-const Duration = @import("../time.zig").Duration;
 const Timestamp = @import("../time.zig").Timestamp;
 const Timeout = @import("../time.zig").Timeout;
 

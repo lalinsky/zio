@@ -1,16 +1,12 @@
 const std = @import("std");
 const linux = std.os.linux;
-const posix_os = @import("../../os/posix.zig");
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 const time = @import("../../os/time.zig");
 const Duration = @import("../../time.zig").Duration;
 const common = @import("common.zig");
-const ReadBuf = @import("../buf.zig").ReadBuf;
-const WriteBuf = @import("../buf.zig").WriteBuf;
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
-const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
 
@@ -21,8 +17,6 @@ const USER_DATA_CANCEL: u64 = 1; // Cancel SQE operations (should be skipped)
 // Futex constants for io_uring FUTEX_WAIT/WAKE
 const FUTEX_BITSET_MATCH_ANY: u64 = 0xffffffff;
 const NetOpen = @import("../completion.zig").NetOpen;
-const NetBind = @import("../completion.zig").NetBind;
-const NetListen = @import("../completion.zig").NetListen;
 const NetConnect = @import("../completion.zig").NetConnect;
 const NetAccept = @import("../completion.zig").NetAccept;
 const NetRecv = @import("../completion.zig").NetRecv;
@@ -50,7 +44,6 @@ const FileSetSize = @import("../completion.zig").FileSetSize;
 const DirOpen = @import("../completion.zig").DirOpen;
 const DirClose = @import("../completion.zig").DirClose;
 const PipePoll = @import("../completion.zig").PipePoll;
-const PipeCreate = @import("../completion.zig").PipeCreate;
 const PipeRead = @import("../completion.zig").PipeRead;
 const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
