@@ -499,7 +499,10 @@ pub const Executor = struct {
 
             // Exit if loop is stopped
             if (self.loop.stopped()) {
-                return;
+                if (mode == .until_stopped) {
+                    return;
+                }
+                @panic("event loop stopped while the main task was yielding");
             }
 
             // Drain remote ready queue (cross-thread tasks) after processing current queue
