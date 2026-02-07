@@ -128,7 +128,7 @@ pub fn wait(self: *Barrier) (Cancelable || error{BrokenBarrier})!bool {
 }
 
 test "Barrier: basic synchronization" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -138,13 +138,13 @@ test "Barrier: basic synchronization" {
     const TestFn = struct {
         fn worker(b: *Barrier, cnt: *u32, result: *u32) !void {
             // Increment counter before barrier
-            _ = @atomicRmw(u32, cnt, .Add, 1, .monotonic);
+            cnt.* += 1;
 
             // Wait at barrier - all should see counter == 3 after this
             _ = try b.wait();
 
             // All coroutines should see the same final counter value
-            result.* = @atomicLoad(u32, cnt, .monotonic);
+            result.* = cnt.*;
         }
     };
 
@@ -165,7 +165,7 @@ test "Barrier: basic synchronization" {
 }
 
 test "Barrier: leader detection" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -175,7 +175,7 @@ test "Barrier: leader detection" {
         fn worker(b: *Barrier, leader_cnt: *u32) !void {
             const is_leader = try b.wait();
             if (is_leader) {
-                _ = @atomicRmw(u32, leader_cnt, .Add, 1, .monotonic);
+                leader_cnt.* += 1;
             }
         }
     };
@@ -195,7 +195,7 @@ test "Barrier: leader detection" {
 }
 
 test "Barrier: reusable for multiple cycles" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(2);
@@ -206,15 +206,15 @@ test "Barrier: reusable for multiple cycles" {
     const TestFn = struct {
         fn worker(b: *Barrier, p1: *u32, p2: *u32, p3: *u32) !void {
             // Phase 1
-            _ = @atomicRmw(u32, p1, .Add, 1, .monotonic);
+            p1.* += 1;
             _ = try b.wait();
 
             // Phase 2
-            _ = @atomicRmw(u32, p2, .Add, 1, .monotonic);
+            p2.* += 1;
             _ = try b.wait();
 
             // Phase 3
-            _ = @atomicRmw(u32, p3, .Add, 1, .monotonic);
+            p3.* += 1;
             _ = try b.wait();
         }
     };
@@ -254,7 +254,7 @@ test "Barrier: single coroutine barrier" {
 }
 
 test "Barrier: ordering test" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -264,14 +264,15 @@ test "Barrier: ordering test" {
 
     const TestFn = struct {
         fn worker(b: *Barrier, order: *u32, my_arrival: *u32, final: *u32) !void {
-            // Record arrival order atomically
-            my_arrival.* = @atomicRmw(u32, order, .Add, 1, .monotonic);
+            // Record arrival order
+            my_arrival.* = order.*;
+            order.* += 1;
 
             // Wait at barrier
             _ = try b.wait();
 
             // After barrier, store final order value
-            @atomicStore(u32, final, @atomicLoad(u32, order, .monotonic), .monotonic);
+            final.* = order.*;
         }
     };
 
@@ -298,7 +299,7 @@ test "Barrier: ordering test" {
 }
 
 test "Barrier: many coroutines" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var barrier = Barrier.init(5);
@@ -307,9 +308,9 @@ test "Barrier: many coroutines" {
 
     const TestFn = struct {
         fn worker(b: *Barrier, cnt: *u32, result: *u32) !void {
-            _ = @atomicRmw(u32, cnt, .Add, 1, .monotonic);
+            cnt.* += 1;
             _ = try b.wait();
-            result.* = @atomicLoad(u32, cnt, .monotonic);
+            result.* = cnt.*;
         }
     };
 

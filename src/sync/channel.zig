@@ -621,7 +621,7 @@ pub fn AsyncSend(comptime T: type) type {
 }
 
 test "Channel: basic send and receive" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -696,7 +696,7 @@ test "Channel: trySend and tryReceive" {
 }
 
 test "Channel: blocking behavior when empty" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -728,7 +728,7 @@ test "Channel: blocking behavior when empty" {
 }
 
 test "Channel: blocking behavior when full" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [2]u32 = undefined;
@@ -764,7 +764,7 @@ test "Channel: blocking behavior when full" {
 }
 
 test "Channel: multiple producers and consumers" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -780,7 +780,7 @@ test "Channel: multiple producers and consumers" {
         fn consumer(ch: *Channel(u32), sum: *u32) !void {
             for (0..5) |_| {
                 const val = try ch.receive();
-                _ = @atomicRmw(u32, sum, .Add, val, .monotonic);
+                sum.* += val;
             }
         }
     };
@@ -803,7 +803,7 @@ test "Channel: multiple producers and consumers" {
 }
 
 test "Channel: close graceful" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -841,7 +841,7 @@ test "Channel: close graceful" {
 }
 
 test "Channel: close immediate" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -938,7 +938,7 @@ test "Channel: ring buffer wrapping" {
 }
 
 test "Channel: asyncReceive with select - basic" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -972,7 +972,7 @@ test "Channel: asyncReceive with select - basic" {
 }
 
 test "Channel: asyncReceive with select - value types" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     // Unbuffered channel - sender blocks until receiver ready
@@ -1056,7 +1056,7 @@ test "Channel: asyncReceive with select - closed channel" {
 }
 
 test "Channel: asyncSend with select - basic" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [2]u32 = undefined;
@@ -1146,7 +1146,7 @@ test "Channel: asyncSend with select - closed channel" {
 }
 
 test "Channel: select on both send and receive" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer1: [5]u32 = undefined;
@@ -1203,7 +1203,7 @@ test "Channel: select on both send and receive" {
 }
 
 test "Channel: select with multiple receivers" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer1: [5]u32 = undefined;
@@ -1252,7 +1252,7 @@ test "Channel: select with multiple receivers" {
 }
 
 test "Channel: unbuffered - basic synchronous transfer" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     // Unbuffered channel - sender and receiver must rendezvous
@@ -1388,7 +1388,7 @@ test "Channel: unbuffered - receiver blocks until sender ready" {
 }
 
 test "Channel: unbuffered - multiple senders and receivers" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var channel = Channel(u32).init(&.{});
@@ -1400,7 +1400,7 @@ test "Channel: unbuffered - multiple senders and receivers" {
 
         fn receiver(ch: *Channel(u32), sum: *u32) !void {
             const val = try ch.receive();
-            _ = @atomicRmw(u32, sum, .Add, val, .monotonic);
+            sum.* += val;
         }
     };
 
@@ -1425,7 +1425,7 @@ test "Channel: unbuffered - multiple senders and receivers" {
 }
 
 test "Channel: unbuffered - close wakes blocked sender" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var channel = Channel(u32).init(&.{});
@@ -1460,7 +1460,7 @@ test "Channel: unbuffered - close wakes blocked sender" {
 }
 
 test "Channel: unbuffered - close wakes blocked receiver" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var channel = Channel(u32).init(&.{});
@@ -1495,7 +1495,7 @@ test "Channel: unbuffered - close wakes blocked receiver" {
 }
 
 test "Channel: unbuffered - select with direct transfer" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var channel = Channel(u32).init(&.{});

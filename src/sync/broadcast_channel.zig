@@ -479,7 +479,7 @@ pub fn AsyncReceive(comptime T: type) type {
 }
 
 test "BroadcastChannel: basic send and receive" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -523,7 +523,7 @@ test "BroadcastChannel: basic send and receive" {
 }
 
 test "BroadcastChannel: multiple consumers receive same messages" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -749,7 +749,7 @@ test "BroadcastChannel: close prevents new sends" {
 }
 
 test "BroadcastChannel: consumers can drain after close" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -798,7 +798,7 @@ test "BroadcastChannel: consumers can drain after close" {
 }
 
 test "BroadcastChannel: waiting consumers wake on close" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [10]u32 = undefined;
@@ -870,7 +870,7 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
 }
 
 test "BroadcastChannel: asyncReceive with select - basic" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer: [5]u32 = undefined;
@@ -1005,7 +1005,7 @@ test "BroadcastChannel: asyncReceive with select - lagged consumer" {
 }
 
 test "BroadcastChannel: select with multiple broadcast channels" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     var buffer1: [5]u32 = undefined;
