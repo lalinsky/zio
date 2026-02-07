@@ -462,7 +462,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
 pub fn finishTask(rt: *Runtime, awaitable: *Awaitable) void {
     // Decrement task count BEFORE marking complete to prevent race where
     // waiting thread wakes up and sees non-zero task_count in deinit()
-    const prev_count = rt.task_count.fetchSub(1, .acq_rel);
+    _ = rt.task_count.fetchSub(1, .acq_rel);
 
     // Mark awaitable as complete and wake all waiters
     awaitable.markComplete();
@@ -474,13 +474,6 @@ pub fn finishTask(rt: *Runtime, awaitable: *Awaitable) void {
 
     // Decref for task completion
     awaitable.release();
-
-    // Wake main executor if last task completed and it's waiting in run() mode
-    if (prev_count == 1) {
-        if (rt.main_executor.main_task.state.cmpxchgStrong(.new, .ready, .release, .acquire) == null) {
-            rt.main_executor.loop.wake();
-        }
-    }
 }
 
 /// Spawn a task with raw context bytes and start function.
