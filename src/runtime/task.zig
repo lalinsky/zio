@@ -459,6 +459,23 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     }
 }
 
+pub fn finishTask(rt: *Runtime, awaitable: *Awaitable) void {
+    // Decrement task count BEFORE marking complete to prevent race where
+    // waiting thread wakes up and sees non-zero task_count in deinit()
+    _ = rt.task_count.fetchSub(1, .acq_rel);
+
+    // Mark awaitable as complete and wake all waiters
+    awaitable.markComplete();
+
+    // For group tasks, decrement counter and release group's reference
+    if (awaitable.group_node.group) |group| {
+        unregisterGroupTask(group, awaitable);
+    }
+
+    // Decref for task completion
+    awaitable.release();
+}
+
 /// Spawn a task with raw context bytes and start function.
 /// Used by Runtime.spawn, Group.spawn, and std.Io vtable implementations.
 pub fn spawnTask(
