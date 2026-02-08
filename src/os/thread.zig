@@ -190,45 +190,28 @@ const FutexLinux = struct {
     const linux = std.os.linux;
 
     fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
-
-            const rc = sys.futex(
-                &ptr.raw,
-                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-                expected,
-                null,
-                null,
-                0,
-            );
-            switch (linux.E.init(rc)) {
-                .TIMEDOUT => unreachable,
-                .INTR => continue,
-                else => return,
-            }
-        }
+        _ = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            expected,
+            null,
+            null,
+            0,
+        );
     }
 
     fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
-
-            const rc = sys.futex(
-                &ptr.raw,
-                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-                expected,
-                &timeout_ts,
-                null,
-                0,
-            );
-            switch (linux.E.init(rc)) {
-                .TIMEDOUT => return error.Timeout,
-                .INTR => continue,
-                else => return,
-            }
-        }
+        const rc = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            expected,
+            &timeout_ts,
+            null,
+            0,
+        );
+        if (linux.E.init(rc) == .TIMEDOUT) return error.Timeout;
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -337,47 +320,29 @@ const FutexDarwin = struct {
 
 const FutexFreeBSD = struct {
     fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
-
-            const rc = sys._umtx_op(
-                &ptr.raw,
-                sys.UMTX_OP_WAIT_UINT_PRIVATE,
-                expected,
-                null,
-                null,
-            );
-            if (rc == -1) {
-                const err = std.posix.errno(rc);
-                if (err == .INTR) continue;
-            }
-            return;
-        }
+        _ = sys._umtx_op(
+            &ptr.raw,
+            sys.UMTX_OP_WAIT_UINT_PRIVATE,
+            expected,
+            null,
+            null,
+        );
     }
 
     fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
+        const rc = sys._umtx_op(
+            &ptr.raw,
+            sys.UMTX_OP_WAIT_UINT_PRIVATE,
+            expected,
+            null,
+            @ptrCast(@constCast(&timeout_ts)),
+        );
 
-            const result = sys._umtx_op(
-                &ptr.raw,
-                sys.UMTX_OP_WAIT_UINT_PRIVATE,
-                expected,
-                null,
-                @ptrCast(@constCast(&timeout_ts)),
-            );
-
-            if (result == -1) {
-                const err = std.posix.errno(result);
-                switch (err) {
-                    .TIMEDOUT => return error.Timeout,
-                    .INTR => continue,
-                    else => return,
-                }
-            }
-            return;
+        if (rc == -1) {
+            const err = std.posix.errno(rc);
+            if (err == .TIMEDOUT) return error.Timeout;
         }
     }
 
@@ -510,47 +475,29 @@ const ConditionFreeBSD = struct {
 
 const FutexOpenBSD = struct {
     fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
-
-            const rc = sys.futex(
-                &ptr.raw,
-                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-                @intCast(expected),
-                null,
-                null,
-            );
-            if (rc == -1) {
-                const err = std.posix.errno(rc);
-                if (err == .INTR) continue;
-            }
-            return;
-        }
+        _ = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            @intCast(expected),
+            null,
+            null,
+        );
     }
 
     fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
+        const rc = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            @intCast(expected),
+            &timeout_ts,
+            null,
+        );
 
-            const result = sys.futex(
-                &ptr.raw,
-                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-                @intCast(expected),
-                &timeout_ts,
-                null,
-            );
-
-            if (result == -1) {
-                const err = std.posix.errno(result);
-                switch (err) {
-                    .TIMEDOUT => return error.Timeout,
-                    .INTR => continue,
-                    else => return,
-                }
-            }
-            return;
+        if (rc == -1) {
+            const err = std.posix.errno(rc);
+            if (err == .TIMEDOUT) return error.Timeout;
         }
     }
 
@@ -575,44 +522,26 @@ const FutexOpenBSD = struct {
 
 const FutexDragonFly = struct {
     fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
-
-            const rc = sys.umtx_sleep(
-                &ptr.raw,
-                @intCast(expected),
-                0, // 0 means infinite wait
-            );
-            if (rc == -1) {
-                const err = std.posix.errno(rc);
-                if (err == .INTR) continue;
-            }
-            return;
-        }
+        _ = sys.umtx_sleep(
+            &ptr.raw,
+            @intCast(expected),
+            0, // 0 means infinite wait
+        );
     }
 
     fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const us = timeout.toMicroseconds();
         const timeout_us: c_int = @max(1, std.math.cast(c_int, us) orelse std.math.maxInt(c_int));
 
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
+        const rc = sys.umtx_sleep(
+            &ptr.raw,
+            @intCast(expected),
+            timeout_us,
+        );
 
-            const result = sys.umtx_sleep(
-                &ptr.raw,
-                @intCast(expected),
-                timeout_us,
-            );
-
-            if (result == -1) {
-                const err = std.posix.errno(result);
-                switch (err) {
-                    .TIMEDOUT, .WOULDBLOCK => return error.Timeout,
-                    .INTR => continue,
-                    else => return,
-                }
-            }
-            return;
+        if (rc == -1) {
+            const err = std.posix.errno(rc);
+            if (err == .TIMEDOUT or err == .WOULDBLOCK) return error.Timeout;
         }
     }
 
