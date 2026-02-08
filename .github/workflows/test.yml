@@ -10,7 +10,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      extended: ${{ steps.filter.outputs.extended == 'true' || contains(github.event.head_commit.message, '#extendedci') }}
+      extended: ${{ steps.filter.outputs.extended == 'true' || contains(github.event.head_commit.message, '#extendedci') || contains(github.event.pull_request.body, '#extendedci') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
