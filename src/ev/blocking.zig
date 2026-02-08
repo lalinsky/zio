@@ -3,19 +3,23 @@
 
 //! Blocking execution of I/O operations without event loop.
 //!
-//! This module provides synchronous execution of file operations
+//! This module provides synchronous execution of file and pipe operations
 //! for use in non-async contexts (when there's no runtime/executor).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Completion = @import("completion.zig").Completion;
 const PipeClose = @import("completion.zig").PipeClose;
+const PipeRead = @import("completion.zig").PipeRead;
+const PipeWrite = @import("completion.zig").PipeWrite;
 const common = @import("backends/common.zig");
 const fs = @import("../os/fs.zig");
+const net = @import("../os/net.zig");
 
 /// Execute a completion synchronously without an event loop.
 /// This is used when there's no async runtime available.
 ///
-/// Note: This only supports file operations currently.
+/// Supports file and pipe operations (read/write use poll+I/O on POSIX).
 /// Network operations and timers are not supported.
 pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
     // Mark completion as having no loop
@@ -55,11 +59,11 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .file_real_path => common.handleFileRealPath(c),
         .file_hard_link => common.handleFileHardLink(c, allocator),
 
-        // Pipe operations (create/close only in blocking mode)
+        // Pipe operations
         .pipe_create => handlePipeCreate(c),
         .pipe_close => handlePipeClose(c),
-        .pipe_read => @panic("Pipe read not supported in blocking mode (requires event loop for non-blocking I/O)"),
-        .pipe_write => @panic("Pipe write not supported in blocking mode (requires event loop for non-blocking I/O)"),
+        .pipe_read => handlePipeRead(c),
+        .pipe_write => handlePipeWrite(c),
         .pipe_poll => @panic("Pipe poll not supported in blocking mode (requires event loop)"),
 
         // Network operations require the event loop
@@ -102,6 +106,56 @@ fn handlePipeClose(c: *Completion) void {
     const data = c.cast(PipeClose);
     if (fs.close(data.handle)) |_| {
         c.setResult(.pipe_close, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle pipe read operation
+fn handlePipeRead(c: *Completion) void {
+    const data = c.cast(PipeRead);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since pipes are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.IN,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now read - Windows blocks, POSIX should have data ready
+    if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
+        c.setResult(.pipe_read, bytes_read);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle pipe write operation
+fn handlePipeWrite(c: *Completion) void {
+    const data = c.cast(PipeWrite);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since pipes are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.OUT,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now write - Windows blocks, POSIX should be ready
+    if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
+        c.setResult(.pipe_write, bytes_written);
     } else |err| {
         c.setError(err);
     }
