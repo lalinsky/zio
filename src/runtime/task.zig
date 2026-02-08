@@ -416,7 +416,7 @@ pub const AnyTask = struct {
                 },
             },
             .coro = .{
-                .parent_context_ptr = &executor.main_task.coro.context,
+                .parent_context_ptr = .init(&executor.main_task.coro.context),
             },
             .closure = alloc_result.closure,
         };

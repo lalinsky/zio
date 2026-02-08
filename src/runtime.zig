@@ -297,7 +297,7 @@ pub const Executor = struct {
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
     /// so we navigate: context -> coro -> main_task -> executor
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
-        const main_coro: *Coroutine = @fieldParentPtr("context", coro.parent_context_ptr);
+        const main_coro: *Coroutine = @fieldParentPtr("context", coro.parent_context_ptr.load(.acquire));
         const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
         return @alignCast(@fieldParentPtr("main_task", main_task));
     }
@@ -323,7 +323,7 @@ pub const Executor = struct {
                 },
             },
             .coro = .{
-                .parent_context_ptr = &self.main_task.coro.context, // points to itself
+                .parent_context_ptr = .init(&self.main_task.coro.context), // points to itself
             },
             .closure = undefined, // main_task has no closure
         };
@@ -432,6 +432,7 @@ pub const Executor = struct {
             executor.current_task = task;
             task.coro.yield();
         }
+        // Synchronize with task migration
         std.debug.assert(task.state.load(.acquire) == .ready);
 
         // We could be on a different executor now
@@ -658,7 +659,7 @@ pub const Executor = struct {
             //       for re-balancing them
             if (current_exec.runtime == self.runtime and old_state != .new) {
                 if (current_exec != self) {
-                    task.coro.parent_context_ptr = &current_exec.main_task.coro.context;
+                    task.coro.parent_context_ptr.store(&current_exec.main_task.coro.context, .release);
                 }
                 current_exec.scheduleTaskLocal(task, false);
                 return;
