@@ -135,7 +135,7 @@ pub const Mutex = switch (builtin.os.tag) {
 pub const Condition = switch (builtin.os.tag) {
     .windows => ConditionWindows,
     .freebsd => ConditionFreeBSD,
-    else => ConditionEvent,
+    else => if (@TypeOf(Futex) == void) ConditionNotify else ConditionFutex,
 };
 
 /// ResetEvent is a thread-safe bool which can be set to true/false.
@@ -189,39 +189,52 @@ pub const ResetEvent = struct {
 const FutexLinux = struct {
     const linux = std.os.linux;
 
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
-        _ = sys.futex(
-            &ptr.raw,
-            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            current,
-            null,
-            null,
-            0,
-        );
-        // Ignore errors - spurious wakeups are fine
+    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
+
+            const rc = sys.futex(
+                &ptr.raw,
+                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+                expected,
+                null,
+                null,
+                0,
+            );
+            switch (linux.E.init(rc)) {
+                .TIMEDOUT => unreachable,
+                .INTR => continue,
+                else => return,
+            }
+        }
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
-        const rc = sys.futex(
-            &ptr.raw,
-            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            current,
-            &timeout_ts,
-            null,
-            0,
-        );
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
 
-        if (linux.E.init(rc) == .TIMEDOUT) {
-            return error.Timeout;
+            const rc = sys.futex(
+                &ptr.raw,
+                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+                expected,
+                &timeout_ts,
+                null,
+                0,
+            );
+            switch (linux.E.init(rc)) {
+                .TIMEDOUT => return error.Timeout,
+                .INTR => continue,
+                else => return,
+            }
         }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const n: u32 = switch (count) {
             .one => 1,
-            .all => std.math.maxInt(u32),
+            .all => std.math.maxInt(i32),
         };
         _ = sys.futex(
             &ptr.raw,
@@ -283,32 +296,47 @@ const FutexWindows = struct {
 // ============================================================================
 
 const FutexDarwin = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
-        _ = sys.__ulock_wait(
-            sys.UL_COMPARE_AND_WAIT,
-            &ptr.raw,
-            current,
-            0, // 0 means infinite wait
-        );
-        // Ignore errors - spurious wakeups are fine
+    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
+
+            const rc = sys.__ulock_wait(
+                sys.UL_COMPARE_AND_WAIT,
+                &ptr.raw,
+                expected,
+                0, // 0 means infinite wait
+            );
+            if (rc == -1) {
+                const err = std.posix.errno(rc);
+                if (err == .INTR) continue;
+            }
+            return;
+        }
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const us = timeout.toMicroseconds();
         const timeout_us: u32 = @max(1, std.math.cast(u32, us) orelse std.math.maxInt(u32));
 
-        const result = sys.__ulock_wait(
-            sys.UL_COMPARE_AND_WAIT,
-            &ptr.raw,
-            current,
-            timeout_us,
-        );
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
 
-        if (result == -1) {
-            const err = std.posix.errno(result);
-            if (err == .TIMEDOUT) {
-                return error.Timeout;
+            const result = sys.__ulock_wait(
+                sys.UL_COMPARE_AND_WAIT,
+                &ptr.raw,
+                expected,
+                timeout_us,
+            );
+
+            if (result == -1) {
+                const err = std.posix.errno(result);
+                switch (err) {
+                    .TIMEDOUT => return error.Timeout,
+                    .INTR => continue,
+                    else => return,
+                }
             }
+            return;
         }
     }
 
@@ -327,43 +355,59 @@ const FutexDarwin = struct {
 // ============================================================================
 
 const FutexFreeBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
-        _ = sys._umtx_op(
-            &ptr.raw,
-            sys.UMTX_OP_WAIT_UINT,
-            current,
-            null,
-            null,
-        );
+    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
+
+            const rc = sys._umtx_op(
+                &ptr.raw,
+                sys.UMTX_OP_WAIT_UINT_PRIVATE,
+                expected,
+                null,
+                null,
+            );
+            if (rc == -1) {
+                const err = std.posix.errno(rc);
+                if (err == .INTR) continue;
+            }
+            return;
+        }
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
-        const result = sys._umtx_op(
-            &ptr.raw,
-            sys.UMTX_OP_WAIT_UINT,
-            current,
-            null,
-            @ptrCast(@constCast(&timeout_ts)),
-        );
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
 
-        if (result == -1) {
-            const err = std.posix.errno(result);
-            if (err == .TIMEDOUT) {
-                return error.Timeout;
+            const result = sys._umtx_op(
+                &ptr.raw,
+                sys.UMTX_OP_WAIT_UINT_PRIVATE,
+                expected,
+                null,
+                @ptrCast(@constCast(&timeout_ts)),
+            );
+
+            if (result == -1) {
+                const err = std.posix.errno(result);
+                switch (err) {
+                    .TIMEDOUT => return error.Timeout,
+                    .INTR => continue,
+                    else => return,
+                }
             }
+            return;
         }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
-        const n: u32 = switch (count) {
+        const n: c_ulong = switch (count) {
             .one => 1,
-            .all => std.math.maxInt(u32),
+            .all => std.math.maxInt(c_int),
         };
         _ = sys._umtx_op(
             &ptr.raw,
-            sys.UMTX_OP_WAKE,
+            sys.UMTX_OP_WAKE_PRIVATE,
             n,
             null,
             null,
@@ -484,32 +528,48 @@ const ConditionFreeBSD = struct {
 // ============================================================================
 
 const FutexOpenBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
-        _ = sys.futex(
-            &ptr.raw,
-            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(current),
-            null,
-            null,
-        );
+    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
+
+            const rc = sys.futex(
+                &ptr.raw,
+                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+                @intCast(expected),
+                null,
+                null,
+            );
+            if (rc == -1) {
+                const err = std.posix.errno(rc);
+                if (err == .INTR) continue;
+            }
+            return;
+        }
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
-        const result = sys.futex(
-            &ptr.raw,
-            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(current),
-            &timeout_ts,
-            null,
-        );
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
 
-        if (result == -1) {
-            const err = std.posix.errno(result);
-            if (err == .TIMEDOUT) {
-                return error.Timeout;
+            const result = sys.futex(
+                &ptr.raw,
+                sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+                @intCast(expected),
+                &timeout_ts,
+                null,
+            );
+
+            if (result == -1) {
+                const err = std.posix.errno(result);
+                switch (err) {
+                    .TIMEDOUT => return error.Timeout,
+                    .INTR => continue,
+                    else => return,
+                }
             }
+            return;
         }
     }
 
@@ -533,29 +593,45 @@ const FutexOpenBSD = struct {
 // ============================================================================
 
 const FutexDragonFly = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
-        _ = sys.umtx_sleep(
-            &ptr.raw,
-            @intCast(current),
-            0, // 0 means infinite wait
-        );
+    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
+
+            const rc = sys.umtx_sleep(
+                &ptr.raw,
+                @intCast(expected),
+                0, // 0 means infinite wait
+            );
+            if (rc == -1) {
+                const err = std.posix.errno(rc);
+                if (err == .INTR) continue;
+            }
+            return;
+        }
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const us = timeout.toMicroseconds();
         const timeout_us: c_int = @max(1, std.math.cast(c_int, us) orelse std.math.maxInt(c_int));
 
-        const result = sys.umtx_sleep(
-            &ptr.raw,
-            @intCast(current),
-            timeout_us,
-        );
+        while (true) {
+            if (ptr.load(.monotonic) != expected) return;
 
-        if (result == -1) {
-            const err = std.posix.errno(result);
-            if (err == .TIMEDOUT or err == .WOULDBLOCK) {
-                return error.Timeout;
+            const result = sys.umtx_sleep(
+                &ptr.raw,
+                @intCast(expected),
+                timeout_us,
+            );
+
+            if (result == -1) {
+                const err = std.posix.errno(result);
+                switch (err) {
+                    .TIMEDOUT, .WOULDBLOCK => return error.Timeout,
+                    .INTR => continue,
+                    else => return,
+                }
             }
+            return;
         }
     }
 
@@ -949,13 +1025,65 @@ const ConditionWindows = struct {
     }
 };
 
+/// Futex-based condition variable using a sequence counter.
+///
+/// Uses a single atomic counter instead of a WaitQueue:
+/// - signal() increments the counter and wakes one futex waiter
+/// - broadcast() increments the counter and wakes all futex waiters
+/// - wait() captures the current sequence, unlocks the mutex, then blocks
+///   on the futex until the sequence changes
+const ConditionFutex = struct {
+    seq: std.atomic.Value(u32) = .init(0),
+
+    pub fn init() ConditionFutex {
+        return .{};
+    }
+
+    pub fn deinit(self: *ConditionFutex) void {
+        _ = self;
+    }
+
+    pub fn wait(self: *ConditionFutex, mutex: *Mutex) void {
+        const seq = self.seq.load(.monotonic);
+        mutex.unlock();
+        defer mutex.lock();
+
+        Futex.wait(&self.seq, seq);
+    }
+
+    pub fn timedWait(self: *ConditionFutex, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
+        if (timeout == .none) {
+            return self.wait(mutex);
+        }
+
+        const seq = self.seq.load(.monotonic);
+        mutex.unlock();
+        defer mutex.lock();
+
+        const remaining = timeout.durationFromNow();
+        if (remaining.value <= 0) return error.Timeout;
+
+        try Futex.timedWait(&self.seq, seq, remaining);
+    }
+
+    pub fn signal(self: *ConditionFutex) void {
+        _ = self.seq.fetchAdd(1, .monotonic);
+        Futex.wake(&self.seq, .one);
+    }
+
+    pub fn broadcast(self: *ConditionFutex) void {
+        _ = self.seq.fetchAdd(1, .monotonic);
+        Futex.wake(&self.seq, .all);
+    }
+};
+
 /// Notify-based condition variable using WaitQueue.
 ///
 /// Uses the same pattern as zio.Condition but for blocking OS threads:
 /// - WaitQueue manages the list of waiting threads
 /// - Stack-allocated waiters block on Notify instead of suspending coroutines
 /// - Works with any Mutex type
-const ConditionEvent = struct {
+const ConditionNotify = struct {
     /// Stack-allocated waiter that blocks an OS thread
     const Waiter = struct {
         wait_node: WaitNode,
@@ -971,18 +1099,18 @@ const ConditionEvent = struct {
 
     wait_queue: WaitQueue(WaitNode) = .empty,
 
-    pub fn init() ConditionEvent {
+    pub fn init() ConditionNotify {
         return .{};
     }
 
-    pub fn deinit(self: *ConditionEvent) void {
+    pub fn deinit(self: *ConditionNotify) void {
         _ = self;
     }
 
     /// Wait for a signal. The mutex must be held when calling this.
     /// The mutex is atomically released and the thread blocks.
     /// When signaled, the mutex is automatically reacquired before returning.
-    pub fn wait(self: *ConditionEvent, mutex: *Mutex) void {
+    pub fn wait(self: *ConditionNotify, mutex: *Mutex) void {
         var waiter = Waiter.init();
 
         // Add to wait queue before releasing mutex
@@ -1004,7 +1132,7 @@ const ConditionEvent = struct {
 
     /// Wait for a signal with a timeout.
     /// Returns error.Timeout if the timeout expires before being signaled.
-    pub fn timedWait(self: *ConditionEvent, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
+    pub fn timedWait(self: *ConditionNotify, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
         if (timeout == .none) {
             return self.wait(mutex);
         }
@@ -1048,7 +1176,7 @@ const ConditionEvent = struct {
     }
 
     /// Wake one waiting thread.
-    pub fn signal(self: *ConditionEvent) void {
+    pub fn signal(self: *ConditionNotify) void {
         if (self.wait_queue.pop()) |wait_node| {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
             waiter.notify.signal();
@@ -1056,7 +1184,7 @@ const ConditionEvent = struct {
     }
 
     /// Wake all waiting threads.
-    pub fn broadcast(self: *ConditionEvent) void {
+    pub fn broadcast(self: *ConditionNotify) void {
         while (self.wait_queue.pop()) |wait_node| {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
             waiter.notify.signal();
@@ -1067,6 +1195,81 @@ const ConditionEvent = struct {
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "Mutex - basic lock unlock" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+    var counter = std.atomic.Value(u32).init(0);
+
+    const Context = struct {
+        mutex: *Mutex,
+        counter: *std.atomic.Value(u32),
+    };
+
+    const worker = struct {
+        fn run(ctx: *Context) void {
+            var i: u32 = 0;
+            while (i < 100) : (i += 1) {
+                ctx.mutex.lock();
+                _ = ctx.counter.fetchAdd(1, .monotonic);
+                ctx.mutex.unlock();
+            }
+        }
+    }.run;
+
+    var ctx = Context{ .mutex = &mutex, .counter = &counter };
+    const t1 = try std.Thread.spawn(.{}, worker, .{&ctx});
+    const t2 = try std.Thread.spawn(.{}, worker, .{&ctx});
+    const t3 = try std.Thread.spawn(.{}, worker, .{&ctx});
+    defer t1.join();
+    defer t2.join();
+    defer t3.join();
+}
+
+test "Futex - wake all" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var futex_value = std.atomic.Value(u32).init(0);
+    var mutex = Mutex.init();
+    defer mutex.deinit();
+    var threads_ready = std.atomic.Value(u32).init(0);
+
+    const Context = struct {
+        futex: *std.atomic.Value(u32),
+        mutex: *Mutex,
+        threads_ready: *std.atomic.Value(u32),
+    };
+
+    const waiter = struct {
+        fn run(ctx: *Context) void {
+            ctx.mutex.lock();
+            const seq = ctx.futex.load(.monotonic);
+            _ = ctx.threads_ready.fetchAdd(1, .release);
+            ctx.mutex.unlock();
+            Futex.wait(ctx.futex, seq);
+            ctx.mutex.lock();
+            ctx.mutex.unlock();
+        }
+    }.run;
+
+    var ctx = Context{ .futex = &futex_value, .mutex = &mutex, .threads_ready = &threads_ready };
+    const t1 = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    const t2 = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    const t3 = try std.Thread.spawn(.{}, waiter, .{&ctx});
+    defer t1.join();
+    defer t2.join();
+    defer t3.join();
+
+    // Wait for all threads to be ready
+    while (threads_ready.load(.acquire) < 3) {
+        std.Thread.yield() catch {};
+    }
+
+    _ = futex_value.fetchAdd(1, .monotonic);
+    Futex.wake(&futex_value, .all);
+}
 
 test "Notify - basic signal and wait" {
     if (builtin.single_threaded) return error.SkipZigTest;
@@ -1182,9 +1385,6 @@ test "Notify - timedWait success (signaled before timeout)" {
     while (!ready.load(.acquire)) {
         std.Thread.yield() catch {};
     }
-
-    // Give thread time to start waiting
-    std.Thread.sleep(10 * std.time.ns_per_ms);
 
     // Signal the notify - should wake up without timeout
     notify_ptr.load(.acquire).?.signal();
@@ -1358,9 +1558,14 @@ test "Condition - broadcast" {
     const waiter = struct {
         fn run(ctx: *Context) void {
             ctx.mutex.lock();
-            _ = ctx.threads_ready.fetchAdd(1, .release);
             while (!ctx.ready.load(.acquire)) {
+                // Signal we're about to block
+                _ = ctx.threads_ready.fetchAdd(1, .release);
                 ctx.cond.wait(ctx.mutex);
+                // If spurious wakeup, decrement and retry
+                if (!ctx.ready.load(.acquire)) {
+                    _ = ctx.threads_ready.fetchSub(1, .release);
+                }
             }
             _ = ctx.count.fetchAdd(1, .acq_rel);
             ctx.mutex.unlock();
@@ -1375,16 +1580,19 @@ test "Condition - broadcast" {
     defer t2.join();
     defer t3.join();
 
-    // Wait for all threads to be ready
+    // Yield until all threads are about to block
     while (threads_ready.load(.acquire) < 3) {
         std.Thread.yield() catch {};
     }
 
+    // Brief sleep to ensure threads have entered kernel wait
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
     // Broadcast to all waiters
     mutex.lock();
     ready.store(true, .release);
-    mutex.unlock();
     cond.broadcast();
+    mutex.unlock();
 }
 
 test "Condition - timedWait timeout" {
