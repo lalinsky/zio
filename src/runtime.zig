@@ -17,6 +17,7 @@ const Duration = time.Duration;
 const Timestamp = time.Timestamp;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
+const Context = @import("coro/coroutines.zig").Context;
 const StackPool = @import("coro/stack_pool.zig").StackPool;
 const StackPoolConfig = @import("coro/stack_pool.zig").Config;
 const setupStackGrowth = @import("coro/stack.zig").setupStackGrowth;
@@ -31,6 +32,8 @@ const Group = @import("runtime/group.zig").Group;
 
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
+
+const mod = @This();
 
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u6) {
@@ -245,7 +248,6 @@ pub const Executor = struct {
 
     id: u6,
     loop: ev.Loop,
-    current_task: ?*AnyTask = null,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
 
@@ -274,6 +276,10 @@ pub const Executor = struct {
     // Timestamp of last event loop tick, used for time-based yield decisions.
     last_tick_time: Timestamp = .zero,
 
+    // Deferred cleanup for the task that just yielded away from this executor.
+    // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
+    pending_cleanup: TaskCleanup = .none,
+
     // Remote task support - lock-free LIFO stack for cross-thread resumption
     next_ready_queue_remote: ConcurrentStack(WaitNode) = .{},
 
@@ -289,9 +295,6 @@ pub const Executor = struct {
     // Shutdown event - keeps the event loop active and provides cross-thread shutdown.
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
-
-    // Executor dedicated to this thread
-    pub threadlocal var current: ?*Executor = null;
 
     /// Get the Executor instance from any coroutine that belongs to it.
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
@@ -323,10 +326,12 @@ pub const Executor = struct {
                 },
             },
             .coro = .{
-                .parent_context_ptr = .init(&self.main_task.coro.context), // points to itself
+                .context = std.mem.zeroes(Context),
+                .parent_context_ptr = undefined,
             },
             .closure = undefined, // main_task has no closure
         };
+        self.main_task.coro.parent_context_ptr = .init(&self.main_task.coro.context);
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
@@ -342,14 +347,11 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
-        std.debug.assert(Executor.current == null);
-        Executor.current = self;
-        self.current_task = &self.main_task;
+        self.main_task.coro.setCurrent();
     }
 
     pub fn deinit(self: *Executor) void {
-        std.debug.assert(Executor.current == self);
-        Executor.current = null;
+        Coroutine.clearCurrent();
 
         self.loop.deinit();
 
@@ -362,103 +364,13 @@ pub const Executor = struct {
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
 
-    /// Cooperatively yield control to other tasks.
-    ///
-    /// Suspends the current coroutine and allows other tasks to run. The coroutine
-    /// will be rescheduled according to `desired_state`:
-    /// - `.ready`: Reschedule immediately (cooperative yielding)
-    /// - `.waiting`: Suspend until resumed (I/O, sync primitives, timeout, cancellation, etc.)
-    ///
-    /// ## Cancellation Mode
-    ///
-    /// The `cancel_mode` parameter is comptime and determines the return type:
-    ///
-    /// - `.allow_cancel`: Checks cancellation flag before and after yielding.
-    ///   Returns `Cancelable!void` (may return `error.Canceled`).
-    ///   Use for normal yields where cancellation should be propagated.
-    ///
-    /// - `.no_cancel`: Ignores cancellation flag completely.
-    ///   Returns `void` (never fails, no error handling needed).
-    ///   Use in critical sections where cancellation would break invariants
-    ///   (e.g., lock-free algorithms, while holding locks).
-    ///
-    /// Using `.no_cancel` prevents interruption during critical operations but
-    /// should be used sparingly as it delays cancellation response.
-    pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        var executor = self;
-
-        const task = executor.current_task.?;
-        executor.current_task = null;
-
-        // Check and consume cancellation flag before yielding (unless no_cancel)
-        if (cancel_mode == .allow_cancel) {
-            task.checkCancel() catch |err| {
-                task.state.store(.ready, .release);
-                executor.current_task = task;
-                return err;
-            };
-        }
-
-        // Atomically transition state - if this fails, someone changed our state
-        if (task.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
-            if (actual_state == .ready) {
-                // We were woken up before we could yield - don't suspend
-                executor.current_task = task;
-                return;
-            }
-            // Unexpected state - this is a bug
-            std.debug.panic("Yield CAS failed with unexpected state: task {*} expected {} but was {} (not .ready)", .{ task, expected_state, actual_state });
-        }
-
-        // Run scheduler if this is the main task
-        if (task == &executor.main_task) {
-            executor.run(.until_ready) catch |err| {
-                std.log.err("Event loop error during yield: {}", .{err});
-            };
-            std.debug.assert(task.state.load(.acquire) == .ready);
-            return;
-        }
-
-        // If yielding with .ready state (cooperative yield), schedule for later execution
-        if (desired_state == .ready) {
-            executor.scheduleTaskLocal(task, true);
-        }
-
-        // Try direct scheduling or yield back to the scheduler
-        if (executor.getNextTask()) |next_task| {
-            executor.current_task = next_task;
-            task.coro.yieldTo(&next_task.coro);
-        } else {
-            executor.current_task = task;
-            task.coro.yield();
-        }
-        // Synchronize with task migration
-        std.debug.assert(task.state.load(.acquire) == .ready);
-
-        // We could be on a different executor now
-        executor = task.getExecutor();
-        executor.current_task = task;
-
-        // Check after resuming in case we were canceled while suspended (unless no_cancel)
-        if (cancel_mode == .allow_cancel) {
-            try task.checkCancel();
-        }
-    }
-
     /// Yield to other tasks only if many are waiting, to balance fairness vs. context-switch overhead.
     const yield_ready_threshold = 13;
 
-    pub fn maybeYield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (self.ready_count >= yield_ready_threshold) {
-            return self.yield(expected_state, desired_state, cancel_mode);
+            return getCurrentTask().yield(mode, cancel_mode);
         }
-    }
-
-    pub fn getCurrentTask(self: *Executor) *AnyTask {
-        if (std.debug.runtime_safety) {
-            std.debug.assert(current == self);
-        }
-        return self.current_task.?;
     }
 
     pub const RunMode = enum {
@@ -472,30 +384,16 @@ pub const Executor = struct {
 
     /// Run the executor event loop.
     pub fn run(self: *Executor, mode: RunMode) !void {
-        std.debug.assert(Executor.current == self);
-        self.current_task = null;
-        defer self.current_task = &self.main_task;
-
         const check_ready = mode != .until_stopped;
+
+        // Process deferred cleanup (e.g. main task's park/reschedule)
+        self.processCleanup();
 
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
-                self.current_task = next_task;
                 next_task.coro.step();
-
-                // Due to direct scheduling, this doesn't have to be the same task we stepped into
-                const last_task = self.current_task.?;
-                self.current_task = null;
-
-                // If it's finished, handle cleanup
-                if (last_task.state.load(.acquire) == .finished) {
-                    if (last_task.coro.context.stack_info.allocation_len > 0) {
-                        self.runtime.stack_pool.release(last_task.coro.context.stack_info, self.loop.now());
-                        last_task.coro.context.stack_info.allocation_len = 0;
-                    }
-                    finishTask(self.runtime, &last_task.awaitable);
-                }
+                self.processCleanup();
             }
 
             // Exit if loop is stopped
@@ -590,6 +488,9 @@ pub const Executor = struct {
     /// - `true`: Task is yielding - goes to ready_queue (FIFO, bypasses LIFO slot)
     /// - `false`: Task is being woken - goes to LIFO slot (immediate) or ready_queue (FIFO)
     fn scheduleTaskLocal(self: *Executor, task: *AnyTask, is_yield: bool) void {
+        // Main task is never queued — the run loop checks its state directly
+        if (task == &self.main_task) return;
+
         const wait_node = &task.awaitable.wait_node;
         if (std.debug.runtime_safety) {
             std.debug.assert(!wait_node.in_list);
@@ -646,14 +547,14 @@ pub const Executor = struct {
         // main_task is never queued - it just checks state in run()
         if (task == &self.main_task) {
             // Wake the loop if called from another thread
-            if (Executor.current != self) {
+            if (getCurrentExecutorOrNull() != self) {
                 self.loop.wake();
             }
             return;
         }
 
         // Normal scheduling
-        if (Executor.current) |current_exec| {
+        if (getCurrentExecutorOrNull()) |current_exec| {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
@@ -669,6 +570,60 @@ pub const Executor = struct {
         // No current executor or different runtime
         self.scheduleTaskRemote(task);
     }
+
+    const TaskCleanup = union(enum) {
+        none,
+        reschedule: *AnyTask,
+        park: *AnyTask,
+        finish: *AnyTask,
+    };
+
+    /// Process deferred cleanup for the task that just yielded away.
+    /// Called at each landing site after a context switch:
+    /// - startFn (new task entry)
+    /// - yield resume (after yieldTo returns)
+    /// - run loop (after step returns)
+    pub fn processCleanup(self: *Executor) void {
+        switch (self.pending_cleanup) {
+            .none => {},
+            .reschedule => |task| {
+                self.pending_cleanup = .none;
+                self.scheduleTaskLocal(task, true);
+            },
+            .park => |task| {
+                self.pending_cleanup = .none;
+                // Context is now saved — safe to make the task wakeable.
+                // CAS preparing_to_wait → waiting. If it fails, the waker already
+                // swapped to .ready, so we schedule the task immediately.
+                if (task.state.cmpxchgStrong(.preparing_to_wait, .waiting, .release, .acquire)) |actual| {
+                    if (actual == .ready) {
+                        self.scheduleTaskLocal(task, false);
+                    } else {
+                        std.debug.panic("park cleanup: unexpected state {} for task {*}", .{ actual, task });
+                    }
+                }
+            },
+            .finish => |task| {
+                self.pending_cleanup = .none;
+                task.state.store(.finished, .release);
+                if (task.coro.context.stack_info.allocation_len > 0) {
+                    self.runtime.stack_pool.release(task.coro.context.stack_info, self.loop.now());
+                    task.coro.context.stack_info.allocation_len = 0;
+                }
+                finishTask(self.runtime, &task.awaitable);
+            },
+        }
+    }
+
+    /// Yield the current coroutine to the next ready task or back to the run loop.
+    /// Sets current_task for the target and performs the context switch.
+    pub fn switchOut(self: *Executor, coro: *Coroutine) void {
+        if (self.getNextTask()) |next_task| {
+            coro.yieldTo(&next_task.coro);
+        } else {
+            coro.yield();
+        }
+    }
 };
 
 /// Get the current thread's executor.
@@ -678,18 +633,20 @@ pub fn getCurrentExecutor() *Executor {
 }
 
 pub fn getCurrentExecutorOrNull() ?*Executor {
-    return Executor.current;
+    const task = getCurrentTaskOrNull() orelse return null;
+    return task.getExecutor();
 }
 
 /// Get the currently executing task.
 /// Panics if called from a thread without an active executor context.
 pub fn getCurrentTask() *AnyTask {
-    return getCurrentExecutor().getCurrentTask();
+    return getCurrentTaskOrNull() orelse @panic("no current task");
 }
 
+/// Get the currently executing task, or null if not in task context.
 pub fn getCurrentTaskOrNull() ?*AnyTask {
-    const executor = getCurrentExecutorOrNull() orelse return null;
-    return executor.getCurrentTask();
+    const coro = Coroutine.getCurrent() orelse return null;
+    return AnyTask.fromCoroutine(coro);
 }
 
 /// Cooperatively yield control to allow other tasks to run.
@@ -697,11 +654,11 @@ pub fn getCurrentTaskOrNull() ?*AnyTask {
 /// Returns error.Canceled if the task was canceled.
 /// No-op if called from a thread without an executor (returns without error).
 pub fn yield() Cancelable!void {
-    const executor = Executor.current orelse {
+    const task = getCurrentTaskOrNull() orelse {
         std.Thread.yield() catch {};
         return;
     };
-    return executor.yield(.ready, .ready, .allow_cancel);
+    return task.yield(.reschedule, .allow_cancel);
 }
 
 /// Spawn a task on the current runtime.
@@ -742,10 +699,15 @@ pub fn checkCancel() Cancelable!void {
     }
 }
 
+/// Get the current monotonic timestamp.
+pub fn now() Timestamp {
+    return .now(.monotonic);
+}
+
 /// Sleep for a specified duration.
 pub fn sleep(duration: Duration) Cancelable!void {
-    const rt = getCurrentExecutor().runtime;
-    return rt.sleep(duration);
+    var waiter: Waiter = .init();
+    try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
 }
 
 // Runtime - orchestrator for one or more Executors
@@ -963,75 +925,43 @@ pub const Runtime = struct {
     /// The current task will be rescheduled and continue execution later.
     /// Can be called from the main thread or from within a coroutine.
     /// If called from a thread without an executor, yields the OS thread.
-    pub fn yield(self: *Runtime) Cancelable!void {
-        _ = self;
-        const executor = Executor.current orelse {
-            std.Thread.yield() catch {};
-            return;
-        };
-        return executor.yield(.ready, .ready, .allow_cancel);
+    /// Deprecated: use zio.yield() instead.
+    pub fn yield(_: *Runtime) Cancelable!void {
+        return mod.yield();
     }
 
     /// Sleep for the specified number of milliseconds.
     /// Returns error.Canceled if the task was canceled during sleep.
-    pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
-        _ = self;
-        var waiter = Waiter.init();
-        try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
+    /// Deprecated: use zio.sleep() instead.
+    pub fn sleep(_: *Runtime, duration: Duration) Cancelable!void {
+        return mod.sleep(duration);
     }
 
     /// Begin a cancellation shield to prevent being canceled during critical sections.
-    pub fn beginShield(self: *Runtime) void {
-        self.getCurrentTask().beginShield();
+    /// Deprecated: use zio.beginShield() instead.
+    pub fn beginShield(_: *Runtime) void {
+        mod.beginShield();
     }
 
     /// End a cancellation shield.
-    pub fn endShield(self: *Runtime) void {
-        self.getCurrentTask().endShield();
+    /// Deprecated: use zio.endShield() instead.
+    pub fn endShield(_: *Runtime) void {
+        mod.endShield();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
     /// This consumes the cancellation flag.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
-    pub fn checkCancel(self: *Runtime) Cancelable!void {
-        return self.getCurrentTask().checkCancel();
-    }
-
-    /// Get the currently executing task.
-    /// Panics if called from a thread without an active executor context.
-    pub fn getCurrentTask(self: *Runtime) *AnyTask {
-        return self.getCurrentExecutor().getCurrentTask();
-    }
-
-    /// Get the currently executing task, or null if not in task context.
-    pub fn getCurrentTaskOrNull(self: *Runtime) ?*AnyTask {
-        const executor = self.getCurrentExecutorOrNull() orelse return null;
-        return executor.getCurrentTask();
-    }
-
-    /// Get the current thread's executor.
-    /// Panics if called from a thread without an active executor context.
-    pub fn getCurrentExecutor(self: *Runtime) *Executor {
-        const executor = Executor.current orelse @panic("no current executor");
-        if (std.debug.runtime_safety) {
-            std.debug.assert(executor.runtime == self);
-        }
-        return executor;
-    }
-
-    /// Get the current thread's executor, or null if not in executor context.
-    pub fn getCurrentExecutorOrNull(self: *Runtime) ?*Executor {
-        const executor = Executor.current orelse return null;
-        if (std.debug.runtime_safety) {
-            std.debug.assert(executor.runtime == self);
-        }
-        return executor;
+    /// Deprecated: use zio.checkCancel() instead.
+    pub fn checkCancel(_: *Runtime) Cancelable!void {
+        return mod.checkCancel();
     }
 
     /// Get the current monotonic timestamp.
     /// This uses the event loop's cached time for efficiency.
-    pub fn now(self: *Runtime) Timestamp {
-        return self.getCurrentExecutor().loop.now();
+    /// Deprecated: use zio.now() instead.
+    pub fn now(_: *Runtime) Timestamp {
+        return mod.now();
     }
 };
 
@@ -1306,4 +1236,53 @@ test "runtime: multi-threaded execution with 2 executors" {
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(4, TestContext.counter);
+}
+
+test "Runtime: multi-threaded with task migration" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
+    defer runtime.deinit();
+
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    const TestContext = struct {
+        group: *Group,
+        done: ResetEvent = .{},
+        counter: std.atomic.Value(u32) = .init(0),
+
+        fn task(ctx: *@This(), parent: *ResetEvent) !void {
+            parent.set();
+
+            const n = ctx.counter.fetchAdd(1, .acquire);
+            if (n >= 99) {
+                ctx.done.set();
+                return;
+            }
+
+            var event: ResetEvent = .{};
+            ctx.group.spawn(task, .{ ctx, &event }) catch |err| {
+                std.debug.print("task migration failed: {}\n", .{err});
+                return err;
+            };
+            event.wait() catch |err| {
+                std.debug.print("event wait failed: {}\n", .{err});
+                return err;
+            };
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    var ctx: TestContext = .{ .group = &group };
+
+    var event: ResetEvent = .{};
+
+    try group.spawn(TestContext.task, .{ &ctx, &event });
+
+    try ctx.done.wait();
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expectEqual(100, ctx.counter.load(.acquire));
 }
