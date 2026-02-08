@@ -22,11 +22,6 @@ pub const EntryPointFn = coroutines.EntryPointFn;
 pub const setupContext = coroutines.setupContext;
 pub const switchContext = coroutines.switchContext;
 
-/// Returns the current coroutine context for this thread, or null if not in a coroutine.
-pub fn getCurrent() ?*Context {
-    return coroutines.current_context;
-}
-
 const stack = @import("stack.zig");
 pub const Stack = stack.StackInfo;
 pub const StackExtendMode = stack.StackExtendMode;

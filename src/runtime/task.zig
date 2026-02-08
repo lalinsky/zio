@@ -6,6 +6,7 @@ const MemoryPoolAligned = @import("../utils/memory_pool.zig").MemoryPoolAligned;
 
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
+const getCurrentExecutorOrNull = @import("../runtime.zig").getCurrentExecutorOrNull;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Coroutine = @import("../coro/coroutines.zig").Coroutine;
 const WaitNode = @import("WaitNode.zig");
@@ -229,13 +230,11 @@ pub const AnyTask = struct {
     ///   The task state remains `.ready`.
     pub fn yield(self: *AnyTask, comptime mode: YieldMode, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         var executor = self.getExecutor();
-        executor.current_task = null;
 
         // Check and consume cancellation flag before yielding (unless no_cancel)
         if (cancel_mode == .allow_cancel) {
             self.checkCancel() catch |err| {
                 self.state.store(.ready, .release);
-                executor.current_task = self;
                 return err;
             };
         }
@@ -261,7 +260,6 @@ pub const AnyTask = struct {
         }
 
         std.debug.assert(self.state.load(.acquire) == .ready);
-        defer executor.current_task = self;
 
         // Check after resuming in case we were canceled while suspended
         if (cancel_mode == .allow_cancel) {
@@ -445,7 +443,6 @@ pub const AnyTask = struct {
         // Re-fetch executor — task may have migrated during execution
         executor = self.getExecutor();
         executor.pending_cleanup = .{ .finish = self };
-        executor.current_task = null;
         executor.switchOut(&self.coro);
         unreachable;
     }
@@ -516,7 +513,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     const executor = Executor.fromCoroutine(&task.coro);
     executor.scheduleTask(task);
 
-    if (Executor.current) |current_executor| {
+    if (getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor == executor) {
             current_executor.maybeYield(.reschedule, .no_cancel);
         }

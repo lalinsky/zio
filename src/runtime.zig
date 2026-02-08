@@ -17,6 +17,7 @@ const Duration = time.Duration;
 const Timestamp = time.Timestamp;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
+const Context = @import("coro/coroutines.zig").Context;
 const StackPool = @import("coro/stack_pool.zig").StackPool;
 const StackPoolConfig = @import("coro/stack_pool.zig").Config;
 const setupStackGrowth = @import("coro/stack.zig").setupStackGrowth;
@@ -245,7 +246,6 @@ pub const Executor = struct {
 
     id: u6,
     loop: ev.Loop,
-    current_task: ?*AnyTask = null,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
 
@@ -294,9 +294,6 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
-    // Executor dedicated to this thread
-    pub threadlocal var current: ?*Executor = null;
-
     /// Get the Executor instance from any coroutine that belongs to it.
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
     /// so we navigate: context -> coro -> main_task -> executor
@@ -327,10 +324,12 @@ pub const Executor = struct {
                 },
             },
             .coro = .{
-                .parent_context_ptr = .init(&self.main_task.coro.context), // points to itself
+                .context = std.mem.zeroes(Context),
+                .parent_context_ptr = undefined,
             },
             .closure = undefined, // main_task has no closure
         };
+        self.main_task.coro.parent_context_ptr = .init(&self.main_task.coro.context);
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
@@ -346,14 +345,11 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
-        std.debug.assert(Executor.current == null);
-        Executor.current = self;
-        self.current_task = &self.main_task;
+        self.main_task.coro.setCurrent();
     }
 
     pub fn deinit(self: *Executor) void {
-        std.debug.assert(Executor.current == self);
-        Executor.current = null;
+        Coroutine.clearCurrent();
 
         self.loop.deinit();
 
@@ -371,15 +367,8 @@ pub const Executor = struct {
 
     pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (self.ready_count >= yield_ready_threshold) {
-            return self.current_task.?.yield(mode, cancel_mode);
+            return getCurrentTask().yield(mode, cancel_mode);
         }
-    }
-
-    pub fn getCurrentTask(self: *Executor) *AnyTask {
-        if (std.debug.runtime_safety) {
-            std.debug.assert(current == self);
-        }
-        return self.current_task.?;
     }
 
     pub const RunMode = enum {
@@ -393,10 +382,6 @@ pub const Executor = struct {
 
     /// Run the executor event loop.
     pub fn run(self: *Executor, mode: RunMode) !void {
-        std.debug.assert(Executor.current == self);
-        self.current_task = null;
-        defer self.current_task = &self.main_task;
-
         const check_ready = mode != .until_stopped;
 
         // Process deferred cleanup (e.g. main task's park/reschedule)
@@ -405,9 +390,7 @@ pub const Executor = struct {
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
-                self.current_task = next_task;
                 next_task.coro.step();
-                self.current_task = null;
                 self.processCleanup();
             }
 
@@ -562,14 +545,14 @@ pub const Executor = struct {
         // main_task is never queued - it just checks state in run()
         if (task == &self.main_task) {
             // Wake the loop if called from another thread
-            if (Executor.current != self) {
+            if (getCurrentExecutorOrNull() != self) {
                 self.loop.wake();
             }
             return;
         }
 
         // Normal scheduling
-        if (Executor.current) |current_exec| {
+        if (getCurrentExecutorOrNull()) |current_exec| {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
@@ -634,7 +617,6 @@ pub const Executor = struct {
     /// Sets current_task for the target and performs the context switch.
     pub fn switchOut(self: *Executor, coro: *Coroutine) void {
         if (self.getNextTask()) |next_task| {
-            self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
             coro.yield();
@@ -649,18 +631,20 @@ pub fn getCurrentExecutor() *Executor {
 }
 
 pub fn getCurrentExecutorOrNull() ?*Executor {
-    return Executor.current;
+    const task = getCurrentTaskOrNull() orelse return null;
+    return task.getExecutor();
 }
 
 /// Get the currently executing task.
 /// Panics if called from a thread without an active executor context.
 pub fn getCurrentTask() *AnyTask {
-    return getCurrentExecutor().getCurrentTask();
+    return getCurrentTaskOrNull() orelse @panic("no current task");
 }
 
+/// Get the currently executing task, or null if not in task context.
 pub fn getCurrentTaskOrNull() ?*AnyTask {
-    const executor = getCurrentExecutorOrNull() orelse return null;
-    return executor.getCurrentTask();
+    const coro = Coroutine.getCurrent() orelse return null;
+    return AnyTask.fromCoroutine(coro);
 }
 
 /// Cooperatively yield control to allow other tasks to run.
@@ -668,11 +652,11 @@ pub fn getCurrentTaskOrNull() ?*AnyTask {
 /// Returns error.Canceled if the task was canceled.
 /// No-op if called from a thread without an executor (returns without error).
 pub fn yield() Cancelable!void {
-    const executor = Executor.current orelse {
+    const task = getCurrentTaskOrNull() orelse {
         std.Thread.yield() catch {};
         return;
     };
-    return executor.current_task.?.yield(.reschedule, .allow_cancel);
+    return task.yield(.reschedule, .allow_cancel);
 }
 
 /// Spawn a task on the current runtime.
@@ -934,75 +918,42 @@ pub const Runtime = struct {
     /// The current task will be rescheduled and continue execution later.
     /// Can be called from the main thread or from within a coroutine.
     /// If called from a thread without an executor, yields the OS thread.
-    pub fn yield(self: *Runtime) Cancelable!void {
-        _ = self;
-        const executor = Executor.current orelse {
+    pub fn yield(_: *Runtime) Cancelable!void {
+        const task = getCurrentTaskOrNull() orelse {
             std.Thread.yield() catch {};
             return;
         };
-        return executor.current_task.?.yield(.reschedule, .allow_cancel);
+        return task.yield(.reschedule, .allow_cancel);
     }
 
     /// Sleep for the specified number of milliseconds.
     /// Returns error.Canceled if the task was canceled during sleep.
-    pub fn sleep(self: *Runtime, duration: Duration) Cancelable!void {
-        _ = self;
+    pub fn sleep(_: *Runtime, duration: Duration) Cancelable!void {
         var waiter = Waiter.init();
         try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
     }
 
     /// Begin a cancellation shield to prevent being canceled during critical sections.
-    pub fn beginShield(self: *Runtime) void {
-        self.getCurrentTask().beginShield();
+    pub fn beginShield(_: *Runtime) void {
+        getCurrentTask().beginShield();
     }
 
     /// End a cancellation shield.
-    pub fn endShield(self: *Runtime) void {
-        self.getCurrentTask().endShield();
+    pub fn endShield(_: *Runtime) void {
+        getCurrentTask().endShield();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
     /// This consumes the cancellation flag.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
-    pub fn checkCancel(self: *Runtime) Cancelable!void {
-        return self.getCurrentTask().checkCancel();
-    }
-
-    /// Get the currently executing task.
-    /// Panics if called from a thread without an active executor context.
-    pub fn getCurrentTask(self: *Runtime) *AnyTask {
-        return self.getCurrentExecutor().getCurrentTask();
-    }
-
-    /// Get the currently executing task, or null if not in task context.
-    pub fn getCurrentTaskOrNull(self: *Runtime) ?*AnyTask {
-        const executor = self.getCurrentExecutorOrNull() orelse return null;
-        return executor.getCurrentTask();
-    }
-
-    /// Get the current thread's executor.
-    /// Panics if called from a thread without an active executor context.
-    pub fn getCurrentExecutor(self: *Runtime) *Executor {
-        const executor = Executor.current orelse @panic("no current executor");
-        if (std.debug.runtime_safety) {
-            std.debug.assert(executor.runtime == self);
-        }
-        return executor;
-    }
-
-    /// Get the current thread's executor, or null if not in executor context.
-    pub fn getCurrentExecutorOrNull(self: *Runtime) ?*Executor {
-        const executor = Executor.current orelse return null;
-        if (std.debug.runtime_safety) {
-            std.debug.assert(executor.runtime == self);
-        }
-        return executor;
+    pub fn checkCancel(_: *Runtime) Cancelable!void {
+        return getCurrentTask().checkCancel();
     }
 
     /// Get the current monotonic timestamp.
     /// This uses the event loop's cached time for efficiency.
-    pub fn now(self: *Runtime) Timestamp {
-        return self.getCurrentExecutor().loop.now();
+    pub fn now(_: *Runtime) Timestamp {
+        return getCurrentExecutor().loop.now();
     }
 };
 

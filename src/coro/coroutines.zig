@@ -832,6 +832,24 @@ pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: std.atomic.Value(*Context),
 
+    /// Returns the current coroutine for this thread, or null if not in a coroutine.
+    pub fn getCurrent() ?*Coroutine {
+        if (current_context) |context| {
+            return @alignCast(@fieldParentPtr("context", context));
+        }
+        return null;
+    }
+
+    /// Set the current coroutine context for this thread.
+    pub fn setCurrent(self: *Coroutine) void {
+        current_context = &self.context;
+    }
+
+    /// Clear the current coroutine context for this thread.
+    pub fn clearCurrent() void {
+        current_context = null;
+    }
+
     /// Step into the coroutine
     pub fn step(self: *Coroutine) void {
         switchContext(self.parent_context_ptr.raw, &self.context);
