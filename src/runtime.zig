@@ -1229,3 +1229,52 @@ test "runtime: multi-threaded execution with 2 executors" {
 
     try std.testing.expectEqual(4, TestContext.counter);
 }
+
+test "Runtime: multi-threaded with task migration" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
+    defer runtime.deinit();
+
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    const TestContext = struct {
+        group: *Group,
+        done: ResetEvent = .{},
+        counter: std.atomic.Value(u32) = .init(0),
+
+        fn task(ctx: *@This(), parent: *ResetEvent) !void {
+            parent.set();
+
+            const n = ctx.counter.fetchAdd(1, .acquire);
+            if (n >= 99) {
+                ctx.done.set();
+                return;
+            }
+
+            var event: ResetEvent = .{};
+            ctx.group.spawn(task, .{ ctx, &event }) catch |err| {
+                std.debug.print("task migration failed: {}\n", .{err});
+                return err;
+            };
+            event.wait() catch |err| {
+                std.debug.print("event wait failed: {}\n", .{err});
+                return err;
+            };
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    var ctx: TestContext = .{ .group = &group };
+
+    var event: ResetEvent = .{};
+
+    try group.spawn(TestContext.task, .{ &ctx, &event });
+
+    try ctx.done.wait();
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expectEqual(100, ctx.counter.load(.acquire));
+}
