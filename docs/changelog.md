@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added `CompletionQueue` for waiting on multiple I/O operations (#291)
+
+### Fixed
+
+- Fixed task migration race condition that could cause crashes under heavy multi-threaded load (#304)
+- Fixed pipe read/write using wrong offset in io_uring backend (#299)
+- Fixed NetBSD test failures (#290)
+
 ## [0.7.0] - 2026-02-06
 
 ### Added
