@@ -8,7 +8,9 @@ const std = @import("std");
 // umtx operations
 // Reference: https://github.com/freebsd/freebsd-src/blob/main/sys/sys/umtx.h
 pub const UMTX_OP_WAIT_UINT: c_int = 11;
+pub const UMTX_OP_WAIT_UINT_PRIVATE: c_int = 15;
 pub const UMTX_OP_WAKE: c_int = 3;
+pub const UMTX_OP_WAKE_PRIVATE: c_int = 16;
 pub const UMTX_OP_MUTEX_TRYLOCK: c_int = 4;
 pub const UMTX_OP_MUTEX_LOCK: c_int = 5;
 pub const UMTX_OP_MUTEX_UNLOCK: c_int = 6;

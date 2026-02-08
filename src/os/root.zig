@@ -7,11 +7,11 @@ pub const path = std.fs.path;
 
 pub const posix = @import("posix.zig");
 pub const windows = @import("windows.zig");
-pub const thread_wait = @import("thread_wait.zig");
+pub const thread = @import("thread.zig");
 
-pub const Mutex = thread_wait.Mutex;
-pub const Condition = thread_wait.Condition;
-pub const ResetEvent = thread_wait.ResetEvent;
+pub const Mutex = thread.Mutex;
+pub const Condition = thread.Condition;
+pub const ResetEvent = thread.ResetEvent;
 
 pub const iovec = fs.iovec;
 pub const iovec_const = fs.iovec_const;

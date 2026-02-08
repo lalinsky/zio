@@ -81,7 +81,7 @@ pub const CompletionQueue = struct {
     /// This must be called BEFORE checking the completed queue to avoid
     /// a race where a signal is lost between checking and waiting.
     fn resetSignals(self: *CompletionQueue) void {
-        self.waiter.event.state.store(0, .monotonic);
+        self.waiter.notify.state.store(0, .monotonic);
     }
 
     /// Wait for the next completion. Blocks until one is available.
