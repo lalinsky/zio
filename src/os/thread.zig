@@ -297,55 +297,36 @@ const FutexWindows = struct {
 
 const FutexDarwin = struct {
     fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
-
-            const rc = sys.__ulock_wait(
-                sys.UL_COMPARE_AND_WAIT,
-                &ptr.raw,
-                expected,
-                0, // 0 means infinite wait
-            );
-            if (rc == -1) {
-                const err = std.posix.errno(rc);
-                if (err == .INTR) continue;
-            }
-            return;
-        }
+        _ = sys.__ulock_wait(
+            sys.UL_COMPARE_AND_WAIT | sys.ULF_NO_ERRNO,
+            &ptr.raw,
+            expected,
+            0, // 0 means infinite wait
+        );
     }
 
     fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const us = timeout.toMicroseconds();
         const timeout_us: u32 = @max(1, std.math.cast(u32, us) orelse std.math.maxInt(u32));
 
-        while (true) {
-            if (ptr.load(.monotonic) != expected) return;
+        const rc = sys.__ulock_wait(
+            sys.UL_COMPARE_AND_WAIT | sys.ULF_NO_ERRNO,
+            &ptr.raw,
+            expected,
+            timeout_us,
+        );
 
-            const result = sys.__ulock_wait(
-                sys.UL_COMPARE_AND_WAIT,
-                &ptr.raw,
-                expected,
-                timeout_us,
-            );
-
-            if (result == -1) {
-                const err = std.posix.errno(result);
-                switch (err) {
-                    .TIMEDOUT => return error.Timeout,
-                    .INTR => continue,
-                    else => return,
-                }
-            }
-            return;
+        if (rc < 0) {
+            const err: std.posix.E = @enumFromInt(-rc);
+            if (err == .TIMEDOUT) return error.Timeout;
         }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const flags: u32 = switch (count) {
-            .one => sys.UL_COMPARE_AND_WAIT | sys.ULF_WAKE_THREAD,
-            .all => sys.UL_COMPARE_AND_WAIT | sys.ULF_WAKE_ALL,
+            .one => sys.UL_COMPARE_AND_WAIT | sys.ULF_NO_ERRNO,
+            .all => sys.UL_COMPARE_AND_WAIT | sys.ULF_NO_ERRNO | sys.ULF_WAKE_ALL,
         };
-
         _ = sys.__ulock_wake(flags, &ptr.raw, 0);
     }
 };

@@ -9,8 +9,9 @@
 // Reference: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/ulock.h
 
 pub const UL_COMPARE_AND_WAIT: u32 = 1;
-pub const ULF_WAKE_THREAD: u32 = 0x100;
-pub const ULF_WAKE_ALL: u32 = 0x200;
+pub const ULF_NO_ERRNO: u32 = 0x01000000;
+pub const ULF_WAKE_ALL: u32 = 0x100;
+pub const ULF_WAKE_THREAD: u32 = 0x200;
 
 pub extern "c" fn __ulock_wait(operation: u32, addr: ?*const anyopaque, value: u64, timeout_us: u32) c_int;
 pub extern "c" fn __ulock_wake(operation: u32, addr: ?*const anyopaque, wake_value: u64) c_int;
