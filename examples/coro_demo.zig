@@ -81,7 +81,7 @@ pub fn main() !void {
 
     // Create producer coroutine
     var producer_coro: coro.Coroutine = .{
-        .parent_context_ptr = &parent_context,
+        .parent_context_ptr = .init(&parent_context),
         .context = undefined,
     };
     try coro.stackAlloc(&producer_coro.context.stack_info, 64 * 1024, 4096);
@@ -89,7 +89,7 @@ pub fn main() !void {
 
     // Create consumer coroutine
     var consumer_coro: coro.Coroutine = .{
-        .parent_context_ptr = &parent_context,
+        .parent_context_ptr = .init(&parent_context),
         .context = undefined,
     };
     try coro.stackAlloc(&consumer_coro.context.stack_info, 64 * 1024, 4096);
