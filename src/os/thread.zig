@@ -35,7 +35,7 @@ pub const WakeCount = enum {
 /// Low-level futex operations for thread synchronization.
 ///
 /// Provides platform-specific wait/wake primitives that operate on atomic values.
-/// This is an internal implementation detail - use the `Event` type instead.
+/// This is an internal implementation detail - use the `Notify` type instead.
 ///
 /// Methods:
 /// - `wait(ptr, current)`: Block indefinitely if *ptr == current
@@ -52,31 +52,31 @@ const Futex = switch (builtin.os.tag) {
     else => |t| if (t.isDarwin()) FutexDarwin else void,
 };
 
-/// Thread synchronization event.
+/// Thread notification primitive.
 ///
 /// A higher-level abstraction over platform wait primitives that owns its state.
 /// Use this instead of raw wait/wake functions when you need to own the state.
 ///
-/// **Important**: Only one thread should wait on this event at a time.
+/// **Important**: Only one thread should wait on this at a time.
 /// For multi-waiter scenarios, use the raw wait/wake functions instead.
 ///
 /// Example usage:
 /// ```zig
-/// var event: Event = .init();
+/// var notify: Notify = .init();
 ///
-/// // Waiter thread
-/// event.wait(1); // Wait indefinitely
+/// // Waiting thread
+/// notify.wait(1); // Wait indefinitely
 /// // or
-/// event.timedWait(1, .fromSeconds(1)) catch |err| {
+/// notify.timedWait(1, .fromSeconds(1)) catch |err| {
 ///     // Handle timeout
 /// };
 ///
-/// // Signaler thread
-/// event.signal();
+/// // Signaling thread
+/// notify.signal();
 /// ```
-pub const Event = switch (builtin.os.tag) {
-    .netbsd => EventNetBSD,
-    else => EventFutex,
+pub const Notify = switch (builtin.os.tag) {
+    .netbsd => NotifyNetBSD,
+    else => NotifyFutex,
 };
 
 /// Mutex for thread synchronization.
@@ -84,7 +84,7 @@ pub const Event = switch (builtin.os.tag) {
 /// A blocking mutex that uses platform-specific optimal primitives:
 /// - Windows: SRWLOCK (Slim Reader/Writer Lock)
 /// - Darwin/macOS: os_unfair_lock
-/// - NetBSD: Event-based with WaitQueue
+/// - NetBSD: Waiter-based with WaitQueue
 /// - Other platforms: futex-based implementation
 ///
 /// Example usage:
@@ -107,7 +107,7 @@ pub const Mutex = switch (builtin.os.tag) {
 ///
 /// A blocking condition variable that uses platform-specific primitives:
 /// - Windows: CONDITION_VARIABLE
-/// - Other platforms: Event-based with WaitQueue
+/// - Other platforms: Waiter-based with WaitQueue
 ///
 /// Condition variables allow threads to wait for certain conditions to become true
 /// while cooperating with other threads. They are always used in conjunction with
@@ -569,32 +569,32 @@ const FutexDragonFly = struct {
 };
 
 // ============================================================================
-// Event implementations
+// Waiter implementations
 // ============================================================================
 
-/// Futex-based event for platforms with futex-like primitives
-const EventFutex = struct {
+/// Futex-based notify for platforms with futex-like primitives
+const NotifyFutex = struct {
     state: std.atomic.Value(u32) = .init(0),
 
-    pub fn init() EventFutex {
+    pub fn init() NotifyFutex {
         return .{};
     }
 
-    pub fn wait(self: *EventFutex, current: u32) void {
+    pub fn wait(self: *NotifyFutex, current: u32) void {
         Futex.wait(&self.state, current);
     }
 
-    pub fn timedWait(self: *EventFutex, current: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(self: *NotifyFutex, current: u32, timeout: Duration) error{Timeout}!void {
         return Futex.timedWait(&self.state, current, timeout);
     }
 
-    pub fn signal(self: *EventFutex) void {
+    pub fn signal(self: *NotifyFutex) void {
         _ = self.state.fetchAdd(1, .release);
         Futex.wake(&self.state, .one);
     }
 };
 
-/// NetBSD event using native _lwp_park/_lwp_unpark
+/// NetBSD notify using native _lwp_park/_lwp_unpark
 ///
 /// Implementation note: _lwp_park/_lwp_unpark handles signal-before-wait races safely.
 /// If _lwp_unpark() is called before the LWP calls _lwp_park(), the kernel sets the
@@ -602,19 +602,19 @@ const EventFutex = struct {
 /// immediately returns EALREADY without blocking. This means signal() can be called
 /// before wait() without losing the wakeup.
 ///
-/// The lwp_id is captured at init() time, so this Event must be created on the same
+/// The lwp_id is captured at init() time, so this Notify must be created on the same
 /// thread that will call wait(). Other threads can safely call signal().
-const EventNetBSD = struct {
+const NotifyNetBSD = struct {
     state: std.atomic.Value(u32) = .init(0),
     lwp_id: c_int,
 
-    pub fn init() EventNetBSD {
+    pub fn init() NotifyNetBSD {
         return .{
             .lwp_id = sys._lwp_self(),
         };
     }
 
-    pub fn wait(self: *EventNetBSD, current: u32) void {
+    pub fn wait(self: *NotifyNetBSD, current: u32) void {
         _ = self;
         _ = current; // Caller checks state, we just park
 
@@ -630,7 +630,7 @@ const EventNetBSD = struct {
         );
     }
 
-    pub fn timedWait(self: *EventNetBSD, current: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(self: *NotifyNetBSD, current: u32, timeout: Duration) error{Timeout}!void {
         _ = self;
         _ = current; // Caller checks state, we just park
 
@@ -655,7 +655,7 @@ const EventNetBSD = struct {
         }
     }
 
-    pub fn signal(self: *EventNetBSD) void {
+    pub fn signal(self: *NotifyNetBSD) void {
         _ = self.state.fetchAdd(1, .release);
         // Safe to call before wait() - sets LW_UNPARKED flag that park() will check
         _ = sys._lwp_unpark(self.lwp_id, null);
@@ -825,22 +825,22 @@ const MutexDarwin = struct {
     }
 };
 
-/// Event-based mutex using WaitQueue for platforms with Event support.
+/// Notify-based mutex using WaitQueue.
 ///
 /// Uses the same pattern as zio.Mutex but for blocking OS threads:
 /// - Queue state encodes lock status with sentinels
-/// - Stack-allocated waiters block on Events instead of suspending coroutines
+/// - Stack-allocated waiters block on Notify instead of suspending coroutines
 /// - FIFO ordering ensures fairness
 const MutexEvent = struct {
     /// Stack-allocated waiter that blocks an OS thread
     const Waiter = struct {
         wait_node: WaitNode,
-        event: Event,
+        notify: Notify,
 
         fn init() Waiter {
             return .{
                 .wait_node = .{ .vtable = &.{} },
-                .event = Event.init(),
+                .notify = Notify.init(),
             };
         }
     };
@@ -880,8 +880,8 @@ const MutexEvent = struct {
         }
 
         // Wait for lock - block on event, handling spurious wakeups
-        while (waiter.event.state.load(.acquire) == 0) {
-            waiter.event.wait(0);
+        while (waiter.notify.state.load(.acquire) == 0) {
+            waiter.notify.wait(0);
         }
 
         // Acquire fence: synchronize-with unlock()'s .release in pop()
@@ -893,7 +893,7 @@ const MutexEvent = struct {
         // Last waiter stays in locked_once (inherits the lock)
         if (self.queue.popOrTransition(locked_once, unlocked, locked_once)) |wait_node| {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
-            waiter.event.signal();
+            waiter.notify.signal();
         }
     }
 };
@@ -949,22 +949,22 @@ const ConditionWindows = struct {
     }
 };
 
-/// Event-based condition variable using WaitQueue.
+/// Notify-based condition variable using WaitQueue.
 ///
 /// Uses the same pattern as zio.Condition but for blocking OS threads:
 /// - WaitQueue manages the list of waiting threads
-/// - Stack-allocated waiters block on Events instead of suspending coroutines
+/// - Stack-allocated waiters block on Notify instead of suspending coroutines
 /// - Works with any Mutex type
 const ConditionEvent = struct {
     /// Stack-allocated waiter that blocks an OS thread
     const Waiter = struct {
         wait_node: WaitNode,
-        event: Event,
+        notify: Notify,
 
         fn init() Waiter {
             return .{
                 .wait_node = .{ .vtable = &.{} },
-                .event = Event.init(),
+                .notify = Notify.init(),
             };
         }
     };
@@ -993,9 +993,9 @@ const ConditionEvent = struct {
 
         // Wait for signal - handles spurious wakeups
         while (true) {
-            const current = waiter.event.state.load(.acquire);
+            const current = waiter.notify.state.load(.acquire);
             if (current >= 1) break;
-            waiter.event.wait(current);
+            waiter.notify.wait(current);
         }
 
         // Re-acquire mutex after waking
@@ -1019,13 +1019,13 @@ const ConditionEvent = struct {
         // Wait for signal or timeout - handles spurious wakeups
         const deadline = timeout.toDeadline();
         while (true) {
-            const current = waiter.event.state.load(.acquire);
+            const current = waiter.notify.state.load(.acquire);
             if (current >= 1) break;
 
             const remaining = deadline.durationFromNow();
             if (remaining.value <= 0) break;
 
-            waiter.event.timedWait(current, remaining) catch {};
+            waiter.notify.timedWait(current, remaining) catch {};
         }
 
         // Determine winner: can we remove ourselves from queue?
@@ -1041,9 +1041,9 @@ const ConditionEvent = struct {
 
         // We were already removed by signal() - ensure signal completed
         while (true) {
-            const current = waiter.event.state.load(.acquire);
+            const current = waiter.notify.state.load(.acquire);
             if (current >= 1) break;
-            waiter.event.wait(current);
+            waiter.notify.wait(current);
         }
     }
 
@@ -1051,7 +1051,7 @@ const ConditionEvent = struct {
     pub fn signal(self: *ConditionEvent) void {
         if (self.wait_queue.pop()) |wait_node| {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
-            waiter.event.signal();
+            waiter.notify.signal();
         }
     }
 
@@ -1059,7 +1059,7 @@ const ConditionEvent = struct {
     pub fn broadcast(self: *ConditionEvent) void {
         while (self.wait_queue.pop()) |wait_node| {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
-            waiter.event.signal();
+            waiter.notify.signal();
         }
     }
 };
@@ -1068,15 +1068,15 @@ const ConditionEvent = struct {
 // Tests
 // ============================================================================
 
-test "Event - basic signal and wait" {
+test "Notify - basic signal and wait" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    var event = Event.init();
+    var notify = Notify.init();
     var ready = std.atomic.Value(bool).init(false);
     var done = std.atomic.Value(bool).init(false);
 
     const WaiterContext = struct {
-        event: *Event,
+        notify: *Notify,
         ready: *std.atomic.Value(bool),
         done: *std.atomic.Value(bool),
     };
@@ -1087,15 +1087,15 @@ test "Event - basic signal and wait" {
             ctx.ready.store(true, .release);
 
             // Wait for signal
-            var state = ctx.event.state.load(.monotonic);
+            var state = ctx.notify.state.load(.monotonic);
             while (!ctx.done.load(.acquire)) {
-                ctx.event.timedWait(state, .fromMilliseconds(100)) catch {};
-                state = ctx.event.state.load(.monotonic);
+                ctx.notify.timedWait(state, .fromMilliseconds(100)) catch {};
+                state = ctx.notify.state.load(.monotonic);
             }
         }
     }.run;
 
-    var ctx = WaiterContext{ .event = &event, .ready = &ready, .done = &done };
+    var ctx = WaiterContext{ .notify = &notify, .ready = &ready, .done = &done };
     const thread = try std.Thread.spawn(.{}, waiter, .{&ctx});
     defer thread.join();
 
@@ -1104,20 +1104,20 @@ test "Event - basic signal and wait" {
         std.Thread.yield() catch {};
     }
 
-    // Signal the event
+    // Signal the notify
     done.store(true, .release);
-    event.signal();
+    notify.signal();
 }
 
-test "Event - multiple signals" {
+test "Notify - multiple signals" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    var event = Event.init();
+    var notify = Notify.init();
     var counter = std.atomic.Value(u32).init(0);
     var ready = std.atomic.Value(bool).init(false);
 
     const WaiterContext = struct {
-        event: *Event,
+        notify: *Notify,
         counter: *std.atomic.Value(u32),
         ready: *std.atomic.Value(bool),
     };
@@ -1125,15 +1125,15 @@ test "Event - multiple signals" {
     const waiter = struct {
         fn run(ctx: *WaiterContext) void {
             ctx.ready.store(true, .release);
-            var state = ctx.event.state.load(.monotonic);
+            var state = ctx.notify.state.load(.monotonic);
             while (ctx.counter.load(.acquire) < 3) {
-                ctx.event.timedWait(state, .fromMilliseconds(100)) catch {};
-                state = ctx.event.state.load(.monotonic);
+                ctx.notify.timedWait(state, .fromMilliseconds(100)) catch {};
+                state = ctx.notify.state.load(.monotonic);
             }
         }
     }.run;
 
-    var ctx = WaiterContext{ .event = &event, .counter = &counter, .ready = &ready };
+    var ctx = WaiterContext{ .notify = &notify, .counter = &counter, .ready = &ready };
     const thread = try std.Thread.spawn(.{}, waiter, .{&ctx});
     defer thread.join();
 
@@ -1145,36 +1145,36 @@ test "Event - multiple signals" {
     // Send multiple signals
     for (0..3) |_| {
         _ = counter.fetchAdd(1, .release);
-        event.signal();
+        notify.signal();
         std.Thread.yield() catch {};
     }
 }
 
-test "Event - timedWait success (signaled before timeout)" {
+test "Notify - timedWait success (signaled before timeout)" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var ready = std.atomic.Value(bool).init(false);
-    var event_ptr = std.atomic.Value(?*Event).init(null);
+    var notify_ptr = std.atomic.Value(?*Notify).init(null);
 
     const Context = struct {
-        event_ptr: *std.atomic.Value(?*Event),
+        notify_ptr: *std.atomic.Value(?*Notify),
         ready: *std.atomic.Value(bool),
     };
 
     const waiter = struct {
         fn run(ctx: *Context) void {
-            // Create Event on the waiting thread (required for NetBSD)
-            var event = Event.init();
-            ctx.event_ptr.store(&event, .release);
+            // Create Notify on the waiting thread (required for NetBSD)
+            var notify = Notify.init();
+            ctx.notify_ptr.store(&notify, .release);
             ctx.ready.store(true, .release);
             // Wait with long timeout (1 second), but should be signaled quickly
-            event.timedWait(0, .fromSeconds(1)) catch |err| {
+            notify.timedWait(0, .fromSeconds(1)) catch |err| {
                 std.debug.panic("timedWait failed: {}", .{err});
             };
         }
     }.run;
 
-    var ctx = Context{ .event_ptr = &event_ptr, .ready = &ready };
+    var ctx = Context{ .notify_ptr = &notify_ptr, .ready = &ready };
     const thread = try std.Thread.spawn(.{}, waiter, .{&ctx});
     defer thread.join();
 
@@ -1186,23 +1186,23 @@ test "Event - timedWait success (signaled before timeout)" {
     // Give thread time to start waiting
     std.Thread.sleep(10 * std.time.ns_per_ms);
 
-    // Signal the event - should wake up without timeout
-    event_ptr.load(.acquire).?.signal();
+    // Signal the notify - should wake up without timeout
+    notify_ptr.load(.acquire).?.signal();
 }
 
-test "Event - timeout" {
+test "Notify - timeout" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    var event = Event.init();
+    var notify = Notify.init();
 
     // Loop to handle spurious wakeups (e.g., stale EALREADY from previous tests)
     const start = std.time.nanoTimestamp();
     while (true) {
-        const result = event.timedWait(0, .fromMilliseconds(50));
+        const result = notify.timedWait(0, .fromMilliseconds(50));
 
-        // Check if event state changed (spurious wakeup if not)
-        if (event.state.load(.acquire) != 0) {
-            return error.TestUnexpectedSignal; // Event was signaled, shouldn't happen
+        // Check if notify state changed (spurious wakeup if not)
+        if (notify.state.load(.acquire) != 0) {
+            return error.TestUnexpectedSignal; // Notify was signaled, shouldn't happen
         }
 
         // State unchanged, check if we got timeout or spurious wakeup

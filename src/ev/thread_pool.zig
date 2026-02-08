@@ -2,7 +2,7 @@ const std = @import("std");
 const Queue = @import("queue.zig").Queue;
 const Completion = @import("completion.zig").Completion;
 const Work = @import("completion.zig").Work;
-const thread_wait = @import("../os/thread_wait.zig");
+const os = @import("../os/root.zig");
 const Timeout = @import("../time.zig").Timeout;
 
 const log = @import("../common.zig").log;
@@ -11,12 +11,12 @@ pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
 
     workers: std.ArrayList(Worker) = .empty,
-    workers_mutex: thread_wait.Mutex = .init(),
+    workers_mutex: os.Mutex = .init(),
     next_worker_id: u64 = 0,
 
     queue: Queue(Completion) = .{},
-    queue_mutex: thread_wait.Mutex = .init(),
-    queue_not_empty: thread_wait.Condition = .init(),
+    queue_mutex: os.Mutex = .init(),
+    queue_not_empty: os.Condition = .init(),
     queue_size: usize = 0,
     shutdown: bool = false,
 
