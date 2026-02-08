@@ -586,7 +586,7 @@ test "Stack: automatic growth" {
 
     var parent_context: coroutines.Context = undefined;
     var coro: coroutines.Coroutine = .{
-        .parent_context_ptr = &parent_context,
+        .parent_context_ptr = .init(&parent_context),
         .context = undefined,
     };
 
