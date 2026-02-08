@@ -246,6 +246,7 @@ pub const Executor = struct {
     id: u6,
     loop: ev.Loop,
     current_task: ?*AnyTask = null,
+    thread_id: std.Thread.Id,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
 
@@ -309,6 +310,7 @@ pub const Executor = struct {
             .lifo_slot_enabled = runtime.options.lifo_slot_enabled,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
+            .thread_id = std.Thread.getCurrentId(),
         };
 
         // Initialize main_task - this serves as both the scheduler context and
@@ -389,6 +391,11 @@ pub const Executor = struct {
             std.debug.panic("BUG: yield: self != current, self={}, current={?}", .{ self, current });
         }
         var executor = self;
+
+        const actual_tid = std.Thread.getCurrentId();
+        if (actual_tid != executor.thread_id) {
+            std.debug.panic("BUG: yield: TLS bug: executor {} belongs to thread {}, but running on thread {}", .{ executor.id, executor.thread_id, actual_tid });
+        }
 
         const task = executor.current_task.?;
         executor.current_task = null;
