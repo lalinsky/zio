@@ -13,6 +13,7 @@ pub const spawn = runtime.spawn;
 pub const spawnBlocking = runtime.spawnBlocking;
 pub const yield = runtime.yield;
 pub const sleep = runtime.sleep;
+pub const now = runtime.now;
 pub const beginShield = runtime.beginShield;
 pub const endShield = runtime.endShield;
 pub const checkCancel = runtime.checkCancel;
