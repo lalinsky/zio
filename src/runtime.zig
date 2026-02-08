@@ -33,6 +33,8 @@ const Group = @import("runtime/group.zig").Group;
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 
+const mod = @This();
+
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u6) {
     /// Auto-detect based on CPU count
@@ -697,10 +699,15 @@ pub fn checkCancel() Cancelable!void {
     }
 }
 
+/// Get the current monotonic timestamp.
+pub fn now() Timestamp {
+    return .now(.monotonic);
+}
+
 /// Sleep for a specified duration.
 pub fn sleep(duration: Duration) Cancelable!void {
-    const rt = getCurrentExecutor().runtime;
-    return rt.sleep(duration);
+    var waiter: Waiter = .init();
+    try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
 }
 
 // Runtime - orchestrator for one or more Executors
@@ -918,42 +925,43 @@ pub const Runtime = struct {
     /// The current task will be rescheduled and continue execution later.
     /// Can be called from the main thread or from within a coroutine.
     /// If called from a thread without an executor, yields the OS thread.
+    /// Deprecated: use zio.yield() instead.
     pub fn yield(_: *Runtime) Cancelable!void {
-        const task = getCurrentTaskOrNull() orelse {
-            std.Thread.yield() catch {};
-            return;
-        };
-        return task.yield(.reschedule, .allow_cancel);
+        return mod.yield();
     }
 
     /// Sleep for the specified number of milliseconds.
     /// Returns error.Canceled if the task was canceled during sleep.
+    /// Deprecated: use zio.sleep() instead.
     pub fn sleep(_: *Runtime, duration: Duration) Cancelable!void {
-        var waiter = Waiter.init();
-        try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
+        return mod.sleep(duration);
     }
 
     /// Begin a cancellation shield to prevent being canceled during critical sections.
+    /// Deprecated: use zio.beginShield() instead.
     pub fn beginShield(_: *Runtime) void {
-        getCurrentTask().beginShield();
+        mod.beginShield();
     }
 
     /// End a cancellation shield.
+    /// Deprecated: use zio.endShield() instead.
     pub fn endShield(_: *Runtime) void {
-        getCurrentTask().endShield();
+        mod.endShield();
     }
 
     /// Check if cancellation has been requested and return error.Canceled if so.
     /// This consumes the cancellation flag.
     /// Use this after endShield() to detect cancellation that occurred during the shielded section.
+    /// Deprecated: use zio.checkCancel() instead.
     pub fn checkCancel(_: *Runtime) Cancelable!void {
-        return getCurrentTask().checkCancel();
+        return mod.checkCancel();
     }
 
     /// Get the current monotonic timestamp.
     /// This uses the event loop's cached time for efficiency.
+    /// Deprecated: use zio.now() instead.
     pub fn now(_: *Runtime) Timestamp {
-        return getCurrentExecutor().loop.now();
+        return mod.now();
     }
 };
 
