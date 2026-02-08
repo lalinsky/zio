@@ -217,6 +217,58 @@ pub const AnyTask = struct {
         return self.getExecutor().runtime;
     }
 
+    pub const YieldMode = enum { park, reschedule };
+
+    /// Cooperatively yield control to other tasks.
+    ///
+    /// - `.park`: Suspend until resumed (I/O, sync primitives, timeout, cancellation).
+    ///   The task state must be `.preparing_to_wait` before calling.
+    ///   The actual transition to `.waiting` is deferred until after the context is saved.
+    ///
+    /// - `.reschedule`: Reschedule immediately (cooperative yielding).
+    ///   The task state remains `.ready`.
+    pub fn yield(self: *AnyTask, comptime mode: YieldMode, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        var executor = self.getExecutor();
+        executor.current_task = null;
+
+        // Check and consume cancellation flag before yielding (unless no_cancel)
+        if (cancel_mode == .allow_cancel) {
+            self.checkCancel() catch |err| {
+                self.state.store(.ready, .release);
+                executor.current_task = self;
+                return err;
+            };
+        }
+
+        // Set up deferred cleanup — state transition happens after context is saved
+        executor.pending_cleanup = switch (mode) {
+            .park => .{ .park = self },
+            .reschedule => .{ .reschedule = self },
+        };
+
+        if (self == &executor.main_task) {
+            // Main task enters the run loop instead of context switching
+            executor.run(.until_ready) catch |err| {
+                std.log.err("Event loop error during yield: {}", .{err});
+            };
+        } else {
+            executor.switchOut(&self.coro);
+
+            // --- Resumed: landing site (b) ---
+            // We could be on a different executor now due to task migration
+            executor = self.getExecutor();
+            executor.processCleanup();
+        }
+
+        std.debug.assert(self.state.load(.acquire) == .ready);
+        defer executor.current_task = self;
+
+        // Check after resuming in case we were canceled while suspended
+        if (cancel_mode == .allow_cancel) {
+            try self.checkCancel();
+        }
+    }
+
     /// Begin a cancellation shield to prevent being canceled during critical sections.
     pub fn beginShield(self: *AnyTask) void {
         var current = self.canceled_status.load(.acquire);
@@ -382,8 +434,20 @@ pub const AnyTask = struct {
 
     pub fn startFn(coro: *Coroutine, _: ?*anyopaque) void {
         const self = fromCoroutine(coro);
+
+        // Landing site (a): handle cleanup for the task that yielded to us
+        var executor = self.getExecutor();
+        executor.processCleanup();
+
+        // Run the task's function
         self.closure.call(AnyTask, self);
-        self.state.store(.finished, .release);
+
+        // Re-fetch executor — task may have migrated during execution
+        executor = self.getExecutor();
+        executor.pending_cleanup = .{ .finish = self };
+        executor.current_task = null;
+        executor.switchOut(&self.coro);
+        unreachable;
     }
 
     pub fn create(
@@ -454,7 +518,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
 
     if (Executor.current) |current_executor| {
         if (current_executor == executor) {
-            current_executor.maybeYield(.ready, .ready, .no_cancel);
+            current_executor.maybeYield(.reschedule, .no_cancel);
         }
     }
 }

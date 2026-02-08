@@ -107,11 +107,10 @@ pub const Waiter = struct {
         }
 
         while (true) {
-            const executor = task.getExecutor();
             if (cancel_mode == .allow_cancel) {
-                try executor.yield(.preparing_to_wait, .waiting, .allow_cancel);
+                try task.yield(.park, .allow_cancel);
             } else {
-                executor.yield(.preparing_to_wait, .waiting, .no_cancel);
+                task.yield(.park, .no_cancel);
             }
 
             current = self.event.state.load(.acquire);
