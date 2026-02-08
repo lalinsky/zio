@@ -385,6 +385,9 @@ pub const Executor = struct {
     /// Using `.no_cancel` prevents interruption during critical operations but
     /// should be used sparingly as it delays cancellation response.
     pub fn yield(self: *Executor, expected_state: AnyTask.State, desired_state: AnyTask.State, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        if (self != current) {
+            std.debug.panic("BUG: yield: self != current, self={}, current={?}", .{ self, current });
+        }
         var executor = self;
 
         const task = executor.current_task.?;
@@ -400,7 +403,7 @@ pub const Executor = struct {
         }
 
         // Atomically transition state - if this fails, someone changed our state
-        if (task.state.cmpxchgStrong(expected_state, desired_state, .release, .acquire)) |actual_state| {
+        if (task.state.cmpxchgStrong(expected_state, desired_state, .acq_rel, .acquire)) |actual_state| {
             if (actual_state == .ready) {
                 // We were woken up before we could yield - don't suspend
                 executor.current_task = task;
@@ -432,7 +435,11 @@ pub const Executor = struct {
             executor.current_task = task;
             task.coro.yield();
         }
-        std.debug.assert(task.state.load(.acquire) == .ready);
+
+        const task_state = task.state.load(.acquire);
+        if (task_state != .ready) {
+            std.debug.panic("BUG: yield: unexpected state {} for task {*} after being resumed", .{ task_state, task });
+        }
 
         // We could be on a different executor now
         executor = task.getExecutor();
@@ -639,7 +646,7 @@ pub const Executor = struct {
 
         // Validate state transitions
         if (old_state != .new and old_state != .waiting) {
-            std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
+            std.debug.panic("BUG: scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
         }
 
         // main_task is never queued - it just checks state in run()
@@ -894,10 +901,7 @@ pub const Runtime = struct {
             null,
         );
 
-        return JoinHandle(Result){
-            .awaitable = &task.awaitable,
-            .result = undefined,
-        };
+        return .{ .awaitable = &task.awaitable, .result = undefined };
     }
 
     pub fn spawnBlocking(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
@@ -922,10 +926,7 @@ pub const Runtime = struct {
             null,
         );
 
-        return JoinHandle(Result){
-            .awaitable = &task.awaitable,
-            .result = undefined,
-        };
+        return .{ .awaitable = &task.awaitable, .result = undefined };
     }
 
     /// Worker thread entry point. Initializes executor and runs until stopped.
@@ -1279,30 +1280,51 @@ test "runtime: sleep from main allows tasks to run" {
     try std.testing.expectEqual(10, counter);
 }
 
-test "runtime: multi-threaded execution with 2 executors" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+test "Runtime: multi-threaded with task migration" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
     defer runtime.deinit();
 
-    const TestContext = struct {
-        var counter: usize = 0;
+    const ResetEvent = @import("sync/ResetEvent.zig");
 
-        fn task(rt: *Runtime) !void {
-            try rt.sleep(.fromMilliseconds(10));
-            _ = @atomicRmw(usize, &counter, .Add, 1, .monotonic);
+    const TestContext = struct {
+        group: *Group,
+        done: ResetEvent = .{},
+        counter: std.atomic.Value(u32) = .init(0),
+
+        fn task(ctx: *@This(), parent: *ResetEvent) !void {
+            parent.set();
+
+            const n = ctx.counter.fetchAdd(1, .acquire);
+            if (n >= 99) {
+                ctx.done.set();
+                return;
+            }
+
+            var event: ResetEvent = .{};
+            ctx.group.spawn(task, .{ ctx, &event }) catch |err| {
+                std.debug.print("task migration failed: {}\n", .{err});
+                return err;
+            };
+            event.wait() catch |err| {
+                std.debug.print("event wait failed: {}\n", .{err});
+                return err;
+            };
         }
     };
-
-    TestContext.counter = 0;
 
     var group: Group = .init;
     defer group.cancel();
 
-    for (0..4) |_| {
-        try group.spawn(TestContext.task, .{runtime});
-    }
+    var ctx: TestContext = .{ .group = &group };
+
+    var event: ResetEvent = .{};
+
+    try group.spawn(TestContext.task, .{ &ctx, &event });
+
+    try ctx.done.wait();
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
 
-    try std.testing.expectEqual(4, TestContext.counter);
+    try std.testing.expectEqual(100, ctx.counter.load(.acquire));
 }
