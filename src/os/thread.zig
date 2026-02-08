@@ -135,7 +135,7 @@ pub const Mutex = switch (builtin.os.tag) {
 pub const Condition = switch (builtin.os.tag) {
     .windows => ConditionWindows,
     .freebsd => ConditionFreeBSD,
-    else => if (@TypeOf(Futex) == void) ConditionNotify else ConditionFutex,
+    else => if (Futex == void) ConditionNotify else ConditionFutex,
 };
 
 /// ResetEvent is a thread-safe bool which can be set to true/false.
@@ -1230,6 +1230,7 @@ test "Mutex - basic lock unlock" {
 
 test "Futex - wake all" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    if (Futex == void) return error.SkipZigTest;
 
     var futex_value = std.atomic.Value(u32).init(0);
     var mutex = Mutex.init();
