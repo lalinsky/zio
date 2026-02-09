@@ -22,6 +22,9 @@ const NetRecvMsg = @import("completion.zig").NetRecvMsg;
 const NetSendMsg = @import("completion.zig").NetSendMsg;
 const NetOpen = @import("completion.zig").NetOpen;
 const NetBind = @import("completion.zig").NetBind;
+const NetListen = @import("completion.zig").NetListen;
+const NetConnect = @import("completion.zig").NetConnect;
+const NetAccept = @import("completion.zig").NetAccept;
 const common = @import("backends/common.zig");
 const fs = @import("../os/fs.zig");
 const net = @import("../os/net.zig");
@@ -30,7 +33,7 @@ const net = @import("../os/net.zig");
 /// This is used when there's no async runtime available.
 ///
 /// Supports file, pipe, and socket operations (read/write use poll+I/O on POSIX).
-/// Network operations requiring the event loop (listen, connect, accept, etc.) and timers are not supported.
+/// Timer and async/work/group operations are not supported (require event loop).
 pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
     // Mark completion as having no loop
     c.loop = null;
@@ -87,13 +90,12 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .net_sendto => handleNetSendTo(c),
         .net_recvmsg => handleNetRecvMsg(c),
         .net_sendmsg => handleNetSendMsg(c),
+        .net_listen => handleNetListen(c),
+        .net_connect => handleNetConnect(c),
+        .net_accept => handleNetAccept(c),
 
-        // Network operations requiring event loop
-        .net_listen,
-        .net_connect,
-        .net_accept,
-        .net_poll,
-        => @panic("Network operations not supported in blocking mode (requires event loop)"),
+        // Network poll operation requiring event loop
+        .net_poll => @panic("Network poll not supported in blocking mode (requires event loop)"),
 
         // Timer and async operations require the event loop
         .timer,
@@ -307,6 +309,62 @@ fn handleNetSendMsg(c: *Completion) void {
     // Now sendmsg - should be ready to write
     if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |bytes_written| {
         c.setResult(.net_sendmsg, bytes_written);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket listen operation
+fn handleNetListen(c: *Completion) void {
+    // Listen is synchronous - no polling needed
+    common.handleNetListen(c);
+}
+
+/// Helper to handle socket connect operation
+fn handleNetConnect(c: *Completion) void {
+    const data = c.cast(NetConnect);
+
+    // Try to connect first
+    if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
+        c.setResult(.net_connect, {});
+        return;
+    } else |err| switch (err) {
+        error.WouldBlock, error.ConnectionPending => {
+            // Poll for write readiness to wait for connection to complete
+            pollForReady(data.handle, net.POLL.OUT) catch |poll_err| {
+                c.setError(poll_err);
+                return;
+            };
+
+            // Check the actual connection result via SO_ERROR
+            const sock_err = net.getSockError(data.handle) catch |sock_err| {
+                c.setError(sock_err);
+                return;
+            };
+
+            if (sock_err == 0) {
+                c.setResult(.net_connect, {});
+            } else {
+                c.setError(net.errnoToConnectError(@enumFromInt(sock_err)));
+            }
+        },
+        else => c.setError(err),
+    }
+}
+
+/// Helper to handle socket accept operation
+fn handleNetAccept(c: *Completion) void {
+    const data = c.cast(NetAccept);
+
+    // Poll for incoming connection
+    pollForReady(data.handle, net.POLL.IN) catch |err| {
+        c.setError(err);
+        return;
+    };
+
+    // Accept the connection
+    if (net.accept(data.handle, data.addr, data.addr_len, data.flags)) |new_handle| {
+        c.setResult(.net_accept, new_handle);
     } else |err| {
         c.setError(err);
     }
