@@ -263,14 +263,14 @@ test "Notify broadcast to multiple waiters" {
     defer runtime.deinit();
 
     var notify = Notify.init;
-    var waiter_count: u32 = 0;
+    var waiter_count = std.atomic.Value(u32).init(0);
     var waiters_ready = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn waiter(n: *Notify, counter: *u32, ready_flag: *std.atomic.Value(u32)) !void {
+        fn waiter(n: *Notify, counter: *std.atomic.Value(u32), ready_flag: *std.atomic.Value(u32)) !void {
             _ = ready_flag.fetchAdd(1, .release);
             try n.wait();
-            counter.* += 1;
+            _ = counter.fetchAdd(1, .monotonic);
         }
 
         fn broadcaster(n: *Notify, ready_flag: *std.atomic.Value(u32)) !void {
@@ -292,7 +292,7 @@ test "Notify broadcast to multiple waiters" {
     try group.wait();
     try std.testing.expect(!group.hasFailed());
 
-    try std.testing.expectEqual(3, waiter_count);
+    try std.testing.expectEqual(3, waiter_count.load(.monotonic));
 }
 
 test "Notify multiple signals to multiple waiters" {
@@ -300,14 +300,14 @@ test "Notify multiple signals to multiple waiters" {
     defer runtime.deinit();
 
     var notify = Notify.init;
-    var waiter_count: u32 = 0;
+    var waiter_count = std.atomic.Value(u32).init(0);
     var waiters_ready = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn waiter(n: *Notify, counter: *u32, ready_flag: *std.atomic.Value(u32)) !void {
+        fn waiter(n: *Notify, counter: *std.atomic.Value(u32), ready_flag: *std.atomic.Value(u32)) !void {
             _ = ready_flag.fetchAdd(1, .release);
             try n.wait();
-            counter.* += 1;
+            _ = counter.fetchAdd(1, .monotonic);
         }
 
         fn signaler(n: *Notify, ready_flag: *std.atomic.Value(u32)) !void {
@@ -332,7 +332,7 @@ test "Notify multiple signals to multiple waiters" {
     try group.wait();
     try std.testing.expect(!group.hasFailed());
 
-    try std.testing.expectEqual(3, waiter_count);
+    try std.testing.expectEqual(3, waiter_count.load(.monotonic));
 }
 
 test "Notify timedWait timeout" {

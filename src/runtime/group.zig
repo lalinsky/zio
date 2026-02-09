@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const log = @import("../common.zig").log;
 const meta = @import("../meta.zig");
 const Runtime = @import("../runtime.zig").Runtime;
 const getCurrentExecutor = @import("../runtime.zig").getCurrentExecutor;
@@ -115,6 +116,7 @@ pub const Group = struct {
                             group.setCanceled();
                             return error.Canceled;
                         } else {
+                            log.err("Group task failed with error: {}", .{err});
                             group.setFailed();
                         }
                     };
