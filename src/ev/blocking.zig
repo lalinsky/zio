@@ -3,7 +3,7 @@
 
 //! Blocking execution of I/O operations without event loop.
 //!
-//! This module provides synchronous execution of file, pipe and socket operations
+//! This module provides synchronous execution of file, pipe, and socket operations
 //! for use in non-async contexts (when there's no runtime/executor).
 
 const std = @import("std");
@@ -20,6 +20,8 @@ const NetRecvFrom = @import("completion.zig").NetRecvFrom;
 const NetSendTo = @import("completion.zig").NetSendTo;
 const NetRecvMsg = @import("completion.zig").NetRecvMsg;
 const NetSendMsg = @import("completion.zig").NetSendMsg;
+const NetOpen = @import("completion.zig").NetOpen;
+const NetBind = @import("completion.zig").NetBind;
 const common = @import("backends/common.zig");
 const fs = @import("../os/fs.zig");
 const net = @import("../os/net.zig");
@@ -27,8 +29,8 @@ const net = @import("../os/net.zig");
 /// Execute a completion synchronously without an event loop.
 /// This is used when there's no async runtime available.
 ///
-/// Supports file, pipe and socket operations (read/write use poll+I/O on POSIX).
-/// Network operations requiring the event loop (connect, accept, etc.) and timers are not supported.
+/// Supports file, pipe, and socket operations (read/write use poll+I/O on POSIX).
+/// Network operations requiring the event loop (listen, connect, accept, etc.) and timers are not supported.
 pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
     // Mark completion as having no loop
     c.loop = null;
@@ -75,6 +77,8 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .pipe_poll => @panic("Pipe poll not supported in blocking mode (requires event loop)"),
 
         // Socket operations
+        .net_open => common.handleNetOpen(c),
+        .net_bind => common.handleNetBind(c),
         .net_close => handleNetClose(c),
         .net_shutdown => handleNetShutdown(c),
         .net_recv => handleNetRecv(c),
@@ -85,8 +89,6 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .net_sendmsg => handleNetSendMsg(c),
 
         // Network operations requiring event loop
-        .net_open,
-        .net_bind,
         .net_listen,
         .net_connect,
         .net_accept,
