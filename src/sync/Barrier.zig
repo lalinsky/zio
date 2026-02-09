@@ -260,10 +260,10 @@ test "Barrier: ordering test" {
     var barrier = Barrier.init(3);
     var arrivals: [3]u32 = .{ 0, 0, 0 };
     var arrival_order = std.atomic.Value(u32).init(0);
-    var final_order: u32 = 0;
+    var final_order = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn worker(b: *Barrier, order: *std.atomic.Value(u32), my_arrival: *u32, final: *u32) !void {
+        fn worker(b: *Barrier, order: *std.atomic.Value(u32), my_arrival: *u32, final: *std.atomic.Value(u32)) !void {
             // Record arrival order
             my_arrival.* = order.fetchAdd(1, .monotonic);
 
@@ -271,7 +271,7 @@ test "Barrier: ordering test" {
             _ = try b.wait();
 
             // After barrier, store final order value
-            final.* = order.load(.monotonic);
+            final.store(order.load(.monotonic), .monotonic);
         }
     };
 
@@ -294,7 +294,7 @@ test "Barrier: ordering test" {
     }
 
     // After barrier, order should be 3
-    try std.testing.expectEqual(3, final_order);
+    try std.testing.expectEqual(3, final_order.load(.monotonic));
 }
 
 test "Barrier: many coroutines" {

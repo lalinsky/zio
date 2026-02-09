@@ -144,6 +144,7 @@ pub const Group = struct {
                         if (err == error.Canceled) {
                             group.setCanceled();
                         } else {
+                            log.err("Group blocking task failed with error: {}", .{err});
                             group.setFailed();
                         }
                     };
