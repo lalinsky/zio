@@ -128,23 +128,23 @@ pub fn wait(self: *Barrier) (Cancelable || error{BrokenBarrier})!bool {
 }
 
 test "Barrier: basic synchronization" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
-    var counter: u32 = 0;
+    var counter = std.atomic.Value(u32).init(0);
     var results: [3]u32 = undefined;
 
     const TestFn = struct {
-        fn worker(b: *Barrier, cnt: *u32, result: *u32) !void {
+        fn worker(b: *Barrier, cnt: *std.atomic.Value(u32), result: *u32) !void {
             // Increment counter before barrier
-            cnt.* += 1;
+            _ = cnt.fetchAdd(1, .monotonic);
 
             // Wait at barrier - all should see counter == 3 after this
             _ = try b.wait();
 
             // All coroutines should see the same final counter value
-            result.* = cnt.*;
+            result.* = cnt.load(.monotonic);
         }
     };
 
@@ -165,17 +165,17 @@ test "Barrier: basic synchronization" {
 }
 
 test "Barrier: leader detection" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
-    var leader_count: u32 = 0;
+    var leader_count = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn worker(b: *Barrier, leader_cnt: *u32) !void {
+        fn worker(b: *Barrier, leader_cnt: *std.atomic.Value(u32)) !void {
             const is_leader = try b.wait();
             if (is_leader) {
-                leader_cnt.* += 1;
+                _ = leader_cnt.fetchAdd(1, .monotonic);
             }
         }
     };
@@ -191,30 +191,30 @@ test "Barrier: leader detection" {
     try std.testing.expect(!group.hasFailed());
 
     // Exactly one coroutine should have been the leader
-    try std.testing.expectEqual(1, leader_count);
+    try std.testing.expectEqual(1, leader_count.load(.monotonic));
 }
 
 test "Barrier: reusable for multiple cycles" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(2);
-    var phase1_done: u32 = 0;
-    var phase2_done: u32 = 0;
-    var phase3_done: u32 = 0;
+    var phase1_done = std.atomic.Value(u32).init(0);
+    var phase2_done = std.atomic.Value(u32).init(0);
+    var phase3_done = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn worker(b: *Barrier, p1: *u32, p2: *u32, p3: *u32) !void {
+        fn worker(b: *Barrier, p1: *std.atomic.Value(u32), p2: *std.atomic.Value(u32), p3: *std.atomic.Value(u32)) !void {
             // Phase 1
-            p1.* += 1;
+            _ = p1.fetchAdd(1, .monotonic);
             _ = try b.wait();
 
             // Phase 2
-            p2.* += 1;
+            _ = p2.fetchAdd(1, .monotonic);
             _ = try b.wait();
 
             // Phase 3
-            p3.* += 1;
+            _ = p3.fetchAdd(1, .monotonic);
             _ = try b.wait();
         }
     };
@@ -228,13 +228,13 @@ test "Barrier: reusable for multiple cycles" {
     try group.wait();
     try std.testing.expect(!group.hasFailed());
 
-    try std.testing.expectEqual(2, phase1_done);
-    try std.testing.expectEqual(2, phase2_done);
-    try std.testing.expectEqual(2, phase3_done);
+    try std.testing.expectEqual(2, phase1_done.load(.monotonic));
+    try std.testing.expectEqual(2, phase2_done.load(.monotonic));
+    try std.testing.expectEqual(2, phase3_done.load(.monotonic));
 }
 
 test "Barrier: single coroutine barrier" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(1);
@@ -254,25 +254,24 @@ test "Barrier: single coroutine barrier" {
 }
 
 test "Barrier: ordering test" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
     var arrivals: [3]u32 = .{ 0, 0, 0 };
-    var arrival_order: u32 = 0;
-    var final_order: u32 = 0;
+    var arrival_order = std.atomic.Value(u32).init(0);
+    var final_order = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn worker(b: *Barrier, order: *u32, my_arrival: *u32, final: *u32) !void {
+        fn worker(b: *Barrier, order: *std.atomic.Value(u32), my_arrival: *u32, final: *std.atomic.Value(u32)) !void {
             // Record arrival order
-            my_arrival.* = order.*;
-            order.* += 1;
+            my_arrival.* = order.fetchAdd(1, .monotonic);
 
             // Wait at barrier
             _ = try b.wait();
 
             // After barrier, store final order value
-            final.* = order.*;
+            final.store(order.load(.monotonic), .monotonic);
         }
     };
 
@@ -295,22 +294,22 @@ test "Barrier: ordering test" {
     }
 
     // After barrier, order should be 3
-    try std.testing.expectEqual(3, final_order);
+    try std.testing.expectEqual(3, final_order.load(.monotonic));
 }
 
 test "Barrier: many coroutines" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(5) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(5);
-    var counter: u32 = 0;
+    var counter = std.atomic.Value(u32).init(0);
     var final_counts: [5]u32 = undefined;
 
     const TestFn = struct {
-        fn worker(b: *Barrier, cnt: *u32, result: *u32) !void {
-            cnt.* += 1;
+        fn worker(b: *Barrier, cnt: *std.atomic.Value(u32), result: *u32) !void {
+            _ = cnt.fetchAdd(1, .monotonic);
             _ = try b.wait();
-            result.* = cnt.*;
+            result.* = cnt.load(.monotonic);
         }
     };
 

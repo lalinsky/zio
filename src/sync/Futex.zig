@@ -249,7 +249,7 @@ test "Futex: basic wait/wake" {
         }
     };
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var task = try rt.spawn(Main.run, .{rt});
@@ -257,7 +257,7 @@ test "Futex: basic wait/wake" {
 }
 
 test "Futex: spurious wakeup - value already changed" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var value: u32 = 1; // Already != 0
@@ -267,7 +267,7 @@ test "Futex: spurious wakeup - value already changed" {
 }
 
 test "Futex: wake with no waiters" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var value: u32 = 0;
@@ -279,17 +279,17 @@ test "Futex: wake with no waiters" {
 
 test "Futex: multiple waiters same address" {
     const Main = struct {
-        fn waiterFunc(v: *u32, w: *u32) !void {
+        fn waiterFunc(v: *u32, w: *u32, ready: *std.atomic.Value(u32)) !void {
+            _ = ready.fetchAdd(1, .release);
             while (@atomicLoad(u32, v, .acquire) == 0) {
                 try Futex.wait(v, 0);
             }
             _ = @atomicRmw(u32, w, .Add, 1, .monotonic);
         }
 
-        fn wakerFunc(val: *u32) !void {
-            // Yield multiple times to ensure waiters have time to block
-            var i: usize = 0;
-            while (i < 10) : (i += 1) {
+        fn wakerFunc(val: *u32, ready: *std.atomic.Value(u32)) !void {
+            // Wait for both waiters to be ready
+            while (ready.load(.acquire) < 2) {
                 try yield();
             }
             @atomicStore(u32, val, 1, .release);
@@ -299,14 +299,15 @@ test "Futex: multiple waiters same address" {
         fn run(io: *Runtime) !void {
             var value: u32 = 0;
             var woken: u32 = 0;
+            var waiters_ready = std.atomic.Value(u32).init(0);
 
-            var waiter1 = try io.spawn(waiterFunc, .{ &value, &woken });
+            var waiter1 = try io.spawn(waiterFunc, .{ &value, &woken, &waiters_ready });
             defer waiter1.cancel();
 
-            var waiter2 = try io.spawn(waiterFunc, .{ &value, &woken });
+            var waiter2 = try io.spawn(waiterFunc, .{ &value, &woken, &waiters_ready });
             defer waiter2.cancel();
 
-            var waker = try io.spawn(wakerFunc, .{&value});
+            var waker = try io.spawn(wakerFunc, .{ &value, &waiters_ready });
             try waker.join();
 
             var timeout: AutoCancel = .init;
@@ -319,7 +320,7 @@ test "Futex: multiple waiters same address" {
         }
     };
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer rt.deinit();
 
     var task = try rt.spawn(Main.run, .{rt});
@@ -365,7 +366,7 @@ test "Futex: multiple waiters different addresses" {
         }
     };
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer rt.deinit();
 
     var woken: u32 = 0;
@@ -379,7 +380,7 @@ test "Futex: multiple waiters different addresses" {
 }
 
 test "Futex: timedWait timeout" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var value: u32 = 0;

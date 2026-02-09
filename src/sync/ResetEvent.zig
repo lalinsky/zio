@@ -226,7 +226,7 @@ pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) bool {
 }
 
 test "ResetEvent basic set/reset/isSet" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -252,20 +252,25 @@ test "ResetEvent basic set/reset/isSet" {
 }
 
 test "ResetEvent wait/set signaling" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
     var waiter_finished = false;
+    var waiter_ready = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(event: *ResetEvent, finished: *bool) !void {
+        fn waiter(event: *ResetEvent, finished: *bool, ready_flag: *std.atomic.Value(bool)) !void {
+            ready_flag.store(true, .release);
             try event.wait();
             finished.* = true;
         }
 
-        fn setter(event: *ResetEvent) !void {
-            try yield(); // Give waiter time to start waiting
+        fn setter(event: *ResetEvent, ready_flag: *std.atomic.Value(bool)) !void {
+            // Wait for waiter to be ready
+            while (!ready_flag.load(.acquire)) {
+                try yield();
+            }
             event.set();
         }
     };
@@ -273,8 +278,8 @@ test "ResetEvent wait/set signaling" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_finished });
-    try group.spawn(TestFn.setter, .{&reset_event});
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_finished, &waiter_ready });
+    try group.spawn(TestFn.setter, .{ &reset_event, &waiter_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -284,7 +289,7 @@ test "ResetEvent wait/set signaling" {
 }
 
 test "ResetEvent timedWait timeout" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var reset_event = ResetEvent.init;
@@ -295,23 +300,25 @@ test "ResetEvent timedWait timeout" {
 }
 
 test "ResetEvent multiple waiters broadcast" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
-    var waiter_count: u32 = 0;
+    var waiter_count = std.atomic.Value(u32).init(0);
+    var waiters_ready = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn waiter(event: *ResetEvent, counter: *u32) !void {
+        fn waiter(event: *ResetEvent, counter: *std.atomic.Value(u32), ready_flag: *std.atomic.Value(u32)) !void {
+            _ = ready_flag.fetchAdd(1, .release);
             try event.wait();
-            counter.* += 1;
+            _ = counter.fetchAdd(1, .monotonic);
         }
 
-        fn setter(event: *ResetEvent) !void {
-            // Give waiters time to start waiting
-            try yield();
-            try yield();
-            try yield();
+        fn setter(event: *ResetEvent, ready_flag: *std.atomic.Value(u32)) !void {
+            // Wait for all waiters to be ready
+            while (ready_flag.load(.acquire) < 3) {
+                try yield();
+            }
             event.set();
         }
     };
@@ -319,20 +326,20 @@ test "ResetEvent multiple waiters broadcast" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count });
-    try group.spawn(TestFn.setter, .{&reset_event});
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &reset_event, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.setter, .{ &reset_event, &waiters_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(reset_event.isSet());
-    try std.testing.expectEqual(3, waiter_count);
+    try std.testing.expectEqual(3, waiter_count.load(.monotonic));
 }
 
 test "ResetEvent wait on already set event" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var reset_event = ResetEvent.init;
@@ -351,7 +358,7 @@ test "ResetEvent size" {
 }
 
 test "ResetEvent: cancel waiting task" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -401,7 +408,7 @@ test "ResetEvent: select" {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
@@ -409,7 +416,7 @@ test "ResetEvent: select" {
 }
 
 test "ResetEvent: foreign thread signals async task" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -445,7 +452,7 @@ test "ResetEvent: foreign thread signals async task" {
 }
 
 test "ResetEvent: async task signals foreign thread" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
