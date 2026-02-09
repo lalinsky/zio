@@ -1,6 +1,6 @@
 .{
     .name = .zio,
-    .version = "0.7.0",
+    .version = "0.8.0",
     .minimum_zig_version = "0.15.2",
     .fingerprint = 0xcf1598b354d576c4,
     .paths = .{

@@ -37,7 +37,7 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 1) Add zio as a dependency in your `build.zig.zon`:
 
 ```bash
-zig fetch --save "git+https://github.com/lalinsky/zio#v0.7.0"
+zig fetch --save "git+https://github.com/lalinsky/zio#v0.8.0"
 ```
 
 2) In your `build.zig`, add the `zio` module as a dependency to your program:
