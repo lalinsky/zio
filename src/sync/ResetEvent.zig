@@ -304,14 +304,14 @@ test "ResetEvent multiple waiters broadcast" {
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
-    var waiter_count: u32 = 0;
+    var waiter_count = std.atomic.Value(u32).init(0);
     var waiters_ready = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn waiter(event: *ResetEvent, counter: *u32, ready_flag: *std.atomic.Value(u32)) !void {
+        fn waiter(event: *ResetEvent, counter: *std.atomic.Value(u32), ready_flag: *std.atomic.Value(u32)) !void {
             _ = ready_flag.fetchAdd(1, .release);
             try event.wait();
-            counter.* += 1;
+            _ = counter.fetchAdd(1, .monotonic);
         }
 
         fn setter(event: *ResetEvent, ready_flag: *std.atomic.Value(u32)) !void {
@@ -335,7 +335,7 @@ test "ResetEvent multiple waiters broadcast" {
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expect(reset_event.isSet());
-    try std.testing.expectEqual(3, waiter_count);
+    try std.testing.expectEqual(3, waiter_count.load(.monotonic));
 }
 
 test "ResetEvent wait on already set event" {
