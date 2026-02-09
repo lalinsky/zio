@@ -49,6 +49,7 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
+const sleep = @import("../runtime.zig").sleep;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
@@ -228,6 +229,8 @@ test "Notify basic signal/wait" {
             while (!ready_flag.load(.acquire)) {
                 try yield();
             }
+            // Give waiter time to actually register the wait
+            try sleep(.fromMilliseconds(1));
             n.signal();
         }
     };
@@ -379,6 +382,8 @@ test "Notify timedWait success" {
             while (!ready_flag.load(.acquire)) {
                 try yield();
             }
+            // Give waiter time to actually register the wait
+            try sleep(.fromMilliseconds(1));
             n.signal();
         }
     };
