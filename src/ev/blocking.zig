@@ -104,9 +104,9 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
     }
 }
 
-/// Poll for socket/pipe readiness on POSIX.
+/// Poll for socket/pipe readiness with infinite timeout.
 /// Returns error if polling fails.
-/// Should only be called on non-Windows platforms.
+/// Works on both POSIX and Windows platforms.
 fn pollForReady(fd: net.fd_t, events: i16) !void {
     var pfd = [_]net.pollfd{.{
         .fd = fd,
@@ -139,7 +139,9 @@ fn handlePipeClose(c: *Completion) void {
 fn handlePipeRead(c: *Completion) void {
     const data = c.cast(PipeRead);
 
-    // POSIX: poll first since pipes are non-blocking
+    // Poll first to wait for data availability
+    // POSIX: pipes are non-blocking, so we must poll
+    // Windows: pipes block, but polling enables future timeout support
     if (builtin.os.tag != .windows) {
         pollForReady(data.handle, net.POLL.IN) catch |err| {
             c.setError(err);
@@ -147,7 +149,7 @@ fn handlePipeRead(c: *Completion) void {
         };
     }
 
-    // Now read - Windows blocks, POSIX should have data ready
+    // Now read - should have data ready on POSIX, blocks on Windows
     if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
         c.setResult(.pipe_read, bytes_read);
     } else |err| {
@@ -159,7 +161,9 @@ fn handlePipeRead(c: *Completion) void {
 fn handlePipeWrite(c: *Completion) void {
     const data = c.cast(PipeWrite);
 
-    // POSIX: poll first since pipes are non-blocking
+    // Poll first to wait for write readiness
+    // POSIX: pipes are non-blocking, so we must poll
+    // Windows: pipes block, but polling enables future timeout support
     if (builtin.os.tag != .windows) {
         pollForReady(data.handle, net.POLL.OUT) catch |err| {
             c.setError(err);
@@ -167,7 +171,7 @@ fn handlePipeWrite(c: *Completion) void {
         };
     }
 
-    // Now write - Windows blocks, POSIX should be ready
+    // Now write - should be ready on POSIX, blocks on Windows
     if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
         c.setResult(.pipe_write, bytes_written);
     } else |err| {
@@ -196,15 +200,14 @@ fn handleNetShutdown(c: *Completion) void {
 fn handleNetRecv(c: *Completion) void {
     const data = c.cast(NetRecv);
 
-    // POSIX: poll first since sockets are non-blocking
-    if (builtin.os.tag != .windows) {
-        pollForReady(data.handle, net.POLL.IN) catch |err| {
-            c.setError(err);
-            return;
-        };
-    }
+    // Poll first to wait for data availability
+    // This enables timeout support in the future
+    pollForReady(data.handle, net.POLL.IN) catch |err| {
+        c.setError(err);
+        return;
+    };
 
-    // Now recv - Windows blocks, POSIX should have data ready
+    // Now recv - should have data ready
     if (net.recv(data.handle, data.buffers.iovecs, data.flags)) |bytes_read| {
         c.setResult(.net_recv, bytes_read);
     } else |err| {
@@ -216,15 +219,14 @@ fn handleNetRecv(c: *Completion) void {
 fn handleNetSend(c: *Completion) void {
     const data = c.cast(NetSend);
 
-    // POSIX: poll first since sockets are non-blocking
-    if (builtin.os.tag != .windows) {
-        pollForReady(data.handle, net.POLL.OUT) catch |err| {
-            c.setError(err);
-            return;
-        };
-    }
+    // Poll first to wait for write readiness
+    // This enables timeout support in the future
+    pollForReady(data.handle, net.POLL.OUT) catch |err| {
+        c.setError(err);
+        return;
+    };
 
-    // Now send - Windows blocks, POSIX should be ready
+    // Now send - should be ready to write
     if (net.send(data.handle, data.buffer.iovecs, data.flags)) |bytes_written| {
         c.setResult(.net_send, bytes_written);
     } else |err| {
@@ -236,15 +238,14 @@ fn handleNetSend(c: *Completion) void {
 fn handleNetRecvFrom(c: *Completion) void {
     const data = c.cast(NetRecvFrom);
 
-    // POSIX: poll first since sockets are non-blocking
-    if (builtin.os.tag != .windows) {
-        pollForReady(data.handle, net.POLL.IN) catch |err| {
-            c.setError(err);
-            return;
-        };
-    }
+    // Poll first to wait for data availability
+    // This enables timeout support in the future
+    pollForReady(data.handle, net.POLL.IN) catch |err| {
+        c.setError(err);
+        return;
+    };
 
-    // Now recvfrom - Windows blocks, POSIX should have data ready
+    // Now recvfrom - should have data ready
     if (net.recvfrom(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_read| {
         c.setResult(.net_recvfrom, bytes_read);
     } else |err| {
@@ -256,15 +257,14 @@ fn handleNetRecvFrom(c: *Completion) void {
 fn handleNetSendTo(c: *Completion) void {
     const data = c.cast(NetSendTo);
 
-    // POSIX: poll first since sockets are non-blocking
-    if (builtin.os.tag != .windows) {
-        pollForReady(data.handle, net.POLL.OUT) catch |err| {
-            c.setError(err);
-            return;
-        };
-    }
+    // Poll first to wait for write readiness
+    // This enables timeout support in the future
+    pollForReady(data.handle, net.POLL.OUT) catch |err| {
+        c.setError(err);
+        return;
+    };
 
-    // Now sendto - Windows blocks, POSIX should be ready
+    // Now sendto - should be ready to write
     if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_written| {
         c.setResult(.net_sendto, bytes_written);
     } else |err| {
@@ -276,15 +276,15 @@ fn handleNetSendTo(c: *Completion) void {
 fn handleNetRecvMsg(c: *Completion) void {
     const data = c.cast(NetRecvMsg);
 
-    // POSIX: poll first since sockets are non-blocking
-    if (builtin.os.tag != .windows) {
-        pollForReady(data.handle, net.POLL.IN) catch |err| {
-            c.setError(err);
-            return;
-        };
-    }
+    // Poll first to wait for data availability
+    // This enables timeout support in the future
+    // Note: recvmsg is POSIX-only (not supported on Windows)
+    pollForReady(data.handle, net.POLL.IN) catch |err| {
+        c.setError(err);
+        return;
+    };
 
-    // Now recvmsg - Windows blocks, POSIX should have data ready
+    // Now recvmsg - should have data ready
     if (net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |result| {
         c.setResult(.net_recvmsg, result);
     } else |err| {
@@ -296,15 +296,15 @@ fn handleNetRecvMsg(c: *Completion) void {
 fn handleNetSendMsg(c: *Completion) void {
     const data = c.cast(NetSendMsg);
 
-    // POSIX: poll first since sockets are non-blocking
-    if (builtin.os.tag != .windows) {
-        pollForReady(data.handle, net.POLL.OUT) catch |err| {
-            c.setError(err);
-            return;
-        };
-    }
+    // Poll first to wait for write readiness
+    // This enables timeout support in the future
+    // Note: sendmsg is POSIX-only (not supported on Windows)
+    pollForReady(data.handle, net.POLL.OUT) catch |err| {
+        c.setError(err);
+        return;
+    };
 
-    // Now sendmsg - Windows blocks, POSIX should be ready
+    // Now sendmsg - should be ready to write
     if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |bytes_written| {
         c.setResult(.net_sendmsg, bytes_written);
     } else |err| {
