@@ -1268,8 +1268,21 @@ pub fn recvmsg(
 
     switch (builtin.os.tag) {
         .windows => {
-            // Windows implementation should be handled in the backend
-            @panic("recvmsg not supported on Windows - use backend implementation");
+            // Control messages are POSIX-specific and not supported on Windows
+            if (control != null and control.?.len > 0) {
+                return error.OperationNotSupported;
+            }
+
+            // Emulate with recvfrom or recv
+            const bytes_read = if (addr != null)
+                try recvfrom(fd, buffers, flags, addr, addr_len)
+            else
+                try recv(fd, buffers, flags);
+
+            return .{
+                .len = bytes_read,
+                .flags = 0,
+            };
         },
         else => {
             var msg: posix.system.msghdr = .{
@@ -1318,8 +1331,16 @@ pub fn sendmsg(
 
     switch (builtin.os.tag) {
         .windows => {
-            // Windows implementation should be handled in the backend
-            @panic("sendmsg not supported on Windows - use backend implementation");
+            // Control messages are POSIX-specific and not supported on Windows
+            if (control != null and control.?.len > 0) {
+                return error.OperationNotSupported;
+            }
+
+            // Emulate with sendto or send
+            return if (addr) |a|
+                try sendto(fd, buffers, flags, a, addr_len)
+            else
+                try send(fd, buffers, flags);
         },
         else => {
             var msg: posix.system.msghdr_const = .{
