@@ -106,7 +106,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Poll for socket/pipe readiness on POSIX (no-op on Windows).
 /// Returns error if polling fails.
-fn pollForReady(fd: std.posix.fd_t, events: i16) !void {
+fn pollForReady(fd: net.fd_t, events: i16) !void {
     if (builtin.os.tag == .windows) return;
 
     var pfd = [_]net.pollfd{.{
