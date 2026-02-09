@@ -6,13 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- Added `CompletionQueue` for waiting on multiple I/O operations (#291)
+- Added `CompletionQueue` for waiting on multiple I/O operations.
+- Added blocking I/O support for socket, pipe, poll, timer, and work operations. These operations can now be called from any thread without an async runtime.
+
+### Changed
+
+- Improved our CI setup, run significanly more tests in multi-threaded mode to catch possible race conditions.
 
 ### Fixed
 
-- Fixed task migration race condition that could cause crashes under heavy multi-threaded load (#304)
-- Fixed pipe read/write using wrong offset in io_uring backend (#299)
-- Fixed NetBSD test failures (#290)
+- Fixed task migration race condition that could cause crashes under heavy multi-threaded load.
+- Fixed pipe read/write using wrong offset in io_uring backend.
+- Fixed NetBSD test failures.
 
 ## [0.7.0] - 2026-02-06
 
