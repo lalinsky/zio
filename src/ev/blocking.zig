@@ -141,21 +141,33 @@ fn handlePipeClose(c: *Completion) void {
 fn handlePipeRead(c: *Completion) void {
     const data = c.cast(PipeRead);
 
-    // Poll first to wait for data availability
-    // POSIX: pipes are non-blocking, so we must poll
-    // Windows: pipes block, but polling enables future timeout support
-    if (builtin.os.tag != .windows) {
+    // Windows: blocking read, no poll needed
+    if (builtin.os.tag == .windows) {
+        if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
+            c.setResult(.pipe_read, bytes_read);
+        } else |err| {
+            c.setError(err);
+        }
+        return;
+    }
+
+    // POSIX: poll+read loop to handle race if multiple threads access same pipe
+    while (true) {
         pollForReady(data.handle, net.POLL.IN) catch |err| {
             c.setError(err);
             return;
         };
-    }
 
-    // Now read - should have data ready on POSIX, blocks on Windows
-    if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
-        c.setResult(.pipe_read, bytes_read);
-    } else |err| {
-        c.setError(err);
+        if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
+            c.setResult(.pipe_read, bytes_read);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread consumed data, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -163,21 +175,33 @@ fn handlePipeRead(c: *Completion) void {
 fn handlePipeWrite(c: *Completion) void {
     const data = c.cast(PipeWrite);
 
-    // Poll first to wait for write readiness
-    // POSIX: pipes are non-blocking, so we must poll
-    // Windows: pipes block, but polling enables future timeout support
-    if (builtin.os.tag != .windows) {
+    // Windows: blocking write, no poll needed
+    if (builtin.os.tag == .windows) {
+        if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
+            c.setResult(.pipe_write, bytes_written);
+        } else |err| {
+            c.setError(err);
+        }
+        return;
+    }
+
+    // POSIX: poll+write loop to handle race if multiple threads access same pipe
+    while (true) {
         pollForReady(data.handle, net.POLL.OUT) catch |err| {
             c.setError(err);
             return;
         };
-    }
 
-    // Now write - should be ready on POSIX, blocks on Windows
-    if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
-        c.setResult(.pipe_write, bytes_written);
-    } else |err| {
-        c.setError(err);
+        if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
+            c.setResult(.pipe_write, bytes_written);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread filled buffer, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -202,18 +226,33 @@ fn handleNetShutdown(c: *Completion) void {
 fn handleNetRecv(c: *Completion) void {
     const data = c.cast(NetRecv);
 
-    // Poll first to wait for data availability
-    // This enables timeout support in the future
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
+    // Windows: blocking recv, no poll needed
+    if (builtin.os.tag == .windows) {
+        if (net.recv(data.handle, data.buffers.iovecs, data.flags)) |bytes_read| {
+            c.setResult(.net_recv, bytes_read);
+        } else |err| {
+            c.setError(err);
+        }
         return;
-    };
+    }
 
-    // Now recv - should have data ready
-    if (net.recv(data.handle, data.buffers.iovecs, data.flags)) |bytes_read| {
-        c.setResult(.net_recv, bytes_read);
-    } else |err| {
-        c.setError(err);
+    // POSIX: poll+recv loop to handle race if multiple threads access same socket
+    while (true) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (net.recv(data.handle, data.buffers.iovecs, data.flags)) |bytes_read| {
+            c.setResult(.net_recv, bytes_read);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread consumed data, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -221,18 +260,33 @@ fn handleNetRecv(c: *Completion) void {
 fn handleNetSend(c: *Completion) void {
     const data = c.cast(NetSend);
 
-    // Poll first to wait for write readiness
-    // This enables timeout support in the future
-    pollForReady(data.handle, net.POLL.OUT) catch |err| {
-        c.setError(err);
+    // Windows: blocking send, no poll needed
+    if (builtin.os.tag == .windows) {
+        if (net.send(data.handle, data.buffer.iovecs, data.flags)) |bytes_written| {
+            c.setResult(.net_send, bytes_written);
+        } else |err| {
+            c.setError(err);
+        }
         return;
-    };
+    }
 
-    // Now send - should be ready to write
-    if (net.send(data.handle, data.buffer.iovecs, data.flags)) |bytes_written| {
-        c.setResult(.net_send, bytes_written);
-    } else |err| {
-        c.setError(err);
+    // POSIX: poll+send loop to handle race if multiple threads access same socket
+    while (true) {
+        pollForReady(data.handle, net.POLL.OUT) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (net.send(data.handle, data.buffer.iovecs, data.flags)) |bytes_written| {
+            c.setResult(.net_send, bytes_written);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread filled buffer, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -240,18 +294,33 @@ fn handleNetSend(c: *Completion) void {
 fn handleNetRecvFrom(c: *Completion) void {
     const data = c.cast(NetRecvFrom);
 
-    // Poll first to wait for data availability
-    // This enables timeout support in the future
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
+    // Windows: blocking recvfrom, no poll needed
+    if (builtin.os.tag == .windows) {
+        if (net.recvfrom(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_read| {
+            c.setResult(.net_recvfrom, bytes_read);
+        } else |err| {
+            c.setError(err);
+        }
         return;
-    };
+    }
 
-    // Now recvfrom - should have data ready
-    if (net.recvfrom(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_read| {
-        c.setResult(.net_recvfrom, bytes_read);
-    } else |err| {
-        c.setError(err);
+    // POSIX: poll+recvfrom loop to handle race if multiple threads access same socket
+    while (true) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (net.recvfrom(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_read| {
+            c.setResult(.net_recvfrom, bytes_read);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread consumed data, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -259,18 +328,33 @@ fn handleNetRecvFrom(c: *Completion) void {
 fn handleNetSendTo(c: *Completion) void {
     const data = c.cast(NetSendTo);
 
-    // Poll first to wait for write readiness
-    // This enables timeout support in the future
-    pollForReady(data.handle, net.POLL.OUT) catch |err| {
-        c.setError(err);
+    // Windows: blocking sendto, no poll needed
+    if (builtin.os.tag == .windows) {
+        if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_written| {
+            c.setResult(.net_sendto, bytes_written);
+        } else |err| {
+            c.setError(err);
+        }
         return;
-    };
+    }
 
-    // Now sendto - should be ready to write
-    if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_written| {
-        c.setResult(.net_sendto, bytes_written);
-    } else |err| {
-        c.setError(err);
+    // POSIX: poll+sendto loop to handle race if multiple threads access same socket
+    while (true) {
+        pollForReady(data.handle, net.POLL.OUT) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_written| {
+            c.setResult(.net_sendto, bytes_written);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread filled buffer, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -278,19 +362,32 @@ fn handleNetSendTo(c: *Completion) void {
 fn handleNetRecvMsg(c: *Completion) void {
     const data = c.cast(NetRecvMsg);
 
-    // Poll first to wait for data availability
-    // This enables timeout support in the future
-    // Note: recvmsg is POSIX-only (not supported on Windows)
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
-        return;
-    };
+    // Windows: not supported (recvmsg is POSIX-only, will panic in net.recvmsg)
+    if (builtin.os.tag == .windows) {
+        _ = net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control) catch |err| {
+            c.setError(err);
+            return;
+        };
+        unreachable;
+    }
 
-    // Now recvmsg - should have data ready
-    if (net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |result| {
-        c.setResult(.net_recvmsg, result);
-    } else |err| {
-        c.setError(err);
+    // POSIX: poll+recvmsg loop to handle race if multiple threads access same socket
+    while (true) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |result| {
+            c.setResult(.net_recvmsg, result);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread consumed data, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -298,19 +395,32 @@ fn handleNetRecvMsg(c: *Completion) void {
 fn handleNetSendMsg(c: *Completion) void {
     const data = c.cast(NetSendMsg);
 
-    // Poll first to wait for write readiness
-    // This enables timeout support in the future
-    // Note: sendmsg is POSIX-only (not supported on Windows)
-    pollForReady(data.handle, net.POLL.OUT) catch |err| {
-        c.setError(err);
-        return;
-    };
+    // Windows: not supported (sendmsg is POSIX-only, will panic in net.sendmsg)
+    if (builtin.os.tag == .windows) {
+        _ = net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control) catch |err| {
+            c.setError(err);
+            return;
+        };
+        unreachable;
+    }
 
-    // Now sendmsg - should be ready to write
-    if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |bytes_written| {
-        c.setResult(.net_sendmsg, bytes_written);
-    } else |err| {
-        c.setError(err);
+    // POSIX: poll+sendmsg loop to handle race if multiple threads access same socket
+    while (true) {
+        pollForReady(data.handle, net.POLL.OUT) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |bytes_written| {
+            c.setResult(.net_sendmsg, bytes_written);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread filled buffer, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
@@ -356,16 +466,32 @@ fn handleNetConnect(c: *Completion) void {
 fn handleNetAccept(c: *Completion) void {
     const data = c.cast(NetAccept);
 
-    // Poll for incoming connection
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
+    // Windows: blocking accept, no poll needed
+    if (builtin.os.tag == .windows) {
+        if (net.accept(data.handle, data.addr, data.addr_len, data.flags)) |new_handle| {
+            c.setResult(.net_accept, new_handle);
+        } else |err| {
+            c.setError(err);
+        }
         return;
-    };
+    }
 
-    // Accept the connection
-    if (net.accept(data.handle, data.addr, data.addr_len, data.flags)) |new_handle| {
-        c.setResult(.net_accept, new_handle);
-    } else |err| {
-        c.setError(err);
+    // POSIX: poll+accept loop to handle race if multiple threads access same socket
+    while (true) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (net.accept(data.handle, data.addr, data.addr_len, data.flags)) |new_handle| {
+            c.setResult(.net_accept, new_handle);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue, // Another thread accepted connection, retry
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
