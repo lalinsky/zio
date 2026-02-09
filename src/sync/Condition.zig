@@ -240,25 +240,30 @@ pub fn broadcast(self: *Condition) void {
 }
 
 test "Condition basic wait/signal" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var mutex = Mutex.init;
     var condition = Condition.init;
     var ready = false;
+    var waiter_ready = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
+        fn waiter(mtx: *Mutex, cond: *Condition, ready_flag: *bool, waiter_flag: *std.atomic.Value(bool)) !void {
             try mtx.lock();
             defer mtx.unlock();
+            waiter_flag.store(true, .release);
 
             while (!ready_flag.*) {
                 try cond.wait(mtx);
             }
         }
 
-        fn signaler(mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
-            try yield(); // Give waiter time to start waiting
+        fn signaler(mtx: *Mutex, cond: *Condition, ready_flag: *bool, waiter_flag: *std.atomic.Value(bool)) !void {
+            // Wait for waiter to be ready
+            while (!waiter_flag.load(.acquire)) {
+                try yield();
+            }
 
             try mtx.lock();
             ready_flag.* = true;
@@ -271,8 +276,8 @@ test "Condition basic wait/signal" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready });
-    try group.spawn(TestFn.signaler, .{ &mutex, &condition, &ready });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_ready });
+    try group.spawn(TestFn.signaler, .{ &mutex, &condition, &ready, &waiter_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -281,7 +286,7 @@ test "Condition basic wait/signal" {
 }
 
 test "Condition timedWait timeout" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var mutex = Mutex.init;
@@ -309,18 +314,20 @@ test "Condition timedWait timeout" {
 }
 
 test "Condition broadcast" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
     var mutex = Mutex.init;
     var condition = Condition.init;
     var ready = false;
     var waiter_count: u32 = 0;
+    var waiters_ready = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn waiter(mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32) !void {
+        fn waiter(mtx: *Mutex, cond: *Condition, ready_flag: *bool, counter: *u32, waiters_flag: *std.atomic.Value(u32)) !void {
             try mtx.lock();
             defer mtx.unlock();
+            _ = waiters_flag.fetchAdd(1, .release);
 
             while (!ready_flag.*) {
                 try cond.wait(mtx);
@@ -328,11 +335,11 @@ test "Condition broadcast" {
             counter.* += 1;
         }
 
-        fn broadcaster(mtx: *Mutex, cond: *Condition, ready_flag: *bool) !void {
-            // Give waiters time to start waiting
-            try yield();
-            try yield();
-            try yield();
+        fn broadcaster(mtx: *Mutex, cond: *Condition, ready_flag: *bool, waiters_flag: *std.atomic.Value(u32)) !void {
+            // Wait for all waiters to be ready
+            while (waiters_flag.load(.acquire) < 3) {
+                try yield();
+            }
 
             try mtx.lock();
             ready_flag.* = true;
@@ -345,10 +352,10 @@ test "Condition broadcast" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count });
-    try group.spawn(TestFn.broadcaster, .{ &mutex, &condition, &ready });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &mutex, &condition, &ready, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.broadcaster, .{ &mutex, &condition, &ready, &waiters_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());

@@ -150,7 +150,7 @@ pub fn unlock(self: *Mutex) void {
 }
 
 test "Mutex basic lock/unlock" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var shared_counter: u32 = 0;
@@ -179,7 +179,7 @@ test "Mutex basic lock/unlock" {
 }
 
 test "Mutex tryLock" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var mutex = Mutex.init;

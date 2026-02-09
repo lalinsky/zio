@@ -210,20 +210,24 @@ pub fn asyncCancelWait(self: *Notify, wait_node: *WaitNode) bool {
 }
 
 test "Notify basic signal/wait" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var notify = Notify.init;
     var waiter_finished = false;
+    var waiter_ready = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(n: *Notify, finished: *bool) !void {
+        fn waiter(n: *Notify, finished: *bool, ready_flag: *std.atomic.Value(bool)) !void {
+            ready_flag.store(true, .release);
             try n.wait();
             finished.* = true;
         }
 
-        fn signaler(n: *Notify) !void {
-            try yield(); // Give waiter time to start waiting
+        fn signaler(n: *Notify, ready_flag: *std.atomic.Value(bool)) !void {
+            while (!ready_flag.load(.acquire)) {
+                try yield();
+            }
             n.signal();
         }
     };
@@ -231,8 +235,8 @@ test "Notify basic signal/wait" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &notify, &waiter_finished });
-    try group.spawn(TestFn.signaler, .{&notify});
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_finished, &waiter_ready });
+    try group.spawn(TestFn.signaler, .{ &notify, &waiter_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -241,7 +245,7 @@ test "Notify basic signal/wait" {
 }
 
 test "Notify signal with no waiters" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -255,23 +259,24 @@ test "Notify signal with no waiters" {
 }
 
 test "Notify broadcast to multiple waiters" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
     var notify = Notify.init;
     var waiter_count: u32 = 0;
+    var waiters_ready = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn waiter(n: *Notify, counter: *u32) !void {
+        fn waiter(n: *Notify, counter: *u32, ready_flag: *std.atomic.Value(u32)) !void {
+            _ = ready_flag.fetchAdd(1, .release);
             try n.wait();
             counter.* += 1;
         }
 
-        fn broadcaster(n: *Notify) !void {
-            // Give waiters time to start waiting
-            try yield();
-            try yield();
-            try yield();
+        fn broadcaster(n: *Notify, ready_flag: *std.atomic.Value(u32)) !void {
+            while (ready_flag.load(.acquire) < 3) {
+                try yield();
+            }
             n.broadcast();
         }
     };
@@ -279,10 +284,10 @@ test "Notify broadcast to multiple waiters" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(TestFn.broadcaster, .{&notify});
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.broadcaster, .{ &notify, &waiters_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -291,23 +296,24 @@ test "Notify broadcast to multiple waiters" {
 }
 
 test "Notify multiple signals to multiple waiters" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
     var notify = Notify.init;
     var waiter_count: u32 = 0;
+    var waiters_ready = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
-        fn waiter(n: *Notify, counter: *u32) !void {
+        fn waiter(n: *Notify, counter: *u32, ready_flag: *std.atomic.Value(u32)) !void {
+            _ = ready_flag.fetchAdd(1, .release);
             try n.wait();
             counter.* += 1;
         }
 
-        fn signaler(n: *Notify) !void {
-            // Give waiters time to start waiting
-            try yield();
-            try yield();
-            try yield();
+        fn signaler(n: *Notify, ready_flag: *std.atomic.Value(u32)) !void {
+            while (ready_flag.load(.acquire) < 3) {
+                try yield();
+            }
             // Signal three times to wake all three waiters one by one (FIFO)
             n.signal();
             n.signal();
@@ -318,10 +324,10 @@ test "Notify multiple signals to multiple waiters" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count });
-    try group.spawn(TestFn.signaler, .{&notify});
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.waiter, .{ &notify, &waiter_count, &waiters_ready });
+    try group.spawn(TestFn.signaler, .{ &notify, &waiters_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -330,7 +336,7 @@ test "Notify multiple signals to multiple waiters" {
 }
 
 test "Notify timedWait timeout" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var notify = Notify.init;
@@ -354,21 +360,25 @@ test "Notify timedWait timeout" {
 }
 
 test "Notify timedWait success" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var notify = Notify.init;
     var wait_succeeded = false;
+    var waiter_ready = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(n: *Notify, success_flag: *bool) !void {
+        fn waiter(n: *Notify, success_flag: *bool, ready_flag: *std.atomic.Value(bool)) !void {
+            ready_flag.store(true, .release);
             // Should be signaled before timeout
             try n.timedWait(.{ .duration = .fromSeconds(1) });
             success_flag.* = true;
         }
 
-        fn signaler(n: *Notify) !void {
-            try yield(); // Give waiter time to start waiting
+        fn signaler(n: *Notify, ready_flag: *std.atomic.Value(bool)) !void {
+            while (!ready_flag.load(.acquire)) {
+                try yield();
+            }
             n.signal();
         }
     };
@@ -376,8 +386,8 @@ test "Notify timedWait success" {
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &notify, &wait_succeeded });
-    try group.spawn(TestFn.signaler, .{&notify});
+    try group.spawn(TestFn.waiter, .{ &notify, &wait_succeeded, &waiter_ready });
+    try group.spawn(TestFn.signaler, .{ &notify, &waiter_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -411,7 +421,7 @@ test "Notify: select" {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});

@@ -128,7 +128,7 @@ pub fn wait(self: *Barrier) (Cancelable || error{BrokenBarrier})!bool {
 }
 
 test "Barrier: basic synchronization" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -165,7 +165,7 @@ test "Barrier: basic synchronization" {
 }
 
 test "Barrier: leader detection" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -195,7 +195,7 @@ test "Barrier: leader detection" {
 }
 
 test "Barrier: reusable for multiple cycles" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(2);
@@ -234,7 +234,7 @@ test "Barrier: reusable for multiple cycles" {
 }
 
 test "Barrier: single coroutine barrier" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(1);
@@ -254,7 +254,7 @@ test "Barrier: single coroutine barrier" {
 }
 
 test "Barrier: ordering test" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(3);
@@ -299,7 +299,7 @@ test "Barrier: ordering test" {
 }
 
 test "Barrier: many coroutines" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(5) });
     defer runtime.deinit();
 
     var barrier = Barrier.init(5);

@@ -163,7 +163,7 @@ pub fn post(self: *Semaphore) void {
 }
 
 test "Semaphore: basic wait/post" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var sem = Semaphore{ .permits = 1 };
@@ -192,7 +192,7 @@ test "Semaphore: basic wait/post" {
 }
 
 test "Semaphore: timedWait timeout" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var sem = Semaphore{};
@@ -216,29 +216,33 @@ test "Semaphore: timedWait timeout" {
 }
 
 test "Semaphore: timedWait success" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var sem = Semaphore{};
     var got_permit = false;
+    var waiter_ready = std.atomic.Value(bool).init(false);
 
     const TestFn = struct {
-        fn waiter(s: *Semaphore, flag: *bool) void {
+        fn waiter(s: *Semaphore, flag: *bool, ready_flag: *std.atomic.Value(bool)) void {
+            ready_flag.store(true, .release);
             s.timedWait(.{ .duration = .fromMilliseconds(100) }) catch return;
             flag.* = true;
         }
 
-        fn poster(s: *Semaphore) !void {
+        fn poster(s: *Semaphore, ready_flag: *std.atomic.Value(bool)) !void {
             defer s.post();
-            try yield();
+            while (!ready_flag.load(.acquire)) {
+                try yield();
+            }
         }
     };
 
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(TestFn.waiter, .{ &sem, &got_permit });
-    try group.spawn(TestFn.poster, .{&sem});
+    try group.spawn(TestFn.waiter, .{ &sem, &got_permit, &waiter_ready });
+    try group.spawn(TestFn.poster, .{ &sem, &waiter_ready });
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
@@ -248,7 +252,7 @@ test "Semaphore: timedWait success" {
 }
 
 test "Semaphore: multiple permits" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var sem = Semaphore{ .permits = 3 };
