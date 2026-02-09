@@ -226,7 +226,7 @@ pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) bool {
 }
 
 test "ResetEvent basic set/reset/isSet" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var reset_event = ResetEvent.init;
@@ -289,7 +289,7 @@ test "ResetEvent wait/set signaling" {
 }
 
 test "ResetEvent timedWait timeout" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var reset_event = ResetEvent.init;
@@ -339,7 +339,7 @@ test "ResetEvent multiple waiters broadcast" {
 }
 
 test "ResetEvent wait on already set event" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var reset_event = ResetEvent.init;
