@@ -104,11 +104,10 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
     }
 }
 
-/// Poll for socket/pipe readiness on POSIX (no-op on Windows).
+/// Poll for socket/pipe readiness on POSIX.
 /// Returns error if polling fails.
+/// Should only be called on non-Windows platforms.
 fn pollForReady(fd: net.fd_t, events: i16) !void {
-    if (builtin.os.tag == .windows) return;
-
     var pfd = [_]net.pollfd{.{
         .fd = fd,
         .events = events,
@@ -141,10 +140,12 @@ fn handlePipeRead(c: *Completion) void {
     const data = c.cast(PipeRead);
 
     // POSIX: poll first since pipes are non-blocking
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now read - Windows blocks, POSIX should have data ready
     if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
@@ -159,10 +160,12 @@ fn handlePipeWrite(c: *Completion) void {
     const data = c.cast(PipeWrite);
 
     // POSIX: poll first since pipes are non-blocking
-    pollForReady(data.handle, net.POLL.OUT) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.OUT) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now write - Windows blocks, POSIX should be ready
     if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
@@ -194,10 +197,12 @@ fn handleNetRecv(c: *Completion) void {
     const data = c.cast(NetRecv);
 
     // POSIX: poll first since sockets are non-blocking
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now recv - Windows blocks, POSIX should have data ready
     if (net.recv(data.handle, data.buffers.iovecs, data.flags)) |bytes_read| {
@@ -212,10 +217,12 @@ fn handleNetSend(c: *Completion) void {
     const data = c.cast(NetSend);
 
     // POSIX: poll first since sockets are non-blocking
-    pollForReady(data.handle, net.POLL.OUT) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.OUT) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now send - Windows blocks, POSIX should be ready
     if (net.send(data.handle, data.buffer.iovecs, data.flags)) |bytes_written| {
@@ -230,10 +237,12 @@ fn handleNetRecvFrom(c: *Completion) void {
     const data = c.cast(NetRecvFrom);
 
     // POSIX: poll first since sockets are non-blocking
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now recvfrom - Windows blocks, POSIX should have data ready
     if (net.recvfrom(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_read| {
@@ -248,10 +257,12 @@ fn handleNetSendTo(c: *Completion) void {
     const data = c.cast(NetSendTo);
 
     // POSIX: poll first since sockets are non-blocking
-    pollForReady(data.handle, net.POLL.OUT) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.OUT) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now sendto - Windows blocks, POSIX should be ready
     if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_written| {
@@ -266,10 +277,12 @@ fn handleNetRecvMsg(c: *Completion) void {
     const data = c.cast(NetRecvMsg);
 
     // POSIX: poll first since sockets are non-blocking
-    pollForReady(data.handle, net.POLL.IN) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now recvmsg - Windows blocks, POSIX should have data ready
     if (net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |result| {
@@ -284,10 +297,12 @@ fn handleNetSendMsg(c: *Completion) void {
     const data = c.cast(NetSendMsg);
 
     // POSIX: poll first since sockets are non-blocking
-    pollForReady(data.handle, net.POLL.OUT) catch |err| {
-        c.setError(err);
-        return;
-    };
+    if (builtin.os.tag != .windows) {
+        pollForReady(data.handle, net.POLL.OUT) catch |err| {
+            c.setError(err);
+            return;
+        };
+    }
 
     // Now sendmsg - Windows blocks, POSIX should be ready
     if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |bytes_written| {
