@@ -3,7 +3,7 @@
 
 //! Blocking execution of I/O operations without event loop.
 //!
-//! This module provides synchronous execution of file and pipe operations
+//! This module provides synchronous execution of file, pipe and socket operations
 //! for use in non-async contexts (when there's no runtime/executor).
 
 const std = @import("std");
@@ -12,6 +12,14 @@ const Completion = @import("completion.zig").Completion;
 const PipeClose = @import("completion.zig").PipeClose;
 const PipeRead = @import("completion.zig").PipeRead;
 const PipeWrite = @import("completion.zig").PipeWrite;
+const NetClose = @import("completion.zig").NetClose;
+const NetShutdown = @import("completion.zig").NetShutdown;
+const NetRecv = @import("completion.zig").NetRecv;
+const NetSend = @import("completion.zig").NetSend;
+const NetRecvFrom = @import("completion.zig").NetRecvFrom;
+const NetSendTo = @import("completion.zig").NetSendTo;
+const NetRecvMsg = @import("completion.zig").NetRecvMsg;
+const NetSendMsg = @import("completion.zig").NetSendMsg;
 const common = @import("backends/common.zig");
 const fs = @import("../os/fs.zig");
 const net = @import("../os/net.zig");
@@ -19,8 +27,8 @@ const net = @import("../os/net.zig");
 /// Execute a completion synchronously without an event loop.
 /// This is used when there's no async runtime available.
 ///
-/// Supports file and pipe operations (read/write use poll+I/O on POSIX).
-/// Network operations and timers are not supported.
+/// Supports file, pipe and socket operations (read/write use poll+I/O on POSIX).
+/// Network operations requiring the event loop (connect, accept, etc.) and timers are not supported.
 pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
     // Mark completion as having no loop
     c.loop = null;
@@ -66,21 +74,23 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .pipe_write => handlePipeWrite(c),
         .pipe_poll => @panic("Pipe poll not supported in blocking mode (requires event loop)"),
 
-        // Network operations require the event loop
+        // Socket operations
+        .net_close => handleNetClose(c),
+        .net_shutdown => handleNetShutdown(c),
+        .net_recv => handleNetRecv(c),
+        .net_send => handleNetSend(c),
+        .net_recvfrom => handleNetRecvFrom(c),
+        .net_sendto => handleNetSendTo(c),
+        .net_recvmsg => handleNetRecvMsg(c),
+        .net_sendmsg => handleNetSendMsg(c),
+
+        // Network operations requiring event loop
         .net_open,
         .net_bind,
         .net_listen,
         .net_connect,
         .net_accept,
-        .net_recv,
-        .net_send,
-        .net_recvfrom,
-        .net_sendto,
-        .net_recvmsg,
-        .net_sendmsg,
         .net_poll,
-        .net_shutdown,
-        .net_close,
         => @panic("Network operations not supported in blocking mode (requires event loop)"),
 
         // Timer and async operations require the event loop
@@ -156,6 +166,173 @@ fn handlePipeWrite(c: *Completion) void {
     // Now write - Windows blocks, POSIX should be ready
     if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
         c.setResult(.pipe_write, bytes_written);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket close operation
+fn handleNetClose(c: *Completion) void {
+    const data = c.cast(NetClose);
+    net.close(data.handle);
+    c.setResult(.net_close, {});
+}
+
+/// Helper to handle socket shutdown operation
+fn handleNetShutdown(c: *Completion) void {
+    const data = c.cast(NetShutdown);
+    if (net.shutdown(data.handle, data.how)) |_| {
+        c.setResult(.net_shutdown, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket recv operation
+fn handleNetRecv(c: *Completion) void {
+    const data = c.cast(NetRecv);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since sockets are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.IN,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now recv - Windows blocks, POSIX should have data ready
+    if (net.recv(data.handle, data.buffers.iovecs, data.flags)) |bytes_read| {
+        c.setResult(.net_recv, bytes_read);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket send operation
+fn handleNetSend(c: *Completion) void {
+    const data = c.cast(NetSend);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since sockets are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.OUT,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now send - Windows blocks, POSIX should be ready
+    if (net.send(data.handle, data.buffer.iovecs, data.flags)) |bytes_written| {
+        c.setResult(.net_send, bytes_written);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket recvfrom operation
+fn handleNetRecvFrom(c: *Completion) void {
+    const data = c.cast(NetRecvFrom);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since sockets are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.IN,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now recvfrom - Windows blocks, POSIX should have data ready
+    if (net.recvfrom(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_read| {
+        c.setResult(.net_recvfrom, bytes_read);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket sendto operation
+fn handleNetSendTo(c: *Completion) void {
+    const data = c.cast(NetSendTo);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since sockets are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.OUT,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now sendto - Windows blocks, POSIX should be ready
+    if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |bytes_written| {
+        c.setResult(.net_sendto, bytes_written);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket recvmsg operation
+fn handleNetRecvMsg(c: *Completion) void {
+    const data = c.cast(NetRecvMsg);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since sockets are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.IN,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now recvmsg - Windows blocks, POSIX should have data ready
+    if (net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |result| {
+        c.setResult(.net_recvmsg, result);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle socket sendmsg operation
+fn handleNetSendMsg(c: *Completion) void {
+    const data = c.cast(NetSendMsg);
+
+    if (builtin.os.tag != .windows) {
+        // POSIX: poll first since sockets are non-blocking
+        var pfd = [_]net.pollfd{.{
+            .fd = data.handle,
+            .events = net.POLL.OUT,
+            .revents = 0,
+        }};
+        if (net.poll(&pfd, -1)) |_| {} else |err| {
+            c.setError(err);
+            return;
+        }
+    }
+
+    // Now sendmsg - Windows blocks, POSIX should be ready
+    if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |bytes_written| {
+        c.setResult(.net_sendmsg, bytes_written);
     } else |err| {
         c.setError(err);
     }
