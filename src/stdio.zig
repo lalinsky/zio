@@ -83,7 +83,7 @@ fn concurrentImpl(userdata: ?*anyopaque, result_len: usize, result_alignment: st
 
 fn awaitOrCancel(userdata: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment, should_cancel: bool) void {
     _ = result_alignment;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const awaitable: *Awaitable = @ptrCast(@alignCast(any_future));
 
     // Request cancellation if needed
@@ -100,7 +100,7 @@ fn awaitOrCancel(userdata: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8,
     @memcpy(result, task_result);
 
     // Release the awaitable (decrements ref count, may destroy)
-    awaitable.release(rt);
+    awaitable.release();
 }
 
 fn awaitImpl(userdata: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8, result_alignment: std.mem.Alignment) void {
@@ -131,13 +131,13 @@ fn groupConcurrentImpl(userdata: ?*anyopaque, group: *Io.Group, context: []const
 
 fn groupAwaitImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) Io.Cancelable!void {
     _ = initial_token;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     return Group.fromStd(group).wait();
 }
 
 fn groupCancelImpl(userdata: ?*anyopaque, group: *Io.Group, initial_token: *anyopaque) void {
     _ = initial_token;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     Group.fromStd(group).cancel();
 }
 
@@ -177,7 +177,7 @@ fn futexWaitImpl(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout:
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
     const internal_timeout = ioTimeoutToTimeout(rt, timeout);
 
-    Futex.timedWait(rt, ptr, expected, internal_timeout) catch |err| switch (err) {
+    Futex.timedWait(ptr, expected, internal_timeout) catch |err| switch (err) {
         error.Timeout => return, // Timeout is not an error, just return void
         error.Canceled => return error.Canceled,
     };
@@ -189,18 +189,18 @@ fn futexWaitUncancelableImpl(userdata: ?*anyopaque, ptr: *const u32, expected: u
     rt.beginShield();
     defer rt.endShield();
 
-    Futex.wait(rt, ptr, expected) catch |err| switch (err) {
+    Futex.wait(ptr, expected) catch |err| switch (err) {
         error.Canceled => unreachable, // Shielded, should not happen
     };
 }
 
 fn futexWakeImpl(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    Futex.wake(rt, ptr, max_waiters);
+    _ = userdata;
+    Futex.wake(ptr, max_waiters);
 }
 
 fn dirCreateDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const mode = if (@hasDecl(Io.Dir.Permissions, "toMode")) permissions.toMode() else 0;
     var op = ev.DirCreateDir.init(dir.handle, sub_path, mode);
     try waitForIo(&op.c);
@@ -255,10 +255,10 @@ fn dirCreateDirPathOpenImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []cons
 }
 
 fn dirStatImpl(userdata: ?*anyopaque, dir: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_dir = zio_fs.Dir{ .fd = dir.handle };
 
-    const ev_stat = zio_dir.stat(rt) catch |err| switch (err) {
+    const ev_stat = zio_dir.stat() catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.AccessDenied => return error.AccessDenied,
         error.SystemResources => return error.SystemResources,
@@ -275,10 +275,10 @@ fn dirStatFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, opt
         return error.Unexpected;
     }
 
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_dir = zio_fs.Dir{ .fd = dir.handle };
 
-    const ev_stat = zio_dir.statPath(rt, sub_path) catch |err| switch (err) {
+    const ev_stat = zio_dir.statPath(sub_path) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.AccessDenied => return error.AccessDenied,
         error.SymLinkLoop => return error.SymLinkLoop,
@@ -293,7 +293,7 @@ fn dirStatFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, opt
 }
 
 fn dirAccessImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirAccess.init(dir.handle, sub_path, .{
         .read = options.read,
         .write = options.write,
@@ -308,7 +308,7 @@ fn dirCreateFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, f
     // Unsupported options
     if (flags.lock != .none or flags.lock_nonblocking) return error.Unexpected;
 
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_dir = zio_fs.Dir{ .fd = dir.handle };
 
     const ev_flags: os.fs.FileCreateFlags = .{
@@ -317,7 +317,7 @@ fn dirCreateFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, f
         .exclusive = flags.exclusive,
     };
 
-    const file = zio_dir.createFile(rt, sub_path, ev_flags) catch |err| switch (err) {
+    const file = zio_dir.createFile(sub_path, ev_flags) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.AccessDenied => return error.AccessDenied,
         error.PermissionDenied => return error.PermissionDenied,
@@ -341,7 +341,7 @@ fn dirCreateFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, f
         else => return error.Unexpected,
     };
 
-    return .{ .handle = file.fd };
+    return .{ .handle = file.fd, .flags = .{ .nonblocking = false } };
 }
 
 fn dirOpenFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, flags: Io.File.OpenFlags) Io.File.OpenError!Io.File {
@@ -350,7 +350,7 @@ fn dirOpenFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, fla
         return error.Unexpected;
     }
 
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_dir = zio_fs.Dir{ .fd = dir.handle };
 
     const ev_flags: os.fs.FileOpenFlags = .{
@@ -361,7 +361,7 @@ fn dirOpenFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, fla
         },
     };
 
-    const file = zio_dir.openFile(rt, sub_path, ev_flags) catch |err| switch (err) {
+    const file = zio_dir.openFile(sub_path, ev_flags) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.AccessDenied => return error.AccessDenied,
         error.PermissionDenied => return error.PermissionDenied,
@@ -385,11 +385,11 @@ fn dirOpenFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, fla
         else => return error.Unexpected,
     };
 
-    return .{ .handle = file.fd };
+    return .{ .handle = file.fd, .flags = .{ .nonblocking = false } };
 }
 
 fn dirOpenDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
 
     const flags: os.fs.DirOpenFlags = .{
         .follow_symlinks = options.follow_symlinks,
@@ -429,7 +429,7 @@ fn dirCloseImpl(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
 }
 
 fn dirReadImpl(userdata: ?*anyopaque, dr: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var entry_index: usize = 0;
 
     // Get the unreserved portion of buffer for syscall (on Windows, reserved space is at start)
@@ -495,49 +495,49 @@ fn stdFileKind(kind: os.fs.FileKind) Io.File.Kind {
 }
 
 fn dirRealPathImpl(userdata: ?*anyopaque, dir: Io.Dir, out_buffer: []u8) Io.Dir.RealPathError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirRealPath.init(dir.handle, out_buffer);
     try waitForIo(&op.c);
     return try op.getResult();
 }
 
 fn dirRealPathFileImpl(userdata: ?*anyopaque, dir: Io.Dir, path_name: []const u8, out_buffer: []u8) Io.Dir.RealPathFileError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirRealPathFile.init(dir.handle, path_name, out_buffer);
     try waitForIo(&op.c);
     return try op.getResult();
 }
 
 fn dirDeleteFileImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirDeleteFile.init(dir.handle, sub_path);
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn dirDeleteDirImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteDirError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirDeleteDir.init(dir.handle, sub_path);
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn dirRenameImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8) Io.Dir.RenameError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirRename.init(old_dir.handle, old_sub_path, new_dir.handle, new_sub_path);
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn dirRenamePreserveImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8) Io.Dir.RenamePreserveError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirRenamePreserve.init(old_dir.handle, old_sub_path, new_dir.handle, new_sub_path);
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn dirSymLinkImpl(userdata: ?*anyopaque, dir: Io.Dir, target_path: []const u8, sym_link_path: []const u8, flags: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirSymLink.init(dir.handle, target_path, sym_link_path, .{
         .is_directory = flags.is_directory,
     });
@@ -546,21 +546,21 @@ fn dirSymLinkImpl(userdata: ?*anyopaque, dir: Io.Dir, target_path: []const u8, s
 }
 
 fn dirReadLinkImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, buffer: []u8) Io.Dir.ReadLinkError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirReadLink.init(dir.handle, sub_path, buffer);
     try waitForIo(&op.c);
     return try op.getResult();
 }
 
 fn dirSetOwnerImpl(userdata: ?*anyopaque, dir: Io.Dir, uid: ?Io.File.Uid, gid: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirSetOwner.init(dir.handle, uid, gid);
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn dirSetFileOwnerImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, uid: ?Io.File.Uid, gid: ?Io.File.Gid, options: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirSetFileOwner.init(dir.handle, sub_path, uid, gid, .{
         .follow_symlinks = options.follow_symlinks,
     });
@@ -569,7 +569,7 @@ fn dirSetFileOwnerImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8,
 }
 
 fn dirSetPermissionsImpl(userdata: ?*anyopaque, dir: Io.Dir, permissions: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const mode = if (@hasDecl(Io.Dir.Permissions, "toMode")) permissions.toMode() else 0;
     var op = ev.DirSetPermissions.init(dir.handle, mode);
     try waitForIo(&op.c);
@@ -577,7 +577,7 @@ fn dirSetPermissionsImpl(userdata: ?*anyopaque, dir: Io.Dir, permissions: Io.Dir
 }
 
 fn dirSetFilePermissionsImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.File.Permissions, options: Io.Dir.SetFilePermissionsOptions) Io.Dir.SetFilePermissionsError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const mode = if (@hasDecl(Io.File.Permissions, "toMode")) permissions.toMode() else 0;
     var op = ev.DirSetFilePermissions.init(dir.handle, sub_path, mode, .{
         .follow_symlinks = options.follow_symlinks,
@@ -587,7 +587,7 @@ fn dirSetFilePermissionsImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []con
 }
 
 fn dirSetTimestampsImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.SetTimestampsOptions) Io.Dir.SetTimestampsError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirSetFileTimestamps.init(dir.handle, sub_path, .{
         .atime = timestampToNanos(options.access_timestamp),
         .mtime = timestampToNanos(options.modify_timestamp),
@@ -599,7 +599,7 @@ fn dirSetTimestampsImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8
 }
 
 fn dirHardLinkImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.DirHardLink.init(old_dir.handle, old_sub_path, new_dir.handle, new_sub_path, .{
         .follow_symlinks = options.follow_symlinks,
     });
@@ -608,7 +608,7 @@ fn dirHardLinkImpl(userdata: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const
 }
 
 fn dirCreateFileAtomicImpl(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = dir;
     _ = sub_path;
     _ = options;
@@ -644,10 +644,10 @@ fn evFileStatToStdIo(ev_stat: os.fs.FileStatInfo) Io.File.Stat {
 }
 
 fn fileStatImpl(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_file = zio_fs.File.fromFd(file.handle);
 
-    const ev_stat = zio_file.stat(rt) catch |err| switch (err) {
+    const ev_stat = zio_file.stat() catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.AccessDenied => return error.AccessDenied,
         error.SystemResources => return error.SystemResources,
@@ -682,7 +682,7 @@ fn fileCloseImpl(userdata: ?*anyopaque, files: []const Io.File) void {
 }
 
 fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize) Io.File.Writer.Error!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = header;
     _ = data;
@@ -693,7 +693,7 @@ fn fileWriteStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []const 
 }
 
 fn fileWritePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
 
     var splat_buf: [64]u8 = undefined;
     var slices: [zio_fs.max_vecs][]const u8 = undefined;
@@ -702,11 +702,11 @@ fn fileWritePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []const
     if (buf_len == 0) return 0;
 
     const zio_file = zio_fs.File.fromFd(file.handle);
-    return try zio_file.writeVec(rt, slices[0..buf_len], offset);
+    return try zio_file.writeVec(slices[0..buf_len], offset);
 }
 
 fn fileReadStreamingImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u8) Io.File.Reader.Error!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = data;
     // Cannot track position with bare file handle - Io.File is just a handle
@@ -714,13 +714,16 @@ fn fileReadStreamingImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u
 }
 
 fn fileReadPositionalImpl(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_file = zio_fs.File.fromFd(file.handle);
-    return try zio_file.readVec(rt, data, offset);
+    return zio_file.readVec(data, offset) catch |err| switch (err) {
+        error.BrokenPipe => return error.Unexpected,
+        else => |e| return e,
+    };
 }
 
 fn fileSeekByImpl(userdata: ?*anyopaque, file: Io.File, relative_offset: i64) Io.File.SeekError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = relative_offset;
     // Cannot seek without position tracking - Io.File is just a handle
@@ -728,7 +731,7 @@ fn fileSeekByImpl(userdata: ?*anyopaque, file: Io.File, relative_offset: i64) Io
 }
 
 fn fileSeekToImpl(userdata: ?*anyopaque, file: Io.File, absolute_offset: u64) Io.File.SeekError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = absolute_offset;
     // Cannot seek without position tracking - Io.File is just a handle
@@ -736,7 +739,7 @@ fn fileSeekToImpl(userdata: ?*anyopaque, file: Io.File, absolute_offset: u64) Io
 }
 
 fn nowImpl(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const ts = os.time.now(switch (clock) {
         .awake, .boot => .monotonic,
         .real => .realtime,
@@ -750,7 +753,7 @@ fn sleepImpl(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     const io = fromRuntime(rt);
 
     // Convert timeout to duration from now (handles none/duration/deadline cases)
-    const duration = (try timeout.toDurationFromNow(io)) orelse return;
+    const duration = timeout.toDurationFromNow(io) orelse return;
 
     // Convert Io.Duration to time.Duration
     const ns: i96 = duration.raw.nanoseconds;
@@ -783,13 +786,13 @@ fn zioIpToStdIo(addr: zio_net.IpAddress) Io.net.IpAddress {
 }
 
 fn netListenIpImpl(userdata: ?*anyopaque, address: Io.net.IpAddress, options: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Server {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_addr = stdIoIpToZio(address);
     const domain = os.net.Domain.fromPosix(zio_addr.any.family);
 
     // Open socket
     var open_op = ev.NetOpen.init(domain, .stream, .ip, .{});
-    try waitForIo(rt, &open_op.c);
+    try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| switch (err) {
         error.AccessDenied => return error.Unexpected,
         else => |e| return e,
@@ -806,7 +809,7 @@ fn netListenIpImpl(userdata: ?*anyopaque, address: Io.net.IpAddress, options: Io
     var bind_addr = zio_addr;
     var addr_len = zio_net.getSockAddrLen(&bind_addr.any);
     var bind_op = ev.NetBind.init(handle, &bind_addr.any, &addr_len);
-    try waitForIo(rt, &bind_op.c);
+    try waitForIo(&bind_op.c);
     bind_op.getResult() catch |err| switch (err) {
         error.AccessDenied,
         error.SymLinkLoop,
@@ -823,7 +826,7 @@ fn netListenIpImpl(userdata: ?*anyopaque, address: Io.net.IpAddress, options: Io
 
     // Listen
     var listen_op = ev.NetListen.init(handle, options.kernel_backlog);
-    try waitForIo(rt, &listen_op.c);
+    try waitForIo(&listen_op.c);
     listen_op.getResult() catch |err| switch (err) {
         error.OperationUnsupported,
         error.AlreadyConnected,
@@ -841,7 +844,7 @@ fn netListenIpImpl(userdata: ?*anyopaque, address: Io.net.IpAddress, options: Io
 }
 
 fn netAcceptImpl(userdata: ?*anyopaque, server: Io.net.Socket.Handle) Io.net.Server.AcceptError!Io.net.Stream {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var peer_addr: zio_net.Address = undefined;
     var peer_addr_len: os.net.socklen_t = @sizeOf(zio_net.Address);
 
@@ -873,13 +876,13 @@ fn netAcceptImpl(userdata: ?*anyopaque, server: Io.net.Socket.Handle) Io.net.Ser
 
 fn netBindIpImpl(userdata: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
     _ = options;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_addr = stdIoIpToZio(address.*);
     const domain = os.net.Domain.fromPosix(zio_addr.any.family);
 
     // Open socket
     var open_op = ev.NetOpen.init(domain, .dgram, .ip, .{});
-    try waitForIo(rt, &open_op.c);
+    try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| switch (err) {
         error.AccessDenied => return error.Unexpected,
         else => |e| return e,
@@ -889,7 +892,7 @@ fn netBindIpImpl(userdata: ?*anyopaque, address: *const Io.net.IpAddress, option
     var bind_addr = zio_addr;
     var addr_len = zio_net.getSockAddrLen(&bind_addr.any);
     var bind_op = ev.NetBind.init(handle, &bind_addr.any, &addr_len);
-    try waitForIo(rt, &bind_op.c);
+    try waitForIo(&bind_op.c);
     bind_op.getResult() catch |err| switch (err) {
         error.AccessDenied,
         error.SymLinkLoop,
@@ -912,13 +915,13 @@ fn netBindIpImpl(userdata: ?*anyopaque, address: *const Io.net.IpAddress, option
 
 fn netConnectIpImpl(userdata: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Stream {
     _ = options;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const zio_addr = stdIoIpToZio(address.*);
     const domain = os.net.Domain.fromPosix(zio_addr.any.family);
 
     // Open socket
     var open_op = ev.NetOpen.init(domain, .stream, .ip, .{});
-    try waitForIo(rt, &open_op.c);
+    try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| switch (err) {
         error.AccessDenied => return error.Unexpected,
         else => |e| return e,
@@ -927,7 +930,7 @@ fn netConnectIpImpl(userdata: ?*anyopaque, address: *const Io.net.IpAddress, opt
     // Connect
     const addr_len = zio_net.getSockAddrLen(&zio_addr.any);
     var connect_op = ev.NetConnect.init(handle, &zio_addr.any, addr_len);
-    try waitForIo(rt, &connect_op.c);
+    try waitForIo(&connect_op.c);
     connect_op.getResult() catch |err| switch (err) {
         error.SymLinkLoop,
         error.FileNotFound,
@@ -952,7 +955,7 @@ fn netConnectIpImpl(userdata: ?*anyopaque, address: *const Io.net.IpAddress, opt
 
 fn netListenUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress, options: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
     if (!zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
 
     // Convert Io.net.UnixAddress (path) to zio UnixAddress (sockaddr)
     const zio_addr = zio_net.UnixAddress.init(address.path) catch {
@@ -962,7 +965,7 @@ fn netListenUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress, 
 
     // Open socket
     var open_op = ev.NetOpen.init(.unix, .stream, .ip, .{});
-    try waitForIo(rt, &open_op.c);
+    try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| switch (err) {
         error.AccessDenied, error.ProtocolUnsupportedBySystem => return error.Unexpected,
         else => |e| return e,
@@ -972,7 +975,7 @@ fn netListenUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress, 
     var bind_addr = zio_addr;
     var addr_len = zio_net.getSockAddrLen(&bind_addr.any);
     var bind_op = ev.NetBind.init(handle, &bind_addr.any, &addr_len);
-    try waitForIo(rt, &bind_op.c);
+    try waitForIo(&bind_op.c);
     bind_op.getResult() catch |err| switch (err) {
         error.NameTooLong,
         error.InputOutput,
@@ -984,7 +987,7 @@ fn netListenUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress, 
 
     // Listen
     var listen_op = ev.NetListen.init(handle, options.kernel_backlog);
-    try waitForIo(rt, &listen_op.c);
+    try waitForIo(&listen_op.c);
     listen_op.getResult() catch |err| switch (err) {
         error.OperationUnsupported,
         error.AlreadyConnected,
@@ -998,7 +1001,7 @@ fn netListenUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress, 
 
 fn netConnectUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress) Io.net.UnixAddress.ConnectError!Io.net.Socket.Handle {
     if (!zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
 
     // Convert Io.net.UnixAddress (path) to zio UnixAddress (sockaddr)
     const zio_addr = zio_net.UnixAddress.init(address.path) catch {
@@ -1008,7 +1011,7 @@ fn netConnectUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress)
 
     // Open socket
     var open_op = ev.NetOpen.init(.unix, .stream, .ip, .{});
-    try waitForIo(rt, &open_op.c);
+    try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| switch (err) {
         error.AccessDenied, error.ProtocolUnsupportedBySystem => return error.Unexpected,
         else => |e| return e,
@@ -1017,7 +1020,7 @@ fn netConnectUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress)
     // Connect
     const addr_len = zio_net.getSockAddrLen(&zio_addr.any);
     var connect_op = ev.NetConnect.init(handle, &zio_addr.any, addr_len);
-    try waitForIo(rt, &connect_op.c);
+    try waitForIo(&connect_op.c);
     connect_op.getResult() catch |err| switch (err) {
         error.NameTooLong,
         error.ConnectionResetByPeer,
@@ -1037,7 +1040,7 @@ fn netConnectUnixImpl(userdata: ?*anyopaque, address: *const Io.net.UnixAddress)
 }
 
 fn netSendImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.OutgoingMessage, flags: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = handle;
     _ = messages;
     _ = flags;
@@ -1045,7 +1048,7 @@ fn netSendImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []
 }
 
 fn netReceiveImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, message_buffer: []Io.net.IncomingMessage, data_buffer: []u8, flags: Io.net.ReceiveFlags, timeout: Io.Timeout) struct { ?Io.net.Socket.ReceiveTimeoutError, usize } {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = handle;
     _ = message_buffer;
     _ = data_buffer;
@@ -1055,7 +1058,7 @@ fn netReceiveImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, message_b
 }
 
 fn netReadImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, data: [][]u8) Io.net.Stream.Reader.Error!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
 
     var iovecs: [zio_net.max_vecs]os.iovec = undefined;
     var op = ev.NetRecv.init(handle, .fromSlices(data, &iovecs), .{});
@@ -1074,7 +1077,7 @@ fn netReadImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, data: [][]u8
 }
 
 fn netWriteImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
 
     var splat_buf: [64]u8 = undefined;
     var slices: [zio_net.max_vecs][]const u8 = undefined;
@@ -1118,13 +1121,13 @@ fn netCloseImpl(userdata: ?*anyopaque, handles: []const Io.net.Socket.Handle) vo
 }
 
 fn netInterfaceNameResolveImpl(userdata: ?*anyopaque, name: *const Io.net.Interface.Name) Io.net.Interface.Name.ResolveError!Io.net.Interface {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = name;
     @panic("TODO");
 }
 
 fn netInterfaceNameImpl(userdata: ?*anyopaque, interface: Io.net.Interface) Io.net.Interface.NameError!Io.net.Interface.Name {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = interface;
     @panic("TODO");
 }
@@ -1136,7 +1139,7 @@ fn netLookupImpl(userdata: ?*anyopaque, hostname: Io.net.HostName, queue: *Io.Qu
 
     // Call the zio DNS lookup (uses thread pool internally)
     const zio_hostname = zio_net.HostName{ .bytes = hostname.bytes };
-    var iter = try zio_hostname.lookup(rt, .{
+    var iter = try zio_hostname.lookup(.{
         .port = options.port,
         .family = if (options.family) |f| switch (f) {
             .ip4 => .ipv4,
@@ -1168,14 +1171,14 @@ fn netLookupImpl(userdata: ?*anyopaque, hostname: Io.net.HostName, queue: *Io.Qu
 
 // File operations
 fn fileLengthImpl(userdata: ?*anyopaque, file: Io.File) Io.File.LengthError!u64 {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.FileSize.init(file.handle);
     try waitForIo(&op.c);
     return try op.getResult();
 }
 
 fn fileWriteFileStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, reader: *Io.File.Reader, count: Io.Limit) Io.File.Writer.WriteFileError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = header;
     _ = reader;
@@ -1184,7 +1187,7 @@ fn fileWriteFileStreamingImpl(userdata: ?*anyopaque, file: Io.File, header: []co
 }
 
 fn fileWriteFilePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []const u8, reader: *Io.File.Reader, count: Io.Limit, offset: u64) Io.File.WriteFilePositionalError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = header;
     _ = reader;
@@ -1194,46 +1197,46 @@ fn fileWriteFilePositionalImpl(userdata: ?*anyopaque, file: Io.File, header: []c
 }
 
 fn fileSyncImpl(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.FileSync.init(file.handle, .{});
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn fileIsTtyImpl(userdata: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const io = Io.Threaded.global_single_threaded.io();
     return io.vtable.fileIsTty(io.userdata, file);
 }
 
 fn fileEnableAnsiEscapeCodesImpl(userdata: ?*anyopaque, file: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const io = Io.Threaded.global_single_threaded.io();
     return io.vtable.fileEnableAnsiEscapeCodes(io.userdata, file);
 }
 
 fn fileSupportsAnsiEscapeCodesImpl(userdata: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const io = Io.Threaded.global_single_threaded.io();
     return io.vtable.fileSupportsAnsiEscapeCodes(io.userdata, file);
 }
 
 fn fileSetLengthImpl(userdata: ?*anyopaque, file: Io.File, length: u64) Io.File.SetLengthError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.FileSetSize.init(file.handle, length);
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn fileSetOwnerImpl(userdata: ?*anyopaque, file: Io.File, uid: ?Io.File.Uid, gid: ?Io.File.Gid) Io.File.SetOwnerError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.FileSetOwner.init(file.handle, uid, gid);
     try waitForIo(&op.c);
     try op.getResult();
 }
 
 fn fileSetPermissionsImpl(userdata: ?*anyopaque, file: Io.File, permissions: Io.File.Permissions) Io.File.SetPermissionsError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const mode = if (@hasDecl(Io.File.Permissions, "toMode")) permissions.toMode() else 0;
     var op = ev.FileSetPermissions.init(file.handle, mode);
     try waitForIo(&op.c);
@@ -1241,7 +1244,7 @@ fn fileSetPermissionsImpl(userdata: ?*anyopaque, file: Io.File, permissions: Io.
 }
 
 fn fileSetTimestampsImpl(userdata: ?*anyopaque, file: Io.File, options: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.FileSetTimestamps.init(file.handle, .{
         .atime = timestampToNanos(options.access_timestamp),
         .mtime = timestampToNanos(options.modify_timestamp),
@@ -1259,40 +1262,40 @@ fn timestampToNanos(ts: Io.File.SetTimestamp) ?i96 {
 }
 
 fn fileLockImpl(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = lock;
     @panic("TODO: fileLock");
 }
 
 fn fileTryLockImpl(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!bool {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = lock;
     @panic("TODO: fileTryLock");
 }
 
 fn fileUnlockImpl(userdata: ?*anyopaque, file: Io.File) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     @panic("TODO: fileUnlock");
 }
 
 fn fileDowngradeLockImpl(userdata: ?*anyopaque, file: Io.File) Io.File.DowngradeLockError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     @panic("TODO: fileDowngradeLock");
 }
 
 fn fileRealPathImpl(userdata: ?*anyopaque, file: Io.File, out_buffer: []u8) Io.File.RealPathError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.FileRealPath.init(file.handle, out_buffer);
     try waitForIo(&op.c);
     return try op.getResult();
 }
 
 fn fileHardLinkImpl(userdata: ?*anyopaque, file: Io.File, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.FileHardLink.init(file.handle, new_dir.handle, new_sub_path, .{
         .follow_symlinks = options.follow_symlinks,
     });
@@ -1301,103 +1304,103 @@ fn fileHardLinkImpl(userdata: ?*anyopaque, file: Io.File, new_dir: Io.Dir, new_s
 }
 
 fn processExecutableOpenImpl(userdata: ?*anyopaque, flags: Io.File.OpenFlags) std.process.OpenExecutableError!Io.File {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = flags;
     @panic("TODO: processExecutableOpen");
 }
 
 fn processExecutablePathImpl(userdata: ?*anyopaque, out_buffer: []u8) std.process.ExecutablePathError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const io = Io.Threaded.global_single_threaded.io();
     return io.vtable.processExecutablePath(io.userdata, out_buffer);
 }
 
 fn lockStderrImpl(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = mode;
     @panic("TODO: lockStderr");
 }
 
 fn tryLockStderrImpl(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = mode;
     return null;
 }
 
 fn unlockStderrImpl(userdata: ?*anyopaque) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     @panic("TODO: unlockStderr");
 }
 
 fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = buffer;
     @panic("TODO: processCurrentPath");
 }
 
 fn processSetCurrentDirImpl(userdata: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = dir;
     @panic("TODO: processSetCurrentDir");
 }
 
 fn processReplaceImpl(userdata: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = options;
     @panic("TODO: processReplace");
 }
 
 fn processReplacePathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = dir;
     _ = options;
     @panic("TODO: processReplacePath");
 }
 
 fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = options;
     @panic("TODO: processSpawn");
 }
 
 fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = dir;
     _ = options;
     @panic("TODO: processSpawnPath");
 }
 
 fn childWaitImpl(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = child;
     @panic("TODO: childWait");
 }
 
 fn childKillImpl(userdata: ?*anyopaque, child: *std.process.Child) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = child;
     @panic("TODO: childKill");
 }
 
 fn progressParentFileImpl(userdata: ?*anyopaque) std.Progress.ParentFileError!Io.File {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     @panic("TODO: progressParentFile");
 }
 
 fn randomImpl(userdata: ?*anyopaque, buffer: []u8) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const io = Io.Threaded.global_single_threaded.io();
     return io.vtable.random(io.userdata, buffer);
 }
 
 fn randomSecureImpl(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     const io = Io.Threaded.global_single_threaded.io();
     return io.vtable.randomSecure(io.userdata, buffer);
 }
 
 fn netWriteFileImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8, reader: *Io.File.Reader, count: Io.Limit) Io.net.Stream.Writer.WriteFileError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = handle;
     _ = header;
     _ = reader;
@@ -1406,39 +1409,39 @@ fn netWriteFileImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, header:
 }
 
 fn fileMemoryMapCreateImpl(userdata: ?*anyopaque, file: Io.File, options: Io.File.MemoryMap.CreateOptions) Io.File.MemoryMap.CreateError!Io.File.MemoryMap {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = file;
     _ = options;
     @panic("TODO: fileMemoryMapCreate");
 }
 
 fn fileMemoryMapDestroyImpl(userdata: ?*anyopaque, mm: *Io.File.MemoryMap) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = mm;
     @panic("TODO: fileMemoryMapDestroy");
 }
 
 fn fileMemoryMapSetLengthImpl(userdata: ?*anyopaque, mm: *Io.File.MemoryMap, new_length: usize) Io.File.MemoryMap.SetLengthError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = mm;
     _ = new_length;
     @panic("TODO: fileMemoryMapSetLength");
 }
 
 fn fileMemoryMapReadImpl(userdata: ?*anyopaque, mm: *Io.File.MemoryMap) Io.File.ReadPositionalError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = mm;
     @panic("TODO: fileMemoryMapRead");
 }
 
 fn fileMemoryMapWriteImpl(userdata: ?*anyopaque, mm: *Io.File.MemoryMap) Io.File.WritePositionalError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     _ = mm;
     @panic("TODO: fileMemoryMapWrite");
 }
 
 fn netShutdownImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    _ = userdata;
     var op = ev.NetShutdown.init(handle, switch (how) {
         .recv => .receive,
         .send => .send,
@@ -1448,7 +1451,45 @@ fn netShutdownImpl(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, how: Io.
     return try op.getResult();
 }
 
+fn operateImpl(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    _ = userdata;
+    _ = operation;
+    @panic("TODO: operate");
+}
+
+fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
+    _ = userdata;
+    _ = batch;
+    @panic("TODO: batchAwaitAsync");
+}
+
+fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) (Io.Cancelable || error{ ConcurrencyUnavailable, Timeout })!void {
+    _ = userdata;
+    _ = batch;
+    _ = timeout;
+    @panic("TODO: batchAwaitConcurrent");
+}
+
+fn batchCancelImpl(userdata: ?*anyopaque, batch: *Io.Batch) void {
+    _ = userdata;
+    _ = batch;
+    @panic("TODO: batchCancel");
+}
+
+fn clockResolutionImpl(userdata: ?*anyopaque, clock: Io.Clock) (error{ ClockUnavailable, Unexpected })!Io.Duration {
+    _ = userdata;
+    _ = clock;
+    @panic("TODO: clockResolution");
+}
+
+fn netSocketCreatePairImpl(userdata: ?*anyopaque, options: Io.net.Socket.CreatePairOptions) (error{ AccessDenied, AddressFamilyUnsupported, Canceled, OperationUnsupported, ProcessFdQuotaExceeded, ProtocolUnsupportedByAddressFamily, ProtocolUnsupportedBySystem, SocketModeUnsupported, SystemFdQuotaExceeded, SystemResources, Unexpected })![2]Io.net.Socket {
+    _ = userdata;
+    _ = options;
+    @panic("TODO: netSocketCreatePair");
+}
+
 pub const vtable = Io.VTable{
+    .operate = operateImpl,
     .async = asyncImpl,
     .concurrent = concurrentImpl,
     .await = awaitImpl,
@@ -1457,6 +1498,9 @@ pub const vtable = Io.VTable{
     .groupConcurrent = groupConcurrentImpl,
     .groupAwait = groupAwaitImpl,
     .groupCancel = groupCancelImpl,
+    .batchAwaitAsync = batchAwaitAsyncImpl,
+    .batchAwaitConcurrent = batchAwaitConcurrentImpl,
+    .batchCancel = batchCancelImpl,
     .recancel = recancelImpl,
     .swapCancelProtection = swapCancelProtectionImpl,
     .checkCancel = checkCancelImpl,
@@ -1535,6 +1579,7 @@ pub const vtable = Io.VTable{
     .random = randomImpl,
     .randomSecure = randomSecureImpl,
     .now = nowImpl,
+    .clockResolution = clockResolutionImpl,
     .sleep = sleepImpl,
     .netListenIp = netListenIpImpl,
     .netAccept = netAcceptImpl,
@@ -1552,6 +1597,7 @@ pub const vtable = Io.VTable{
     .netInterfaceNameResolve = netInterfaceNameResolveImpl,
     .netInterfaceName = netInterfaceNameImpl,
     .netLookup = netLookupImpl,
+    .netSocketCreatePair = netSocketCreatePairImpl,
 };
 
 pub fn fromRuntime(rt: *Runtime) Io {
