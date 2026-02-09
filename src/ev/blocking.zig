@@ -362,13 +362,14 @@ fn handleNetSendTo(c: *Completion) void {
 fn handleNetRecvMsg(c: *Completion) void {
     const data = c.cast(NetRecvMsg);
 
-    // Windows: not supported (recvmsg is POSIX-only, will panic in net.recvmsg)
+    // Windows: blocking recvmsg (emulated in net layer), no poll needed
     if (builtin.os.tag == .windows) {
-        _ = net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control) catch |err| {
+        if (net.recvmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |result| {
+            c.setResult(.net_recvmsg, result);
+        } else |err| {
             c.setError(err);
-            return;
-        };
-        unreachable;
+        }
+        return;
     }
 
     // POSIX: poll+recvmsg loop to handle race if multiple threads access same socket
@@ -395,13 +396,14 @@ fn handleNetRecvMsg(c: *Completion) void {
 fn handleNetSendMsg(c: *Completion) void {
     const data = c.cast(NetSendMsg);
 
-    // Windows: not supported (sendmsg is POSIX-only, will panic in net.sendmsg)
+    // Windows: blocking sendmsg (emulated in net layer), no poll needed
     if (builtin.os.tag == .windows) {
-        _ = net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control) catch |err| {
+        if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |bytes_written| {
+            c.setResult(.net_sendmsg, bytes_written);
+        } else |err| {
             c.setError(err);
-            return;
-        };
-        unreachable;
+        }
+        return;
     }
 
     // POSIX: poll+sendmsg loop to handle race if multiple threads access same socket
