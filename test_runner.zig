@@ -18,10 +18,32 @@ const Allocator = std.mem.Allocator;
 
 const BORDER = "=" ** 80;
 
+// Simple Timer for tracking test duration
+const Timer = struct {
+    started: std.Io.Timestamp,
+    io: std.Io,
+
+    fn start(io: std.Io) Timer {
+        const now_ts = std.Io.Timestamp.now(io, .awake);
+        return .{ .started = now_ts, .io = io };
+    }
+
+    fn reset(self: *Timer) void {
+        self.started = std.Io.Timestamp.now(self.io, .awake);
+    }
+
+    fn lap(self: *const Timer) u64 {
+        const now_ts = std.Io.Timestamp.now(self.io, .awake);
+        const elapsed = self.started.durationTo(now_ts);
+        return @intCast(elapsed.nanoseconds);
+    }
+};
+
 // Log capture for suppressing logs in passing tests
 const LogCapture = struct {
     capture_writer: ?*std.Io.Writer = null,
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
+    io: std.Io,
 
     pub fn logFn(
         self: *@This(),
@@ -30,8 +52,8 @@ const LogCapture = struct {
         comptime format: []const u8,
         args: anytype,
     ) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const scope_prefix = "(" ++ @tagName(scope) ++ "/" ++ @tagName(level) ++ "): ";
 
@@ -45,19 +67,19 @@ const LogCapture = struct {
     }
 
     pub fn startCapture(self: *@This(), writer: *std.Io.Writer) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         self.capture_writer = writer;
     }
 
     pub fn stopCapture(self: *@This()) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         self.capture_writer = null;
     }
 };
 
-var log_capture = LogCapture{};
+var log_capture: LogCapture = undefined;
 
 pub fn customLogFn(
     comptime level: std.log.Level,
@@ -71,16 +93,20 @@ pub fn customLogFn(
 // use in custom panic handler
 var current_test: ?[]const u8 = null;
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const allocator = gpa.allocator();
+    log_capture = .{
+        .capture_writer = null,
+        .mutex = .init,
+        .io = io,
+    };
 
-    var env = Env.init(allocator, init.environ);
+    var env = Env.init(allocator, init.minimal.environ);
     defer env.deinit(allocator);
 
-    var slowest = SlowTracker.init(allocator, 5);
+    var slowest = SlowTracker.init(allocator, 5, io);
     defer slowest.deinit();
 
     var pass: usize = 0;
@@ -318,10 +344,10 @@ const SlowTracker = struct {
     const SlowestQueue = std.PriorityDequeue(TestInfo, void, compareTiming);
     max: usize,
     slowest: SlowestQueue,
-    timer: std.time.Timer,
+    timer: Timer,
 
-    fn init(allocator: Allocator, count: u32) SlowTracker {
-        const timer = std.time.Timer.start() catch @panic("failed to start timer");
+    fn init(allocator: Allocator, count: u32, io: std.Io) SlowTracker {
+        const timer = Timer.start(io);
         var slowest = SlowestQueue.init(allocator, {});
         slowest.ensureTotalCapacity(count) catch @panic("OOM");
         return .{

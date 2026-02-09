@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const os = @import("root.zig");
 
 const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
@@ -211,7 +212,10 @@ const FutexLinux = struct {
             null,
             0,
         );
-        if (linux.E.init(rc) == .TIMEDOUT) return error.Timeout;
+        if (@as(isize, @bitCast(rc)) < 0) {
+            const err = @as(usize, @intCast(-@as(isize, @bitCast(rc))));
+            if (@as(linux.E, @enumFromInt(err)) == .TIMEDOUT) return error.Timeout;
+        }
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -1307,7 +1311,7 @@ test "Notify - timeout" {
     var notify = Notify.init();
 
     // Loop to handle spurious wakeups (e.g., stale EALREADY from previous tests)
-    const start = std.time.nanoTimestamp();
+    const start = os.time.now(.monotonic);
     while (true) {
         const result = notify.timedWait(0, .fromMilliseconds(50));
 
@@ -1327,7 +1331,8 @@ test "Notify - timeout" {
         }
     }
 
-    const elapsed = std.time.nanoTimestamp() - start;
+    const end = os.time.now(.monotonic);
+    const elapsed = end.toNanoseconds() - start.toNanoseconds();
     // Allow some slack for scheduling
     try std.testing.expect(elapsed >= 40 * std.time.ns_per_ms);
     try std.testing.expect(elapsed < 200 * std.time.ns_per_ms);
@@ -1497,7 +1502,7 @@ test "Condition - broadcast" {
     }
 
     // Brief sleep to ensure threads have entered kernel wait
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    // std.Thread.sleep(10 * std.time.ns_per_ms); // TODO: Zig 0.16 - need alternative sleep
 
     // Broadcast to all waiters
     mutex.lock();

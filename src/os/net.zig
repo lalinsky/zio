@@ -44,17 +44,21 @@ pub const has_unix_dgram_sockets = switch (builtin.os.tag) {
     else => true,
 };
 
-var wsa_init_once = std.once(wsaInit);
+const thread = @import("thread.zig");
 
-fn wsaInit() void {
-    if (builtin.os.tag == .windows) {
-        var wsa_data: windows.WSADATA = undefined;
-        _ = windows.WSAStartup(2 << 8 | 2, &wsa_data);
-    }
-}
+var wsa_init_mutex: thread.Mutex = .init();
+var wsa_initialized: bool = false;
 
 pub fn ensureWSAInitialized() void {
-    wsa_init_once.call();
+    if (builtin.os.tag == .windows) {
+        wsa_init_mutex.lock();
+        defer wsa_init_mutex.unlock();
+        if (!wsa_initialized) {
+            var wsa_data: windows.WSADATA = undefined;
+            _ = windows.WSAStartup(2 << 8 | 2, &wsa_data);
+            wsa_initialized = true;
+        }
+    }
 }
 
 pub const fd_t = switch (builtin.os.tag) {

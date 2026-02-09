@@ -735,14 +735,13 @@ pub const Runtime = struct {
     workers: std.ArrayList(Worker) = .empty,
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    futex_table: Futex.Table, // Global futex wait table
     old_sig_io: if (have_sig_io) std.posix.Sigaction else void = undefined,
     old_sig_pipe: if (have_sig_pipe) std.posix.Sigaction else void = undefined,
     have_signal_handler: bool = false,
 
     const Worker = struct {
         thread: std.Thread = undefined,
-        ready: std.Thread.ResetEvent = .unset,
+        ready: os.ResetEvent = .init(),
         err: ?anyerror = null,
         executor: Executor = undefined,
     };
@@ -858,9 +857,6 @@ pub const Runtime = struct {
 
         // Clean up task pool
         self.task_pool.deinit();
-
-        // Clean up futex table
-        self.futex_table.deinit(allocator);
 
         // Restore old signal handlers
         if (std.posix.Sigaction != void and self.have_signal_handler) {

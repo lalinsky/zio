@@ -34,6 +34,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .file_set_timestamps => common.handleFileSetTimestamps(c),
         .dir_create_dir => common.handleDirCreateDir(c, allocator),
         .dir_rename => common.handleDirRename(c, allocator),
+        .dir_rename_preserve => common.handleDirRenamePreserve(c, allocator),
         .dir_delete_file => common.handleDirDeleteFile(c, allocator),
         .dir_delete_dir => common.handleDirDeleteDir(c, allocator),
         .file_size => common.handleFileSize(c),
