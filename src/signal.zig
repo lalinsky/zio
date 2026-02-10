@@ -9,7 +9,6 @@ const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Timeout = @import("time.zig").Timeout;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("runtime/WaitNode.zig");
 const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
 const Waiter = @import("common.zig").Waiter;
@@ -40,7 +39,7 @@ const MAX_HANDLERS = 32;
 const HandlerEntry = struct {
     kind: std.atomic.Value(u8) = .init(NO_SIGNAL),
     counter: std.atomic.Value(usize) = .init(0),
-    waiters: WaitQueue(WaitNode) = .empty,
+    waiters: WaitQueue(Waiter) = .empty,
 };
 
 const HandlerRegistryUnix = struct {
@@ -187,8 +186,8 @@ fn signalHandlerUnix(signum: c_int) callconv(.c) void {
             _ = entry.counter.fetchAdd(1, .release);
 
             // Wake all waiting tasks
-            while (entry.waiters.pop()) |wait_node| {
-                wait_node.wake();
+            while (entry.waiters.pop()) |waiter| {
+                waiter.wake();
             }
         }
     }
@@ -210,8 +209,8 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
             _ = entry.counter.fetchAdd(1, .release);
 
             // Wake all waiting tasks
-            while (entry.waiters.pop()) |wait_node| {
-                wait_node.wake();
+            while (entry.waiters.pop()) |waiter| {
+                waiter.wake();
             }
 
             found_handler = true;
@@ -284,12 +283,12 @@ pub const Signal = struct {
         var waiter: Waiter = .init();
 
         // Add to wait queue
-        self.entry.waiters.push(&waiter.wait_node);
+        self.entry.waiters.push(&waiter);
 
         // Wait for signal, handling spurious wakeups internally
         waiter.wait(1, .allow_cancel) catch |err| {
             // On cancellation, try to remove from queue
-            const was_in_queue = self.entry.waiters.remove(&waiter.wait_node);
+            const was_in_queue = self.entry.waiters.remove(&waiter);
             if (!was_in_queue) {
                 // Already removed by signal delivery - wait for signal to complete
                 waiter.wait(1, .no_cancel);
@@ -323,7 +322,7 @@ pub const Signal = struct {
         var waiter: Waiter = .init();
 
         // Add to wait queue
-        self.entry.waiters.push(&waiter.wait_node);
+        self.entry.waiters.push(&waiter);
 
         // Set up timeout timer
         var timer = AutoCancel.init;
@@ -333,7 +332,7 @@ pub const Signal = struct {
         // Wait for signal, handling spurious wakeups internally
         waiter.wait(1, .allow_cancel) catch |err| {
             // On cancellation, try to remove from queue
-            const was_in_queue = self.entry.waiters.remove(&waiter.wait_node);
+            const was_in_queue = self.entry.waiters.remove(&waiter);
             if (!was_in_queue) {
                 // Already removed by signal delivery - wait for signal to complete
                 waiter.wait(1, .no_cancel);
@@ -351,23 +350,23 @@ pub const Signal = struct {
     /// Registers a wait node to be notified when the signal is received.
     /// This is part of the Future protocol for select().
     /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
-    pub fn asyncWait(self: *Signal, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *Signal, waiter: *Waiter) bool {
         // Fast path: signal already received
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return false;
         }
 
         // Add to wait queue
-        self.entry.waiters.push(wait_node);
+        self.entry.waiters.push(waiter);
         return true;
     }
 
-    /// Cancels a pending wait operation by removing the wait node.
+    /// Cancels a pending wait operation by removing the waiter.
     /// This is part of the Future protocol for select().
     /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Signal, wait_node: *WaitNode) bool {
+    pub fn asyncCancelWait(self: *Signal, waiter: *Waiter) bool {
         // Simply remove from queue - no need to wake another waiter since signals broadcast to all
-        return self.entry.waiters.remove(wait_node);
+        return self.entry.waiters.remove(waiter);
     }
 
     /// Gets the result value.

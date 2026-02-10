@@ -173,15 +173,6 @@ pub const AnyTask = struct {
         finished,
     };
 
-    pub const wait_node_vtable = WaitNode.VTable{
-        .wake = waitNodeWake,
-    };
-
-    fn waitNodeWake(wait_node: *WaitNode) void {
-        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
-        AnyTask.fromAwaitable(awaitable).wake();
-    }
-
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         std.debug.assert(awaitable.kind == .task);
         return @fieldParentPtr("awaitable", awaitable);
@@ -477,9 +468,7 @@ pub const AnyTask = struct {
             .state = .init(.new),
             .awaitable = .{
                 .kind = .task,
-                .wait_node = .{
-                    .vtable = &AnyTask.wait_node_vtable,
-                },
+                .wait_node = .{},
             },
             .coro = .{
                 .parent_context_ptr = .init(&executor.main_task.coro.context),

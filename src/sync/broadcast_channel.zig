@@ -7,7 +7,6 @@ const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
 const Barrier = @import("Barrier.zig");
 const select = @import("../select.zig").select;
 const Waiter = @import("../common.zig").Waiter;
@@ -32,7 +31,7 @@ const BroadcastChannelImpl = struct {
 
     consumers: SimpleQueue(BroadcastChannelConsumer) = .{},
     mutex: Mutex = .init,
-    wait_queue: SimpleWaitQueue(WaitNode) = .empty,
+    wait_queue: SimpleWaitQueue(Waiter) = .empty,
 
     closed: bool = false,
 
@@ -83,12 +82,12 @@ const BroadcastChannelImpl = struct {
                 return error.Closed;
             }
 
-            self.wait_queue.push(&waiter.wait_node);
+            self.wait_queue.push(&waiter);
             self.mutex.unlock();
 
             waiter.wait(1, .allow_cancel) catch |err| {
                 self.mutex.lockUncancelable();
-                const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+                const was_in_queue = self.wait_queue.remove(&waiter);
                 if (!was_in_queue) {
                     self.mutex.unlock();
                     waiter.wait(1, .no_cancel);
@@ -175,7 +174,7 @@ const AsyncReceiveImpl = struct {
         result: ?error{ Closed, Lagged }!void = null,
     };
 
-    pub fn asyncWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext, result_ptr: [*]u8) bool {
+    pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) bool {
         ctx.result_ptr = result_ptr;
         ctx.result = null;
 
@@ -209,15 +208,15 @@ const AsyncReceiveImpl = struct {
         }
 
         // Slow path: enqueue and wait
-        self.channel.wait_queue.push(wait_node);
+        self.channel.wait_queue.push(waiter);
         self.channel.mutex.unlock();
         return true;
     }
 
-    pub fn asyncCancelWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncCancelWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = ctx;
         self.channel.mutex.lockUncancelable();
-        const was_in_queue = self.channel.wait_queue.remove(wait_node);
+        const was_in_queue = self.channel.wait_queue.remove(waiter);
         self.channel.mutex.unlock();
         return was_in_queue;
     }
@@ -459,18 +458,18 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncWait(wait_node, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
+        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+            return self.impl.asyncWait(waiter, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
         }
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncCancelWait(wait_node, &ctx.impl_ctx);
+        pub fn asyncCancelWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+            return self.impl.asyncCancelWait(waiter, &ctx.impl_ctx);
         }
 
         /// Get the result of the receive operation.
-        /// Must only be called after asyncWait() returns false or the wait_node is woken.
+        /// Must only be called after asyncWait() returns false or the waiter is woken.
         pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
             try self.impl.getResult(&ctx.impl_ctx);
             return ctx.result;

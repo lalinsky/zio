@@ -55,10 +55,9 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
 const Waiter = @import("../common.zig").Waiter;
 
-wait_queue: WaitQueue(WaitNode) = .empty,
+wait_queue: WaitQueue(Waiter) = .empty,
 
 const Notify = @This();
 
@@ -75,8 +74,8 @@ pub const init: Notify = .{};
 /// at a time as resources become available.
 pub fn signal(self: *Notify) void {
     // Pop one waiter if available
-    if (self.wait_queue.pop()) |wait_node| {
-        wait_node.wake();
+    if (self.wait_queue.pop()) |waiter| {
+        waiter.wake();
     }
 }
 
@@ -88,8 +87,8 @@ pub fn signal(self: *Notify) void {
 /// This is useful for notifying multiple tasks about an event that affects them all.
 pub fn broadcast(self: *Notify) void {
     // Pop and wake all waiters
-    while (self.wait_queue.pop()) |wait_node| {
-        wait_node.wake();
+    while (self.wait_queue.pop()) |waiter| {
+        waiter.wake();
     }
 }
 
@@ -105,12 +104,12 @@ pub fn wait(self: *Notify) Cancelable!void {
     var waiter: Waiter = .init();
 
     // Push to wait queue
-    self.wait_queue.push(&waiter.wait_node);
+    self.wait_queue.push(&waiter);
 
     // Wait for signal, handling spurious wakeups internally
     waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter);
         if (!was_in_queue) {
             // We were already removed by signal() - wait for signal to complete
             waiter.wait(1, .no_cancel);
@@ -140,12 +139,12 @@ pub fn timedWait(self: *Notify, timeout: Timeout) (Timeoutable || Cancelable)!vo
     var waiter: Waiter = .init();
 
     // Push to wait queue
-    self.wait_queue.push(&waiter.wait_node);
+    self.wait_queue.push(&waiter);
 
     // Wait for signal or timeout, handling spurious wakeups internally
     waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter);
         if (!was_in_queue) {
             // Removed by signal() - wait for signal to complete before destroying waiter
             waiter.wait(1, .no_cancel);
@@ -159,7 +158,7 @@ pub fn timedWait(self: *Notify, timeout: Timeout) (Timeoutable || Cancelable)!vo
     };
 
     // Determine winner: can we remove ourselves from queue?
-    if (self.wait_queue.remove(&waiter.wait_node)) {
+    if (self.wait_queue.remove(&waiter)) {
         // We were still in queue - timer won
         return error.Timeout;
     }
@@ -182,16 +181,16 @@ pub fn getResult(self: *const Notify) void {
 /// Registers a wait node to be notified when signal() or broadcast() is called.
 /// This is part of the Future protocol for select().
 /// Always returns true since Notify has no persistent state (never pre-completed).
-pub fn asyncWait(self: *Notify, wait_node: *WaitNode) bool {
-    self.wait_queue.push(wait_node);
+pub fn asyncWait(self: *Notify, waiter: *Waiter) bool {
+    self.wait_queue.push(waiter);
     return true;
 }
 
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
 /// Returns true if removed, false if already removed by completion (wake in-flight).
-pub fn asyncCancelWait(self: *Notify, wait_node: *WaitNode) bool {
-    const was_in_queue = self.wait_queue.remove(wait_node);
+pub fn asyncCancelWait(self: *Notify, waiter: *Waiter) bool {
+    const was_in_queue = self.wait_queue.remove(waiter);
     if (!was_in_queue) {
         // We were already removed by signal() which will wake us.
         // Since we're being cancelled and won't process the signal,
@@ -395,7 +394,7 @@ test "Notify timedWait success" {
 
 test "Notify size and alignment" {
     // Should be the same size as WaitQueue (one pointer for head, tail stored in head.userdata)
-    try std.testing.expectEqual(@sizeOf(WaitQueue(WaitNode)), @sizeOf(Notify));
+    try std.testing.expectEqual(@sizeOf(WaitQueue(Waiter)), @sizeOf(Notify));
     _ = @alignOf(Notify);
 }
 

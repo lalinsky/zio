@@ -53,11 +53,10 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
 const Waiter = @import("../common.zig").Waiter;
 
 /// Wait queue with flag indicating whether event is set.
-wait_queue: WaitQueue(WaitNode) = .empty,
+wait_queue: WaitQueue(Waiter) = .empty,
 
 const ResetEvent = @This();
 
@@ -79,8 +78,8 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// already set have no effect.
 pub fn set(self: *ResetEvent) void {
     // Pop and wake all waiters while setting the flag
-    while (self.wait_queue.popAndSetFlag()) |wait_node| {
-        wait_node.wake();
+    while (self.wait_queue.popAndSetFlag()) |waiter| {
+        waiter.wake();
     }
 }
 
@@ -110,7 +109,7 @@ pub fn wait(self: *ResetEvent) Cancelable!void {
     var waiter: Waiter = .init();
 
     // Try to push to queue - only succeeds if event is not set (flag not set)
-    if (!self.wait_queue.pushUnlessFlag(&waiter.wait_node)) {
+    if (!self.wait_queue.pushUnlessFlag(&waiter)) {
         // Event was set, return immediately
         return;
     }
@@ -118,7 +117,7 @@ pub fn wait(self: *ResetEvent) Cancelable!void {
     // Wait for signal, handling spurious wakeups internally
     waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter);
         if (!was_in_queue) {
             // Removed by set() - wait for signal to complete before destroying waiter
             waiter.wait(1, .no_cancel);
@@ -150,7 +149,7 @@ pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable
     var waiter: Waiter = .init();
 
     // Try to push to queue - only succeeds if event is not set (flag not set)
-    if (!self.wait_queue.pushUnlessFlag(&waiter.wait_node)) {
+    if (!self.wait_queue.pushUnlessFlag(&waiter)) {
         // Event was set, return immediately
         return;
     }
@@ -158,7 +157,7 @@ pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable
     // Wait for signal or timeout, handling spurious wakeups internally
     waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter);
         if (!was_in_queue) {
             // Removed by set() - wait for signal to complete before destroying waiter
             waiter.wait(1, .no_cancel);
@@ -167,7 +166,7 @@ pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable
     };
 
     // Determine winner: can we remove ourselves from queue?
-    if (self.wait_queue.remove(&waiter.wait_node)) {
+    if (self.wait_queue.remove(&waiter)) {
         // We were still in queue - timer won
         return error.Timeout;
     }
@@ -196,16 +195,16 @@ pub fn getResult(self: *const ResetEvent) void {
 /// Registers a wait node to be notified when the event is set.
 /// This is part of the Future protocol for select().
 /// Returns false if the event is already set (no wait needed), true if added to queue.
-pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) bool {
+pub fn asyncWait(self: *ResetEvent, waiter: *Waiter) bool {
     // Try to push to queue - only succeeds if event is not set (flag not set)
-    return self.wait_queue.pushUnlessFlag(wait_node);
+    return self.wait_queue.pushUnlessFlag(waiter);
 }
 
 /// Cancels a pending wait operation by removing the wait node.
 /// This is part of the Future protocol for select().
 /// Returns true if removed, false if already removed by completion (wake in-flight).
-pub fn asyncCancelWait(self: *ResetEvent, wait_node: *WaitNode) bool {
-    return self.wait_queue.remove(wait_node);
+pub fn asyncCancelWait(self: *ResetEvent, waiter: *Waiter) bool {
+    return self.wait_queue.remove(waiter);
 }
 
 test "ResetEvent basic set/reset/isSet" {

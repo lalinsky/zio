@@ -7,7 +7,7 @@ const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
 const Cancelable = @import("../common.zig").Cancelable;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const Waiter = @import("../common.zig").Waiter;
 const meta = @import("../meta.zig");
 const select = @import("../select.zig");
 
@@ -72,7 +72,7 @@ pub fn Future(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        wait_queue: WaitQueue(WaitNode) = .empty,
+        wait_queue: WaitQueue(Waiter) = .empty,
         value: FutureResult(T) = .{},
 
         /// Initialize a new Future. Use like: `var future = Future(i32).init;`
@@ -88,8 +88,8 @@ pub fn Future(comptime T: type) type {
             }
 
             // Pop and wake all waiters while setting the flag
-            while (self.wait_queue.popAndSetFlag()) |wait_node| {
-                wait_node.wake();
+            while (self.wait_queue.popAndSetFlag()) |waiter| {
+                waiter.wake();
             }
         }
 
@@ -113,20 +113,20 @@ pub fn Future(comptime T: type) type {
         /// Registers a wait node to be notified when the future is set.
         /// This is part of the Future protocol for select().
         /// Returns false if the future is already set (no wait needed), true if added to queue.
-        pub fn asyncWait(self: *Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: *Self, waiter: *Waiter) bool {
             // Fast path: check if already set
             if (self.value.isSet()) {
                 return false;
             }
             // Try to push to queue - only succeeds if future is not done (flag not set)
-            return self.wait_queue.pushUnlessFlag(wait_node);
+            return self.wait_queue.pushUnlessFlag(waiter);
         }
 
         /// Cancels a pending wait operation by removing the wait node.
         /// This is part of the Future protocol for select().
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *Self, wait_node: *WaitNode) bool {
-            return self.wait_queue.remove(wait_node);
+        pub fn asyncCancelWait(self: *Self, waiter: *Waiter) bool {
+            return self.wait_queue.remove(waiter);
         }
     };
 }

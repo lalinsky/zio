@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 
 const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("WaitNode.zig");
+const Waiter = @import("../common.zig").Waiter;
 const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const SimpleQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
@@ -29,11 +30,11 @@ pub const Awaitable = struct {
 
     wait_node: WaitNode,
 
-    // WaitNodes waiting for the completion of this awaitable
+    // Waiters waiting for the completion of this awaitable
     // Uses WaitQueue flag to track completion:
     // - flag clear = not complete
     // - flag set = complete
-    waiting_list: WaitQueue(WaitNode) = .empty,
+    waiting_list: WaitQueue(Waiter) = .empty,
 
     // Group membership - group_node.group is null if standalone
     group_node: GroupNode = .{},
@@ -53,20 +54,20 @@ pub const Awaitable = struct {
     /// Registers a wait node to be notified when the awaitable completes.
     /// This is part of the Future protocol for select().
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
-    pub fn asyncWait(self: *Awaitable, wait_node: *WaitNode) bool {
+    pub fn asyncWait(self: *Awaitable, waiter: *Waiter) bool {
         // Fast path: check if already complete
         if (self.waiting_list.isFlagSet()) {
             return false;
         }
         // Try to push to queue - only succeeds if awaitable is not complete (flag not set)
-        return self.waiting_list.pushUnlessFlag(wait_node);
+        return self.waiting_list.pushUnlessFlag(waiter);
     }
 
     /// Cancels a pending wait operation by removing the wait node.
     /// This is part of the Future protocol for select().
     /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Awaitable, wait_node: *WaitNode) bool {
-        return self.waiting_list.remove(wait_node);
+    pub fn asyncCancelWait(self: *Awaitable, waiter: *Waiter) bool {
+        return self.waiting_list.remove(waiter);
     }
 
     /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
@@ -74,8 +75,8 @@ pub const Awaitable = struct {
     /// Can be called from any context.
     pub fn markComplete(self: *Awaitable) void {
         // Pop and wake all waiters while setting the flag
-        while (self.waiting_list.popAndSetFlag()) |wait_node| {
-            wait_node.wake();
+        while (self.waiting_list.popAndSetFlag()) |waiter| {
+            waiter.wake();
         }
     }
 

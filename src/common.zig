@@ -12,7 +12,6 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
-const WaitNode = @import("runtime/WaitNode.zig");
 const os = @import("os/root.zig");
 
 /// Error set for operations that can be cancelled
@@ -27,11 +26,13 @@ pub const Timeoutable = error{
 
 /// Stack-allocated waiter for async operations.
 ///
-/// This provides a common pattern for waiting with spurious wakeup handling.
-/// Tracks a signal count that is atomically incremented before waking the task.
+/// A tagged union with three variants:
+/// - `thread`: blocks an OS thread via futex
+/// - `task`: suspends a coroutine task
+/// - `select`: participates in a select() race, claims winner and signals parent
 ///
-/// For sync primitives, the wait_node is used in wait queues.
-/// For I/O operations, only the signaled field is used.
+/// For sync primitives, the waiter is placed directly in wait queues.
+/// For I/O operations, only the signal/notify mechanism is used.
 ///
 /// Usage:
 /// ```zig
@@ -40,67 +41,124 @@ pub const Timeoutable = error{
 /// try waiter.wait(1, .allow_cancel);
 /// ```
 pub const Waiter = struct {
-    wait_node: WaitNode,
-    task: ?*AnyTask,
-    notify: os.thread.Notify,
+    // Queue linkage (for participation in WaitQueue/SimpleWaitQueue)
+    prev: ?*Waiter = null,
+    next: ?*Waiter = null,
+    in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+    userdata: usize = undefined,
 
-    const vtable: WaitNode.VTable = .{
-        .wake = wakeImpl,
+    data: Data,
+
+    pub const no_winner = std.math.maxInt(usize);
+
+    pub const Data = union(enum) {
+        thread: Thread,
+        task: Task,
+        select: Select,
+    };
+
+    pub const Thread = struct {
+        notify: os.thread.Notify,
+    };
+
+    pub const Task = struct {
+        ref: *AnyTask,
+        notify: os.thread.Notify,
+    };
+
+    pub const Select = struct {
+        parent: *Waiter,
+        winner: *std.atomic.Value(usize),
+        index: usize,
     };
 
     pub fn init() Waiter {
-        return .{
-            .wait_node = .{ .vtable = &vtable },
-            .task = getCurrentTaskOrNull(),
-            .notify = .init(),
+        const task_or_null = getCurrentTaskOrNull();
+        if (task_or_null) |task| {
+            return .{ .data = .{ .task = .{ .ref = task, .notify = .init() } } };
+        } else {
+            return .{ .data = .{ .thread = .{ .notify = .init() } } };
+        }
+    }
+
+    pub fn initSelect(parent: *Waiter, winner: *std.atomic.Value(usize), index: usize) Waiter {
+        return .{ .data = .{ .select = .{ .parent = parent, .winner = winner, .index = index } } };
+    }
+
+    /// Wake this waiter. Dispatches based on waiter kind.
+    pub fn wake(self: *Waiter) void {
+        switch (self.data) {
+            .select => |s| {
+                _ = s.winner.cmpxchgStrong(no_winner, s.index, .acq_rel, .acquire);
+                s.parent.signal();
+            },
+            else => self.signal(),
+        }
+    }
+
+    /// Signal this waiter (thread or task variant only).
+    /// Increments the signal count and wakes the task or OS thread.
+    pub fn signal(self: *Waiter) void {
+        switch (self.data) {
+            .task => |*t| {
+                _ = t.notify.state.fetchAdd(1, .release);
+                t.ref.wake();
+            },
+            .thread => |*t| {
+                t.notify.signal();
+            },
+            .select => unreachable,
+        }
+    }
+
+    /// Try to claim this waiter for a select operation.
+    /// Returns true if claimed (or not in a select), false if another op won.
+    pub fn tryClaim(self: *Waiter) bool {
+        return switch (self.data) {
+            .select => |s| s.winner.cmpxchgStrong(no_winner, s.index, .acq_rel, .acquire) == null,
+            else => true,
         };
     }
 
-    /// Recover Waiter pointer from embedded WaitNode.
-    /// Only valid for WaitNodes that are part of a Waiter.
-    pub inline fn fromWaitNode(wait_node: *WaitNode) *Waiter {
-        if (std.debug.runtime_safety) {
-            std.debug.assert(wait_node.vtable == &vtable);
-        }
-        return @alignCast(@fieldParentPtr("wait_node", wait_node));
+    /// Check if this waiter won its select.
+    /// Returns true if won (or not in a select).
+    pub fn didWin(self: *Waiter) bool {
+        return switch (self.data) {
+            .select => |s| s.winner.load(.acquire) == s.index,
+            else => true,
+        };
     }
 
-    /// Signal this waiter and wake the task.
-    /// Increments the signal count and wakes the task.
-    pub fn signal(self: *Waiter) void {
-        if (self.task) |task| {
-            _ = self.notify.state.fetchAdd(1, .release);
-            task.wake();
-        } else {
-            self.notify.signal();
-        }
-    }
-
-    fn wakeImpl(wait_node: *WaitNode) void {
-        fromWaitNode(wait_node).signal();
+    /// Get the task reference, or null if this is a thread waiter.
+    pub fn taskOrNull(self: *Waiter) ?*AnyTask {
+        return switch (self.data) {
+            .task => |t| t.ref,
+            .thread => null,
+            .select => unreachable,
+        };
     }
 
     /// Wait for at least `expected` signals, handling spurious wakeups internally.
     pub fn wait(self: *Waiter, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        if (self.task) |task| {
-            return self.waitTask(task, expected, cancel_mode);
-        } else {
-            return self.waitFutex(expected);
+        switch (self.data) {
+            .task => |*t| return waitTask(&t.notify, t.ref, expected, cancel_mode),
+            .thread => |*t| return waitFutex(&t.notify, expected),
+            .select => unreachable,
         }
     }
 
-    fn waitFutex(self: *Waiter, expected: u32) void {
+    fn waitFutex(notify: *os.thread.Notify, expected: u32) void {
         while (true) {
-            const current = self.notify.state.load(.acquire);
+            const current = notify.state.load(.acquire);
             if (current >= expected) return;
-            self.notify.wait(current);
+            notify.wait(current);
         }
     }
 
-    fn waitTask(self: *Waiter, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    fn waitTask(notify: *os.thread.Notify, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         task.state.store(.preparing_to_wait, .release);
 
-        var current = self.notify.state.load(.acquire);
+        var current = notify.state.load(.acquire);
         if (current >= expected) {
             task.state.store(.ready, .release);
             return;
@@ -113,7 +171,7 @@ pub const Waiter = struct {
                 task.yield(.park, .no_cancel);
             }
 
-            current = self.notify.state.load(.acquire);
+            current = notify.state.load(.acquire);
             if (current >= expected) {
                 return;
             }
@@ -121,14 +179,14 @@ pub const Waiter = struct {
         }
     }
 
-    fn timedWaitFutex(self: *Waiter, expected: u32, timeout: Timeout) void {
+    fn timedWaitFutex(notify: *os.thread.Notify, expected: u32, timeout: Timeout) void {
         if (timeout == .none) {
-            return self.waitFutex(expected);
+            return waitFutex(notify, expected);
         }
 
         const deadline = timeout.toDeadline();
         while (true) {
-            const current = self.notify.state.load(.acquire);
+            const current = notify.state.load(.acquire);
             if (current >= expected) {
                 return;
             }
@@ -136,13 +194,13 @@ pub const Waiter = struct {
             if (remaining.value <= 0) {
                 return;
             }
-            self.notify.timedWait(current, remaining) catch return;
+            notify.timedWait(current, remaining) catch return;
         }
     }
 
-    fn timedWaitTask(self: *Waiter, task: *AnyTask, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    fn timedWaitTask(self: *Waiter, notify: *os.thread.Notify, task: *AnyTask, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (timeout == .none) {
-            return self.waitTask(task, expected, cancel_mode);
+            return waitTask(notify, task, expected, cancel_mode);
         }
 
         var timer: ev.Timer = .init(timeout);
@@ -152,17 +210,17 @@ pub const Waiter = struct {
         task.getExecutor().loop.setTimer(&timer, timeout);
         defer timer.c.loop.?.clearTimer(&timer);
 
-        return self.waitTask(task, expected, cancel_mode);
+        return waitTask(notify, task, expected, cancel_mode);
     }
 
     /// Wait for at least `expected` signals with a timeout.
     /// The caller must check their condition to determine if timeout actually won
     /// (e.g., by trying to remove from a wait queue).
     pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        if (self.task) |task| {
-            return self.timedWaitTask(task, expected, timeout, cancel_mode);
-        } else {
-            return self.timedWaitFutex(expected, timeout);
+        switch (self.data) {
+            .task => |*t| return self.timedWaitTask(&t.notify, t.ref, expected, timeout, cancel_mode),
+            .thread => |*t| return timedWaitFutex(&t.notify, expected, timeout),
+            .select => unreachable,
         }
     }
 
@@ -190,7 +248,7 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     };
 
     // Blocking path: Execute synchronously without event loop
-    const task = waiter.task orelse {
+    const task = waiter.taskOrNull() orelse {
         // TODO: Don't use std.heap.smp_allocator - it should be passed as a parameter
         ev.executeBlocking(c, std.heap.smp_allocator);
         return;
@@ -233,7 +291,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     };
 
     // Blocking path: Execute synchronously without event loop
-    const task = waiter.task orelse {
+    const task = waiter.taskOrNull() orelse {
         // TODO: Don't use std.heap.smp_allocator - it should be passed as a parameter
         ev.executeBlocking(c, std.heap.smp_allocator);
         return;
@@ -300,9 +358,7 @@ test "timedWaitForIo: completes before timeout" {
 test "Waiter: futex-based timed wait with timeout" {
     // Create waiter without task (blocking context)
     var waiter: Waiter = .{
-        .wait_node = .{ .vtable = &Waiter.vtable },
-        .task = null,
-        .notify = .init(),
+        .data = .{ .thread = .{ .notify = .init() } },
     };
 
     var timer = Stopwatch.start();
@@ -337,8 +393,8 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
         }
 
         fn completionFn(completion_ctx: ?*anyopaque, _: *ev.Work) void {
-            const waiter: *Waiter = @ptrCast(@alignCast(completion_ctx.?));
-            waiter.signal();
+            const waiter_ptr: *Waiter = @ptrCast(@alignCast(completion_ctx.?));
+            waiter_ptr.signal();
         }
     };
 
@@ -346,7 +402,7 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
     var waiter: Waiter = .init();
 
     // If not in a task context, just run the function directly
-    const task = waiter.task orelse {
+    const task = waiter.taskOrNull() orelse {
         return @call(.auto, func, args);
     };
 

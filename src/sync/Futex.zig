@@ -129,7 +129,7 @@ pub fn timedWait(ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable ||
     const address = @intFromPtr(ptr);
     const bucket = getBucket(address);
 
-    // Use a stack-allocated waiter with its own WaitNode
+    // Use a stack-allocated waiter
     var futex_waiter = FutexWaiter{
         .waiter = Waiter.init(),
         .address = address,

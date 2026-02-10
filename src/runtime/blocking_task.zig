@@ -7,7 +7,6 @@ const ev = @import("../ev/root.zig");
 
 const Runtime = @import("../runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
-const WaitNode = @import("WaitNode.zig");
 const Closure = @import("task.zig").Closure;
 const finishTask = @import("task.zig").finishTask;
 const Group = @import("group.zig").Group;
@@ -24,8 +23,6 @@ pub const AnyBlockingTask = struct {
 
     // Simple cancellation flag for blocking tasks
     user_canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-    pub const wait_node_vtable = WaitNode.VTable{};
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
@@ -84,9 +81,7 @@ pub const AnyBlockingTask = struct {
         self.* = .{
             .awaitable = .{
                 .kind = .blocking_task,
-                .wait_node = .{
-                    .vtable = &AnyBlockingTask.wait_node_vtable,
-                },
+                .wait_node = .{},
             },
             .work = ev.Work.init(workFunc, self),
             .runtime = runtime,

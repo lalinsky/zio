@@ -836,7 +836,7 @@ pub const MutexNotify = struct {
 
         fn init() Waiter {
             return .{
-                .wait_node = .{ .vtable = &.{} },
+                .wait_node = .{},
                 .notify = Notify.init(),
             };
         }
@@ -1011,7 +1011,7 @@ const ConditionNotify = struct {
 
         fn init() Waiter {
             return .{
-                .wait_node = .{ .vtable = &.{} },
+                .wait_node = .{},
                 .notify = Notify.init(),
             };
         }

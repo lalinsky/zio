@@ -27,7 +27,6 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
-const WaitNode = @import("../runtime/WaitNode.zig");
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const Waiter = @import("../common.zig").Waiter;
 
@@ -36,7 +35,7 @@ const Mutex = @This();
 /// FIFO wait queue with lock state encoded in flag:
 /// - flag set = unlocked
 /// - flag clear = locked (with or without waiters)
-queue: WaitQueue(WaitNode) = .empty_flagged,
+queue: WaitQueue(Waiter) = .empty_flagged,
 
 /// Creates a new unlocked mutex.
 pub const init: Mutex = .{};
@@ -72,7 +71,7 @@ pub fn lock(self: *Mutex) Cancelable!void {
     var waiter: Waiter = .init();
 
     // Try to clear flag (acquire lock), or push to queue
-    const result = self.queue.pushOrClearFlag(&waiter.wait_node);
+    const result = self.queue.pushOrClearFlag(&waiter);
     if (result == .flag_cleared) {
         // Mutex was unlocked, we acquired it
         return;
@@ -81,7 +80,7 @@ pub fn lock(self: *Mutex) Cancelable!void {
     // Wait for lock, handling spurious wakeups internally
     waiter.wait(1, .allow_cancel) catch |err| {
         // Cancellation - try to remove ourselves from queue
-        if (!self.queue.remove(&waiter.wait_node)) {
+        if (!self.queue.remove(&waiter)) {
             // Already inherited the lock - wait for signal to complete, then unlock
             waiter.wait(1, .no_cancel);
             self.unlock();
@@ -114,7 +113,7 @@ pub fn lockUncancelable(self: *Mutex) void {
     var waiter: Waiter = .init();
 
     // Try to clear flag (acquire lock), or push to queue
-    const result = self.queue.pushOrClearFlag(&waiter.wait_node);
+    const result = self.queue.pushOrClearFlag(&waiter);
     if (result == .flag_cleared) {
         // Mutex was unlocked, we acquired it
         return;
@@ -137,8 +136,8 @@ pub fn lockUncancelable(self: *Mutex) void {
 /// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex) void {
     // Pop one waiter (they inherit the lock, flag stays clear) or set flag (unlock)
-    if (self.queue.popOrSetFlag()) |wait_node| {
-        Waiter.fromWaitNode(wait_node).signal();
+    if (self.queue.popOrSetFlag()) |waiter| {
+        waiter.signal();
     }
 }
 

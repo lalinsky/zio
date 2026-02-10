@@ -10,11 +10,7 @@ const Cancelable = @import("common.zig").Cancelable;
 const Waiter = @import("common.zig").Waiter;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Awaitable = @import("runtime/awaitable.zig").Awaitable;
-const WaitNode = @import("runtime/WaitNode.zig");
 const meta = @import("meta.zig");
-
-/// Sentinel value indicating no winner has been selected yet
-const NO_WINNER = std.math.maxInt(usize);
 
 // Future protocol - Any type implementing these methods can be used with select():
 //
@@ -27,8 +23,8 @@ const NO_WINNER = std.math.maxInt(usize);
 //     asyncWait/asyncCancelWait. Useful for storing completions, results, or other
 //     data that varies per wait operation.
 //
-//   fn asyncWait(self: *Self, wait_node: *WaitNode) bool           // if WaitContext == void
-//   fn asyncWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
+//   fn asyncWait(self: *Self, waiter: *Waiter) bool           // if WaitContext == void
+//   fn asyncWait(self: *Self, waiter: *Waiter, ctx: *WaitContext) bool  // if WaitContext != void
 //     Register for notification when this future completes.
 //
 //     If WaitContext != void, the ctx parameter points to caller-allocated per-wait state
@@ -36,27 +32,27 @@ const NO_WINNER = std.math.maxInt(usize);
 //
 //     Returns:
 //       - false: Operation already complete (fast path). Result is available via getResult().
-//                The wait_node was NOT added to any queue.
-//       - true: Operation pending (slow path). The wait_node was added to an internal wait
-//               queue and will be woken via wait_node.wake() when the operation completes.
+//                The waiter was NOT added to any queue.
+//       - true: Operation pending (slow path). The waiter was added to an internal wait
+//               queue and will be woken via waiter.wake() when the operation completes.
 //
 //     Guarantees:
 //       - If returns false, getResult() can be called immediately
-//       - If returns true, wait_node.wake() will be called exactly once when complete
+//       - If returns true, waiter.wake() will be called exactly once when complete
 //       - Thread-safe: can be called from any thread
-//       - The ctx pointer (if present) remains valid until asyncCancelWait() or wait_node.wake()
+//       - The ctx pointer (if present) remains valid until asyncCancelWait() or waiter.wake()
 //
-//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode) bool     // if WaitContext == void
-//   fn asyncCancelWait(self: *Self, wait_node: *WaitNode, ctx: *WaitContext) bool  // if WaitContext != void
-//     Cancel a pending wait operation by removing the wait_node from internal queues.
+//   fn asyncCancelWait(self: *Self, waiter: *Waiter) bool     // if WaitContext == void
+//   fn asyncCancelWait(self: *Self, waiter: *Waiter, ctx: *WaitContext) bool  // if WaitContext != void
+//     Cancel a pending wait operation by removing the waiter from internal queues.
 //
 //     Must be called if asyncWait() returned true and the caller no longer wants to wait
 //     (e.g., select() chose a different future).
 //
 //     Returns:
-//       - true: Successfully removed from queue. The future will not wake this wait_node.
+//       - true: Successfully removed from queue. The future will not wake this waiter.
 //       - false: Already removed by completion. The future has committed to waking this
-//                wait_node (wake is in-flight or already happened).
+//                waiter (wake is in-flight or already happened).
 //
 //     For queuing operations (Channel, Notify), when returning false the implementation
 //     must transfer the wakeup to another waiter to avoid losing the signal/item.
@@ -69,7 +65,7 @@ const NO_WINNER = std.math.maxInt(usize);
 //   fn getResult(self: *const Self, ctx: *WaitContext) Result                      // if WaitContext != void
 //     Retrieve the result of the completed operation.
 //
-//     Must only be called after asyncWait() returns false or after wait_node.wake() is called.
+//     Must only be called after asyncWait() returns false or after waiter.wake() is called.
 //
 //     Returns: The result value. For operations that can fail, Result may be an error union
 //              (e.g., error{ChannelClosed}!T).
@@ -209,61 +205,6 @@ test "SelectResult: result types" {
     _ = Select{ .future2 = 32 };
 }
 
-// SelectWaiter - used by Runtime.select to wait on multiple handles
-pub const SelectWaiter = struct {
-    wait_node: WaitNode,
-    parent: *Waiter,
-    winner: *std.atomic.Value(usize),
-    index: usize,
-
-    pub const wait_node_vtable = WaitNode.VTable{
-        .wake = waitNodeWake,
-    };
-
-    pub fn init(parent: *Waiter, winner: *std.atomic.Value(usize), index: usize) SelectWaiter {
-        return .{
-            .wait_node = .{
-                .vtable = &wait_node_vtable,
-            },
-            .parent = parent,
-            .winner = winner,
-            .index = index,
-        };
-    }
-
-    /// Try to claim a wait node via its SelectWaiter (if any).
-    /// Returns true if claimed (or not in a select), false if another op won.
-    /// Used by channel operations to atomically claim a waiting receiver/sender.
-    pub fn tryClaim(node: *WaitNode) bool {
-        if (node.vtable == &wait_node_vtable) {
-            const self: *SelectWaiter = @fieldParentPtr("wait_node", node);
-            return self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire) == null;
-        }
-        return true; // Not in a select, always claimable
-    }
-
-    /// Check if a wait node won its select (was claimed).
-    /// Returns true if won (or not in a select).
-    pub fn didWin(node: *WaitNode) bool {
-        if (node.vtable == &wait_node_vtable) {
-            const self: *SelectWaiter = @fieldParentPtr("wait_node", node);
-            return self.winner.load(.acquire) == self.index;
-        }
-        return true; // Not in a select, always won
-    }
-
-    fn waitNodeWake(wait_node: *WaitNode) void {
-        const self: *SelectWaiter = @fieldParentPtr("wait_node", wait_node);
-
-        // Try to claim winner slot with our index (may already be claimed by channel)
-        _ = self.winner.cmpxchgStrong(NO_WINNER, self.index, .acq_rel, .acquire);
-
-        // Always signal parent - needed for both winner notification and
-        // cleanup synchronization (waiting for in-flight wakes to complete)
-        self.parent.signal();
-    }
-};
-
 /// Wait for multiple futures simultaneously and return whichever completes first.
 ///
 /// `futures` is a struct with each field being either:
@@ -296,10 +237,10 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         checkSelfWait(task, @field(futures, field.name));
     }
 
-    // Winner tracking: NO_WINNER means no winner yet
-    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    // Winner tracking: Waiter.no_winner means no winner yet
+    var winner: std.atomic.Value(usize) = .init(Waiter.no_winner);
 
-    // Parent waiter that SelectWaiters will signal when they win
+    // Parent waiter that select waiters will signal when they win
     var waiter = Waiter.init();
 
     // Allocate WaitContext struct on stack for futures that need per-wait state
@@ -307,9 +248,9 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     var contexts: ContextsType = .{};
 
     // Create waiter structures on the stack
-    var select_waiters: [fields.len]SelectWaiter = undefined;
+    var select_waiters: [fields.len]Waiter = undefined;
     inline for (&select_waiters, 0..) |*sw, i| {
-        sw.* = SelectWaiter.init(&waiter, &winner, i);
+        sw.* = Waiter.initSelect(&waiter, &winner, i);
     }
 
     // Track how many futures we've registered with (for cleanup).
@@ -328,9 +269,9 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
             if (i < registered_count and winner_index != i) {
                 var future = @field(futures, field.name);
                 const was_removed = if (comptime hasWaitContext(field.type))
-                    future.asyncCancelWait(&select_waiters[i].wait_node, &@field(contexts, field.name))
+                    future.asyncCancelWait(&select_waiters[i], &@field(contexts, field.name))
                 else
-                    future.asyncCancelWait(&select_waiters[i].wait_node);
+                    future.asyncCancelWait(&select_waiters[i]);
 
                 if (was_removed) {
                     // Successfully removed from queue - won't signal
@@ -347,9 +288,9 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     inline for (fields, 0..) |field, i| {
         const future = @field(futures, field.name);
         const waiting = if (comptime hasWaitContext(field.type))
-            future.asyncWait(&select_waiters[i].wait_node, &@field(contexts, field.name))
+            future.asyncWait(&select_waiters[i], &@field(contexts, field.name))
         else
-            future.asyncWait(&select_waiters[i].wait_node);
+            future.asyncWait(&select_waiters[i]);
 
         if (!waiting) {
             winner.store(i, .release);
@@ -394,12 +335,12 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
         @panic("selectAwaitables: too many awaitables (max 64)");
     }
 
-    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var winner: std.atomic.Value(usize) = .init(Waiter.no_winner);
     var waiter = Waiter.init();
-    var select_waiters: [max_awaitables]SelectWaiter = undefined;
+    var select_waiters: [max_awaitables]Waiter = undefined;
 
     for (select_waiters[0..awaitables.len], 0..) |*sw, i| {
-        sw.* = SelectWaiter.init(&waiter, &winner, i);
+        sw.* = Waiter.initSelect(&waiter, &winner, i);
     }
 
     // Only incremented when asyncWait returns true (future is pending).
@@ -413,7 +354,7 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
         var expected: u32 = @intCast(registered_count);
         for (awaitables[0..registered_count], 0..) |awaitable, i| {
             if (winner_index != i) {
-                const was_removed = awaitable.asyncCancelWait(&select_waiters[i].wait_node);
+                const was_removed = awaitable.asyncCancelWait(&select_waiters[i]);
                 if (was_removed) {
                     // Successfully removed from queue - won't signal
                     expected -= 1;
@@ -426,7 +367,7 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     }
 
     for (awaitables, 0..) |awaitable, i| {
-        const waiting = awaitable.asyncWait(&select_waiters[i].wait_node);
+        const waiting = awaitable.asyncWait(&select_waiters[i]);
 
         if (!waiting) {
             winner.store(i, .release);
@@ -450,9 +391,9 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
     checkSelfWait(task, future);
 
     // Winner tracking: for single future, winner is always 0 if signaled
-    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var winner: std.atomic.Value(usize) = .init(Waiter.no_winner);
     var waiter = Waiter.init();
-    var select_waiter = SelectWaiter.init(&waiter, &winner, 0);
+    var select_waiter = Waiter.initSelect(&waiter, &winner, 0);
 
     // Allocate WaitContext if needed
     const WaitCtx = FutureWaitContext(@TypeOf(future));
@@ -462,9 +403,9 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
     // Fast path: check if already complete
     var fut = future;
     const added = if (has_context)
-        fut.asyncWait(&select_waiter.wait_node, &context)
+        fut.asyncWait(&select_waiter, &context)
     else
-        fut.asyncWait(&select_waiter.wait_node);
+        fut.asyncWait(&select_waiter);
 
     if (!added) {
         winner.store(0, .release);
@@ -474,11 +415,11 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
 
     // Clean up waiter on exit
     defer {
-        if (winner.load(.acquire) == NO_WINNER) {
+        if (winner.load(.acquire) == Waiter.no_winner) {
             const was_removed = if (has_context)
-                fut.asyncCancelWait(&select_waiter.wait_node, &context)
+                fut.asyncCancelWait(&select_waiter, &context)
             else
-                fut.asyncCancelWait(&select_waiter.wait_node);
+                fut.asyncCancelWait(&select_waiter);
 
             if (!was_removed) {
                 // Wake is in-flight, wait for it to complete (1 signal expected)
