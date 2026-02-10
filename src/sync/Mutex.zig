@@ -33,15 +33,10 @@ const Waiter = @import("../common.zig").Waiter;
 
 const Mutex = @This();
 
-/// FIFO wait queue with lock state encoded in sentinel values:
-/// - sentinel0 (0b00) = locked, no waiters
-/// - sentinel1 (0b01) = unlocked
-/// - pointer = locked with waiters
-queue: WaitQueue(WaitNode) = .initWithState(.sentinel1),
-
-const State = WaitQueue(WaitNode).State;
-const locked_once: State = .sentinel0;
-const unlocked: State = .sentinel1;
+/// FIFO wait queue with lock state encoded in flag:
+/// - flag set = unlocked
+/// - flag clear = locked (with or without waiters)
+queue: WaitQueue(WaitNode) = .empty_flagged,
 
 /// Creates a new unlocked mutex.
 pub const init: Mutex = .{};
@@ -51,7 +46,8 @@ pub const init: Mutex = .{};
 /// is already locked by another coroutine.
 /// This function will never suspend the current task. If you need blocking behavior, use `lock()` instead.
 pub fn tryLock(self: *Mutex) bool {
-    return self.queue.tryTransition(unlocked, locked_once);
+    // Only succeeds if flag is set (unlocked) AND no waiters
+    return self.queue.tryClearFlagIfEmpty();
 }
 
 /// Acquires the mutex, blocking if it is already locked.
@@ -65,8 +61,8 @@ pub fn tryLock(self: *Mutex) bool {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
 pub fn lock(self: *Mutex) Cancelable!void {
-    // Fast path: try to acquire unlocked mutex
-    if (self.queue.tryTransition(unlocked, locked_once)) {
+    // Fast path: try to acquire unlocked mutex (flag set, no waiters)
+    if (self.queue.tryClearFlagIfEmpty()) {
         return;
     }
 
@@ -75,11 +71,10 @@ pub fn lock(self: *Mutex) Cancelable!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
 
-    // Try to push to queue, or if mutex is unlocked, acquire it atomically
-    // This prevents the race: unlocked -> has_waiters (skipping locked_once)
-    const result = self.queue.pushOrTransition(unlocked, locked_once, &waiter.wait_node);
-    if (result == .transitioned) {
-        // Mutex was unlocked, we acquired it via transition to locked_once
+    // Try to clear flag (acquire lock), or push to queue
+    const result = self.queue.pushOrClearFlag(&waiter.wait_node);
+    if (result == .flag_cleared) {
+        // Mutex was unlocked, we acquired it
         return;
     }
 
@@ -96,7 +91,7 @@ pub fn lock(self: *Mutex) Cancelable!void {
 
     // Acquire fence: synchronize-with unlock()'s .release in pop()
     // Ensures visibility of all writes made by the previous lock holder
-    _ = self.queue.getState();
+    _ = self.queue.isFlagSet();
 }
 
 /// Acquires the mutex, ignoring cancellation.
@@ -111,17 +106,17 @@ pub fn lock(self: *Mutex) Cancelable!void {
 /// `Runtime.checkCancel()` after this function returns.
 pub fn lockUncancelable(self: *Mutex) void {
     // Fast path: try to acquire unlocked mutex
-    if (self.queue.tryTransition(unlocked, locked_once)) {
+    if (self.queue.tryClearFlagIfEmpty()) {
         return;
     }
 
     // Slow path: add to FIFO wait queue
     var waiter: Waiter = .init();
 
-    // Try to push to queue, or if mutex is unlocked, acquire it atomically
-    const result = self.queue.pushOrTransition(unlocked, locked_once, &waiter.wait_node);
-    if (result == .transitioned) {
-        // Mutex was unlocked, we acquired it via transition to locked_once
+    // Try to clear flag (acquire lock), or push to queue
+    const result = self.queue.pushOrClearFlag(&waiter.wait_node);
+    if (result == .flag_cleared) {
+        // Mutex was unlocked, we acquired it
         return;
     }
 
@@ -129,7 +124,7 @@ pub fn lockUncancelable(self: *Mutex) void {
     waiter.wait(1, .no_cancel);
 
     // Acquire fence: synchronize-with unlock()'s .release in pop()
-    _ = self.queue.getState();
+    _ = self.queue.isFlagSet();
 }
 
 /// Releases the mutex.
@@ -141,10 +136,8 @@ pub fn lockUncancelable(self: *Mutex) void {
 ///
 /// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex) void {
-    // Pop one waiter or transition from locked_once to unlocked
-    // Last waiter stays in locked_once (inherits the lock)
-    // Handles cancellation race by retrying internally
-    if (self.queue.popOrTransition(locked_once, unlocked, locked_once)) |wait_node| {
+    // Pop one waiter (they inherit the lock, flag stays clear) or set flag (unlock)
+    if (self.queue.popOrSetFlag()) |wait_node| {
         Waiter.fromWaitNode(wait_node).signal();
     }
 }
