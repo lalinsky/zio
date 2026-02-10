@@ -130,22 +130,22 @@ pub fn JoinHandle(comptime T: type) type {
             return self.result;
         }
 
-        /// Registers a wait node to be notified when the task completes.
+        /// Registers a waiter to be notified when the task completes.
         /// This is part of the Future protocol for select().
         /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(self: Self, wait_node: *WaitNode) bool {
+        pub fn asyncWait(self: Self, waiter: *Waiter) bool {
             if (self.awaitable) |awaitable| {
-                return awaitable.asyncWait(wait_node);
+                return awaitable.asyncWait(waiter);
             }
             return false; // Already complete
         }
 
-        /// Cancels a pending wait operation by removing the wait node.
+        /// Cancels a pending wait operation by removing the waiter.
         /// This is part of the Future protocol for select().
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: Self, wait_node: *WaitNode) bool {
+        pub fn asyncCancelWait(self: Self, waiter: *Waiter) bool {
             if (self.awaitable) |awaitable| {
-                return awaitable.asyncCancelWait(wait_node);
+                return awaitable.asyncCancelWait(waiter);
             }
             return true; // No awaitable means already completed, no wake in-flight
         }
@@ -224,7 +224,7 @@ pub fn JoinHandle(comptime T: type) type {
 }
 
 // Generic data structures (private)
-const WaitNode = @import("runtime/WaitNode.zig");
+const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 
@@ -321,9 +321,7 @@ pub const Executor = struct {
             .state = std.atomic.Value(AnyTask.State).init(.ready),
             .awaitable = .{
                 .kind = .task,
-                .wait_node = .{
-                    .vtable = &AnyTask.wait_node_vtable,
-                },
+                .wait_node = .{},
             },
             .coro = .{
                 .context = std.mem.zeroes(Context),

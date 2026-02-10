@@ -27,7 +27,7 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const Waiter = @import("../common.zig").Waiter;
 
@@ -72,7 +72,7 @@ pub fn lock(self: *Mutex) Cancelable!void {
     var waiter: Waiter = .init();
 
     // Try to clear flag (acquire lock), or push to queue
-    const result = self.queue.pushOrClearFlag(&waiter.wait_node);
+    const result = self.queue.pushOrClearFlag(&waiter.node);
     if (result == .flag_cleared) {
         // Mutex was unlocked, we acquired it
         return;
@@ -81,7 +81,7 @@ pub fn lock(self: *Mutex) Cancelable!void {
     // Wait for lock, handling spurious wakeups internally
     waiter.wait(1, .allow_cancel) catch |err| {
         // Cancellation - try to remove ourselves from queue
-        if (!self.queue.remove(&waiter.wait_node)) {
+        if (!self.queue.remove(&waiter.node)) {
             // Already inherited the lock - wait for signal to complete, then unlock
             waiter.wait(1, .no_cancel);
             self.unlock();
@@ -114,7 +114,7 @@ pub fn lockUncancelable(self: *Mutex) void {
     var waiter: Waiter = .init();
 
     // Try to clear flag (acquire lock), or push to queue
-    const result = self.queue.pushOrClearFlag(&waiter.wait_node);
+    const result = self.queue.pushOrClearFlag(&waiter.node);
     if (result == .flag_cleared) {
         // Mutex was unlocked, we acquired it
         return;
@@ -138,7 +138,7 @@ pub fn lockUncancelable(self: *Mutex) void {
 pub fn unlock(self: *Mutex) void {
     // Pop one waiter (they inherit the lock, flag stays clear) or set flag (unlock)
     if (self.queue.popOrSetFlag()) |wait_node| {
-        Waiter.fromWaitNode(wait_node).signal();
+        Waiter.fromNode(wait_node).signal();
     }
 }
 

@@ -60,7 +60,7 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("../time.zig").Timeout;
 const Mutex = @import("Mutex.zig");
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Waiter = @import("../common.zig").Waiter;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
@@ -94,7 +94,7 @@ pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
     var waiter: Waiter = .init();
 
     // Add to wait queue before releasing mutex
-    self.wait_queue.push(&waiter.wait_node);
+    self.wait_queue.push(&waiter.node);
 
     // Atomically release mutex
     mutex.unlock();
@@ -102,14 +102,14 @@ pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
     // Wait for signal, handling spurious wakeups internally
     waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.node);
         if (!was_in_queue) {
             // We were already removed by signal() - wait for signal to complete
             waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
-                Waiter.fromWaitNode(next_waiter).signal();
+                Waiter.fromNode(next_waiter).signal();
             }
         }
         // Must reacquire mutex before returning
@@ -160,7 +160,7 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
 
-    self.wait_queue.push(&waiter.wait_node);
+    self.wait_queue.push(&waiter.node);
 
     // Atomically release mutex
     mutex.unlock();
@@ -168,14 +168,14 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
     // Wait for signal or timeout, handling spurious wakeups internally
     waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.node);
         if (!was_in_queue) {
             // Removed by signal() - wait for signal to complete before destroying waiter
             waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
             if (self.wait_queue.pop()) |next_waiter| {
-                Waiter.fromWaitNode(next_waiter).signal();
+                Waiter.fromNode(next_waiter).signal();
             }
         }
 
@@ -186,7 +186,7 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
     };
 
     // Determine winner: can we remove ourselves from queue?
-    const timed_out = self.wait_queue.remove(&waiter.wait_node);
+    const timed_out = self.wait_queue.remove(&waiter.node);
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable();
@@ -214,7 +214,7 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
 /// ```
 pub fn signal(self: *Condition) void {
     if (self.wait_queue.pop()) |wait_node| {
-        Waiter.fromWaitNode(wait_node).signal();
+        Waiter.fromNode(wait_node).signal();
     }
 }
 
@@ -235,7 +235,7 @@ pub fn signal(self: *Condition) void {
 /// ```
 pub fn broadcast(self: *Condition) void {
     while (self.wait_queue.pop()) |wait_node| {
-        Waiter.fromWaitNode(wait_node).signal();
+        Waiter.fromNode(wait_node).signal();
     }
 }
 

@@ -10,7 +10,7 @@ const Executor = @import("../runtime.zig").Executor;
 const getCurrentExecutorOrNull = @import("../runtime.zig").getCurrentExecutorOrNull;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Coroutine = @import("../coro/coroutines.zig").Coroutine;
-const WaitNode = @import("WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Cancelable = @import("../common.zig").Cancelable;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
@@ -172,15 +172,6 @@ pub const AnyTask = struct {
         waiting,
         finished,
     };
-
-    pub const wait_node_vtable = WaitNode.VTable{
-        .wake = waitNodeWake,
-    };
-
-    fn waitNodeWake(wait_node: *WaitNode) void {
-        const awaitable: *Awaitable = @fieldParentPtr("wait_node", wait_node);
-        AnyTask.fromAwaitable(awaitable).wake();
-    }
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         std.debug.assert(awaitable.kind == .task);
@@ -477,9 +468,7 @@ pub const AnyTask = struct {
             .state = .init(.new),
             .awaitable = .{
                 .kind = .task,
-                .wait_node = .{
-                    .vtable = &AnyTask.wait_node_vtable,
-                },
+                .wait_node = .{},
             },
             .coro = .{
                 .parent_context_ptr = .init(&executor.main_task.coro.context),

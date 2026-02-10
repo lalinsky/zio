@@ -55,7 +55,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Waiter = @import("../common.zig").Waiter;
 
 wait_queue: WaitQueue(WaitNode) = .empty,
@@ -75,8 +75,8 @@ pub const init: Notify = .{};
 /// at a time as resources become available.
 pub fn signal(self: *Notify) void {
     // Pop one waiter if available
-    if (self.wait_queue.pop()) |wait_node| {
-        wait_node.wake();
+    if (self.wait_queue.pop()) |node| {
+        Waiter.fromNode(node).signal();
     }
 }
 
@@ -88,8 +88,8 @@ pub fn signal(self: *Notify) void {
 /// This is useful for notifying multiple tasks about an event that affects them all.
 pub fn broadcast(self: *Notify) void {
     // Pop and wake all waiters
-    while (self.wait_queue.pop()) |wait_node| {
-        wait_node.wake();
+    while (self.wait_queue.pop()) |node| {
+        Waiter.fromNode(node).signal();
     }
 }
 
@@ -105,19 +105,19 @@ pub fn wait(self: *Notify) Cancelable!void {
     var waiter: Waiter = .init();
 
     // Push to wait queue
-    self.wait_queue.push(&waiter.wait_node);
+    self.wait_queue.push(&waiter.node);
 
     // Wait for signal, handling spurious wakeups internally
     waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.node);
         if (!was_in_queue) {
             // We were already removed by signal() - wait for signal to complete
             waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
-            if (self.wait_queue.pop()) |next_waiter| {
-                next_waiter.wake();
+            if (self.wait_queue.pop()) |node| {
+                Waiter.fromNode(node).signal();
             }
         }
         return err;
@@ -140,26 +140,26 @@ pub fn timedWait(self: *Notify, timeout: Timeout) (Timeoutable || Cancelable)!vo
     var waiter: Waiter = .init();
 
     // Push to wait queue
-    self.wait_queue.push(&waiter.wait_node);
+    self.wait_queue.push(&waiter.node);
 
     // Wait for signal or timeout, handling spurious wakeups internally
     waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.wait_node);
+        const was_in_queue = self.wait_queue.remove(&waiter.node);
         if (!was_in_queue) {
             // Removed by signal() - wait for signal to complete before destroying waiter
             waiter.wait(1, .no_cancel);
             // Since we're being cancelled and won't process the signal,
             // wake another waiter to receive the signal instead.
-            if (self.wait_queue.pop()) |next_waiter| {
-                next_waiter.wake();
+            if (self.wait_queue.pop()) |node| {
+                Waiter.fromNode(node).signal();
             }
         }
         return err;
     };
 
     // Determine winner: can we remove ourselves from queue?
-    if (self.wait_queue.remove(&waiter.wait_node)) {
+    if (self.wait_queue.remove(&waiter.node)) {
         // We were still in queue - timer won
         return error.Timeout;
     }
@@ -179,25 +179,25 @@ pub fn getResult(self: *const Notify) void {
     return;
 }
 
-/// Registers a wait node to be notified when signal() or broadcast() is called.
+/// Registers a waiter to be notified when signal() or broadcast() is called.
 /// This is part of the Future protocol for select().
 /// Always returns true since Notify has no persistent state (never pre-completed).
-pub fn asyncWait(self: *Notify, wait_node: *WaitNode) bool {
-    self.wait_queue.push(wait_node);
+pub fn asyncWait(self: *Notify, waiter: *Waiter) bool {
+    self.wait_queue.push(&waiter.node);
     return true;
 }
 
-/// Cancels a pending wait operation by removing the wait node.
+/// Cancels a pending wait operation by removing the waiter.
 /// This is part of the Future protocol for select().
 /// Returns true if removed, false if already removed by completion (wake in-flight).
-pub fn asyncCancelWait(self: *Notify, wait_node: *WaitNode) bool {
-    const was_in_queue = self.wait_queue.remove(wait_node);
+pub fn asyncCancelWait(self: *Notify, waiter: *Waiter) bool {
+    const was_in_queue = self.wait_queue.remove(&waiter.node);
     if (!was_in_queue) {
         // We were already removed by signal() which will wake us.
         // Since we're being cancelled and won't process the signal,
         // wake another waiter to receive the signal instead.
-        if (self.wait_queue.pop()) |next_waiter| {
-            next_waiter.wake();
+        if (self.wait_queue.pop()) |node| {
+            Waiter.fromNode(node).signal();
         }
     }
     return was_in_queue;
