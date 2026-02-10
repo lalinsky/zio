@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const MemoryPoolAligned = @import("../utils/memory_pool.zig").MemoryPoolAligned;
+const ev = @import("../ev/root.zig");
 
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
@@ -216,6 +217,10 @@ pub const AnyTask = struct {
 
     pub inline fn getRuntime(self: *AnyTask) *Runtime {
         return self.getExecutor().runtime;
+    }
+
+    pub inline fn getThreadPool(self: *AnyTask) *ev.ThreadPool {
+        return &self.getRuntime().thread_pool;
     }
 
     pub const YieldMode = enum { park, reschedule };

@@ -313,3 +313,72 @@ test "Waiter: futex-based timed wait with timeout" {
     try std.testing.expect(elapsed.toMilliseconds() >= 40);
     try std.testing.expect(elapsed.toMilliseconds() < 200); // Sanity check
 }
+
+/// Execute a blocking function on the thread pool, blocking the current task until completion.
+///
+/// Unlike `spawnBlocking`, this does not allocate - all state is kept on the stack.
+/// The calling task is parked while the blocking work executes on a thread pool worker.
+///
+/// Usage:
+/// ```zig
+/// const result = zio.blockInPlace(expensiveComputation, .{arg1, arg2});
+/// ```
+pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta.ReturnType(func) {
+    const Args = @TypeOf(args);
+    const Result = meta.ReturnType(func);
+
+    const Context = struct {
+        args: Args,
+        result: Result = undefined,
+
+        fn workFn(work: *ev.Work) void {
+            const ctx: *@This() = @ptrCast(@alignCast(work.userdata.?));
+            ctx.result = @call(.auto, func, ctx.args);
+        }
+
+        fn completionFn(completion_ctx: ?*anyopaque, _: *ev.Work) void {
+            const waiter: *Waiter = @ptrCast(@alignCast(completion_ctx.?));
+            waiter.signal();
+        }
+    };
+
+    var ctx: Context = .{ .args = args };
+    var waiter: Waiter = .init();
+
+    // If not in a task context, just run the function directly
+    const task = waiter.task orelse {
+        return @call(.auto, func, args);
+    };
+
+    var work = ev.Work.init(Context.workFn, &ctx);
+    work.completion_fn = Context.completionFn;
+    work.completion_context = &waiter;
+
+    const thread_pool = task.getThreadPool();
+    thread_pool.submit(&work);
+
+    waiter.wait(1, .allow_cancel) catch {
+        // Try to cancel the work, but must wait for completion either way
+        // since context is stack-allocated
+        thread_pool.cancel(&work);
+        waiter.wait(1, .no_cancel);
+    };
+
+    return ctx.result;
+}
+
+const meta = @import("meta.zig");
+
+test "blockInPlace: basic computation" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const double = struct {
+        fn call(x: i32) i32 {
+            return x * 2;
+        }
+    }.call;
+
+    const result = blockInPlace(double, .{21});
+    try std.testing.expectEqual(42, result);
+}
