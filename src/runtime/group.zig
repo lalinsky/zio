@@ -238,7 +238,11 @@ pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!voi
     awaitable.group_node.group = group;
     // Push unless canceled (flag set means group was canceled)
     if (!group.getTasks().pushUnlessFlag(&awaitable.group_node)) {
-        _ = @atomicRmw(u32, group.getState(), .Sub, 1, .acq_rel);
+        const state_ptr = group.getState();
+        const state_before_sub = @atomicRmw(u32, state_ptr, .Sub, 1, .acq_rel);
+        if (state_before_sub & Group.counter_mask == 1) {
+            Futex.wake(state_ptr, std.math.maxInt(u32));
+        }
         return error.Closed;
     }
 }
