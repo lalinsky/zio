@@ -77,11 +77,8 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// The event remains set until `reset()` is called. Multiple calls to `set()` while
 /// already set have no effect.
 pub fn set(self: *ResetEvent) void {
-    // Set flag FIRST to ensure isSet() returns true before we wake any waiters
-    self.wait_queue.setFlag();
-
-    // Pop and wake all waiters
-    while (self.wait_queue.pop()) |wait_node| {
+    // Pop and wake all waiters while setting the flag
+    while (self.wait_queue.popAndSetFlag()) |wait_node| {
         wait_node.wake();
     }
 }

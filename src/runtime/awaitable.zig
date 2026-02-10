@@ -73,12 +73,8 @@ pub const Awaitable = struct {
     /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
     /// Can be called from any context.
     pub fn markComplete(self: *Awaitable) void {
-        // Set the flag FIRST to ensure isFlagSet() returns true before we wake any waiters.
-        // This prevents a race where woken tasks check hasResult() before the flag is set.
-        self.waiting_list.setFlag();
-
-        // Now pop and wake all waiters
-        while (self.waiting_list.pop()) |wait_node| {
+        // Pop and wake all waiters while setting the flag
+        while (self.waiting_list.popAndSetFlag()) |wait_node| {
             wait_node.wake();
         }
     }

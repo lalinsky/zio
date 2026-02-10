@@ -87,11 +87,8 @@ pub fn Future(comptime T: type) type {
                 return;
             }
 
-            // Set flag FIRST to ensure isFlagSet() returns true before we wake any waiters
-            self.wait_queue.setFlag();
-
-            // Pop and wake all waiters
-            while (self.wait_queue.pop()) |wait_node| {
+            // Pop and wake all waiters while setting the flag
+            while (self.wait_queue.popAndSetFlag()) |wait_node| {
                 wait_node.wake();
             }
         }

@@ -270,26 +270,43 @@ pub fn WaitQueue(comptime T: type) type {
         /// Set the flag. Can be called at any time, even with waiters.
         /// The flag is "sticky" - it stays set until explicitly cleared.
         ///
-        /// Memory ordering: Uses .release to make prior writes visible to
-        /// threads that subsequently observe the flag via isFlagSet().
+        /// Spins while mutation lock is held, then sets flag atomically.
+        /// For the common pattern of set + pop loop, prefer popAndSetFlag().
         pub fn setFlag(self: *Self) void {
-            _ = self.head.fetchOr(flag_bit, .release);
+            var state = self.head.load(.monotonic);
+            while (true) {
+                if (state & lock_bit != 0) {
+                    // Mutation in progress, spin
+                    std.atomic.spinLoopHint();
+                    state = self.head.load(.monotonic);
+                    continue;
+                }
+                if (self.head.cmpxchgWeak(state, state | flag_bit, .release, .monotonic)) |new_state| {
+                    state = new_state;
+                } else {
+                    return;
+                }
+            }
         }
 
         /// Clear the flag.
         ///
-        /// Memory ordering: Uses .release for consistency with setFlag().
+        /// Spins while mutation lock is held, then clears flag atomically.
         pub fn clearFlag(self: *Self) void {
-            _ = self.head.fetchAnd(~flag_bit, .release);
-        }
-
-        /// Try to set the flag if not already set.
-        /// Returns true if we set the flag, false if it was already set.
-        ///
-        /// Memory ordering: Uses .acq_rel for bidirectional synchronization.
-        pub fn trySetFlag(self: *Self) bool {
-            const old = self.head.fetchOr(flag_bit, .acq_rel);
-            return old & flag_bit == 0;
+            var state = self.head.load(.monotonic);
+            while (true) {
+                if (state & lock_bit != 0) {
+                    // Mutation in progress, spin
+                    std.atomic.spinLoopHint();
+                    state = self.head.load(.monotonic);
+                    continue;
+                }
+                if (self.head.cmpxchgWeak(state, state & ~flag_bit, .release, .monotonic)) |new_state| {
+                    state = new_state;
+                } else {
+                    return;
+                }
+            }
         }
 
         /// Try to clear the flag, but only if there are no waiters.
@@ -382,7 +399,8 @@ pub fn WaitQueue(comptime T: type) type {
 
         /// Internal helper: perform the actual pop after lock is acquired.
         /// Assumes mutation lock is held and there are waiters. Releases lock before returning.
-        fn popInternal(self: *Self, old_state: usize, old_head: *T) *T {
+        /// The `set_flag` parameter controls whether to set the flag in the final state.
+        fn popInternal(self: *Self, old_state: usize, old_head: *T, comptime set_flag: bool) *T {
             const next = old_head.next;
 
             // Mark as removed from list
@@ -395,15 +413,17 @@ pub fn WaitQueue(comptime T: type) type {
             old_head.next = null;
             old_head.prev = null;
 
+            // Determine flag for final state
+            const final_flag = if (set_flag) flag_bit else (old_state & flag_bit);
+
             if (next) |new_head| {
                 // Transfer tail pointer from old head to new head
                 new_head.userdata = old_head.userdata;
                 new_head.prev = null;
-                // Preserve flag, update pointer
-                self.head.store(makePtrState(new_head, old_state), .release);
+                self.head.store(makePtrState(new_head, final_flag), .release);
             } else {
-                // Was last waiter - preserve flag, clear pointer
-                self.head.store(old_state & flag_bit, .release);
+                // Was last waiter
+                self.head.store(final_flag, .release);
             }
 
             return old_head;
@@ -447,7 +467,7 @@ pub fn WaitQueue(comptime T: type) type {
                 return null;
             };
 
-            return self.popInternal(old_state, old_head);
+            return self.popInternal(old_state, old_head, false);
         }
 
         /// Remove a specific item from the queue.
@@ -550,7 +570,24 @@ pub fn WaitQueue(comptime T: type) type {
                 return null;
             };
 
-            return self.popInternal(old_state, old_head);
+            return self.popInternal(old_state, old_head, false);
+        }
+
+        /// Pop a waiter while also setting the flag.
+        /// Returns the popped waiter, or null if no waiters (flag is still set).
+        ///
+        /// This is useful for ResetEvent.set() / Future.set() - set the flag and
+        /// wake all waiters. Call in a loop until null is returned.
+        pub fn popAndSetFlag(self: *Self) ?*T {
+            const old_state = self.acquireMutationLock();
+
+            const old_head = getHeadPtr(old_state) orelse {
+                // No waiters, just set flag
+                self.head.store(flag_bit, .release);
+                return null;
+            };
+
+            return self.popInternal(old_state, old_head, true);
         }
     };
 }
@@ -761,12 +798,8 @@ test "WaitQueue flag operations" {
     queue.clearFlag();
     try std.testing.expect(!queue.isFlagSet());
 
-    // Test trySetFlag
-    try std.testing.expect(queue.trySetFlag()); // Should succeed
-    try std.testing.expect(!queue.trySetFlag()); // Already set, should fail
-    try std.testing.expect(queue.isFlagSet());
-
     // Test tryClearFlagIfEmpty
+    queue.setFlag();
     try std.testing.expect(queue.tryClearFlagIfEmpty()); // No waiters, should succeed
     try std.testing.expect(!queue.isFlagSet());
 
