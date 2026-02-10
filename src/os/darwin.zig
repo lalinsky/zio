@@ -30,3 +30,5 @@ pub const OS_UNFAIR_LOCK_INIT: os_unfair_lock_s = .{ ._os_unfair_lock_opaque = 0
 pub extern "c" fn os_unfair_lock_lock(lock: os_unfair_lock_t) void;
 pub extern "c" fn os_unfair_lock_unlock(lock: os_unfair_lock_t) void;
 pub extern "c" fn os_unfair_lock_trylock(lock: os_unfair_lock_t) bool;
+
+pub const sched_yield = @import("c.zig").sched_yield;

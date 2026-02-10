@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const thread = @import("../os/thread.zig");
 
 /// Work-stealing queue for task scheduling.
 ///
@@ -419,7 +420,7 @@ test "WorkStealingQueue: concurrent push and steal" {
             var attempts: usize = 0;
             while (attempts < 20) : (attempts += 1) {
                 _ = victim.steal(dest);
-                std.Thread.yield() catch {};
+                thread.yield();
             }
         }
     }.stealItems, .{ &victim_queue, &stealer_queue });

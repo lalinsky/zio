@@ -42,3 +42,5 @@ pub const ucond = extern struct {
 };
 
 pub extern "c" fn _umtx_op(obj: *const anyopaque, op: c_int, val: c_ulong, uaddr: ?*anyopaque, uaddr2: ?*anyopaque) c_int;
+
+pub const sched_yield = @import("c.zig").sched_yield;

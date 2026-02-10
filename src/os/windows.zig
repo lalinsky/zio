@@ -257,6 +257,8 @@ pub extern "kernel32" fn Sleep(
     dwMilliseconds: DWORD,
 ) callconv(.winapi) void;
 
+pub extern "kernel32" fn SwitchToThread() callconv(.winapi) BOOL;
+
 pub extern "kernel32" fn SleepEx(
     dwMilliseconds: DWORD,
     bAlertable: BOOL,

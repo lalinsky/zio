@@ -55,6 +55,8 @@ pub const io_uring_getevents_arg = extern struct {
 
 /// io_uring_enter2 syscall (kernel 5.11+)
 /// This version supports extended arguments including timeout
+pub const sched_yield = @import("c.zig").sched_yield;
+
 pub fn io_uring_enter2(
     fd: i32,
     to_submit: u32,

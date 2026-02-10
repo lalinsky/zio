@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const thread = @import("../os/thread.zig");
 const SimpleStack = @import("simple_stack.zig").SimpleStack;
 
 /// Simple wait queue for use under external synchronization (e.g., mutex).
@@ -336,7 +337,7 @@ pub fn WaitQueue(comptime T: type) type {
 
                 spin_count +%= 1;
                 if (spin_count == 0) {
-                    std.Thread.yield() catch {};
+                    thread.yield();
                 }
                 std.atomic.spinLoopHint();
             }

@@ -46,6 +46,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
+const os = @import("../os/root.zig");
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -415,7 +416,7 @@ test "ResetEvent: foreign thread signals async task" {
         fn threadSet(event: *ResetEvent, ready: *std.atomic.Value(bool)) void {
             // Wait for task to be ready
             while (!ready.load(.acquire)) {
-                std.Thread.yield() catch {};
+                os.thread.yield();
             }
             event.set();
         }

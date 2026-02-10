@@ -655,7 +655,7 @@ pub fn getCurrentTaskOrNull() ?*AnyTask {
 /// No-op if called from a thread without an executor (returns without error).
 pub fn yield() Cancelable!void {
     const task = getCurrentTaskOrNull() orelse {
-        std.Thread.yield() catch {};
+        os.thread.yield();
         return;
     };
     return task.yield(.reschedule, .allow_cancel);

@@ -24,6 +24,17 @@ const sys = switch (builtin.os.tag) {
     else => |t| if (t.isDarwin()) @import("darwin.zig") else @compileError("Unsupported OS: " ++ @tagName(t)),
 };
 
+/// Yields the current thread's time slice to the scheduler.
+///
+/// This is a hint to the OS that the current thread has no immediate work
+/// and other threads should be given a chance to run.
+pub fn yield() void {
+    switch (builtin.os.tag) {
+        .windows => _ = sys.SwitchToThread(),
+        else => _ = sys.sched_yield(),
+    }
+}
+
 /// Number of waiters to wake
 pub const WakeCount = enum {
     /// Wake one waiter
@@ -1175,7 +1186,7 @@ test "Futex - wake all" {
 
     // Wait for all threads to be ready
     while (threads_ready.load(.acquire) < 3) {
-        std.Thread.yield() catch {};
+        yield();
     }
 
     _ = futex_value.fetchAdd(1, .monotonic);
@@ -1215,7 +1226,7 @@ test "Notify - basic signal and wait" {
 
     // Wait for waiter to be ready
     while (!ready.load(.acquire)) {
-        std.Thread.yield() catch {};
+        yield();
     }
 
     // Signal the notify
@@ -1253,14 +1264,14 @@ test "Notify - multiple signals" {
 
     // Wait for waiter to be ready
     while (!ready.load(.acquire)) {
-        std.Thread.yield() catch {};
+        yield();
     }
 
     // Send multiple signals
     for (0..3) |_| {
         _ = counter.fetchAdd(1, .release);
         notify.signal();
-        std.Thread.yield() catch {};
+        yield();
     }
 }
 
@@ -1294,7 +1305,7 @@ test "Notify - timedWait success (signaled before timeout)" {
 
     // Wait for waiter to be ready
     while (!ready.load(.acquire)) {
-        std.Thread.yield() catch {};
+        yield();
     }
 
     // Signal the notify - should wake up without timeout
@@ -1377,7 +1388,7 @@ test "Mutex - contention" {
 
             // Wait for all threads to be ready
             while (ctx.ready.load(.acquire) < 4) {
-                std.Thread.yield() catch {};
+                yield();
             }
 
             var i: u32 = 0;
@@ -1437,7 +1448,7 @@ test "Condition - basic wait and signal" {
 
     // Wait for thread to be ready
     while (!thread_ready.load(.acquire)) {
-        std.Thread.yield() catch {};
+        yield();
     }
 
     // Signal the condition
@@ -1493,7 +1504,7 @@ test "Condition - broadcast" {
 
     // Yield until all threads are about to block
     while (threads_ready.load(.acquire) < 3) {
-        std.Thread.yield() catch {};
+        yield();
     }
 
     // Brief sleep to ensure threads have entered kernel wait
@@ -1541,7 +1552,7 @@ test "Condition - timedWait timeout" {
 
     // Wait for thread to be ready
     while (!thread_ready.load(.acquire)) {
-        std.Thread.yield() catch {};
+        yield();
     }
 
     // Don't signal - let it timeout
