@@ -7,7 +7,6 @@ const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
 const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
-const SelectWaiter = @import("../select.zig").SelectWaiter;
 const select = @import("../select.zig").select;
 const Waiter = @import("../common.zig").Waiter;
 const Mutex = @import("Mutex.zig");
@@ -63,12 +62,12 @@ const ChannelImpl = struct {
         var ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = undefined };
         var waiter = Waiter.init();
 
-        if (!recv.asyncWait(&waiter.wait_node, &ctx, elem_ptr)) {
+        if (!recv.asyncWait(&waiter, &ctx, elem_ptr)) {
             return recv.getResult(&ctx);
         }
 
         waiter.wait(1, .allow_cancel) catch |err| {
-            const was_removed = recv.asyncCancelWait(&waiter.wait_node, &ctx);
+            const was_removed = recv.asyncCancelWait(&waiter, &ctx);
             if (!was_removed) {
                 waiter.wait(1, .no_cancel);
                 return recv.getResult(&ctx);
@@ -88,12 +87,12 @@ const ChannelImpl = struct {
         }
 
         while (self.sender_queue.pop()) |node| {
-            if (SelectWaiter.tryClaim(node)) {
+            if (Waiter.fromNode(node).tryClaim()) {
                 const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
                 @memcpy(elem_ptr[0..self.elem_size], send_ctx.item_ptr[0..self.elem_size]);
                 send_ctx.succeeded = true;
                 self.mutex.unlock();
-                node.wake();
+                Waiter.fromNode(node).signal();
                 return;
             }
         }
@@ -111,14 +110,14 @@ const ChannelImpl = struct {
         self.count -= 1;
 
         while (self.sender_queue.pop()) |node| {
-            if (SelectWaiter.tryClaim(node)) {
+            if (Waiter.fromNode(node).tryClaim()) {
                 const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
                 @memcpy(self.elemPtr(self.tail)[0..self.elem_size], send_ctx.item_ptr[0..self.elem_size]);
                 self.tail = (self.tail + 1) % self.capacity;
                 self.count += 1;
                 send_ctx.succeeded = true;
                 self.mutex.unlock();
-                node.wake();
+                Waiter.fromNode(node).signal();
                 return;
             }
         }
@@ -131,12 +130,12 @@ const ChannelImpl = struct {
         var ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = undefined };
         var waiter = Waiter.init();
 
-        if (!send_op.asyncWait(&waiter.wait_node, &ctx, elem_ptr)) {
+        if (!send_op.asyncWait(&waiter, &ctx, elem_ptr)) {
             return send_op.getResult(&ctx);
         }
 
         waiter.wait(1, .allow_cancel) catch |err| {
-            const was_removed = send_op.asyncCancelWait(&waiter.wait_node, &ctx);
+            const was_removed = send_op.asyncCancelWait(&waiter, &ctx);
             if (!was_removed) {
                 waiter.wait(1, .no_cancel);
                 return send_op.getResult(&ctx);
@@ -156,12 +155,12 @@ const ChannelImpl = struct {
         }
 
         while (self.receiver_queue.pop()) |node| {
-            if (SelectWaiter.tryClaim(node)) {
+            if (Waiter.fromNode(node).tryClaim()) {
                 const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
                 @memcpy(recv_ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
                 recv_ctx.result_set = true;
                 self.mutex.unlock();
-                node.wake();
+                Waiter.fromNode(node).signal();
                 return;
             }
         }
@@ -194,11 +193,11 @@ const ChannelImpl = struct {
         self.mutex.unlock();
 
         while (receivers.pop()) |node| {
-            node.wake();
+            Waiter.fromNode(node).signal();
         }
 
         while (senders.pop()) |node| {
-            node.wake();
+            Waiter.fromNode(node).signal();
         }
     }
 };
@@ -214,7 +213,7 @@ const AsyncSendImpl = struct {
         succeeded: bool = false,
     };
 
-    pub fn asyncWait(self: *const SendSelf, wait_node: *WaitNode, ctx: *WaitContext, item_ptr: [*]const u8) bool {
+    pub fn asyncWait(self: *const SendSelf, waiter: *Waiter, ctx: *WaitContext, item_ptr: [*]const u8) bool {
         ctx.item_ptr = item_ptr;
 
         self.channel.mutex.lockUncancelable();
@@ -225,13 +224,13 @@ const AsyncSendImpl = struct {
         }
 
         while (self.channel.receiver_queue.pop()) |node| {
-            if (SelectWaiter.tryClaim(node)) {
+            if (Waiter.fromNode(node).tryClaim()) {
                 const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
                 @memcpy(recv_ctx.result_ptr[0..self.channel.elem_size], ctx.item_ptr[0..self.channel.elem_size]);
                 recv_ctx.result_set = true;
                 ctx.succeeded = true;
                 self.channel.mutex.unlock();
-                node.wake();
+                Waiter.fromNode(node).signal();
                 return false;
             }
         }
@@ -245,23 +244,23 @@ const AsyncSendImpl = struct {
             return false;
         }
 
-        wait_node.userdata = @intFromPtr(ctx);
-        self.channel.sender_queue.push(wait_node);
+        waiter.node.userdata = @intFromPtr(ctx);
+        self.channel.sender_queue.push(&waiter.node);
         self.channel.mutex.unlock();
         return true;
     }
 
-    pub fn asyncCancelWait(self: *const SendSelf, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncCancelWait(self: *const SendSelf, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = ctx;
         self.channel.mutex.lockUncancelable();
-        const was_in_queue = self.channel.sender_queue.remove(wait_node);
+        const was_in_queue = self.channel.sender_queue.remove(&waiter.node);
         self.channel.mutex.unlock();
 
         if (was_in_queue) {
             return true;
         }
 
-        return !SelectWaiter.didWin(wait_node);
+        return !waiter.didWin();
     }
 
     pub fn getResult(self: *const SendSelf, ctx: *WaitContext) error{ChannelClosed}!void {
@@ -284,7 +283,7 @@ const AsyncReceiveImpl = struct {
         result_set: bool = false,
     };
 
-    pub fn asyncWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext, result_ptr: [*]u8) bool {
+    pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) bool {
         ctx.result_ptr = result_ptr;
         ctx.result_set = false;
 
@@ -297,13 +296,13 @@ const AsyncReceiveImpl = struct {
         }
 
         while (self.channel.sender_queue.pop()) |node| {
-            if (SelectWaiter.tryClaim(node)) {
+            if (Waiter.fromNode(node).tryClaim()) {
                 const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
                 @memcpy(ctx.result_ptr[0..self.channel.elem_size], send_ctx.item_ptr[0..self.channel.elem_size]);
                 send_ctx.succeeded = true;
                 ctx.result_set = true;
                 self.channel.mutex.unlock();
-                node.wake();
+                Waiter.fromNode(node).signal();
                 return false;
             }
         }
@@ -313,23 +312,23 @@ const AsyncReceiveImpl = struct {
             return false;
         }
 
-        wait_node.userdata = @intFromPtr(ctx);
-        self.channel.receiver_queue.push(wait_node);
+        waiter.node.userdata = @intFromPtr(ctx);
+        self.channel.receiver_queue.push(&waiter.node);
         self.channel.mutex.unlock();
         return true;
     }
 
-    pub fn asyncCancelWait(self: *const RecvSelf, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncCancelWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = ctx;
         self.channel.mutex.lockUncancelable();
-        const was_in_queue = self.channel.receiver_queue.remove(wait_node);
+        const was_in_queue = self.channel.receiver_queue.remove(&waiter.node);
         self.channel.mutex.unlock();
 
         if (was_in_queue) {
             return true;
         }
 
-        return !SelectWaiter.didWin(wait_node);
+        return !waiter.didWin();
     }
 
     pub fn getResult(self: *const RecvSelf, ctx: *WaitContext) error{ChannelClosed}!void {
@@ -549,14 +548,14 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncWait(wait_node, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
+        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+            return self.impl.asyncWait(waiter, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
         }
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncCancelWait(wait_node, &ctx.impl_ctx);
+        pub fn asyncCancelWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+            return self.impl.asyncCancelWait(waiter, &ctx.impl_ctx);
         }
 
         /// Get the result of the receive operation.
@@ -602,14 +601,14 @@ pub fn AsyncSend(comptime T: type) type {
 
         /// Register for notification when send can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncWait(wait_node, &ctx.impl_ctx, std.mem.asBytes(&self.item).ptr);
+        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+            return self.impl.asyncWait(waiter, &ctx.impl_ctx, std.mem.asBytes(&self.item).ptr);
         }
 
         /// Cancel a pending wait operation.
         /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *const Self, wait_node: *WaitNode, ctx: *WaitContext) bool {
-            return self.impl.asyncCancelWait(wait_node, &ctx.impl_ctx);
+        pub fn asyncCancelWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+            return self.impl.asyncCancelWait(waiter, &ctx.impl_ctx);
         }
 
         /// Get the result of the send operation.

@@ -57,7 +57,7 @@ pub const CompletionQueue = struct {
     }
 
     fn getLoop(self: *CompletionQueue) *ev.Loop {
-        return &self.waiter.task.?.getExecutor().loop;
+        return &self.waiter.mode.direct.task.?.getExecutor().loop;
     }
 
     /// Get the Completion that owns a group node.
@@ -81,7 +81,7 @@ pub const CompletionQueue = struct {
     /// This must be called BEFORE checking the completed queue to avoid
     /// a race where a signal is lost between checking and waiting.
     fn resetSignals(self: *CompletionQueue) void {
-        self.waiter.notify.state.store(0, .monotonic);
+        self.waiter.mode.direct.notify.state.store(0, .monotonic);
     }
 
     /// Wait for the next completion. Blocks until one is available.

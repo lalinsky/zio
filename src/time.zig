@@ -12,7 +12,7 @@ const os = @import("os/root.zig");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
-const WaitNode = @import("runtime/WaitNode.zig");
+const Waiter = @import("common.zig").Waiter;
 
 // Time configuration - adjust these for different platforms
 const TimePrecision = enum { nanoseconds, microseconds, milliseconds };
@@ -453,17 +453,17 @@ pub const Timeout = union(enum) {
 
     pub const WaitContext = struct {
         timer: ev.Timer = ev.Timer.init(.{ .duration = .zero }),
-        wait_node: ?*WaitNode = null,
+        waiter: ?*Waiter = null,
     };
 
-    pub fn asyncWait(self: *const Timeout, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) bool {
         // Timeout.none means wait forever - never completes
         if (self.* == .none) {
             return true;
         }
 
         ctx.timer = ev.Timer.init(self.*);
-        ctx.wait_node = wait_node;
+        ctx.waiter = waiter;
         ctx.timer.c.userdata = ctx;
         ctx.timer.c.callback = timerCallback;
 
@@ -474,16 +474,16 @@ pub const Timeout = union(enum) {
 
     fn timerCallback(_: *ev.Loop, c: *ev.Completion) void {
         const ctx: *WaitContext = @ptrCast(@alignCast(c.userdata.?));
-        if (ctx.wait_node) |node| {
-            node.wake();
+        if (ctx.waiter) |waiter| {
+            waiter.signal();
         }
     }
 
-    pub fn asyncCancelWait(self: *const Timeout, wait_node: *WaitNode, ctx: *WaitContext) bool {
+    pub fn asyncCancelWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = self;
-        _ = wait_node;
+        _ = waiter;
         const loop = ctx.timer.c.loop orelse return true;
-        ctx.wait_node = null; // Prevent callback from waking a stale/reused wait node
+        ctx.waiter = null; // Prevent callback from waking a stale/reused waiter
         loop.clearTimer(&ctx.timer);
         return true; // Timer operations don't have values to re-add if we lost the race
     }

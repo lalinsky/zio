@@ -25,8 +25,6 @@ pub const AnyBlockingTask = struct {
     // Simple cancellation flag for blocking tasks
     user_canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    pub const wait_node_vtable = WaitNode.VTable{};
-
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyBlockingTask {
         assert(awaitable.kind == .blocking_task);
         return @fieldParentPtr("awaitable", awaitable);
@@ -84,9 +82,7 @@ pub const AnyBlockingTask = struct {
         self.* = .{
             .awaitable = .{
                 .kind = .blocking_task,
-                .wait_node = .{
-                    .vtable = &AnyBlockingTask.wait_node_vtable,
-                },
+                .wait_node = .{},
             },
             .work = ev.Work.init(workFunc, self),
             .runtime = runtime,
