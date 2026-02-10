@@ -11,7 +11,7 @@ const builtin = @import("builtin");
 
 const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 
 const sys = switch (builtin.os.tag) {

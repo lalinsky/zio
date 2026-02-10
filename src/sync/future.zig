@@ -8,7 +8,7 @@ const yield = @import("../runtime.zig").yield;
 const Cancelable = @import("../common.zig").Cancelable;
 const Waiter = @import("../common.zig").Waiter;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const meta = @import("../meta.zig");
 const select = @import("../select.zig");
 

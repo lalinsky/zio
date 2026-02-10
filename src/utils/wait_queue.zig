@@ -16,6 +16,20 @@ const builtin = @import("builtin");
 const thread = @import("../os/thread.zig");
 const SimpleStack = @import("simple_stack.zig").SimpleStack;
 
+/// Node for participation in wait queues.
+///
+/// This is a low-level building block used by synchronization primitives.
+/// Application code should not use this directly.
+pub const WaitNode = struct {
+    // For participation in wait queues
+    prev: ?*WaitNode = null,
+    next: ?*WaitNode = null,
+    in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+
+    // User data associated with this wait node (used by WaitQueue for tail pointer)
+    userdata: usize = undefined,
+};
+
 /// Simple wait queue for use under external synchronization (e.g., mutex).
 ///
 /// **Low-level primitive**: This is intended for implementing synchronization primitives.

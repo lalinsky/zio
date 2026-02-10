@@ -12,7 +12,6 @@ const Waiter = common.Waiter;
 const NO_WINNER = common.NO_WINNER;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Awaitable = @import("runtime/awaitable.zig").Awaitable;
-const WaitNode = @import("runtime/WaitNode.zig");
 const meta = @import("meta.zig");
 
 // Future protocol - Any type implementing these methods can be used with select():

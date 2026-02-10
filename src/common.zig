@@ -12,7 +12,7 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const AnyTask = @import("runtime/task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
-const WaitNode = @import("runtime/WaitNode.zig");
+const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const os = @import("os/root.zig");
 
 /// Error set for operations that can be cancelled

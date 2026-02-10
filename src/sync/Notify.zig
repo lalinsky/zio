@@ -55,7 +55,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Waiter = @import("../common.zig").Waiter;
 
 wait_queue: WaitQueue(WaitNode) = .empty,

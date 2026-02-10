@@ -27,7 +27,7 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../runtime/group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
-const WaitNode = @import("../runtime/WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const Waiter = @import("../common.zig").Waiter;
 

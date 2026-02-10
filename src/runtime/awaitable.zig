@@ -5,7 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
-const WaitNode = @import("WaitNode.zig");
+const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Waiter = @import("../common.zig").Waiter;
 const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
