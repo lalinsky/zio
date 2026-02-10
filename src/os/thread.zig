@@ -110,7 +110,7 @@ pub const Notify = switch (builtin.os.tag) {
 pub const Mutex = switch (builtin.os.tag) {
     .windows => MutexWindows,
     .freebsd => MutexFreeBSD,
-    .netbsd => MutexEvent,
+    .netbsd => MutexNotify,
     else => |t| if (t.isDarwin()) MutexDarwin else MutexFutex,
 };
 
@@ -825,10 +825,10 @@ const MutexDarwin = struct {
 /// Notify-based mutex using WaitQueue.
 ///
 /// Uses the same pattern as zio.Mutex but for blocking OS threads:
-/// - Queue state encodes lock status with sentinels
+/// - Queue flag encodes lock status (flag set = unlocked)
 /// - Stack-allocated waiters block on Notify instead of suspending coroutines
 /// - FIFO ordering ensures fairness
-const MutexEvent = struct {
+pub const MutexNotify = struct {
     /// Stack-allocated waiter that blocks an OS thread
     const Waiter = struct {
         wait_node: WaitNode,
@@ -842,37 +842,37 @@ const MutexEvent = struct {
         }
     };
 
-    queue: WaitQueue(WaitNode) = .initWithState(.sentinel1),
+    /// FIFO wait queue with lock state encoded in flag:
+    /// - flag set = unlocked
+    /// - flag clear = locked (with or without waiters)
+    queue: WaitQueue(WaitNode) = .empty_flagged,
 
-    const State = WaitQueue(WaitNode).State;
-    const locked_once: State = .sentinel0;
-    const unlocked: State = .sentinel1;
-
-    pub fn init() MutexEvent {
+    pub fn init() MutexNotify {
         return .{};
     }
 
-    pub fn deinit(self: *MutexEvent) void {
+    pub fn deinit(self: *MutexNotify) void {
         _ = self;
     }
 
-    pub fn tryLock(self: *MutexEvent) bool {
-        return self.queue.tryTransition(unlocked, locked_once);
+    pub fn tryLock(self: *MutexNotify) bool {
+        // Only succeeds if flag is set (unlocked) AND no waiters
+        return self.queue.tryClearFlagIfEmpty();
     }
 
-    pub fn lock(self: *MutexEvent) void {
-        // Fast path: try to acquire unlocked mutex
-        if (self.queue.tryTransition(unlocked, locked_once)) {
+    pub fn lock(self: *MutexNotify) void {
+        // Fast path: try to acquire unlocked mutex (flag set, no waiters)
+        if (self.queue.tryClearFlagIfEmpty()) {
             return;
         }
 
         // Slow path: add to FIFO wait queue
         var waiter = Waiter.init();
 
-        // Try to push to queue, or if mutex is unlocked, acquire it atomically
-        const result = self.queue.pushOrTransition(unlocked, locked_once, &waiter.wait_node);
-        if (result == .transitioned) {
-            // Mutex was unlocked, we acquired it via transition to locked_once
+        // Try to clear flag (acquire lock), or push to queue
+        const result = self.queue.pushOrClearFlag(&waiter.wait_node);
+        if (result == .flag_cleared) {
+            // Mutex was unlocked, we acquired it
             return;
         }
 
@@ -882,13 +882,12 @@ const MutexEvent = struct {
         }
 
         // Acquire fence: synchronize-with unlock()'s .release in pop()
-        _ = self.queue.getState();
+        _ = self.queue.isFlagSet();
     }
 
-    pub fn unlock(self: *MutexEvent) void {
-        // Pop one waiter or transition from locked_once to unlocked
-        // Last waiter stays in locked_once (inherits the lock)
-        if (self.queue.popOrTransition(locked_once, unlocked, locked_once)) |wait_node| {
+    pub fn unlock(self: *MutexNotify) void {
+        // Pop one waiter (they inherit the lock, flag stays clear) or set flag (unlock)
+        if (self.queue.popOrSetFlag()) |wait_node| {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
             waiter.notify.signal();
         }
@@ -1117,15 +1116,13 @@ const ConditionNotify = struct {
 // Tests
 // ============================================================================
 
-test "Mutex - basic lock unlock" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-
-    var mutex = Mutex.init();
+fn checkMutexBasicLockUnlock(comptime MutexType: type) !void {
+    var mutex = MutexType.init();
     defer mutex.deinit();
     var counter = std.atomic.Value(u32).init(0);
 
     const Context = struct {
-        mutex: *Mutex,
+        mutex: *MutexType,
         counter: *std.atomic.Value(u32),
     };
 
@@ -1147,6 +1144,16 @@ test "Mutex - basic lock unlock" {
     defer t1.join();
     defer t2.join();
     defer t3.join();
+}
+
+test "Mutex - basic lock unlock" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkMutexBasicLockUnlock(Mutex);
+}
+
+test "MutexNotify - basic lock unlock" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkMutexBasicLockUnlock(MutexNotify);
 }
 
 test "Futex - wake all" {
@@ -1344,20 +1351,26 @@ test "Notify - timeout" {
     try std.testing.expect(elapsed < 200 * std.time.ns_per_ms);
 }
 
-test "Mutex - basic lock and unlock" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-
-    var mutex = Mutex.init();
+fn checkMutexBasicLockAndUnlock(comptime MutexType: type) void {
+    var mutex = MutexType.init();
     defer mutex.deinit();
 
     mutex.lock();
     mutex.unlock();
 }
 
-test "Mutex - tryLock" {
+test "Mutex - basic lock and unlock" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    checkMutexBasicLockAndUnlock(Mutex);
+}
 
-    var mutex = Mutex.init();
+test "MutexNotify - basic lock and unlock" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    checkMutexBasicLockAndUnlock(MutexNotify);
+}
+
+fn checkMutexTryLock(comptime MutexType: type) !void {
+    var mutex = MutexType.init();
     defer mutex.deinit();
 
     try std.testing.expect(mutex.tryLock());
@@ -1367,17 +1380,25 @@ test "Mutex - tryLock" {
     mutex.unlock();
 }
 
-test "Mutex - contention" {
+test "Mutex - tryLock" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    try checkMutexTryLock(Mutex);
+}
 
-    var mutex = Mutex.init();
+test "MutexNotify - tryLock" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkMutexTryLock(MutexNotify);
+}
+
+fn checkMutexContention(comptime MutexType: type) !void {
+    var mutex = MutexType.init();
     defer mutex.deinit();
 
     var counter: u32 = 0;
     var ready = std.atomic.Value(u32).init(0);
 
     const Context = struct {
-        mutex: *Mutex,
+        mutex: *MutexType,
         counter: *u32,
         ready: *std.atomic.Value(u32),
     };
@@ -1414,19 +1435,27 @@ test "Mutex - contention" {
     try std.testing.expectEqual(400, counter);
 }
 
-test "Condition - basic wait and signal" {
+test "Mutex - contention" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    try checkMutexContention(Mutex);
+}
 
-    var mutex = Mutex.init();
+test "MutexNotify - contention" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkMutexContention(MutexNotify);
+}
+
+fn checkConditionBasicWaitAndSignal(comptime MutexType: type, comptime ConditionType: type) !void {
+    var mutex = MutexType.init();
     defer mutex.deinit();
-    var cond = Condition.init();
+    var cond = ConditionType.init();
     defer cond.deinit();
     var ready = std.atomic.Value(bool).init(false);
     var thread_ready = std.atomic.Value(bool).init(false);
 
     const Context = struct {
-        mutex: *Mutex,
-        cond: *Condition,
+        mutex: *MutexType,
+        cond: *ConditionType,
         ready: *std.atomic.Value(bool),
         thread_ready: *std.atomic.Value(bool),
     };
@@ -1458,20 +1487,28 @@ test "Condition - basic wait and signal" {
     cond.signal();
 }
 
-test "Condition - broadcast" {
+test "Condition - basic wait and signal" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    try checkConditionBasicWaitAndSignal(Mutex, Condition);
+}
 
-    var mutex = Mutex.init();
+test "ConditionNotify - basic wait and signal" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkConditionBasicWaitAndSignal(Mutex, ConditionNotify);
+}
+
+fn checkConditionBroadcast(comptime MutexType: type, comptime ConditionType: type) !void {
+    var mutex = MutexType.init();
     defer mutex.deinit();
-    var cond = Condition.init();
+    var cond = ConditionType.init();
     defer cond.deinit();
     var ready = std.atomic.Value(bool).init(false);
     var count = std.atomic.Value(u32).init(0);
     var threads_ready = std.atomic.Value(u32).init(0);
 
     const Context = struct {
-        mutex: *Mutex,
-        cond: *Condition,
+        mutex: *MutexType,
+        cond: *ConditionType,
         ready: *std.atomic.Value(bool),
         count: *std.atomic.Value(u32),
         threads_ready: *std.atomic.Value(u32),
@@ -1517,19 +1554,27 @@ test "Condition - broadcast" {
     mutex.unlock();
 }
 
-test "Condition - timedWait timeout" {
+test "Condition - broadcast" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    try checkConditionBroadcast(Mutex, Condition);
+}
 
-    var mutex = Mutex.init();
+test "ConditionNotify - broadcast" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkConditionBroadcast(Mutex, ConditionNotify);
+}
+
+fn checkConditionTimedWaitTimeout(comptime MutexType: type, comptime ConditionType: type) !void {
+    var mutex = MutexType.init();
     defer mutex.deinit();
-    var cond = Condition.init();
+    var cond = ConditionType.init();
     defer cond.deinit();
     var timed_out = std.atomic.Value(bool).init(false);
     var thread_ready = std.atomic.Value(bool).init(false);
 
     const Context = struct {
-        mutex: *Mutex,
-        cond: *Condition,
+        mutex: *MutexType,
+        cond: *ConditionType,
         timed_out: *std.atomic.Value(bool),
         thread_ready: *std.atomic.Value(bool),
     };
@@ -1559,4 +1604,14 @@ test "Condition - timedWait timeout" {
     thread.join();
 
     try std.testing.expect(timed_out.load(.acquire));
+}
+
+test "Condition - timedWait timeout" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkConditionTimedWaitTimeout(Mutex, Condition);
+}
+
+test "ConditionNotify - timedWait timeout" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try checkConditionTimedWaitTimeout(Mutex, ConditionNotify);
 }
