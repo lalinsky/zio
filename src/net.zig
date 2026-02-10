@@ -8,7 +8,6 @@ const os = @import("os/root.zig");
 const runtime_mod = @import("runtime.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
-const spawnBlocking = runtime_mod.spawnBlocking;
 const Channel = @import("sync/channel.zig").Channel;
 const Group = @import("runtime/group.zig").Group;
 
@@ -16,6 +15,7 @@ const common = @import("common.zig");
 const waitForIo = common.waitForIo;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 const timedWaitForIo = common.timedWaitForIo;
+const blockInPlace = common.blockInPlace;
 const Timeout = @import("time.zig").Timeout;
 const fillBuf = @import("utils/writer.zig").fillBuf;
 
@@ -158,16 +158,10 @@ pub const HostName = struct {
         self: HostName,
         options: LookupOptions,
     ) LookupError!LookupResultIterator {
-        var task = spawnBlocking(
+        const res = try blockInPlace(
             lookupHostBlocking,
             .{ self.bytes, options.port, options.family, options.canonical_name },
-        ) catch |err| switch (err) {
-            error.ResultTooLarge, error.ContextTooLarge => unreachable,
-            else => |e| return @as(LookupError, e),
-        };
-        defer task.cancel();
-
-        const res = try task.join();
+        );
         return .{
             .head = res,
             .current = res,

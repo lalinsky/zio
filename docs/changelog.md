@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added `blockInPlace` for running blocking functions on the thread pool without allocations.
+
 ## [0.8.0] - 2026-02-09
 
 ### Added
