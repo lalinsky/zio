@@ -166,11 +166,14 @@ pub fn deinit(self: *Self) void {
 pub fn wake(self: *Self, state: *LoopState) void {
     _ = self;
     // wake_requested is already set by Loop.wake() before calling us.
-    // Just do the futex wake syscall.
-    _ = linux.futex_3arg(
-        @ptrCast(&state.wake_requested.raw),
-        .{ .cmd = .WAKE, .private = true },
-        1, // wake 1 waiter
+    // Use futex2_wake to match io_uring's FUTEX_WAIT which uses FUTEX2.
+    // Wake all waiters - the kernel may leave stale waiters in the futex hash
+    // table when io_uring rings are closed (suspected kernel bug).
+    _ = linux.futex2_wake(
+        &state.wake_requested.raw,
+        FUTEX_BITSET_MATCH_ANY,
+        std.math.maxInt(i32),
+        .{ .size = .U32, .private = true },
     );
 }
 
