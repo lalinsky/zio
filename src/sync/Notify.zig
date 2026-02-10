@@ -62,13 +62,6 @@ wait_queue: WaitQueue(WaitNode) = .empty,
 
 const Notify = @This();
 
-// Use WaitQueue sentinel states:
-// - sentinel0 = no waiters (empty)
-// - pointer = has waiters
-// No sentinel1 needed since there's no persistent "signaled" state
-const State = WaitQueue(WaitNode).State;
-const empty = State.sentinel0;
-
 /// Creates a new Notify primitive.
 pub const init: Notify = .{};
 
@@ -132,7 +125,7 @@ pub fn wait(self: *Notify) Cancelable!void {
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
     // Ensures visibility of all writes made before signal() was called
-    _ = self.wait_queue.getState();
+    _ = self.wait_queue.isFlagSet();
 }
 
 /// Waits for a signal or broadcast with a timeout.
@@ -173,7 +166,7 @@ pub fn timedWait(self: *Notify, timeout: Timeout) (Timeoutable || Cancelable)!vo
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
     // Ensures visibility of all writes made before signal() was called
-    _ = self.wait_queue.getState();
+    _ = self.wait_queue.isFlagSet();
 }
 
 // Future protocol implementation for use with select()
@@ -257,8 +250,8 @@ test "Notify signal with no waiters" {
     notify.signal();
     notify.broadcast();
 
-    // Verify state is still empty
-    try std.testing.expectEqual(empty, notify.wait_queue.getState());
+    // Verify state is still empty (no waiters, no flag)
+    try std.testing.expect(!notify.wait_queue.hasWaiters());
 }
 
 test "Notify broadcast to multiple waiters" {

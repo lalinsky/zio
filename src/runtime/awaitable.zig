@@ -30,10 +30,9 @@ pub const Awaitable = struct {
     wait_node: WaitNode,
 
     // WaitNodes waiting for the completion of this awaitable
-    // Use WaitQueue sentinel states to track completion:
-    // - sentinel0 = not complete (no waiters, task not complete)
-    // - sentinel1 = complete (no waiters, task is complete)
-    // - pointer = waiting (has waiters, task not complete)
+    // Uses WaitQueue flag to track completion:
+    // - flag clear = not complete
+    // - flag set = complete
     waiting_list: WaitQueue(WaitNode) = .empty,
 
     // Group membership - group_node.group is null if standalone
@@ -41,10 +40,6 @@ pub const Awaitable = struct {
 
     // Future protocol - type-erased result type
     pub const Result = void;
-
-    pub const State = WaitQueue(WaitNode).State;
-    pub const not_complete = State.sentinel0;
-    pub const complete = State.sentinel1;
 
     /// Request cancellation of this awaitable.
     /// Dispatches to the sub-type's cancel method.
@@ -60,12 +55,11 @@ pub const Awaitable = struct {
     /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
     pub fn asyncWait(self: *Awaitable, wait_node: *WaitNode) bool {
         // Fast path: check if already complete
-        if (self.waiting_list.getState() == complete) {
+        if (self.waiting_list.isFlagSet()) {
             return false;
         }
-        // Try to push to queue - only succeeds if awaitable is not complete
-        // Returns false if awaitable is complete, preventing invalid transition: complete -> has_waiters
-        return self.waiting_list.pushUnless(complete, wait_node);
+        // Try to push to queue - only succeeds if awaitable is not complete (flag not set)
+        return self.waiting_list.pushUnlessFlag(wait_node);
     }
 
     /// Cancels a pending wait operation by removing the wait node.
@@ -79,17 +73,12 @@ pub const Awaitable = struct {
     /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
     /// Can be called from any context.
     pub fn markComplete(self: *Awaitable) void {
-        // First, pop ALL waiters into a temporary list and transition to complete state.
-        // This ensures waiting_list.getState() == complete BEFORE we wake any waiters,
-        // preventing a race where woken tasks check hasResult() before the transition completes.
-        var waiters: SimpleQueue(WaitNode) = .empty;
+        // Set the flag FIRST to ensure isFlagSet() returns true before we wake any waiters.
+        // This prevents a race where woken tasks check hasResult() before the flag is set.
+        self.waiting_list.setFlag();
 
-        while (self.waiting_list.popOrTransition(not_complete, complete, complete)) |wait_node| {
-            waiters.push(wait_node);
-        }
-
-        // Now wake all waiters - at this point waiting_list is in complete state
-        while (waiters.pop()) |wait_node| {
+        // Now pop and wake all waiters
+        while (self.waiting_list.pop()) |wait_node| {
             wait_node.wake();
         }
     }
@@ -102,7 +91,7 @@ pub const Awaitable = struct {
 
     /// Check if the awaitable has completed and a result is available.
     pub fn hasResult(self: *const Awaitable) bool {
-        return self.waiting_list.getState() == complete;
+        return self.waiting_list.isFlagSet();
     }
 
     /// Get the typed result from this awaitable.

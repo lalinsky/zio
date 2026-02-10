@@ -75,14 +75,6 @@ pub fn Future(comptime T: type) type {
         wait_queue: WaitQueue(WaitNode) = .empty,
         value: FutureResult(T) = .{},
 
-        // Use WaitQueue sentinel states to encode future state:
-        // - sentinel0 = not set (no waiters, value not available)
-        // - sentinel1 = done (no waiters, value is available)
-        // - pointer = waiting (has waiters, value not available)
-        const State = WaitQueue(WaitNode).State;
-        const not_set = State.sentinel0;
-        const done = State.sentinel1;
-
         /// Initialize a new Future. Use like: `var future = Future(i32).init;`
         pub const init: Self = .{};
 
@@ -95,9 +87,11 @@ pub fn Future(comptime T: type) type {
                 return;
             }
 
-            // Pop and wake all waiters, then transition to done
-            // Loop continues until popOrTransition successfully transitions not_set->done
-            while (self.wait_queue.popOrTransition(not_set, done, done)) |wait_node| {
+            // Set flag FIRST to ensure isFlagSet() returns true before we wake any waiters
+            self.wait_queue.setFlag();
+
+            // Pop and wake all waiters
+            while (self.wait_queue.pop()) |wait_node| {
                 wait_node.wake();
             }
         }
@@ -127,9 +121,8 @@ pub fn Future(comptime T: type) type {
             if (self.value.isSet()) {
                 return false;
             }
-            // Try to push to queue - only succeeds if future is not done
-            // Returns false if future is done, preventing invalid transition: done -> has_waiters
-            return self.wait_queue.pushUnless(done, wait_node);
+            // Try to push to queue - only succeeds if future is not done (flag not set)
+            return self.wait_queue.pushUnlessFlag(wait_node);
         }
 
         /// Cancels a pending wait operation by removing the wait node.

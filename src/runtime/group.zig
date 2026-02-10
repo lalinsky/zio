@@ -171,9 +171,9 @@ pub const Group = struct {
             try Futex.wait(state_ptr, state);
         }
 
-        // All tasks completed - verify list is empty (sentinel0)
+        // All tasks completed - verify list is empty
         // Tasks remove themselves in onGroupTaskComplete
-        std.debug.assert(group.getTasks().getState() == .sentinel0);
+        std.debug.assert(!group.getTasks().hasWaiters());
     }
 
     pub fn cancel(group: *Group) void {
@@ -182,8 +182,9 @@ pub const Group = struct {
 
         group.setCanceled();
 
-        // Pop all tasks and cancel them
-        while (group.getTasks().popOrTransition(.sentinel0, .sentinel1, .sentinel1)) |node| {
+        // Set the "canceled" flag and pop all tasks to cancel them
+        group.getTasks().setFlag();
+        while (group.getTasks().pop()) |node| {
             const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
             awaitable.cancel();
             awaitable.release();
@@ -198,8 +199,8 @@ pub const Group = struct {
             Futex.wait(state_ptr, state) catch unreachable;
         }
 
-        // Transition back to idle
-        _ = group.getTasks().tryTransition(.sentinel1, .sentinel0);
+        // Clear the canceled flag for reuse
+        group.getTasks().clearFlag();
     }
 };
 
@@ -236,7 +237,8 @@ pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!voi
     const prev_counter = prev_state & Group.counter_mask;
     std.debug.assert(prev_counter < Group.counter_mask); // Check for overflow
     awaitable.group_node.group = group;
-    if (!group.getTasks().pushUnless(.sentinel1, &awaitable.group_node)) {
+    // Push unless canceled (flag set means group was canceled)
+    if (!group.getTasks().pushUnlessFlag(&awaitable.group_node)) {
         _ = @atomicRmw(u32, group.getState(), .Sub, 1, .acq_rel);
         return error.Closed;
     }

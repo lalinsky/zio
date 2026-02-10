@@ -55,17 +55,10 @@ const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../runtime/WaitNode.zig");
 const Waiter = @import("../common.zig").Waiter;
 
+/// Wait queue with flag indicating whether event is set.
 wait_queue: WaitQueue(WaitNode) = .empty,
 
 const ResetEvent = @This();
-
-// Use WaitQueue sentinel states to encode event state:
-// - sentinel0 = unset (no waiters, event not signaled)
-// - sentinel1 = set (no waiters, event signaled)
-// - pointer = waiting (has waiters, event not signaled)
-const State = WaitQueue(WaitNode).State;
-const unset = State.sentinel0;
-const is_set = State.sentinel1;
 
 /// Creates a new ResetEvent in the unset state.
 pub const init: ResetEvent = .{};
@@ -75,7 +68,7 @@ pub const init: ResetEvent = .{};
 /// Returns `true` if `set()` has been called and `reset()` has not been called since.
 /// Returns `false` otherwise.
 pub fn isSet(self: *const ResetEvent) bool {
-    return self.wait_queue.getState() == is_set;
+    return self.wait_queue.isFlagSet();
 }
 
 /// Sets the event and wakes all waiting tasks.
@@ -84,12 +77,11 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// The event remains set until `reset()` is called. Multiple calls to `set()` while
 /// already set have no effect.
 pub fn set(self: *ResetEvent) void {
-    // Pop and wake all waiters, then transition to is_set
-    // Loop continues until popOrTransition successfully transitions unset->is_set
-    // This handles: already set (is_set->is_set fails, pop returns null),
-    // has waiters (pops them all until last pop transitions to is_set),
-    // and cancellation races (retry loop inside popOrTransition)
-    while (self.wait_queue.popOrTransition(unset, is_set, is_set)) |wait_node| {
+    // Set flag FIRST to ensure isSet() returns true before we wake any waiters
+    self.wait_queue.setFlag();
+
+    // Pop and wake all waiters
+    while (self.wait_queue.pop()) |wait_node| {
         wait_node.wake();
     }
 }
@@ -100,8 +92,8 @@ pub fn set(self: *ResetEvent) void {
 /// on it again. It is undefined behavior to call `reset()` while tasks are waiting
 /// in `wait()` or `timedWait()`.
 pub fn reset(self: *ResetEvent) void {
-    const prev = self.wait_queue.tryTransitionEx(is_set, unset);
-    std.debug.assert(prev == is_set or prev == unset);
+    std.debug.assert(!self.wait_queue.hasWaiters());
+    self.wait_queue.clearFlag();
 }
 
 /// Waits for the event to be set.
@@ -111,19 +103,16 @@ pub fn reset(self: *ResetEvent) void {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn wait(self: *ResetEvent) Cancelable!void {
-    const state = self.wait_queue.getState();
-
     // Fast path: already set
-    if (state == is_set) {
+    if (self.wait_queue.isFlagSet()) {
         return;
     }
 
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
 
-    // Try to push to queue - only succeeds if event is not set
-    // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
-    if (!self.wait_queue.pushUnless(is_set, &waiter.wait_node)) {
+    // Try to push to queue - only succeeds if event is not set (flag not set)
+    if (!self.wait_queue.pushUnlessFlag(&waiter.wait_node)) {
         // Event was set, return immediately
         return;
     }
@@ -139,9 +128,9 @@ pub fn wait(self: *ResetEvent) Cancelable!void {
         return err;
     };
 
-    // Acquire fence: synchronize-with set()'s .release in popAll
+    // Acquire fence: synchronize-with set()'s .release in setFlag
     // Ensures visibility of all writes made before set() was called
-    _ = self.wait_queue.getState();
+    _ = self.wait_queue.isFlagSet();
 }
 
 /// Waits for the event to be set with a timeout.
@@ -154,19 +143,16 @@ pub fn wait(self: *ResetEvent) Cancelable!void {
 /// Returns `error.Timeout` if the timeout expires before the event is set.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable)!void {
-    const state = self.wait_queue.getState();
-
     // Fast path: already set
-    if (state == is_set) {
+    if (self.wait_queue.isFlagSet()) {
         return;
     }
 
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
 
-    // Try to push to queue - only succeeds if event is not set
-    // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
-    if (!self.wait_queue.pushUnless(is_set, &waiter.wait_node)) {
+    // Try to push to queue - only succeeds if event is not set (flag not set)
+    if (!self.wait_queue.pushUnlessFlag(&waiter.wait_node)) {
         // Event was set, return immediately
         return;
     }
@@ -188,9 +174,9 @@ pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable
         return error.Timeout;
     }
 
-    // Acquire fence: synchronize-with set()'s .release in popAll
+    // Acquire fence: synchronize-with set()'s .release in setFlag
     // Ensures visibility of all writes made before set() was called
-    _ = self.wait_queue.getState();
+    _ = self.wait_queue.isFlagSet();
 }
 
 // Future protocol implementation for use with select()
@@ -213,9 +199,8 @@ pub fn getResult(self: *const ResetEvent) void {
 /// This is part of the Future protocol for select().
 /// Returns false if the event is already set (no wait needed), true if added to queue.
 pub fn asyncWait(self: *ResetEvent, wait_node: *WaitNode) bool {
-    // Try to push to queue - only succeeds if event is not set
-    // Returns false if event is set, preventing invalid transition: is_set -> has_waiters
-    return self.wait_queue.pushUnless(is_set, wait_node);
+    // Try to push to queue - only succeeds if event is not set (flag not set)
+    return self.wait_queue.pushUnlessFlag(wait_node);
 }
 
 /// Cancels a pending wait operation by removing the wait node.

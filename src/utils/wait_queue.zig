@@ -164,7 +164,7 @@ pub fn SimpleWaitQueue(comptime T: type) type {
     };
 }
 
-/// Wait queue with two sentinel states for synchronization primitives.
+/// Atomic wait queue with a sticky flag for synchronization primitives.
 ///
 /// **Low-level primitive**: This is intended for implementing synchronization primitives.
 /// Application code should use higher-level abstractions from the sync module instead.
@@ -177,11 +177,29 @@ pub fn SimpleWaitQueue(comptime T: type) type {
 /// faster in practice because the head is always cache-hot from the atomic operations, so
 /// accessing the tail via head.userdata is cheaper than a separate atomic tail pointer.
 ///
-/// Uses tagged pointers with mutation spinlock for thread-safe operations:
-/// - 0b00: Sentinel state 0
-/// - 0b01: Sentinel state 1
-/// - ptr (>1): Pointer to head of wait queue
-/// - ptr | 0b10: Mutation lock bit
+/// ## State Encoding
+///
+/// Uses tagged pointers with a user flag and mutation spinlock:
+/// - bit 0: User flag (sticky, orthogonal to waiters)
+/// - bit 1: Mutation spinlock (internal)
+/// - bits 2+: Pointer to head node (0 if no waiters)
+///
+/// The flag is "sticky" - it persists across push/pop/remove operations. This allows
+/// tracking logical state (set/unset, locked/unlocked) independently of whether there
+/// are waiters in the queue.
+///
+/// ## Usage Examples
+///
+/// For ResetEvent (flag = "is set"):
+/// - `isFlagSet()` → check if event is signaled
+/// - `pushUnlessFlag()` → wait unless already set
+/// - `setFlag()` + `pop()` loop → signal and wake all waiters
+/// - `remove()` → cancel wait (preserves flag!)
+///
+/// For Mutex (flag = "is unlocked"):
+/// - `tryClearFlagIfEmpty()` → tryLock
+/// - `pushOrClearFlag()` → lock (acquire or wait)
+/// - `popOrSetFlag()` → unlock (wake next or mark unlocked)
 ///
 /// **IMPORTANT**: The `userdata` field in T is reserved for internal use by the queue.
 /// When a node is the head of the queue, its userdata field stores the tail pointer.
@@ -212,113 +230,91 @@ pub fn WaitQueue(comptime T: type) type {
         /// When head is a pointer, head_node.userdata contains the tail pointer.
         head: std.atomic.Value(usize),
 
-        /// Empty queue constant for convenient initialization
+        // Bit layout constants
+        const flag_bit: usize = 0b01;
+        const lock_bit: usize = 0b10;
+        const ptr_mask: usize = ~@as(usize, 0b11);
+
+        /// Empty queue with flag cleared.
         pub const empty: Self = .{
-            .head = std.atomic.Value(usize).init(@intFromEnum(State.sentinel0)),
+            .head = std.atomic.Value(usize).init(0),
         };
 
-        /// Create a queue from a raw pointer (e.g., from std.Io.Group.token)
-        pub fn fromPtr(ptr: *anyopaque) Self {
-            return .{ .head = std.atomic.Value(usize).init(@intFromPtr(ptr)) };
-        }
-
-        /// Create a queue from a raw usize value
-        pub fn fromInt(value: usize) Self {
-            return .{ .head = std.atomic.Value(usize).init(value) };
-        }
-
-        pub const State = enum(usize) {
-            sentinel0 = 0b00,
-            sentinel1 = 0b01,
-            _,
-
-            /// Returns true if state is a pointer (not a sentinel).
-            pub fn isPointer(s: State) bool {
-                const val = @intFromEnum(s);
-                return val > 1;
-            }
-
-            /// Returns true if the mutation lock bit is set.
-            pub fn hasMutationBit(s: State) bool {
-                return @intFromEnum(s) & 0b10 != 0;
-            }
-
-            /// Returns state with mutation lock bit set.
-            pub fn withMutationBit(s: State) State {
-                return @enumFromInt(@intFromEnum(s) | 0b10);
-            }
-
-            /// Extract pointer from state, or null if state is a sentinel.
-            pub fn getPtr(s: State) ?*T {
-                if (!s.isPointer()) return null;
-                const addr = @intFromEnum(s) & ~@as(usize, 0b11);
-                return @ptrFromInt(addr);
-            }
-
-            /// Create state from pointer. Pointer must be 4-byte aligned.
-            pub fn fromPtr(ptr: *T) State {
-                const addr = @intFromPtr(ptr);
-                std.debug.assert(addr & 0b11 == 0); // Must be aligned
-                return @enumFromInt(addr);
-            }
+        /// Empty queue with flag set.
+        pub const empty_flagged: Self = .{
+            .head = std.atomic.Value(usize).init(flag_bit),
         };
 
-        /// Initialize queue in a specific sentinel state.
-        pub fn initWithState(state: State) Self {
-            std.debug.assert(!state.isPointer());
-            return .{
-                .head = std.atomic.Value(usize).init(@intFromEnum(state)),
-            };
-        }
+        // =========================================================================
+        // State Queries
+        // =========================================================================
 
-        /// Get current state (atomic load).
+        /// Check if the flag is set.
         ///
-        /// Memory ordering: Uses .acquire to ensure visibility of any prior modifications
-        /// to the list structure if the state is a pointer.
-        pub fn getState(self: *const Self) State {
-            return @enumFromInt(self.head.load(.acquire));
+        /// Memory ordering: Uses .acquire to synchronize-with setFlag()'s .release.
+        pub fn isFlagSet(self: *const Self) bool {
+            return self.head.load(.acquire) & flag_bit != 0;
         }
 
-        /// Try to atomically transition from one sentinel state to another.
-        /// Returns the previous state (useful for checking if already at target).
+        /// Check if there are waiters in the queue.
         ///
-        /// Memory ordering: Uses .acq_rel on success for bidirectional synchronization.
-        /// Uses .acquire on failure to observe the current state.
-        pub fn tryTransitionEx(self: *Self, from: State, to: State) State {
-            std.debug.assert(!from.isPointer() and !to.isPointer());
-            const result = self.head.cmpxchgStrong(
-                @intFromEnum(from),
-                @intFromEnum(to),
-                .acq_rel,
-                .acquire,
-            );
-            if (result) |prev| {
-                return @enumFromInt(prev);
-            } else {
-                return from; // Success, was in from state
-            }
+        /// Memory ordering: Uses .acquire to ensure visibility of waiter data.
+        pub fn hasWaiters(self: *const Self) bool {
+            return self.head.load(.acquire) & ptr_mask != 0;
         }
 
-        /// Try to atomically transition from one sentinel state to another.
-        /// Returns true if successful, false if state has changed.
-        pub fn tryTransition(self: *Self, from: State, to: State) bool {
-            return self.tryTransitionEx(from, to) == from;
+        // =========================================================================
+        // Flag Operations
+        // =========================================================================
+
+        /// Set the flag. Can be called at any time, even with waiters.
+        /// The flag is "sticky" - it stays set until explicitly cleared.
+        ///
+        /// Memory ordering: Uses .release to make prior writes visible to
+        /// threads that subsequently observe the flag via isFlagSet().
+        pub fn setFlag(self: *Self) void {
+            _ = self.head.fetchOr(flag_bit, .release);
         }
+
+        /// Clear the flag.
+        ///
+        /// Memory ordering: Uses .release for consistency with setFlag().
+        pub fn clearFlag(self: *Self) void {
+            _ = self.head.fetchAnd(~flag_bit, .release);
+        }
+
+        /// Try to set the flag if not already set.
+        /// Returns true if we set the flag, false if it was already set.
+        ///
+        /// Memory ordering: Uses .acq_rel for bidirectional synchronization.
+        pub fn trySetFlag(self: *Self) bool {
+            const old = self.head.fetchOr(flag_bit, .acq_rel);
+            return old & flag_bit == 0;
+        }
+
+        /// Try to clear the flag, but only if there are no waiters.
+        /// Returns true if cleared, false if flag was not set or has waiters.
+        ///
+        /// This is useful for Mutex.tryLock() - atomically check unlocked AND no contention.
+        pub fn tryClearFlagIfEmpty(self: *Self) bool {
+            // Only succeeds if state is exactly flag_bit (flag set, no waiters, not locked)
+            return self.head.cmpxchgStrong(flag_bit, 0, .acq_rel, .acquire) == null;
+        }
+
+        // =========================================================================
+        // Internal Helpers
+        // =========================================================================
 
         /// Acquire exclusive access to manipulate the wait list.
         /// Spins until mutation lock is acquired.
-        /// Returns the state before mutation bit was set.
-        ///
-        /// Memory ordering: Uses .acquire on fetchOr to synchronize-with the previous
-        /// releaseMutationLock().
-        pub fn acquireMutationLock(self: *Self) State {
+        /// Returns the state before mutation bit was set (with lock bit cleared).
+        fn acquireMutationLock(self: *Self) usize {
             var spin_count: u4 = 0;
             while (true) {
-                const old = self.head.fetchOr(0b10, .acquire);
-                const old_state: State = @enumFromInt(old);
+                const old = self.head.fetchOr(lock_bit, .acquire);
 
-                if (!old_state.hasMutationBit()) {
-                    return old_state;
+                if (old & lock_bit == 0) {
+                    return old;
                 }
 
                 spin_count +%= 1;
@@ -330,17 +326,27 @@ pub fn WaitQueue(comptime T: type) type {
         }
 
         /// Release exclusive access to wait list.
-        ///
-        /// Memory ordering: Uses .release on fetchAnd to make all modifications
-        /// visible to future lock acquires.
-        pub fn releaseMutationLock(self: *Self) void {
-            const prev = self.head.fetchAnd(~@as(usize, 0b10), .release);
-            std.debug.assert(prev & 0b10 != 0);
+        fn releaseMutationLock(self: *Self) void {
+            _ = self.head.fetchAnd(~lock_bit, .release);
+        }
+
+        /// Extract pointer from state, or null if no waiters.
+        fn getHeadPtr(state: usize) ?*T {
+            const ptr_val = state & ptr_mask;
+            if (ptr_val == 0) return null;
+            return @ptrFromInt(ptr_val);
+        }
+
+        /// Create state value from pointer, preserving flag.
+        fn makePtrState(ptr: *T, preserve_flag: usize) usize {
+            const addr = @intFromPtr(ptr);
+            std.debug.assert(addr & 0b11 == 0); // Must be aligned
+            return addr | (preserve_flag & flag_bit);
         }
 
         /// Internal helper: perform the actual push after lock is acquired.
         /// Assumes mutation lock is held. Releases lock before returning.
-        fn pushInternal(self: *Self, old_state: State, item: *T) void {
+        fn pushInternal(self: *Self, old_state: usize, item: *T) void {
             // Initialize item
             if (std.debug.runtime_safety) {
                 std.debug.assert(!item.in_list);
@@ -349,23 +355,24 @@ pub fn WaitQueue(comptime T: type) type {
             item.next = null;
             item.prev = null;
 
-            // First waiter - transition from sentinel to queue
-            if (!old_state.isPointer()) {
+            const old_head = getHeadPtr(old_state);
+
+            // First waiter - add to empty queue
+            if (old_head == null) {
                 // Item is both head and tail, store tail pointer in its own userdata
                 item.userdata = @intFromPtr(item);
-                // .release: publishes userdata update and item initialization
-                self.head.store(@intFromEnum(State.fromPtr(item)), .release);
+                // Preserve flag, set pointer
+                self.head.store(makePtrState(item, old_state), .release);
                 return;
             }
 
-            // Get head and tail from head's userdata
-            const head = old_state.getPtr().?;
+            // Get tail from head's userdata
+            const head = old_head.?;
             const tail: *T = @ptrFromInt(head.userdata);
 
             // Append to tail
             tail.next = item;
             item.prev = tail;
-            item.next = null;
 
             // Update tail pointer in head's userdata
             head.userdata = @intFromPtr(item);
@@ -373,58 +380,9 @@ pub fn WaitQueue(comptime T: type) type {
             self.releaseMutationLock();
         }
 
-        /// Add item to the end of the queue.
-        /// If queue is currently in a sentinel state, transitions to queue state.
-        pub fn push(self: *Self, item: *T) void {
-            const old_state = self.acquireMutationLock();
-            self.pushInternal(old_state, item);
-        }
-
-        /// Add item to the end of the queue, unless queue is in forbidden_state.
-        /// Returns true if item was pushed, false if queue was in forbidden_state.
-        pub fn pushUnless(self: *Self, forbidden_state: State, item: *T) bool {
-            const old_state = self.acquireMutationLock();
-
-            if (old_state == forbidden_state) {
-                self.releaseMutationLock();
-                return false;
-            }
-
-            self.pushInternal(old_state, item);
-            return true;
-        }
-
-        pub const PushOrTransitionResult = enum {
-            pushed,
-            transitioned,
-        };
-
-        /// Push an item to the queue, or if the queue is in from_state, transition to to_state instead.
-        /// Returns `.transitioned` if transition occurred, `.pushed` if item was pushed.
-        pub fn pushOrTransition(self: *Self, from_state: State, to_state: State, item: *T) PushOrTransitionResult {
-            const old_state = self.acquireMutationLock();
-
-            if (old_state == from_state) {
-                self.head.store(@intFromEnum(to_state), .release);
-                return .transitioned;
-            }
-
-            self.pushInternal(old_state, item);
-            return .pushed;
-        }
-
-        /// Remove and return the item at the front of the queue.
-        /// Returns null if queue is in a sentinel state (empty).
-        pub fn pop(self: *Self) ?*T {
-            const old_state = self.acquireMutationLock();
-
-            // Check if queue is empty
-            if (!old_state.isPointer()) {
-                self.releaseMutationLock();
-                return null;
-            }
-
-            const old_head = old_state.getPtr().?;
+        /// Internal helper: perform the actual pop after lock is acquired.
+        /// Assumes mutation lock is held and there are waiters. Releases lock before returning.
+        fn popInternal(self: *Self, old_state: usize, old_head: *T) *T {
             const next = old_head.next;
 
             // Mark as removed from list
@@ -437,31 +395,72 @@ pub fn WaitQueue(comptime T: type) type {
             old_head.next = null;
             old_head.prev = null;
 
-            if (next == null) {
-                // Last waiter - transition to sentinel0
-                self.head.store(@intFromEnum(State.sentinel0), .release);
-            } else {
+            if (next) |new_head| {
                 // Transfer tail pointer from old head to new head
-                next.?.userdata = old_head.userdata;
-                next.?.prev = null;
-                self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
+                new_head.userdata = old_head.userdata;
+                new_head.prev = null;
+                // Preserve flag, update pointer
+                self.head.store(makePtrState(new_head, old_state), .release);
+            } else {
+                // Was last waiter - preserve flag, clear pointer
+                self.head.store(old_state & flag_bit, .release);
             }
 
             return old_head;
         }
 
-        /// Remove a specific item from the queue.
-        /// Returns true if the item was found and removed, false otherwise.
-        pub fn remove(self: *Self, item: *T) bool {
+        // =========================================================================
+        // Waiter Operations (all preserve flag)
+        // =========================================================================
+
+        /// Add item to the end of the queue.
+        /// Preserves the flag.
+        pub fn push(self: *Self, item: *T) void {
+            const old_state = self.acquireMutationLock();
+            self.pushInternal(old_state, item);
+        }
+
+        /// Add item to the end of the queue, unless the flag is set.
+        /// Returns true if item was pushed, false if flag was set.
+        ///
+        /// This is useful for ResetEvent/Future wait - don't wait if already signaled.
+        pub fn pushUnlessFlag(self: *Self, item: *T) bool {
             const old_state = self.acquireMutationLock();
 
-            // Check if queue is empty
-            if (!old_state.isPointer()) {
+            if (old_state & flag_bit != 0) {
                 self.releaseMutationLock();
                 return false;
             }
 
-            const head = old_state.getPtr().?;
+            self.pushInternal(old_state, item);
+            return true;
+        }
+
+        /// Remove and return the item at the front of the queue.
+        /// Returns null if there are no waiters.
+        /// Preserves the flag.
+        pub fn pop(self: *Self) ?*T {
+            const old_state = self.acquireMutationLock();
+
+            const old_head = getHeadPtr(old_state) orelse {
+                self.releaseMutationLock();
+                return null;
+            };
+
+            return self.popInternal(old_state, old_head);
+        }
+
+        /// Remove a specific item from the queue.
+        /// Returns true if the item was found and removed, false otherwise.
+        /// **Preserves the flag** - this is the key fix for the cancel race!
+        pub fn remove(self: *Self, item: *T) bool {
+            const old_state = self.acquireMutationLock();
+
+            const head = getHeadPtr(old_state) orelse {
+                self.releaseMutationLock();
+                return false;
+            };
+
             const tail: *T = @ptrFromInt(head.userdata);
 
             // Validate membership via pointer checks
@@ -498,12 +497,12 @@ pub fn WaitQueue(comptime T: type) type {
             if (head == item) {
                 if (item_next) |next| {
                     // Transfer tail pointer to new head
-                    // (tail can't be item since item.next != null)
                     next.userdata = head.userdata;
-                    self.head.store(@intFromEnum(State.fromPtr(next)), .release);
+                    // Preserve flag, update pointer
+                    self.head.store(makePtrState(next, old_state), .release);
                 } else {
-                    // Was only waiter
-                    self.head.store(@intFromEnum(State.sentinel0), .release);
+                    // Was only waiter - PRESERVE FLAG, clear pointer
+                    self.head.store(old_state & flag_bit, .release);
                 }
             } else {
                 // Not removing head, update tail if needed
@@ -516,58 +515,42 @@ pub fn WaitQueue(comptime T: type) type {
             return true;
         }
 
-        /// Pop one item, or if queue is empty (in from_sentinel state), transition to to_sentinel.
-        /// When popping the last item, transitions to last_waiter_sentinel.
-        /// Returns the popped item, or null if queue was/became empty.
-        pub fn popOrTransition(self: *Self, from_sentinel: State, to_sentinel: State, last_waiter_sentinel: State) ?*T {
-            std.debug.assert(!from_sentinel.isPointer());
-            std.debug.assert(!to_sentinel.isPointer());
-            std.debug.assert(!last_waiter_sentinel.isPointer());
+        // =========================================================================
+        // Combined Operations (for lock semantics)
+        // =========================================================================
 
+        /// Push a waiter, or if flag is set AND no waiters, clear the flag.
+        /// Returns `.pushed` if waiter was added to queue.
+        /// Returns `.flag_cleared` if flag was cleared (caller "won", e.g., acquired lock).
+        ///
+        /// This is useful for Mutex.lock() - either acquire the lock or join the wait queue.
+        pub fn pushOrClearFlag(self: *Self, item: *T) enum { pushed, flag_cleared } {
             const old_state = self.acquireMutationLock();
 
-            // If in from_sentinel, transition to to_sentinel
-            if (old_state == from_sentinel) {
-                self.head.store(@intFromEnum(to_sentinel), .release);
+            // If flag set and no waiters, clear flag (acquire lock)
+            if (old_state == flag_bit) {
+                self.head.store(0, .release); // Clear flag and lock bit
+                return .flag_cleared;
+            }
+
+            self.pushInternal(old_state, item);
+            return .pushed;
+        }
+
+        /// Pop a waiter, or if no waiters, set the flag.
+        /// Returns the popped waiter, or null if flag was set (queue was empty).
+        ///
+        /// This is useful for Mutex.unlock() - wake next waiter or mark as unlocked.
+        pub fn popOrSetFlag(self: *Self) ?*T {
+            const old_state = self.acquireMutationLock();
+
+            const old_head = getHeadPtr(old_state) orelse {
+                // No waiters, set flag
+                self.head.store(flag_bit, .release);
                 return null;
-            }
+            };
 
-            // Already in target state
-            if (old_state == to_sentinel) {
-                self.releaseMutationLock();
-                return null;
-            }
-
-            // Must be a pointer (has waiters)
-            if (!old_state.isPointer()) {
-                self.releaseMutationLock();
-                return null;
-            }
-
-            const old_head = old_state.getPtr().?;
-            const next = old_head.next;
-
-            // Mark as removed from list
-            if (std.debug.runtime_safety) {
-                std.debug.assert(old_head.in_list);
-                old_head.in_list = false;
-            }
-
-            // Clear old head's pointers
-            old_head.next = null;
-            old_head.prev = null;
-
-            if (next == null) {
-                // Last waiter - transition to last_waiter_sentinel
-                self.head.store(@intFromEnum(last_waiter_sentinel), .release);
-            } else {
-                // Transfer tail pointer to new head
-                next.?.userdata = old_head.userdata;
-                next.?.prev = null;
-                self.head.store(@intFromEnum(State.fromPtr(next.?)), .release);
-            }
-
-            return old_head;
+            return self.popInternal(old_state, old_head);
         }
     };
 }
@@ -720,8 +703,9 @@ test "WaitQueue basic operations" {
     const Queue = WaitQueue(TestNode);
     var queue: Queue = .empty;
 
-    // Initially in sentinel0 state
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    // Initially empty with flag clear
+    try std.testing.expect(!queue.isFlagSet());
+    try std.testing.expect(!queue.hasWaiters());
 
     // Create mock nodes - ensure proper alignment
     var node1 align(8) = TestNode{ .value = 1 };
@@ -729,7 +713,8 @@ test "WaitQueue basic operations" {
 
     // Push items
     queue.push(&node1);
-    try std.testing.expect(queue.getState().isPointer());
+    try std.testing.expect(queue.hasWaiters());
+    try std.testing.expect(!queue.isFlagSet()); // Flag preserved (clear)
     // When there's only one item, it should point to itself as tail
     try std.testing.expectEqual(@intFromPtr(&node1), node1.userdata);
 
@@ -745,13 +730,13 @@ test "WaitQueue basic operations" {
 
     // Remove specific item
     try std.testing.expectEqual(true, queue.remove(&node2));
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expect(!queue.hasWaiters());
 
     // Remove non-existent item
     try std.testing.expectEqual(false, queue.remove(&node1));
 }
 
-test "WaitQueue state transitions" {
+test "WaitQueue flag operations" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -761,19 +746,41 @@ test "WaitQueue state transitions" {
     };
 
     const Queue = WaitQueue(TestNode);
-    var queue = Queue.initWithState(.sentinel1);
-    try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
 
-    // Transition between sentinels
-    try std.testing.expectEqual(true, queue.tryTransition(.sentinel1, .sentinel0));
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    // Test .empty (flag clear)
+    var queue: Queue = .empty;
+    try std.testing.expect(!queue.isFlagSet());
 
-    // Failed transition
-    try std.testing.expectEqual(false, queue.tryTransition(.sentinel1, .sentinel0));
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    // Test .empty_flagged (flag set)
+    var queue2: Queue = .empty_flagged;
+    try std.testing.expect(queue2.isFlagSet());
+
+    // Test setFlag / clearFlag
+    queue.setFlag();
+    try std.testing.expect(queue.isFlagSet());
+    queue.clearFlag();
+    try std.testing.expect(!queue.isFlagSet());
+
+    // Test trySetFlag
+    try std.testing.expect(queue.trySetFlag()); // Should succeed
+    try std.testing.expect(!queue.trySetFlag()); // Already set, should fail
+    try std.testing.expect(queue.isFlagSet());
+
+    // Test tryClearFlagIfEmpty
+    try std.testing.expect(queue.tryClearFlagIfEmpty()); // No waiters, should succeed
+    try std.testing.expect(!queue.isFlagSet());
+
+    // Add a waiter, then try to clear
+    var node align(8) = TestNode{ .value = 1 };
+    queue.setFlag();
+    queue.push(&node);
+    try std.testing.expect(!queue.tryClearFlagIfEmpty()); // Has waiters, should fail
+    try std.testing.expect(queue.isFlagSet()); // Flag unchanged
+
+    _ = queue.pop();
 }
 
-test "WaitQueue empty constant" {
+test "WaitQueue empty and empty_flagged constants" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -784,16 +791,22 @@ test "WaitQueue empty constant" {
 
     // Test .empty initialization
     var queue: WaitQueue(TestNode) = .empty;
-    try std.testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
+    try std.testing.expect(!queue.isFlagSet());
+    try std.testing.expect(!queue.hasWaiters());
 
     // Verify it works
     var node align(8) = TestNode{ .value = 42 };
     queue.push(&node);
-    try std.testing.expect(queue.getState().isPointer());
+    try std.testing.expect(queue.hasWaiters());
 
     const popped = queue.pop();
     try std.testing.expectEqual(&node, popped);
-    try std.testing.expectEqual(WaitQueue(TestNode).State.sentinel0, queue.getState());
+    try std.testing.expect(!queue.hasWaiters());
+
+    // Test .empty_flagged
+    var queue2: WaitQueue(TestNode) = .empty_flagged;
+    try std.testing.expect(queue2.isFlagSet());
+    try std.testing.expect(!queue2.hasWaiters());
 }
 
 test "WaitQueue tail tracking" {
@@ -933,7 +946,158 @@ test "WaitQueue double remove" {
     try std.testing.expectEqual(false, queue.remove(&node3));
 
     // Queue should be empty
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expect(!queue.hasWaiters());
+}
+
+test "WaitQueue remove preserves flag" {
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        userdata: usize = 0,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+        value: i32,
+    };
+
+    const Queue = WaitQueue(TestNode);
+    var queue: Queue = .empty;
+
+    var node1 align(8) = TestNode{ .value = 1 };
+
+    // Push a waiter
+    queue.push(&node1);
+    try std.testing.expect(!queue.isFlagSet());
+
+    // Set the flag while waiter is in queue
+    queue.setFlag();
+    try std.testing.expect(queue.isFlagSet());
+    try std.testing.expect(queue.hasWaiters());
+
+    // Remove the waiter - flag should be preserved!
+    try std.testing.expectEqual(true, queue.remove(&node1));
+    try std.testing.expect(queue.isFlagSet()); // THE KEY TEST
+    try std.testing.expect(!queue.hasWaiters());
+}
+
+test "WaitQueue pop preserves flag" {
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        userdata: usize = 0,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+        value: i32,
+    };
+
+    const Queue = WaitQueue(TestNode);
+    var queue: Queue = .empty;
+
+    var node1 align(8) = TestNode{ .value = 1 };
+
+    // Set flag, then push a waiter
+    queue.setFlag();
+    queue.push(&node1);
+    try std.testing.expect(queue.isFlagSet());
+    try std.testing.expect(queue.hasWaiters());
+
+    // Pop the waiter - flag should be preserved!
+    const popped = queue.pop();
+    try std.testing.expectEqual(&node1, popped);
+    try std.testing.expect(queue.isFlagSet()); // Flag preserved
+    try std.testing.expect(!queue.hasWaiters());
+}
+
+test "WaitQueue pushUnlessFlag" {
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        userdata: usize = 0,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+        value: i32,
+    };
+
+    const Queue = WaitQueue(TestNode);
+    var queue: Queue = .empty;
+
+    var node1 align(8) = TestNode{ .value = 1 };
+    var node2 align(8) = TestNode{ .value = 2 };
+
+    // Push should succeed when flag is clear
+    try std.testing.expect(queue.pushUnlessFlag(&node1));
+    try std.testing.expect(queue.hasWaiters());
+
+    // Set the flag
+    queue.setFlag();
+
+    // Push should fail when flag is set
+    try std.testing.expect(!queue.pushUnlessFlag(&node2));
+
+    // Clean up
+    _ = queue.pop();
+}
+
+test "WaitQueue pushOrClearFlag" {
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        userdata: usize = 0,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+        value: i32,
+    };
+
+    const Queue = WaitQueue(TestNode);
+
+    var node1 align(8) = TestNode{ .value = 1 };
+    var node2 align(8) = TestNode{ .value = 2 };
+
+    // Test 1: flag set, no waiters -> clears flag
+    var queue1: Queue = .empty_flagged;
+    try std.testing.expectEqual(.flag_cleared, queue1.pushOrClearFlag(&node1));
+    try std.testing.expect(!queue1.isFlagSet());
+    try std.testing.expect(!queue1.hasWaiters());
+
+    // Test 2: flag clear, no waiters -> pushes
+    var queue2: Queue = .empty;
+    try std.testing.expectEqual(.pushed, queue2.pushOrClearFlag(&node1));
+    try std.testing.expect(!queue2.isFlagSet());
+    try std.testing.expect(queue2.hasWaiters());
+    _ = queue2.pop();
+
+    // Test 3: flag set, has waiters -> pushes (doesn't clear)
+    var queue3: Queue = .empty;
+    queue3.push(&node1);
+    queue3.setFlag();
+    try std.testing.expectEqual(.pushed, queue3.pushOrClearFlag(&node2));
+    try std.testing.expect(queue3.isFlagSet()); // Flag unchanged
+    _ = queue3.pop();
+    _ = queue3.pop();
+}
+
+test "WaitQueue popOrSetFlag" {
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        userdata: usize = 0,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+        value: i32,
+    };
+
+    const Queue = WaitQueue(TestNode);
+
+    var node1 align(8) = TestNode{ .value = 1 };
+
+    // Test 1: has waiters -> pops, doesn't set flag
+    var queue1: Queue = .empty;
+    queue1.push(&node1);
+    const popped = queue1.popOrSetFlag();
+    try std.testing.expectEqual(&node1, popped);
+    try std.testing.expect(!queue1.isFlagSet()); // Flag not set (was clear before)
+    try std.testing.expect(!queue1.hasWaiters());
+
+    // Test 2: no waiters -> sets flag
+    var queue2: Queue = .empty;
+    const popped2 = queue2.popOrSetFlag();
+    try std.testing.expectEqual(null, popped2);
+    try std.testing.expect(queue2.isFlagSet()); // Flag now set
+    try std.testing.expect(!queue2.hasWaiters());
 }
 
 test "WaitQueue concurrent push and pop" {
@@ -986,7 +1150,7 @@ test "WaitQueue concurrent push and pop" {
     }
 
     try std.testing.expectEqual(total_items, popped_count);
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expect(!queue.hasWaiters());
 }
 
 test "WaitQueue concurrent remove during modifications" {
@@ -1064,10 +1228,10 @@ test "WaitQueue concurrent remove during modifications" {
 
     // Verify all items were accounted for
     try std.testing.expectEqual(num_items, total_processed);
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expect(!queue.hasWaiters());
 }
 
-test "WaitQueue popOrTransition with concurrent removals" {
+test "WaitQueue popOrSetFlag with concurrent removals" {
     const TestNode = struct {
         next: ?*@This() = null,
         prev: ?*@This() = null,
@@ -1077,7 +1241,7 @@ test "WaitQueue popOrTransition with concurrent removals" {
     };
 
     const Queue = WaitQueue(TestNode);
-    var queue = Queue.initWithState(.sentinel0);
+    var queue: Queue = .empty;
 
     const num_items = 500;
 
@@ -1094,17 +1258,17 @@ test "WaitQueue popOrTransition with concurrent removals" {
         queue.push(n);
     }
 
-    // Thread 1: popOrTransition from sentinel0 to sentinel1
+    // Thread 1: popOrSetFlag until empty (then flag gets set)
     var pop_count = std.atomic.Value(usize).init(0);
     var pops_done = std.atomic.Value(bool).init(false);
     const pop_thread = try std.Thread.spawn(.{}, struct {
         fn popItems(q: *Queue, count: *std.atomic.Value(usize), done: *std.atomic.Value(bool)) void {
             var local_count: usize = 0;
             while (true) {
-                if (q.popOrTransition(.sentinel0, .sentinel1, .sentinel1)) |_| {
+                if (q.popOrSetFlag()) |_| {
                     local_count += 1;
                 } else {
-                    break;
+                    break; // Flag was set, queue is empty
                 }
             }
             count.store(local_count, .monotonic);
@@ -1132,9 +1296,10 @@ test "WaitQueue popOrTransition with concurrent removals" {
 
     const total_processed = pop_count.load(.monotonic) + remove_count.load(.monotonic);
 
-    // Verify all items were accounted for and state transitioned
+    // Verify all items were accounted for and flag was set
     try std.testing.expectEqual(num_items, total_processed);
-    try std.testing.expectEqual(Queue.State.sentinel1, queue.getState());
+    try std.testing.expect(queue.isFlagSet());
+    try std.testing.expect(!queue.hasWaiters());
 }
 
 test "WaitQueue stress test with heavy contention" {
@@ -1230,5 +1395,47 @@ test "WaitQueue stress test with heavy contention" {
 
     // All items must be accounted for
     try std.testing.expectEqual(total_items, total_accounted);
-    try std.testing.expectEqual(Queue.State.sentinel0, queue.getState());
+    try std.testing.expect(!queue.hasWaiters());
+}
+
+test "WaitQueue concurrent setFlag and remove" {
+    const TestNode = struct {
+        next: ?*@This() = null,
+        prev: ?*@This() = null,
+        userdata: usize = 0,
+        in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+        value: usize,
+    };
+
+    const Queue = WaitQueue(TestNode);
+
+    // This test verifies that remove() preserves the flag even under contention
+    for (0..100) |_| {
+        var queue: Queue = .empty;
+        var node align(8) = TestNode{ .value = 1 };
+
+        queue.push(&node);
+
+        // Thread 1: Set flag and pop
+        const set_thread = try std.Thread.spawn(.{}, struct {
+            fn setAndPop(q: *Queue) void {
+                q.setFlag();
+                _ = q.pop();
+            }
+        }.setAndPop, .{&queue});
+
+        // Thread 2: Try to remove
+        const remove_thread = try std.Thread.spawn(.{}, struct {
+            fn tryRemove(q: *Queue, n: *TestNode) void {
+                _ = q.remove(n);
+            }
+        }.tryRemove, .{ &queue, &node });
+
+        set_thread.join();
+        remove_thread.join();
+
+        // The flag should always be set, regardless of which thread won
+        try std.testing.expect(queue.isFlagSet());
+        try std.testing.expect(!queue.hasWaiters());
+    }
 }
