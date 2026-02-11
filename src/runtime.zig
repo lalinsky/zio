@@ -65,12 +65,6 @@ pub const RuntimeOptions = struct {
     },
     /// Number of executor threads to run (including main).
     executors: ExecutorCount = .exact(1),
-    /// Enable LIFO slot optimization for cache locality.
-    /// When enabled, tasks woken by other tasks are placed in a LIFO slot
-    /// for immediate execution, improving cache locality.
-    /// Enabled by default as it also maintains backward-compatible timing
-    /// (woken tasks run immediately instead of being deferred to next batch).
-    lifo_slot_enabled: bool = true,
 };
 
 const Awaitable = @import("runtime/awaitable.zig").Awaitable;
@@ -251,26 +245,16 @@ pub const Executor = struct {
 
     ready_queue: SimpleQueue(WaitNode) = .{},
 
-    // LIFO slot optimization: when a task wakes another task, the woken task
-    // is placed here for immediate execution, improving cache locality.
-    // This is checked before ready_queue when selecting the next task to run.
-    lifo_slot: ?*WaitNode = null,
-
-    // Controls whether LIFO slot optimization is enabled.
-    // When disabled, all wakeups go to next_ready_queue (deferred to next batch).
-    // Initialized from RuntimeOptions.lifo_slot_enabled (default: true).
-    lifo_slot_enabled: bool = true,
-
-    // Tracks consecutive polls from LIFO slot to prevent starvation.
-    // Reset when we poll from ready_queue instead.
-    lifo_slot_used: u8 = 0,
-
     // Tracks tasks run since last event loop tick.
     // After EVENT_INTERVAL tasks, getNextTask() returns null to force I/O processing.
     tick_task_count: u8 = 0,
 
-    // Tracks tasks waiting in ready_queue + lifo_slot + next_ready_queue.
-    // Used by maybeYield to decide whether to yield based on pending work.
+    // Monotonically increasing tick counter, incremented after each event loop tick.
+    // Used with task.last_run_tick to prevent running the same task more than once per tick.
+    // Starts at 1 so new tasks (last_run_tick=0) can run immediately.
+    current_tick: u32 = 1,
+
+    // Tracks tasks waiting in ready_queue + next_ready_queue.
     ready_count: u32 = 0,
 
     // Timestamp of last event loop tick, used for time-based yield decisions.
@@ -309,7 +293,6 @@ pub const Executor = struct {
         self.* = .{
             .id = id,
             .loop = undefined,
-            .lifo_slot_enabled = runtime.options.lifo_slot_enabled,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
         };
@@ -411,11 +394,12 @@ pub const Executor = struct {
 
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
             const main_ready = check_ready and self.main_task.state.load(.acquire) == .ready;
-            const has_work = self.ready_queue.head != null or self.lifo_slot != null or main_ready;
+            const has_work = self.ready_queue.head != null or main_ready;
             try self.loop.run(if (has_work) .no_wait else .once);
 
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
+            self.current_tick +%= 1;
             self.last_tick_time = self.loop.now();
 
             // Check again after I/O
@@ -425,11 +409,7 @@ pub const Executor = struct {
         }
     }
 
-    /// Get the next task to run, checking LIFO slot first for cache locality.
-    ///
-    /// The LIFO slot is checked first (when enabled) because recently woken tasks
-    /// are likely cache-hot. However, we limit consecutive LIFO polls to prevent
-    /// starvation of tasks in ready_queue.
+    /// Get the next task to run from the ready queue.
     ///
     /// Returns null if no tasks are available, or if EVENT_INTERVAL tasks have
     /// been run since the last event loop tick (to ensure I/O responsiveness).
@@ -442,50 +422,29 @@ pub const Executor = struct {
             return null;
         }
 
-        // LIFO slot optimization: check LIFO slot first for cache locality
-        // But limit consecutive LIFO polls to prevent starvation of ready_queue tasks
-        const MAX_LIFO_POLLS_PER_TICK = 3;
+        // Peek at head of ready_queue
+        const node = self.ready_queue.head orelse return null;
+        const task = AnyTask.fromWaitNode(node);
 
-        if (self.lifo_slot_enabled) {
-            if (self.lifo_slot_used < MAX_LIFO_POLLS_PER_TICK) {
-                // Under starvation limit - can use LIFO slot
-                if (self.lifo_slot) |task| {
-                    self.lifo_slot = null;
-                    self.lifo_slot_used += 1;
-                    self.tick_task_count += 1;
-                    self.ready_count -= 1;
-                    return .fromWaitNode(task);
-                }
-            } else {
-                // Hit starvation limit - move LIFO slot task to ready_queue (back of FIFO)
-                // This gives other ready_queue tasks a chance to run first
-                if (self.lifo_slot) |task| {
-                    self.lifo_slot = null;
-                    self.ready_queue.push(task);
-                    // Don't reset counter - only reset when we actually poll from ready_queue
-                    // Note: ready_count stays the same (moved from lifo_slot to ready_queue)
-                }
-            }
+        // Task already ran this tick? Force event loop tick first.
+        // This prevents a yielding task from running multiple times per tick.
+        // We leave the task in the queue (don't pop) to preserve FIFO order.
+        if (task.last_run_tick == self.current_tick) {
+            return null;
         }
 
-        // Take from ready_queue
-        if (self.ready_queue.pop()) |task| {
-            self.lifo_slot_used = 0; // Reset LIFO starvation counter
-            self.tick_task_count += 1;
-            self.ready_count -= 1;
-            return .fromWaitNode(task);
-        }
+        // Actually remove from queue now that we're going to run it
+        _ = self.ready_queue.pop();
 
-        return null;
+        task.last_run_tick = self.current_tick;
+        self.tick_task_count += 1;
+        self.ready_count -= 1;
+        return task;
     }
 
     /// Schedule a task to the current executor's local queue.
     /// This must only be called when we're on the correct executor thread.
-    ///
-    /// The `is_yield` parameter determines scheduling behavior:
-    /// - `true`: Task is yielding - goes to ready_queue (FIFO, bypasses LIFO slot)
-    /// - `false`: Task is being woken - goes to LIFO slot (immediate) or ready_queue (FIFO)
-    fn scheduleTaskLocal(self: *Executor, task: *AnyTask, is_yield: bool) void {
+    fn scheduleTaskLocal(self: *Executor, task: *AnyTask) void {
         // Main task is never queued — the run loop checks its state directly
         if (task == &self.main_task) return;
 
@@ -493,21 +452,8 @@ pub const Executor = struct {
         if (std.debug.runtime_safety) {
             std.debug.assert(!wait_node.in_list);
         }
-        if (is_yield or !self.lifo_slot_enabled) {
-            // Yields bypass LIFO slot for fairness, go to back of ready_queue
-            // LIFO disabled also uses ready_queue (FIFO, fair scheduling)
-            self.ready_queue.push(wait_node);
-            self.ready_count += 1;
-        } else {
-            // LIFO enabled - try LIFO slot for cache locality
-            if (self.lifo_slot) |old_task| {
-                // LIFO slot occupied - displaced task goes to ready_queue (FIFO)
-                self.ready_queue.push(old_task);
-            }
-            // New task takes the LIFO slot (runs immediately, cache-hot)
-            self.lifo_slot = wait_node;
-            self.ready_count += 1;
-        }
+        self.ready_queue.push(wait_node);
+        self.ready_count += 1;
     }
 
     /// Schedule a task to a remote executor (different executor or no current executor).
@@ -559,8 +505,9 @@ pub const Executor = struct {
             if (current_exec.runtime == self.runtime and old_state != .new) {
                 if (current_exec != self) {
                     task.coro.parent_context_ptr.store(&current_exec.main_task.coro.context, .release);
+                    task.last_run_tick = 0; // Allow immediate execution on new executor
                 }
-                current_exec.scheduleTaskLocal(task, false);
+                current_exec.scheduleTaskLocal(task);
                 return;
             }
         }
@@ -586,7 +533,7 @@ pub const Executor = struct {
             .none => {},
             .reschedule => |task| {
                 self.pending_cleanup = .none;
-                self.scheduleTaskLocal(task, true);
+                self.scheduleTaskLocal(task);
             },
             .park => |task| {
                 self.pending_cleanup = .none;
@@ -595,7 +542,7 @@ pub const Executor = struct {
                 // swapped to .ready, so we schedule the task immediately.
                 if (task.state.cmpxchgStrong(.preparing_to_wait, .waiting, .release, .acquire)) |actual| {
                     if (actual == .ready) {
-                        self.scheduleTaskLocal(task, false);
+                        self.scheduleTaskLocal(task);
                     } else {
                         std.debug.panic("park cleanup: unexpected state {} for task {*}", .{ actual, task });
                     }
