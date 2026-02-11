@@ -29,7 +29,7 @@ const std = @import("std");
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const common = @import("common.zig");
-const SimpleWaitQueue = @import("utils/wait_queue.zig").SimpleWaitQueue;
+const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 const Runtime = @import("runtime.zig").Runtime;
 
 const Waiter = common.Waiter;
@@ -45,7 +45,7 @@ pub const CompletionQueue = struct {
     waiter: Waiter,
 
     const GroupNode = @FieldType(Completion, "group");
-    const Queue = SimpleWaitQueue(GroupNode);
+    const Queue = SimpleQueue(GroupNode);
 
     pub fn init() CompletionQueue {
         return .{
