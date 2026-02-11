@@ -249,6 +249,11 @@ pub const Executor = struct {
     // After EVENT_INTERVAL tasks, getNextTask() returns null to force I/O processing.
     tick_task_count: u8 = 0,
 
+    // Monotonically increasing tick counter, incremented after each event loop tick.
+    // Used with task.last_run_tick to prevent running the same task more than once per tick.
+    // Starts at 1 so new tasks (last_run_tick=0) can run immediately.
+    current_tick: u32 = 1,
+
     // Tracks tasks waiting in ready_queue + next_ready_queue.
     ready_count: u32 = 0,
 
@@ -394,6 +399,7 @@ pub const Executor = struct {
 
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
+            self.current_tick +%= 1;
             self.last_tick_time = self.loop.now();
 
             // Check again after I/O
@@ -416,14 +422,24 @@ pub const Executor = struct {
             return null;
         }
 
-        // Take from ready_queue
-        if (self.ready_queue.pop()) |task| {
-            self.tick_task_count += 1;
-            self.ready_count -= 1;
-            return .fromWaitNode(task);
+        // Peek at head of ready_queue
+        const node = self.ready_queue.head orelse return null;
+        const task = AnyTask.fromWaitNode(node);
+
+        // Task already ran this tick? Force event loop tick first.
+        // This prevents a yielding task from running multiple times per tick.
+        // We leave the task in the queue (don't pop) to preserve FIFO order.
+        if (task.last_run_tick == self.current_tick) {
+            return null;
         }
 
-        return null;
+        // Actually remove from queue now that we're going to run it
+        _ = self.ready_queue.pop();
+
+        task.last_run_tick = self.current_tick;
+        self.tick_task_count += 1;
+        self.ready_count -= 1;
+        return task;
     }
 
     /// Schedule a task to the current executor's local queue.
@@ -489,6 +505,7 @@ pub const Executor = struct {
             if (current_exec.runtime == self.runtime and old_state != .new) {
                 if (current_exec != self) {
                     task.coro.parent_context_ptr.store(&current_exec.main_task.coro.context, .release);
+                    task.last_run_tick = 0; // Allow immediate execution on new executor
                 }
                 current_exec.scheduleTaskLocal(task);
                 return;

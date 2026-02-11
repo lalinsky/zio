@@ -162,6 +162,11 @@ pub const AnyTask = struct {
     // Cancellation status - tracks user cancel, timeout, pending errors, and shield count
     canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
+    // Tracks which tick this task last ran on (per-executor).
+    // Used to prevent running the same task more than once per event loop tick.
+    // Reset to 0 when stolen, allowing immediate execution on the thief.
+    last_run_tick: u32 = 0,
+
     // Closure for the task
     closure: Closure,
 
