@@ -5,7 +5,7 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
-const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
+const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const select = @import("../select.zig").select;
 const Waiter = @import("../common.zig").Waiter;
@@ -30,8 +30,8 @@ const ChannelImpl = struct {
     count: usize = 0,
 
     mutex: Mutex = .init,
-    receiver_queue: SimpleWaitQueue(WaitNode) = .empty,
-    sender_queue: SimpleWaitQueue(WaitNode) = .empty,
+    receiver_queue: SimpleQueue(WaitNode) = .empty,
+    sender_queue: SimpleQueue(WaitNode) = .empty,
 
     closed: bool = false,
 

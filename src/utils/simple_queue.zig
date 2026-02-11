@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const SimpleStack = @import("simple_stack.zig").SimpleStack;
 
 /// Generic simple FIFO queue.
 /// T must be a struct type with `next` and `prev` fields of type ?*T.
@@ -28,6 +29,14 @@ pub fn SimpleQueue(comptime T: type) type {
 
         head: ?*T = null,
         tail: ?*T = null,
+
+        /// Empty queue constant for convenient initialization
+        pub const empty: Self = .{};
+
+        /// Check if the queue is empty
+        pub fn isEmpty(self: *const Self) bool {
+            return self.head == null;
+        }
 
         pub fn push(self: *Self, item: *T) void {
             if (std.debug.runtime_safety) {
@@ -60,6 +69,31 @@ pub fn SimpleQueue(comptime T: type) type {
             head.next = null;
             head.prev = null;
             return head;
+        }
+
+        /// Remove and return all items from the queue.
+        /// Returns a SimpleStack containing all items; the original queue becomes empty.
+        /// This is useful for processing all items without repeated locking.
+        ///
+        /// The returned stack only uses `next` pointers for iteration. All nodes have
+        /// their `prev` field set to null, which acts as a sentinel to prevent concurrent
+        /// remove() operations from touching the nodes while they're being processed.
+        pub fn popAll(self: *Self) SimpleStack(T) {
+            const head = self.head;
+
+            // Iterate through all nodes and set prev = null (sentinel)
+            // This prevents concurrent remove() from manipulating these nodes
+            var node = head;
+            while (node) |n| {
+                n.prev = null;
+                node = n.next;
+            }
+
+            // Clear the queue
+            self.* = .empty;
+
+            // Return a SimpleStack (only uses next pointers)
+            return .{ .head = head };
         }
 
         pub fn concatByMoving(self: *Self, other: *Self) void {

@@ -34,7 +34,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Waiter = @import("../common.zig").Waiter;
 const Timeout = @import("../time.zig").Timeout;
-const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
+const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
 const os = @import("../os/root.zig");
 
@@ -47,7 +47,7 @@ const bucket_shift = @bitSizeOf(usize) - @ctz(@as(usize, num_buckets));
 
 const Bucket = struct {
     mutex: os.Mutex = .init(),
-    waiters: SimpleWaitQueue(FutexWaiter) = .empty,
+    waiters: SimpleQueue(FutexWaiter) = .empty,
 };
 
 /// Global static bucket table for futex operations.
@@ -108,7 +108,7 @@ pub fn wait(ptr: *const u32, expect: u32) Cancelable!void {
 
 /// Stack-allocated waiter for futex operations.
 const FutexWaiter = struct {
-    // Linked list fields for SimpleWaitQueue
+    // Linked list fields for SimpleQueue
     next: ?*FutexWaiter = null,
     prev: ?*FutexWaiter = null,
     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},

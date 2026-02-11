@@ -9,7 +9,6 @@ const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Waiter = @import("../common.zig").Waiter;
 const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
-const SimpleQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 
 // Forward declaration - Runtime is defined in runtime.zig
 const Runtime = @import("../runtime.zig").Runtime;

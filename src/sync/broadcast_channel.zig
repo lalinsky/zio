@@ -5,7 +5,6 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../runtime/group.zig").Group;
-const SimpleWaitQueue = @import("../utils/wait_queue.zig").SimpleWaitQueue;
 const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Barrier = @import("Barrier.zig");
@@ -32,7 +31,7 @@ const BroadcastChannelImpl = struct {
 
     consumers: SimpleQueue(BroadcastChannelConsumer) = .{},
     mutex: Mutex = .init,
-    wait_queue: SimpleWaitQueue(WaitNode) = .empty,
+    wait_queue: SimpleQueue(WaitNode) = .empty,
 
     closed: bool = false,
 
