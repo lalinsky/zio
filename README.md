@@ -32,6 +32,16 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 - Synchronization primitives, including more advanced ones, like channels.
 - Low-level event loop access for integrating with existing C libraries.
 
+## Ecosystem
+
+The following libraries use zio for networking and concurrency:
+
+- [HTTP server and client](https://github.com/lalinsky/dusty)
+- [PostgreSQL client](https://github.com/lalinsky/pg.zig)
+- [Redis client](https://github.com/lalinsky/redis.zig)
+- [NATS client](https://github.com/lalinsky/nats.zig)
+- [Memcached client](https://github.com/lalinsky/memcached.zig)
+
 ## Installation
 
 1) Add zio as a dependency in your `build.zig.zon`:
@@ -105,16 +115,6 @@ pub fn main() !void {
 ```
 
 See `examples/*.zig` for more examples.
-
-## Ecosystem
-
-The following libraries use zio for networking and concurrency:
-
-- [HTTP server and client](https://github.com/lalinsky/dusty)
-- [PostgreSQL client](https://github.com/lalinsky/pg.zig)
-- [Redis client](https://github.com/lalinsky/redis.zig)
-- [NATS client](https://github.com/lalinsky/nats.zig)
-- [Memcached client](https://github.com/lalinsky/memcached.zig)
 
 ## Building
 
