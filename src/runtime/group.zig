@@ -56,11 +56,18 @@ pub const Group = struct {
         return @ptrCast(&self.inner.state);
     }
 
-    /// Set the failed flag.
+    /// Set the failed flag. If fail_fast is set, also closes the group.
     /// TODO: Wake waiters immediately when this bit transitions from unset to set.
     /// Currently waiters only wake when counter reaches zero.
     pub fn setFailed(self: *Group) void {
-        _ = @atomicRmw(u32, self.getState(), .Or, failed_bit | closed_bit, .acq_rel);
+        const state_ptr = self.getState();
+        var state = @atomicLoad(u32, state_ptr, .acquire);
+        while (true) {
+            var new_state = state | failed_bit;
+            if (state & fail_fast_bit != 0) new_state |= closed_bit;
+            if (new_state == state) return;
+            state = @cmpxchgWeak(u32, state_ptr, state, new_state, .acq_rel, .acquire) orelse return;
+        }
     }
 
     /// Check if the failed flag is set.
@@ -68,11 +75,18 @@ pub const Group = struct {
         return (@atomicLoad(u32, self.getState(), .acquire) & failed_bit) != 0;
     }
 
-    /// Set the canceled flag.
+    /// Set the canceled flag. If fail_fast is set, also closes the group.
     /// TODO: Wake waiters immediately when this bit transitions from unset to set.
     /// Currently waiters only wake when counter reaches zero.
     pub fn setCanceled(self: *Group) void {
-        _ = @atomicRmw(u32, self.getState(), .Or, canceled_bit | closed_bit, .acq_rel);
+        const state_ptr = self.getState();
+        var state = @atomicLoad(u32, state_ptr, .acquire);
+        while (true) {
+            var new_state = state | canceled_bit;
+            if (state & fail_fast_bit != 0) new_state |= closed_bit;
+            if (new_state == state) return;
+            state = @cmpxchgWeak(u32, state_ptr, state, new_state, .acq_rel, .acquire) orelse return;
+        }
     }
 
     /// Check if the canceled flag is set.
@@ -386,4 +400,36 @@ test "Group: cancellation while waiting" {
 
     var handle = try rt.spawn(TestContext.asyncTask, .{rt});
     try handle.join();
+}
+
+test "Group: failed task does not close group" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const T = struct {
+        var counter: usize = 0;
+
+        fn task(i: usize) !void {
+            if (i % 2 == 0) {
+                _ = @atomicRmw(usize, &counter, .Add, 1, .monotonic);
+            } else {
+                return error.OddNumber;
+            }
+        }
+    };
+
+    T.counter = 0;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    const n = 10;
+    for (0..n) |i| {
+        try group.spawn(T.task, .{i});
+        try sleep(.fromMilliseconds(1));
+    }
+
+    try group.wait();
+
+    try std.testing.expectEqual(n / 2, T.counter);
 }
