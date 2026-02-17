@@ -471,10 +471,10 @@ pub const Work = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
 
-    func: *const WorkFn,
+    func: *const fn (work: *Work) void,
     userdata: ?*anyopaque,
 
-    completion_fn: ?*const CompletionFn = null,
+    completion_fn: ?*const fn (ctx: ?*anyopaque, work: *Work) void = null,
     completion_context: ?*anyopaque = null,
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.pending),
 
@@ -487,10 +487,7 @@ pub const Work = struct {
         canceled,
     };
 
-    pub const WorkFn = fn (work: *Work) void;
-    pub const CompletionFn = fn (ctx: ?*anyopaque, work: *Work) void;
-
-    pub fn init(func: *const WorkFn, userdata: ?*anyopaque) Work {
+    pub fn init(func: *const fn (work: *Work) void, userdata: ?*anyopaque) Work {
         return .{
             .c = .init(.work),
             .func = func,

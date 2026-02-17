@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.2] - 2026-02-17
+
+### Fixed
+
+- Fixed dependency loop compilation error when using zio as a dependency module, by inlining `Work.WorkFn` and `Work.CompletionFn` type aliases.
+
 ## [0.8.1] - 2026-02-17
 
 ### Added
@@ -197,6 +203,7 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.8.2]: https://github.com/lalinsky/zio/releases/tag/v0.8.2
 [0.8.1]: https://github.com/lalinsky/zio/releases/tag/v0.8.1
 [0.8.0]: https://github.com/lalinsky/zio/releases/tag/v0.8.0
 [0.7.0]: https://github.com/lalinsky/zio/releases/tag/v0.7.0
