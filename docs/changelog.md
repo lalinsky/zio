@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Added `blockInPlace` for running blocking functions on the thread pool without allocations.
+- Added `os.thread.yield()` for yielding to the kernel from OS-level threads.
+
+### Changed
+
+- Removed LIFO slot optimization in the coroutine scheduler, to simplify the code while planning to rework the scheduler.
+- Added check that prevents coroutines from being called multiple times per one event loop iteration.
+- Internal refactoring of our `WaitQueue` primitive, to better express the semantics we need for synchronization primitives like `Mutex` or `Condition`.
+- Internal refactoring of our `Waiter` primitive, avoiding indirect function calls and more direct integration with `select`.
+
+### Fixed
+
+- Fixed error returned from `Group` task closing the group, even if not in fail-fast mode.
 
 ## [0.8.0] - 2026-02-09
 
