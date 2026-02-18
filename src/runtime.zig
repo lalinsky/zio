@@ -193,27 +193,6 @@ pub fn JoinHandle(comptime T: type) type {
             self.awaitable = null;
             self.result = undefined;
         }
-
-        /// Cast this JoinHandle to a different error set while keeping the same payload type.
-        /// This is safe because all error sets have the same runtime representation (u16).
-        /// The payload type must remain unchanged.
-        /// This is a move operation - the original handle is consumed.
-        ///
-        /// Example: JoinHandle(MyError!i32) can be cast to JoinHandle(anyerror!i32)
-        pub fn cast(self: Self, comptime T2: type) JoinHandle(T2) {
-            assert(self.awaitable != null);
-            const P1 = meta.Payload(T);
-            const P2 = meta.Payload(T2);
-            if (P1 != P2) {
-                @compileError("cast() can only change error set, not payload type. " ++
-                    "Source payload: " ++ @typeName(P1) ++ ", target payload: " ++ @typeName(P2));
-            }
-
-            return JoinHandle(T2){
-                .awaitable = self.awaitable,
-                .result = undefined,
-            };
-        }
     };
 }
 
@@ -934,45 +913,6 @@ test "runtime: spawnBlocking smoke test" {
 
     const result = handle.join();
     try std.testing.expectEqual(42, result);
-}
-
-test "runtime: JoinHandle.cast() error set conversion" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
-    defer runtime.deinit();
-
-    const MyError = error{ Foo, Bar };
-
-    const taskSuccess = struct {
-        fn call() MyError!i32 {
-            return 42;
-        }
-    }.call;
-
-    const taskError = struct {
-        fn call() MyError!i32 {
-            return error.Foo;
-        }
-    }.call;
-
-    // Test casting success case
-    {
-        var handle = try runtime.spawn(taskSuccess, .{});
-        var casted = handle.cast(anyerror!i32);
-        defer casted.cancel();
-
-        const result = try casted.join();
-        try std.testing.expectEqual(42, result);
-    }
-
-    // Test casting error case
-    {
-        var handle = try runtime.spawn(taskError, .{});
-        var casted = handle.cast(anyerror!i32);
-        defer casted.cancel();
-
-        const result = casted.join();
-        try std.testing.expectError(error.Foo, result);
-    }
 }
 
 test "Runtime: implicit run" {
