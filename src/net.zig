@@ -11,11 +11,12 @@ const getCurrentTask = runtime_mod.getCurrentTask;
 const Channel = @import("sync/channel.zig").Channel;
 const Group = @import("runtime/group.zig").Group;
 
+const dns = @import("dns/root.zig");
+
 const common = @import("common.zig");
 const waitForIo = common.waitForIo;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 const timedWaitForIo = common.timedWaitForIo;
-const blockInPlace = common.blockInPlace;
 const Timeout = @import("time.zig").Timeout;
 const fillBuf = @import("utils/writer.zig").fillBuf;
 
@@ -112,61 +113,21 @@ pub const HostName = struct {
         canonical_name: bool = false,
     };
 
-    pub const LookupResult = union(enum) {
-        address: IpAddress,
-        canonical_name: HostName,
-    };
-
-    pub const LookupError = LookupHostError;
-
-    pub const LookupResultIterator = struct {
-        head: ?*os.net.addrinfo,
-        current: ?*os.net.addrinfo,
-        return_canonical_name: bool,
-
-        pub fn next(self: *LookupResultIterator) ?LookupResult {
-            // Return canonical name first if requested
-            if (self.return_canonical_name) {
-                self.return_canonical_name = false;
-                if (self.head) |head| {
-                    if (head.canonname) |name| {
-                        return .{ .canonical_name = .{ .bytes = std.mem.sliceTo(name, 0) } };
-                    }
-                }
-            }
-
-            // Then return addresses
-            while (self.current) |info| {
-                self.current = @ptrCast(info.next);
-                const addr = info.addr orelse continue;
-                if (addr.family != os.net.AF.INET and addr.family != os.net.AF.INET6) continue;
-                return .{ .address = IpAddress.initPosix(@ptrCast(addr), @intCast(info.addrlen)) };
-            }
-            return null;
-        }
-
-        pub fn deinit(self: *LookupResultIterator) void {
-            if (self.head) |head| {
-                os.net.freeaddrinfo(head);
-            }
-        }
-    };
+    pub const LookupResult = dns.LookupResult;
+    pub const LookupError = dns.LookupError;
 
     /// Resolves the hostname to IP addresses.
     /// Returns an iterator over the results. Call `deinit()` when done.
     pub fn lookup(
         self: HostName,
         options: LookupOptions,
-    ) LookupError!LookupResultIterator {
-        const res = try blockInPlace(
-            lookupHostBlocking,
-            .{ self.bytes, options.port, options.family, options.canonical_name },
-        );
-        return .{
-            .head = res,
-            .current = res,
-            .return_canonical_name = options.canonical_name,
-        };
+    ) LookupError!dns.Result {
+        return dns.lookup(.{
+            .name = self.bytes,
+            .port = options.port,
+            .family = options.family,
+            .canonical_name = options.canonical_name,
+        });
     }
 
     /// Resolves the hostname and connects to the first successful address.
@@ -175,8 +136,8 @@ pub const HostName = struct {
         defer iter.deinit();
 
         var last_err: ?anyerror = null;
-        while (iter.next()) |result| {
-            switch (result) {
+        while (iter.next()) |entry| {
+            switch (entry) {
                 .address => |addr| {
                     return addr.connect(.{ .timeout = options.timeout }) catch |err| {
                         last_err = err;
@@ -1283,61 +1244,6 @@ pub const Stream = struct {
     }
 };
 
-pub const LookupHostError = error{
-    HostLacksNetworkAddresses,
-    TemporaryNameServerFailure,
-    NameServerFailure,
-    AddressFamilyNotSupported,
-    OutOfMemory,
-    UnknownHostName,
-    ServiceUnavailable,
-    Unexpected,
-    RuntimeShutdown,
-    Closed,
-    NoThreadPool,
-    ProcessFdQuotaExceeded,
-    SystemResources,
-} || std.posix.UnexpectedError;
-
-fn lookupHostBlocking(
-    name: []const u8,
-    port: u16,
-    family: ?IpAddress.Family,
-    canonical_name: bool,
-) LookupHostError!?*os.net.addrinfo {
-    // Use stack buffer for temporary allocations
-    var buf: [512]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const allocator = fba.allocator();
-
-    const name_c = try allocator.dupeZ(u8, name);
-    const port_c = try std.fmt.allocPrintSentinel(allocator, "{d}", .{port}, 0);
-
-    var hints: os.net.addrinfo = std.mem.zeroes(os.net.addrinfo);
-    hints.family = if (family) |f| switch (f) {
-        .ipv4 => os.net.AF.INET,
-        .ipv6 => os.net.AF.INET6,
-    } else os.net.AF.UNSPEC;
-    hints.socktype = std.posix.SOCK.STREAM;
-    hints.protocol = std.posix.IPPROTO.TCP;
-    if (canonical_name) {
-        hints.flags.CANONNAME = true;
-    }
-
-    var res: ?*os.net.addrinfo = null;
-
-    os.net.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res) catch |err| {
-        return switch (err) {
-            error.ServiceNotAvailable => error.ServiceUnavailable,
-            error.InvalidFlags => unreachable,
-            error.SocketTypeNotSupported => unreachable,
-            else => |e| e,
-        };
-    };
-
-    return res;
-}
-
 pub fn tcpConnectToHost(
     name: []const u8,
     port: u16,
@@ -1404,8 +1310,8 @@ test "HostName: lookup" {
     defer iter.deinit();
 
     var has_address = false;
-    while (iter.next()) |result| {
-        switch (result) {
+    while (iter.next()) |entry| {
+        switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(80, addr.getPort());
                 has_address = true;
@@ -1424,8 +1330,8 @@ test "HostName: lookup with family filter" {
     var iter = try host.lookup(.{ .port = 80, .family = .ipv4 });
     defer iter.deinit();
 
-    while (iter.next()) |result| {
-        switch (result) {
+    while (iter.next()) |entry| {
+        switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(IpAddress.Family.ipv4, addr.getFamily());
             },
@@ -1444,8 +1350,8 @@ test "HostName: lookup with canonical name" {
 
     var has_canonical_name = false;
     var has_address = false;
-    while (iter.next()) |result| {
-        switch (result) {
+    while (iter.next()) |entry| {
+        switch (entry) {
             .address => {
                 has_address = true;
             },
@@ -1521,8 +1427,8 @@ test "HostName: lookup numeric IP" {
 
     var count: usize = 0;
     var first_addr: ?IpAddress = null;
-    while (iter.next()) |result| {
-        switch (result) {
+    while (iter.next()) |entry| {
+        switch (entry) {
             .address => |addr| {
                 if (first_addr == null) first_addr = addr;
                 count += 1;

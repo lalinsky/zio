@@ -781,6 +781,47 @@ pub const AI = packed struct(u32) {
     EXTENDED: bool = false,
 };
 
+// ADDRINFOEXW structure for GetAddrInfoExW
+pub const ADDRINFOEXW = extern struct {
+    ai_flags: i32,
+    ai_family: i32,
+    ai_socktype: i32,
+    ai_protocol: i32,
+    ai_addrlen: usize,
+    ai_canonname: ?[*:0]const u16,
+    ai_addr: ?*sockaddr,
+    ai_blob: ?*anyopaque,
+    ai_bloblen: usize,
+    ai_provider: ?*GUID,
+    ai_next: ?*ADDRINFOEXW,
+};
+
+pub const LPLOOKUPSERVICE_COMPLETION_ROUTINE = *const fn (DWORD, DWORD, ?*OVERLAPPED) callconv(.winapi) void;
+
+pub const NS_DNS: DWORD = 12;
+pub const WSA_IO_PENDING: i32 = 997;
+
+pub extern "ws2_32" fn GetAddrInfoExW(
+    pName: ?[*:0]const u16,
+    pServiceName: ?[*:0]const u16,
+    dwNameSpace: DWORD,
+    lpNspId: ?*anyopaque,
+    hints: ?*const ADDRINFOEXW,
+    ppResult: *?*ADDRINFOEXW,
+    timeout: ?*anyopaque,
+    lpOverlapped: ?*OVERLAPPED,
+    lpCompletionRoutine: ?LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    lpNameHandle: ?*HANDLE,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn GetAddrInfoExCancel(
+    lpHandle: *HANDLE,
+) callconv(.winapi) i32;
+
+pub extern "ws2_32" fn FreeAddrInfoExW(
+    pAddrInfoEx: *ADDRINFOEXW,
+) callconv(.winapi) void;
+
 // Winsock functions
 pub extern "ws2_32" fn WSAStartup(
     wVersionRequired: WORD,
