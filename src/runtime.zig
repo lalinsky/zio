@@ -475,18 +475,25 @@ pub const Executor = struct {
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
     pub fn scheduleTask(self: *Executor, task: *AnyTask) void {
-        const old_state = task.state.swap(.ready, .acq_rel);
+        var old_state = task.state.load(.acquire);
+        while (true) {
+            switch (old_state) {
+                // Task already finished (race between completion and cancel) - nothing to do
+                .finished => return,
+                // Task already transitioned to .ready by another thread - avoid double-schedule
+                .ready => return,
+                // Valid states to transition from
+                .new, .waiting, .preparing_to_wait => {},
+            }
+            if (task.state.cmpxchgWeak(old_state, .ready, .acq_rel, .acquire)) |actual| {
+                old_state = actual;
+                continue;
+            }
+            break;
+        }
 
         // Task hasn't yielded yet - it will see .ready and skip the yield
         if (old_state == .preparing_to_wait) return;
-
-        // Task already transitioned to .ready by another thread - avoid double-schedule
-        if (old_state == .ready) return;
-
-        // Validate state transitions
-        if (old_state != .new and old_state != .waiting) {
-            std.debug.panic("scheduleTask: unexpected state {} for task {*}", .{ old_state, task });
-        }
 
         // main_task is never queued - it just checks state in run()
         if (task == &self.main_task) {
