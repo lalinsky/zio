@@ -541,6 +541,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompletedFromBackend(c);
             };
         },
+        .mach_port => unreachable,
     }
 }
 

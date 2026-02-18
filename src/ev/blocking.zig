@@ -109,6 +109,8 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .async,
         .group,
         => @panic("Async operations not supported in blocking mode (requires event loop)"),
+
+        .mach_port => unreachable,
     }
 }
 
