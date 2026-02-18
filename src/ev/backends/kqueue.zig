@@ -158,7 +158,7 @@ fn getFilter(completion: *Completion) i16 {
                 .write => std.c.EVFILT.WRITE,
             };
         },
-        .mach_port => std.c.EVFILT.MACHPORT,
+        .mach_port => if (builtin.os.tag.isDarwin()) std.c.EVFILT.MACHPORT else unreachable,
         else => unreachable,
     };
 }
