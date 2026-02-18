@@ -21,6 +21,16 @@ It's similar to [goroutines](https://en.wikipedia.org/wiki/Go_(programming_langu
 - Structured concurrency using task groups
 - Synchronization primitives, including more advanced ones, like channels
 
+## Ecosystem
+
+The following libraries use ZIO for networking and concurrency:
+
+- [HTTP server and client](https://github.com/lalinsky/dusty)
+- [PostgreSQL client](https://github.com/lalinsky/pg.zig)
+- [Redis client](https://github.com/lalinsky/redis.zig)
+- [NATS client](https://github.com/lalinsky/nats.zig)
+- [Memcached client](https://github.com/lalinsky/memcached.zig)
+
 ## Quick Example
 
 Basic TCP echo server:
@@ -30,14 +40,6 @@ Basic TCP echo server:
 ```
 
 See the [Tutorial](getting-started.md) to get started, or check out the examples in the repository.
-
-## Ecosystem
-
-The following libraries use ZIO for networking and concurrency:
-
-- [Dusty](https://github.com/lalinsky/dusty) - HTTP client and server library
-- [nats.zig](https://github.com/lalinsky/nats.zig) - NATS client library
-- [pg.zig](https://github.com/lalinsky/pg.zig) - PostgreSQL client library
 
 ## Installation
 
