@@ -39,6 +39,7 @@ pub const LookupError = error{
 
 pub const impl = switch (builtin.os.tag) {
     .windows => @import("windows.zig"),
+    .macos => @import("darwin.zig"),
     else => @import("posix.zig"),
 };
 

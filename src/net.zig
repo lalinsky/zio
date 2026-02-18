@@ -1440,6 +1440,27 @@ test "HostName: lookup numeric IP" {
     try std.testing.expectEqual(8080, first_addr.?.getPort());
 }
 
+test "HostName: lookup google.com" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const host = try HostName.init("google.com");
+    var iter = try host.lookup(.{ .port = 443 });
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (iter.next()) |entry| {
+        switch (entry) {
+            .address => |addr| {
+                try std.testing.expectEqual(443, addr.getPort());
+                count += 1;
+            },
+            .canonical_name => unreachable,
+        }
+    }
+    try std.testing.expect(count > 0);
+}
+
 test "tcpConnectToAddress: basic" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();

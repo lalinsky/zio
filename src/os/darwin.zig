@@ -32,3 +32,47 @@ pub extern "c" fn os_unfair_lock_unlock(lock: os_unfair_lock_t) void;
 pub extern "c" fn os_unfair_lock_trylock(lock: os_unfair_lock_t) bool;
 
 pub const sched_yield = @import("c.zig").sched_yield;
+
+// Mach message types (not re-exported by std.c in Zig 0.15)
+
+pub const mach_port_t = std.c.mach_port_t;
+
+pub const mach_msg_header_t = extern struct {
+    msgh_bits: std.c.mach_msg_bits_t,
+    msgh_size: std.c.mach_msg_size_t,
+    msgh_remote_port: std.c.mach_port_t,
+    msgh_local_port: std.c.mach_port_t,
+    msgh_voucher_port: std.c.mach_port_name_t,
+    msgh_id: std.c.mach_msg_id_t,
+};
+
+pub const MACH_RCV_MSG: std.c.mach_msg_option_t = 2;
+pub const MACH_PORT_NULL: std.c.mach_port_t = 0;
+
+pub extern "c" fn mach_msg(
+    msg: *mach_msg_header_t,
+    option: std.c.mach_msg_option_t,
+    send_size: std.c.mach_msg_size_t,
+    rcv_size: std.c.mach_msg_size_t,
+    rcv_name: std.c.mach_port_name_t,
+    timeout: std.c.mach_msg_timeout_t,
+    notify: std.c.mach_port_name_t,
+) std.c.kern_return_t;
+
+// libinfo async DNS resolution
+
+pub const getaddrinfo_async_callback = *const fn (i32, ?*std.c.addrinfo, ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn getaddrinfo_async_start(
+    port: *mach_port_t,
+    hostname: ?[*:0]const u8,
+    servname: ?[*:0]const u8,
+    hints: ?*const std.c.addrinfo,
+    callback: getaddrinfo_async_callback,
+    context: ?*anyopaque,
+) i32;
+
+pub extern "c" fn getaddrinfo_async_handle_reply(msg: *mach_msg_header_t) i32;
+pub extern "c" fn getaddrinfo_async_cancel(port: mach_port_t) void;
+
+const std = @import("std");
