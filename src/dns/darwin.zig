@@ -75,7 +75,10 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
         },
     };
 
-    _ = mp.getResult() catch return error.Unexpected;
+    _ = mp.getResult() catch {
+        darwin.getaddrinfo_async_cancel(machport);
+        return error.Unexpected;
+    };
 
     // Receive the mach message from the port
     var msg: MachMsgRcv = undefined;
@@ -93,7 +96,11 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
     }
 
     // Process the reply — fires libinfoCallback synchronously
-    _ = darwin.getaddrinfo_async_handle_reply(&msg.header);
+    const reply_rc = darwin.getaddrinfo_async_handle_reply(&msg.header);
+    if (reply_rc != 0) {
+        if (ctx.result) |r| os_net.freeaddrinfo(r);
+        return error.Unexpected;
+    }
 
     if (ctx.status != 0) {
         if (ctx.result) |r| os_net.freeaddrinfo(r);
