@@ -29,7 +29,7 @@ pub const Context = switch (builtin.cpu.arch) {
     .aarch64 => extern struct {
         sp: u64,  // x31 (stack pointer)
         fp: u64,  // x29 (frame pointer)
-        lr: u64,  // x30 (link register)
+        lr: u64,  // x30 (link register) only saved a an optimization reusing ldp/stp
         pc: u64,
         fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
         stack_info: StackInfo,
@@ -39,7 +39,7 @@ pub const Context = switch (builtin.cpu.arch) {
     .arm, .thumb => extern struct {
         sp: u32,  // r13 (stack pointer)
         fp: u32,  // r11 (frame pointer, r7 in Thumb)
-        lr: u32,  // r14 (link register)
+        lr: u32,  // r14 (link register) only saved beause of https://github.com/llvm/llvm-project/pull/179740 (can't be worked around in zig)
         pc: u32,  // r15 (program counter)
         stack_info: StackInfo,
 
