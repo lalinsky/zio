@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const thread = @import("../os/thread.zig");
 
 /// Node for participation in wait queues.
 ///
@@ -187,7 +186,6 @@ pub fn WaitQueue(comptime T: type) type {
         /// Spins until mutation lock is acquired.
         /// Returns the state before mutation bit was set (with lock bit cleared).
         fn acquireMutationLock(self: *Self) usize {
-            var spin_count: u4 = 0;
             while (true) {
                 const old = self.head.fetchOr(lock_bit, .acquire);
 
@@ -195,10 +193,6 @@ pub fn WaitQueue(comptime T: type) type {
                     return old;
                 }
 
-                spin_count +%= 1;
-                if (spin_count == 0) {
-                    thread.yield();
-                }
                 std.atomic.spinLoopHint();
             }
         }
