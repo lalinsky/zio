@@ -108,6 +108,7 @@ pub const Op = enum {
     pipe_read,
     pipe_write,
     pipe_close,
+    mach_port,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -167,6 +168,7 @@ pub const Op = enum {
             .pipe_read => PipeRead,
             .pipe_write => PipeWrite,
             .pipe_close => PipeClose,
+            .mach_port => MachPort,
         };
     }
 
@@ -228,6 +230,7 @@ pub const Op = enum {
             PipeRead => .pipe_read,
             PipeWrite => .pipe_write,
             PipeClose => .pipe_close,
+            MachPort => .mach_port,
             else => @compileError("unknown completion type"),
         };
     }
@@ -1840,5 +1843,24 @@ pub const PipeClose = struct {
 
     pub fn getResult(self: *const PipeClose) Error!void {
         return self.c.getResult(.pipe_close);
+    }
+};
+
+pub const MachPort = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    port: u32,
+
+    pub const Error = error{Unexpected} || Cancelable;
+
+    pub fn init(port: u32) MachPort {
+        return .{
+            .c = .init(.mach_port),
+            .port = port,
+        };
+    }
+
+    pub fn getResult(self: *const MachPort) Error!void {
+        return self.c.getResult(.mach_port);
     }
 };

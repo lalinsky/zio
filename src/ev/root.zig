@@ -82,6 +82,7 @@ pub const PipeCreate = completion.PipeCreate;
 pub const PipeRead = completion.PipeRead;
 pub const PipeWrite = completion.PipeWrite;
 pub const PipeClose = completion.PipeClose;
+pub const MachPort = completion.MachPort;
 
 test {
     std.testing.refAllDecls(@This());

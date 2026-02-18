@@ -23,6 +23,7 @@ const PipePoll = @import("../completion.zig").PipePoll;
 const PipeRead = @import("../completion.zig").PipeRead;
 const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
+const MachPort = @import("../completion.zig").MachPort;
 const fs = @import("../../os/fs.zig");
 
 pub const NetHandle = net.fd_t;
@@ -157,6 +158,7 @@ fn getFilter(completion: *Completion) i16 {
                 .write => std.c.EVFILT.WRITE,
             };
         },
+        .mach_port => std.c.EVFILT.MACHPORT,
         else => unreachable,
     };
 }
@@ -173,7 +175,7 @@ fn reserveChange(self: *Self, state: *LoopState) !*std.c.Kevent {
 
 /// Queue a kevent change to register a completion.
 /// If queuing fails, completes the completion with error.Unexpected.
-fn queueRegister(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
+fn queueRegister(self: *Self, state: *LoopState, ident: usize, completion: *Completion) void {
     const filter = getFilter(completion);
     const change = self.reserveChange(state) catch {
         log.err("Failed to reserve kevent change slot", .{});
@@ -182,7 +184,7 @@ fn queueRegister(self: *Self, state: *LoopState, fd: NetHandle, completion: *Com
         return;
     };
     change.* = .{
-        .ident = @intCast(fd),
+        .ident = ident,
         .filter = filter,
         .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
         .fflags = 0,
@@ -194,14 +196,14 @@ fn queueRegister(self: *Self, state: *LoopState, fd: NetHandle, completion: *Com
 /// Queue a kevent change to unregister a completion.
 /// NOTE: Only used for cancellations; normal completions use EV_ONESHOT which auto-removes events
 /// Returns true if successfully queued, false if OOM (caller should let target complete naturally)
-fn queueUnregister(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) bool {
+fn queueUnregister(self: *Self, state: *LoopState, ident: usize, completion: *Completion) bool {
     const filter = getFilter(completion);
     const change = self.reserveChange(state) catch {
         log.err("Failed to reserve kevent change slot for unregister", .{});
         return false;
     };
     change.* = .{
-        .ident = @intCast(fd),
+        .ident = ident,
         .filter = filter,
         .flags = std.c.EV.DELETE,
         .fflags = 0,
@@ -211,21 +213,22 @@ fn queueUnregister(self: *Self, state: *LoopState, fd: NetHandle, completion: *C
     return true;
 }
 
-fn getHandle(completion: *Completion) NetHandle {
+fn getIdent(completion: *Completion) usize {
     return switch (completion.op) {
-        .net_accept => completion.cast(NetAccept).handle,
-        .net_connect => completion.cast(NetConnect).handle,
-        .net_recv => completion.cast(NetRecv).handle,
-        .net_send => completion.cast(NetSend).handle,
-        .net_recvfrom => completion.cast(NetRecvFrom).handle,
-        .net_sendto => completion.cast(NetSendTo).handle,
-        .net_recvmsg => completion.cast(NetRecvMsg).handle,
-        .net_sendmsg => completion.cast(NetSendMsg).handle,
-        .net_poll => completion.cast(NetPoll).handle,
-        .pipe_poll => completion.cast(PipePoll).handle,
-        .pipe_read => completion.cast(PipeRead).handle,
-        .pipe_write => completion.cast(PipeWrite).handle,
-        .pipe_close => completion.cast(PipeClose).handle,
+        .net_accept => @intCast(completion.cast(NetAccept).handle),
+        .net_connect => @intCast(completion.cast(NetConnect).handle),
+        .net_recv => @intCast(completion.cast(NetRecv).handle),
+        .net_send => @intCast(completion.cast(NetSend).handle),
+        .net_recvfrom => @intCast(completion.cast(NetRecvFrom).handle),
+        .net_sendto => @intCast(completion.cast(NetSendTo).handle),
+        .net_recvmsg => @intCast(completion.cast(NetRecvMsg).handle),
+        .net_sendmsg => @intCast(completion.cast(NetSendMsg).handle),
+        .net_poll => @intCast(completion.cast(NetPoll).handle),
+        .pipe_poll => @intCast(completion.cast(PipePoll).handle),
+        .pipe_read => @intCast(completion.cast(PipeRead).handle),
+        .pipe_write => @intCast(completion.cast(PipeWrite).handle),
+        .pipe_close => @intCast(completion.cast(PipeClose).handle),
+        .mach_port => completion.cast(MachPort).port,
         else => unreachable,
     };
 }
@@ -271,7 +274,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             } else |err| switch (err) {
                 error.WouldBlock, error.ConnectionPending => {
                     // Queue for completion - queueRegister handles errors
-                    self.queueRegister(state, data.handle, c);
+                    self.queueRegister(state, @intCast(data.handle), c);
                 },
                 else => {
                     c.setError(err);
@@ -283,39 +286,39 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         // Other async operations - queue and try on wakeup
         .net_accept => {
             const data = c.cast(NetAccept);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .net_recv => {
             const data = c.cast(NetRecv);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .net_send => {
             const data = c.cast(NetSend);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .net_recvmsg => {
             const data = c.cast(NetRecvMsg);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .net_sendmsg => {
             const data = c.cast(NetSendMsg);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .net_poll => {
             const data = c.cast(NetPoll);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .pipe_poll => {
             const data = c.cast(PipePoll);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .pipe_create => {
             const fds = fs.pipe() catch |err| {
@@ -328,11 +331,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .pipe_read => {
             const data = c.cast(PipeRead);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .pipe_write => {
             const data = c.cast(PipeWrite);
-            self.queueRegister(state, data.handle, c);
+            self.queueRegister(state, @intCast(data.handle), c);
         },
         .pipe_close => {
             const data = c.cast(PipeClose);
@@ -342,6 +345,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 c.setError(err);
             }
             state.markCompletedFromBackend(c);
+        },
+        .mach_port => {
+            const data = c.cast(MachPort);
+            self.queueRegister(state, data.port, c);
         },
 
         // File operations are handled by Loop via thread pool
@@ -353,7 +360,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Try to queue unregister
-    const fd = getHandle(target);
+    const fd = getIdent(target);
     if (!self.queueUnregister(state, fd, target)) {
         // Queueing failed - target is still registered, let it complete naturally
         return;
@@ -409,7 +416,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         if (event.udata == 0) continue; // Shouldn't happen, but be defensive
 
         const completion: *Completion = @ptrFromInt(event.udata);
-        const fd: NetHandle = @intCast(event.ident);
+        const ident = event.ident;
 
         // Skip if already completed (can happen with cancellations)
         if (completion.state == .completed or completion.state == .dead) {
@@ -423,7 +430,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             },
             .requeue => {
                 // Spurious wakeup - EV_ONESHOT already consumed the event, re-register
-                self.queueRegister(state, fd, completion);
+                self.queueRegister(state, ident, completion);
             },
         }
     }
@@ -662,6 +669,10 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             // For poll operations, any event (error, EOF, or readiness) means "ready"
             // The actual error (if any) will be discovered on the next read/write
             comp.setResult(.pipe_poll, {});
+            return .completed;
+        },
+        .mach_port => {
+            comp.setResult(.mach_port, {});
             return .completed;
         },
         else => {
