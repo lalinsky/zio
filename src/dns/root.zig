@@ -37,11 +37,14 @@ pub const LookupError = error{
     NoThreadPool,
 } || std.posix.UnexpectedError;
 
-pub const impl = switch (builtin.os.tag) {
-    .windows => @import("windows.zig"),
-    .macos => @import("darwin.zig"),
-    else => @import("posix.zig"),
-};
+const backend = @import("../ev/backend.zig");
+
+pub const impl = if (builtin.os.tag == .windows)
+    @import("windows.zig")
+else if (builtin.os.tag.isDarwin() and backend.backend == .kqueue)
+    @import("darwin.zig")
+else
+    @import("posix.zig");
 
 pub const Result = impl.Result;
 pub const lookup = impl.lookup;
