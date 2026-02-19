@@ -12,7 +12,7 @@ It's similar to [goroutines](https://en.wikipedia.org/wiki/Go_(programming_langu
 ## Features
 
 - Support for Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and many other systems (`poll`)
-- User-mode coroutine context switching for `x86_64`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64` and `loongarch64` architectures
+- User-mode coroutine context switching for `x86_64`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64`, `loongarch64` and `powerpc64` architectures
 - Growable stacks for the coroutines implemented by auto-extending virtual memory reservations
 - Multi-threaded coroutine scheduler
 - Fully asynchronous network I/O on all systems

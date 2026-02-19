@@ -69,6 +69,14 @@ pub const Context = switch (builtin.cpu.arch) {
 
         pub const stack_alignment = 16;
     },
+    .powerpc64, .powerpc64le => extern struct {
+        sp: u64,   // r1 (stack pointer)
+        fp: u64,   // r31 (conventional frame pointer)
+        pc: u64,
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -105,6 +113,11 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
             ctx.pc = @intCast(@intFromPtr(entry_point));
         },
         .loongarch64 => {
+            ctx.sp = stack_ptr;
+            ctx.fp = 0;
+            ctx.pc = @intFromPtr(entry_point);
+        },
+        .powerpc64, .powerpc64le => {
             ctx.sp = stack_ptr;
             ctx.fp = 0;
             ctx.pc = @intFromPtr(entry_point);
@@ -658,6 +671,213 @@ pub inline fn switchContext(
               .f31 = true,  // ft11
               .memory = true,
             }),
+        .powerpc64, .powerpc64le => asm volatile (
+            \\ // Get resume address into r5
+            \\ bcl 20, 31, 1f
+            \\1:
+            \\ mflr 5
+            \\ addi 5, 5, 0f - 1b
+            \\ // Save current context
+            \\ std 1, 0(3)
+            \\ std 31, 8(3)
+            \\ std 5, 16(3)
+            \\
+            \\ // Restore new context
+            \\ ld 1, 0(4)
+            \\ ld 31, 8(4)
+            \\ ld 5, 16(4)
+            \\ mtctr 5
+            \\ bctr
+            \\0:
+            :
+            : [current] "{r3}" (current_context_param),
+              [new] "{r4}" (new_context),
+            : .{
+              .cr0 = true,
+              .cr1 = true,
+              .cr2 = true,
+              .cr3 = true,
+              .cr4 = true,
+              .cr5 = true,
+              .cr6 = true,
+              .cr7 = true,
+              .xer = true,
+              .ctr = true,
+              .lr = true,
+              .r0 = true,
+              .r1 = false,  // sp (saved)
+              .r2 = false,  // TOC (reserved on ELFv2)
+              .r3 = true,
+              .r4 = true,
+              .r5 = true,
+              .r6 = true,
+              .r7 = true,
+              .r8 = true,
+              .r9 = true,
+              .r10 = true,
+              .r11 = true,
+              .r12 = true,
+              .r13 = false, // thread pointer (reserved)
+              .r14 = true,
+              .r15 = true,
+              .r16 = true,
+              .r17 = true,
+              .r18 = true,
+              .r19 = true,
+              .r20 = true,
+              .r21 = true,
+              .r22 = true,
+              .r23 = true,
+              .r24 = true,
+              .r25 = true,
+              .r26 = true,
+              .r27 = true,
+              .r28 = true,
+              .r29 = true,
+              .r30 = true,
+              .r31 = false, // fp (saved)
+              .fpscr = true,
+              .vscr = true,
+              .vs0 = true,
+              .vs1 = true,
+              .vs2 = true,
+              .vs3 = true,
+              .vs4 = true,
+              .vs5 = true,
+              .vs6 = true,
+              .vs7 = true,
+              .vs8 = true,
+              .vs9 = true,
+              .vs10 = true,
+              .vs11 = true,
+              .vs12 = true,
+              .vs13 = true,
+              .vs14 = true,
+              .vs15 = true,
+              .vs16 = true,
+              .vs17 = true,
+              .vs18 = true,
+              .vs19 = true,
+              .vs20 = true,
+              .vs21 = true,
+              .vs22 = true,
+              .vs23 = true,
+              .vs24 = true,
+              .vs25 = true,
+              .vs26 = true,
+              .vs27 = true,
+              .vs28 = true,
+              .vs29 = true,
+              .vs30 = true,
+              .vs31 = true,
+              .vs32 = true,
+              .vs33 = true,
+              .vs34 = true,
+              .vs35 = true,
+              .vs36 = true,
+              .vs37 = true,
+              .vs38 = true,
+              .vs39 = true,
+              .vs40 = true,
+              .vs41 = true,
+              .vs42 = true,
+              .vs43 = true,
+              .vs44 = true,
+              .vs45 = true,
+              .vs46 = true,
+              .vs47 = true,
+              .vs48 = true,
+              .vs49 = true,
+              .vs50 = true,
+              .vs51 = true,
+              .vs52 = true,
+              .vs53 = true,
+              .vs54 = true,
+              .vs55 = true,
+              .vs56 = true,
+              .vs57 = true,
+              .vs58 = true,
+              .vs59 = true,
+              .vs60 = true,
+              .vs61 = true,
+              .vs62 = true,
+              .vs63 = true,
+              .f0 = true,
+              .f1 = true,
+              .f2 = true,
+              .f3 = true,
+              .f4 = true,
+              .f5 = true,
+              .f6 = true,
+              .f7 = true,
+              .f8 = true,
+              .f9 = true,
+              .f10 = true,
+              .f11 = true,
+              .f12 = true,
+              .f13 = true,
+              .f14 = true,
+              .f15 = true,
+              .f16 = true,
+              .f17 = true,
+              .f18 = true,
+              .f19 = true,
+              .f20 = true,
+              .f21 = true,
+              .f22 = true,
+              .f23 = true,
+              .f24 = true,
+              .f25 = true,
+              .f26 = true,
+              .f27 = true,
+              .f28 = true,
+              .f29 = true,
+              .f30 = true,
+              .f31 = true,
+              .v0 = true,
+              .v1 = true,
+              .v2 = true,
+              .v3 = true,
+              .v4 = true,
+              .v5 = true,
+              .v6 = true,
+              .v7 = true,
+              .v8 = true,
+              .v9 = true,
+              .v10 = true,
+              .v11 = true,
+              .v12 = true,
+              .v13 = true,
+              .v14 = true,
+              .v15 = true,
+              .v16 = true,
+              .v17 = true,
+              .v18 = true,
+              .v19 = true,
+              .v20 = true,
+              .v21 = true,
+              .v22 = true,
+              .v23 = true,
+              .v24 = true,
+              .v25 = true,
+              .v26 = true,
+              .v27 = true,
+              .v28 = true,
+              .v29 = true,
+              .v30 = true,
+              .v31 = true,
+              .acc0 = true,
+              .acc1 = true,
+              .acc2 = true,
+              .acc3 = true,
+              .acc4 = true,
+              .acc5 = true,
+              .acc6 = true,
+              .acc7 = true,
+              .acc = true,
+              .spefsc = true,
+              .memory = true,
+            }),
         .loongarch64 => asm volatile (
             \\ la.local $t0, 0f
             \\ st.d $t0, $a0, 16
@@ -823,6 +1043,12 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ ld.d $a0, $sp, 8
             \\ ld.d $t0, $sp, 0
             \\ jr $t0
+        ),
+        .powerpc64, .powerpc64le => asm volatile (
+            \\ ld 12, 0(1)
+            \\ ld 3, 8(1)
+            \\ mtctr 12
+            \\ bctr
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -1131,6 +1357,8 @@ test "Coroutine: allocator inside coroutine" {
 
 
 test "Coroutine: stack trace" {
+    if (builtin.cpu.arch == .powerpc64 or builtin.cpu.arch == .powerpc64le) return error.SkipZigTest;
+
     const stack = @import("stack.zig");
 
     var parent_ctx: Context = undefined;

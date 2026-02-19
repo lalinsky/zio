@@ -22,7 +22,7 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 ## Features
 
 - Support for Linux (`io_uring`, `epoll`), Windows (`iocp`), macOS (`kqueue`), most BSDs (`kqueue`), and many other systems (`poll`).
-- User-mode coroutine context switching for `x86_64`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64` and `loongarch64` architectures.
+- User-mode coroutine context switching for `x86_64`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64`, `loongarch64` and `powerpc64` architectures.
 - Growable stacks for the coroutines implemented by auto-extending virtual memory reservations.
 - Single-threaded or multi-threaded coroutine scheduler.
 - Fully asynchronous network I/O on all systems. Supports TCP, UDP, Unix sockets, raw IP sockets. DNS lookups.
