@@ -437,10 +437,8 @@ pub inline fn switchContext(
               .memory = true,
             }),
         .thumb => asm volatile (
-            // Calculate return address and set Thumb bit
-            // CRITICAL: adds r2, #1 sets LSB to indicate Thumb mode
-            \\ adr r2, 0f
-            \\ adds r2, #1
+            // Calculate return address with Thumb bit (LSB=1) set via adr offset
+            \\ adr r2, 0f + 1
             \\ mov r3, sp
             \\ str r3, [r0, #0]
             \\ str r7, [r0, #4]
