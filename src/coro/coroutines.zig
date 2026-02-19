@@ -241,7 +241,16 @@ pub inline fn switchContext(
               .fpcr = true,
               .mxcsr = true,
               .rflags = true,
+              .cc = true,
               .dirflag = true,
+              .st0 = true,
+              .st1 = true,
+              .st2 = true,
+              .st3 = true,
+              .st4 = true,
+              .st5 = true,
+              .st6 = true,
+              .st7 = true,
               .memory = true,
             }),
 
@@ -367,6 +376,7 @@ pub inline fn switchContext(
               .fpcr = true,
               .fpsr = true,
               .ffr = true,
+              .nzcv = true,
               .memory = true,
             }),
         .arm => asm volatile (
@@ -434,6 +444,7 @@ pub inline fn switchContext(
               .d30 = true,
               .d31 = true,
               .fpscr = true,
+              .cpsr = true,
               .memory = true,
             }),
         .thumb => asm volatile (
@@ -507,6 +518,7 @@ pub inline fn switchContext(
               .d30 = true,
               .d31 = true,
               .fpscr = true,
+              .cpsr = true,
               .memory = true,
             }),
         .riscv64 => asm volatile (
@@ -587,6 +599,8 @@ pub inline fn switchContext(
               .f29 = true,  // ft9
               .f30 = true,  // ft10
               .f31 = true,  // ft11
+              .fflags = true,
+              .frm = true,
               .memory = true,
             }),
         .riscv32 => asm volatile (
@@ -667,6 +681,8 @@ pub inline fn switchContext(
               .f29 = true,  // ft9
               .f30 = true,  // ft10
               .f31 = true,  // ft11
+              .fflags = true,
+              .frm = true,
               .memory = true,
             }),
         .powerpc64, .powerpc64le => asm volatile (
@@ -952,6 +968,18 @@ pub inline fn switchContext(
               .f29 = true,  // fs5
               .f30 = true,  // fs6
               .f31 = true,  // fs7
+              .fcc0 = true,
+              .fcc1 = true,
+              .fcc2 = true,
+              .fcc3 = true,
+              .fcc4 = true,
+              .fcc5 = true,
+              .fcc6 = true,
+              .fcc7 = true,
+              .fcsr0 = true,
+              .fcsr1 = true,
+              .fcsr2 = true,
+              .fcsr3 = true,
               .memory = true,
             }),
         else => @compileError("unsupported architecture"),
