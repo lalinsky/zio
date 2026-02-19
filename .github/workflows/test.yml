@@ -71,6 +71,7 @@ jobs:
           - { os: ubuntu-latest, target: riscv32-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: riscv64-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'epoll poll' }
+          - { os: ubuntu-latest, target: powerpc64le-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
           - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd, backends: 'kqueue poll' }
 
