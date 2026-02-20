@@ -69,7 +69,7 @@ jobs:
       fail-fast: false
       matrix:
         zig_version: ['0.15.2']
-        release: [false, true]
+        mode: [debug, release]
         config:
           - { os: ubuntu-24.04, target: native, backends: 'io_uring epoll poll' }
           - { os: ubuntu-24.04-arm, target: native, backends: 'io_uring epoll poll' }
@@ -114,7 +114,7 @@ jobs:
             ${{ matrix.config.target != 'native' && format('--target {0}', matrix.config.target) || '' }} \
             ${{ matrix.config.qemu && '--qemu' || '' }} \
             ${{ matrix.config.vm && '--no-exec' || '' }} \
-            ${{ matrix.release && '--release' || '' }}
+            ${{ matrix.mode == 'release' && '--release' || '' }}
           if [ -n "${{ matrix.config.vm }}" ]; then
             cp zig-out/bin/test zig-out/bin/test-$backend
           fi
