@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- Fully asynchronous DNS resolver on macOS and Windows using their native APIs.
+- Added support for 64-bit PowerPC CPUs.
+
+### Fixed
+
+- Fixed incorrect assert that could panic on a race between task finishing naturally and being cancelled.
+- Added some extra clobbers to context switching asssembly, already implicitly covered by others, but for consistency.
+
 ## [0.8.2] - 2026-02-17
 
 ### Fixed
