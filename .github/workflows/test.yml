@@ -10,7 +10,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      extended: ${{ steps.filter.outputs.extended }}
+      extended: ${{ steps.filter.outputs.extended || steps.keyword.outputs.extended }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -22,6 +22,15 @@ jobs:
               - 'src/ev/**'
               - 'src/os/**'
               - '.github/workflows/test.yml'
+      - name: Check for [ci:extended] in PR body
+        id: keyword
+        if: github.event_name == 'pull_request'
+        run: |
+          if echo "$PR_BODY" | grep -qF '[ci:extended]'; then
+            echo "extended=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
 
   basic:
     needs: changes
