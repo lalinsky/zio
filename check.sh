@@ -106,8 +106,8 @@ if [ "$NO_EXEC" = true ]; then
     BUILD_ARGS="$BUILD_ARGS -Demit-test-bin"
 fi
 if [ "$RELEASE_MODE" = true ]; then
-    echo "Build mode: ReleaseFast"
-    BUILD_ARGS="$BUILD_ARGS -Doptimize=ReleaseFast"
+    echo "Build mode: ReleaseSafe"
+    BUILD_ARGS="$BUILD_ARGS -Doptimize=ReleaseSafe"
 fi
 if [ "$VERBOSE" = true ]; then
     export TEST_VERBOSE=true
