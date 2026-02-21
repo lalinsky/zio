@@ -183,7 +183,8 @@ pub fn WaitQueue(comptime T: type) type {
         // =========================================================================
 
         /// Acquire exclusive access to manipulate the wait list.
-        /// Spins until mutation lock is acquired.
+        /// Spins until mutation lock is acquired. The critical section is a
+        /// constant few pointer swaps on the linked list, so unbounded spinning is fine.
         /// Returns the state before mutation bit was set (with lock bit cleared).
         fn acquireMutationLock(self: *Self) usize {
             while (true) {
