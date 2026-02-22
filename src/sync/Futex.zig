@@ -35,7 +35,7 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Waiter = @import("../common.zig").Waiter;
 const Timeout = @import("../time.zig").Timeout;
 const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
-const AutoCancel = @import("../runtime/autocancel.zig").AutoCancel;
+const AutoCancel = @import("../autocancel.zig").AutoCancel;
 const os = @import("../os/root.zig");
 
 const Futex = @This();

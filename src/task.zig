@@ -2,20 +2,20 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const MemoryPoolAligned = @import("../utils/memory_pool.zig").MemoryPoolAligned;
-const ev = @import("../ev/root.zig");
+const MemoryPoolAligned = @import("utils/memory_pool.zig").MemoryPoolAligned;
+const ev = @import("ev/root.zig");
 
-const Runtime = @import("../runtime.zig").Runtime;
-const Executor = @import("../runtime.zig").Executor;
-const getCurrentExecutorOrNull = @import("../runtime.zig").getCurrentExecutorOrNull;
+const Runtime = @import("runtime.zig").Runtime;
+const Executor = @import("runtime.zig").Executor;
+const getCurrentExecutorOrNull = @import("runtime.zig").getCurrentExecutorOrNull;
 const Awaitable = @import("awaitable.zig").Awaitable;
-const Coroutine = @import("../coro/coroutines.zig").Coroutine;
-const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
-const Cancelable = @import("../common.zig").Cancelable;
+const Coroutine = @import("coro/coroutines.zig").Coroutine;
+const WaitNode = @import("utils/wait_queue.zig").WaitNode;
+const Cancelable = @import("common.zig").Cancelable;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
-const os = @import("../os/root.zig");
+const os = @import("os/root.zig");
 
 pub const Closure = struct {
     start: Start,
@@ -495,7 +495,7 @@ pub const AnyTask = struct {
     }
 };
 
-const getNextExecutor = @import("../runtime.zig").getNextExecutor;
+const getNextExecutor = @import("runtime.zig").getNextExecutor;
 
 /// Register a task with the runtime and schedule it for execution.
 /// Increments its reference count, adds the task to the runtime's task list,

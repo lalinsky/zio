@@ -23,12 +23,12 @@ const StackPoolConfig = @import("coro/stack_pool.zig").Config;
 const setupStackGrowth = @import("coro/stack.zig").setupStackGrowth;
 const cleanupStackGrowth = @import("coro/stack.zig").cleanupStackGrowth;
 
-const AnyTask = @import("runtime/task.zig").AnyTask;
-const TaskPool = @import("runtime/task.zig").TaskPool;
-const spawnTask = @import("runtime/task.zig").spawnTask;
-const finishTask = @import("runtime/task.zig").finishTask;
-const spawnBlockingTask = @import("runtime/blocking_task.zig").spawnBlockingTask;
-const Group = @import("runtime/group.zig").Group;
+const AnyTask = @import("task.zig").AnyTask;
+const TaskPool = @import("task.zig").TaskPool;
+const spawnTask = @import("task.zig").spawnTask;
+const finishTask = @import("task.zig").finishTask;
+const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
+const Group = @import("group.zig").Group;
 
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
@@ -67,7 +67,7 @@ pub const RuntimeOptions = struct {
     executors: ExecutorCount = .exact(1),
 };
 
-const Awaitable = @import("runtime/awaitable.zig").Awaitable;
+const Awaitable = @import("awaitable.zig").Awaitable;
 
 // Public handle for spawned tasks and futures
 pub fn JoinHandle(comptime T: type) type {

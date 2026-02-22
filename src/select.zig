@@ -10,8 +10,8 @@ const common = @import("common.zig");
 const Cancelable = common.Cancelable;
 const Waiter = common.Waiter;
 const NO_WINNER = common.NO_WINNER;
-const AnyTask = @import("runtime/task.zig").AnyTask;
-const Awaitable = @import("runtime/awaitable.zig").Awaitable;
+const AnyTask = @import("task.zig").AnyTask;
+const Awaitable = @import("awaitable.zig").Awaitable;
 const meta = @import("meta.zig");
 
 // Future protocol - Any type implementing these methods can be used with select():

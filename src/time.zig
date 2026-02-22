@@ -688,7 +688,7 @@ test "Stopwatch: start, read, lap, reset" {
 
 test "Timeout future: timeout wins select" {
     const Channel = @import("sync/channel.zig").Channel;
-    const Group = @import("runtime/group.zig").Group;
+    const Group = @import("group.zig").Group;
     const select = @import("select.zig").select;
 
     const runtime = try Runtime.init(std.testing.allocator, .{});

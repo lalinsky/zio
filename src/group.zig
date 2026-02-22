@@ -3,19 +3,19 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const log = @import("../common.zig").log;
-const meta = @import("../meta.zig");
-const Runtime = @import("../runtime.zig").Runtime;
-const getCurrentExecutor = @import("../runtime.zig").getCurrentExecutor;
-const beginShield = @import("../runtime.zig").beginShield;
-const endShield = @import("../runtime.zig").endShield;
-const sleep = @import("../runtime.zig").sleep;
-const JoinHandle = @import("../runtime.zig").JoinHandle;
-const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
+const log = @import("common.zig").log;
+const meta = @import("meta.zig");
+const Runtime = @import("runtime.zig").Runtime;
+const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
+const beginShield = @import("runtime.zig").beginShield;
+const endShield = @import("runtime.zig").endShield;
+const sleep = @import("runtime.zig").sleep;
+const JoinHandle = @import("runtime.zig").JoinHandle;
+const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const spawnTask = @import("task.zig").spawnTask;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
-const Futex = @import("../sync/Futex.zig");
+const Futex = @import("sync/Futex.zig");
 
 /// Matches std.Io.Group layout exactly for future vtable compatibility.
 pub const IoGroup = extern struct {
@@ -287,7 +287,7 @@ pub const GroupNode = struct {
     userdata: usize = undefined,
 };
 
-const Cancelable = @import("../common.zig").Cancelable;
+const Cancelable = @import("common.zig").Cancelable;
 
 fn testFn(arg: usize) usize {
     return arg + 1;

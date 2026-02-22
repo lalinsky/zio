@@ -9,7 +9,7 @@ const runtime_mod = @import("runtime.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
 const Channel = @import("sync/channel.zig").Channel;
-const Group = @import("runtime/group.zig").Group;
+const Group = @import("group.zig").Group;
 
 const dns = @import("dns/root.zig");
 

@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const ev = @import("../ev/root.zig");
-const Runtime = @import("../runtime.zig").Runtime;
-const getCurrentTask = @import("../runtime.zig").getCurrentTask;
-const Duration = @import("../time.zig").Duration;
-const Timeout = @import("../time.zig").Timeout;
+const ev = @import("ev/root.zig");
+const Runtime = @import("runtime.zig").Runtime;
+const getCurrentTask = @import("runtime.zig").getCurrentTask;
+const Duration = @import("time.zig").Duration;
+const Timeout = @import("time.zig").Timeout;
 const AnyTask = @import("task.zig").AnyTask;
 
 /// Automatically cancels I/O operations on the current task after a timeout.
@@ -83,7 +83,7 @@ fn autoCancelCallback(
     }
 }
 
-const Cancelable = @import("../common.zig").Cancelable;
+const Cancelable = @import("common.zig").Cancelable;
 
 test "AutoCancel: smoke test" {
     const rt = try Runtime.init(std.testing.allocator, .{});

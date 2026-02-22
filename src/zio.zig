@@ -18,9 +18,9 @@ pub const beginShield = runtime.beginShield;
 pub const endShield = runtime.endShield;
 pub const checkCancel = runtime.checkCancel;
 
-pub const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
+pub const AutoCancel = @import("autocancel.zig").AutoCancel;
 
-pub const Group = @import("runtime/group.zig").Group;
+pub const Group = @import("group.zig").Group;
 pub const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
 
 const common = @import("common.zig");
@@ -59,6 +59,8 @@ pub const Future = @import("sync/future.zig").Future;
 
 pub const Signal = @import("signal.zig").Signal;
 pub const SignalKind = @import("signal.zig").SignalKind;
+
+pub const tls = @import("tls.zig");
 
 pub const select = @import("select.zig").select;
 pub const wait = @import("select.zig").wait;

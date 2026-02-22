@@ -4,13 +4,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("runtime.zig").Runtime;
-const Group = @import("runtime/group.zig").Group;
+const Group = @import("group.zig").Group;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const Timeout = @import("time.zig").Timeout;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
-const AutoCancel = @import("runtime/autocancel.zig").AutoCancel;
+const AutoCancel = @import("autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
 const Waiter = @import("common.zig").Waiter;
 

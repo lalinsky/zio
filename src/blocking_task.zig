@@ -3,9 +3,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ev = @import("../ev/root.zig");
+const ev = @import("ev/root.zig");
 
-const Runtime = @import("../runtime.zig").Runtime;
+const Runtime = @import("runtime.zig").Runtime;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Closure = @import("task.zig").Closure;
 const finishTask = @import("task.zig").finishTask;

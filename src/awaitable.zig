@@ -4,14 +4,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const RefCounter = @import("../utils/ref_counter.zig").RefCounter;
-const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
-const Waiter = @import("../common.zig").Waiter;
+const RefCounter = @import("utils/ref_counter.zig").RefCounter;
+const WaitNode = @import("utils/wait_queue.zig").WaitNode;
+const Waiter = @import("common.zig").Waiter;
 const GroupNode = @import("group.zig").GroupNode;
-const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
+const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 
 // Forward declaration - Runtime is defined in runtime.zig
-const Runtime = @import("../runtime.zig").Runtime;
+const Runtime = @import("runtime.zig").Runtime;
 const AnyTask = @import("task.zig").AnyTask;
 const AnyBlockingTask = @import("blocking_task.zig").AnyBlockingTask;
 

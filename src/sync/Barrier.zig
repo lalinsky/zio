@@ -48,7 +48,7 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
-const Group = @import("../runtime/group.zig").Group;
+const Group = @import("../group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
