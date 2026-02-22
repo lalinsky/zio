@@ -60,8 +60,6 @@ pub const Future = @import("sync/future.zig").Future;
 pub const Signal = @import("signal.zig").Signal;
 pub const SignalKind = @import("signal.zig").SignalKind;
 
-pub const tls = @import("tls.zig");
-
 pub const select = @import("select.zig").select;
 pub const wait = @import("select.zig").wait;
 pub const SelectResult = @import("select.zig").SelectResult;
