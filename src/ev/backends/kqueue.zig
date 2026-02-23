@@ -24,6 +24,7 @@ const PipeRead = @import("../completion.zig").PipeRead;
 const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
 const MachPort = @import("../completion.zig").MachPort;
+const ProcessWait = @import("../completion.zig").ProcessWait;
 const fs = @import("../../os/fs.zig");
 
 pub const NetHandle = net.fd_t;
@@ -159,6 +160,7 @@ fn getFilter(completion: *Completion) i16 {
             };
         },
         .mach_port => if (builtin.os.tag.isDarwin()) std.c.EVFILT.MACHPORT else unreachable,
+        .process_wait => std.c.EVFILT.PROC,
         else => unreachable,
     };
 }
@@ -187,7 +189,7 @@ fn queueRegister(self: *Self, state: *LoopState, ident: usize, completion: *Comp
         .ident = ident,
         .filter = filter,
         .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
-        .fflags = 0,
+        .fflags = if (completion.op == .process_wait) std.c.NOTE.EXIT else 0,
         .data = 0,
         .udata = @intFromPtr(completion),
     };
@@ -229,6 +231,7 @@ fn getIdent(completion: *Completion) usize {
         .pipe_write => @intCast(completion.cast(PipeWrite).handle),
         .pipe_close => @intCast(completion.cast(PipeClose).handle),
         .mach_port => completion.cast(MachPort).port,
+        .process_wait => @intCast(completion.cast(ProcessWait).pid),
         else => unreachable,
     };
 }
@@ -349,6 +352,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .mach_port => {
             const data = c.cast(MachPort);
             self.queueRegister(state, data.port, c);
+        },
+        .process_wait => {
+            const data = c.cast(ProcessWait);
+            self.queueRegister(state, @intCast(data.pid), c);
         },
 
         // File operations are handled by Loop via thread pool
@@ -673,6 +680,10 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
         },
         .mach_port => {
             comp.setResult(.mach_port, {});
+            return .completed;
+        },
+        .process_wait => {
+            comp.setResult(.process_wait, {});
             return .completed;
         },
         else => {

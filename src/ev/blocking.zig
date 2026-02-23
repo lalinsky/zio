@@ -27,6 +27,7 @@ const NetConnect = @import("completion.zig").NetConnect;
 const NetAccept = @import("completion.zig").NetAccept;
 const NetPoll = @import("completion.zig").NetPoll;
 const PipePoll = @import("completion.zig").PipePoll;
+const ProcessWait = @import("completion.zig").ProcessWait;
 const Timer = @import("completion.zig").Timer;
 const Work = @import("completion.zig").Work;
 const common = @import("backends/common.zig");
@@ -111,6 +112,8 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         => @panic("Async operations not supported in blocking mode (requires event loop)"),
 
         .mach_port => unreachable,
+
+        .process_wait => handleProcessWait(c),
     }
 }
 
@@ -567,4 +570,20 @@ fn handleWork(c: *Completion) void {
     data.func(data);
     data.state.store(.completed, .monotonic);
     c.setResult(.work, {});
+}
+
+/// Helper to handle process wait operation (blocking waitpid)
+fn handleProcessWait(c: *Completion) void {
+    if (builtin.os.tag == .windows) {
+        @panic("ProcessWait not supported on Windows in blocking mode");
+    }
+
+    const data = c.cast(ProcessWait);
+    // Block until process exits - we only need to know it exited, not the status
+    // (the caller will call waitpidBlocking separately to reap)
+    _ = os.process.waitpidBlocking(data.pid) catch |err| {
+        c.setError(err);
+        return;
+    };
+    c.setResult(.process_wait, {});
 }

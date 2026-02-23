@@ -8,6 +8,7 @@ pub const path = std.fs.path;
 pub const posix = @import("posix.zig");
 pub const windows = @import("windows.zig");
 pub const thread = @import("thread.zig");
+pub const process = @import("process.zig");
 
 pub const Mutex = thread.Mutex;
 pub const Condition = thread.Condition;

@@ -109,6 +109,7 @@ pub const Op = enum {
     pipe_write,
     pipe_close,
     mach_port,
+    process_wait,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -169,6 +170,7 @@ pub const Op = enum {
             .pipe_write => PipeWrite,
             .pipe_close => PipeClose,
             .mach_port => MachPort,
+            .process_wait => ProcessWait,
         };
     }
 
@@ -231,6 +233,7 @@ pub const Op = enum {
             PipeWrite => .pipe_write,
             PipeClose => .pipe_close,
             MachPort => .mach_port,
+            ProcessWait => .process_wait,
             else => @compileError("unknown completion type"),
         };
     }
@@ -1862,5 +1865,24 @@ pub const MachPort = struct {
 
     pub fn getResult(self: *const MachPort) Error!void {
         return self.c.getResult(.mach_port);
+    }
+};
+
+pub const ProcessWait = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    pid: i32,
+
+    pub const Error = error{Unexpected} || Cancelable;
+
+    pub fn init(pid: i32) ProcessWait {
+        return .{
+            .c = .init(.process_wait),
+            .pid = pid,
+        };
+    }
+
+    pub fn getResult(self: *const ProcessWait) Error!void {
+        return self.c.getResult(.process_wait);
     }
 };

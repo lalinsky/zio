@@ -323,6 +323,7 @@ const libc = struct {
     extern "c" fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
     extern "c" fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, flags: u32) c_int;
     extern "c" fn lseek(fd: fd_t, offset: c.off_t, whence: c_int) c.off_t;
+    extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 };
 
 pub const fchmodat = libc.fchmodat;
@@ -338,6 +339,8 @@ pub const munmap = libc.munmap;
 pub const mmap = libc.mmap;
 pub const sigaltstack = libc.sigaltstack;
 pub const utimensat = libc.utimensat;
+
+pub const execvp = libc.execvp;
 
 pub fn lseek(fd: i32, offset: off_t, whence: u32) off_t {
     return libc.lseek(fd, offset, @intCast(whence));

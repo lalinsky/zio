@@ -792,7 +792,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
-        .mach_port => unreachable,
+        .mach_port, .process_wait => unreachable,
     }
 }
 
@@ -1210,7 +1210,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setResult(.pipe_close, {});
             }
         },
-        .mach_port => unreachable,
+        .mach_port, .process_wait => unreachable,
     }
 }
 

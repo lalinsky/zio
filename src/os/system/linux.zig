@@ -335,3 +335,11 @@ pub fn mkdirat(dirfd: fd_t, path: [*:0]const u8, mode: mode_t) usize {
         mode,
     );
 }
+
+pub fn pidfd_open(pid: i32, flags: u32) usize {
+    return linux.syscall2(
+        .pidfd_open,
+        @as(usize, @bitCast(@as(isize, pid))),
+        flags,
+    );
+}
