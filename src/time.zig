@@ -359,6 +359,10 @@ pub const Timestamp = struct {
         return .{ .value = to.value -| from.value };
     }
 
+    pub fn untilNow(self: Timestamp, comptime clock: Clock) Duration {
+        return self.durationTo(now(clock));
+    }
+
     pub fn addDuration(self: Timestamp, duration: Duration) Timestamp {
         return .{ .value = self.value +| duration.value };
     }
@@ -592,6 +596,13 @@ test "Timestamp: fromTimespec, toTimespec" {
     const zero_back = zero.toTimespec();
     try std.testing.expectEqual(0, zero_back.sec);
     try std.testing.expectEqual(0, zero_back.nsec);
+}
+
+test "Timestamp: untilNow" {
+    const before = Timestamp.now(.monotonic);
+    const elapsed = before.untilNow(.monotonic);
+    // Should be non-negative and small (less than 1 second)
+    try std.testing.expect(elapsed.toNanoseconds() < ns_per_s);
 }
 
 test "Timestamp: addDuration, subDuration, durationTo" {
