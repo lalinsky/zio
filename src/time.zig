@@ -326,8 +326,20 @@ pub const Timestamp = struct {
         return .{ .value = ms *| (ns_per_ms / ns_per_unit) };
     }
 
+    pub fn fromSeconds(s: TimeInt) Timestamp {
+        return .{ .value = s *| (ns_per_s / ns_per_unit) };
+    }
+
     pub fn toNanoseconds(self: Timestamp) TimeInt {
         return self.value *| ns_per_unit;
+    }
+
+    pub fn toSeconds(self: Timestamp) TimeInt {
+        if (ns_per_s >= ns_per_unit) {
+            return self.value / (ns_per_s / ns_per_unit);
+        } else {
+            return self.value *| (ns_per_unit / ns_per_s);
+        }
     }
 
     pub fn fromTimespec(ts: os.timespec) Timestamp {
@@ -537,6 +549,50 @@ pub const Stopwatch = struct {
         return self.previous;
     }
 };
+
+test "Timestamp: fromNanoseconds, toNanoseconds" {
+    const t = Timestamp.fromNanoseconds(1_500_000_000);
+    try std.testing.expectEqual(1_500_000_000, t.toNanoseconds());
+
+    const zero = Timestamp.fromNanoseconds(0);
+    try std.testing.expectEqual(0, zero.toNanoseconds());
+}
+
+test "Timestamp: fromMilliseconds, toNanoseconds" {
+    const t = Timestamp.fromMilliseconds(1500);
+    try std.testing.expectEqual(1_500_000_000, t.toNanoseconds());
+
+    const zero = Timestamp.fromMilliseconds(0);
+    try std.testing.expectEqual(0, zero.toNanoseconds());
+}
+
+test "Timestamp: fromSeconds, toSeconds" {
+    const t = Timestamp.fromSeconds(1705322445);
+    try std.testing.expectEqual(1705322445, t.toSeconds());
+
+    const zero = Timestamp.fromSeconds(0);
+    try std.testing.expectEqual(0, zero.toSeconds());
+
+    // Round-trip: fromNanoseconds -> toSeconds
+    const t2 = Timestamp.fromNanoseconds(5_500_000_000);
+    try std.testing.expectEqual(5, t2.toSeconds());
+
+    // Round-trip: fromSeconds -> toNanoseconds
+    const t3 = Timestamp.fromSeconds(42);
+    try std.testing.expectEqual(42_000_000_000, t3.toNanoseconds());
+}
+
+test "Timestamp: fromTimespec, toTimespec" {
+    const ts = Timestamp.fromTimespec(.{ .sec = 5, .nsec = 500_000_000 });
+    const back = ts.toTimespec();
+    try std.testing.expectEqual(5, back.sec);
+    try std.testing.expectEqual(500_000_000, back.nsec);
+
+    const zero = Timestamp.fromTimespec(.{ .sec = 0, .nsec = 0 });
+    const zero_back = zero.toTimespec();
+    try std.testing.expectEqual(0, zero_back.sec);
+    try std.testing.expectEqual(0, zero_back.nsec);
+}
 
 test "Timestamp: addDuration, subDuration, durationTo" {
     const t1 = Timestamp.fromNanoseconds(1_000_000_000);
