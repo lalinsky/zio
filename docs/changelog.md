@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Fully asynchronous DNS resolver on macOS and Windows using their native APIs.
 - Added support for 64-bit PowerPC CPUs.
+- Added `RwLock` for async readers-writer locking.
 
 ### Fixed
 
