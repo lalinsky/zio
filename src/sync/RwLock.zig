@@ -81,7 +81,7 @@ pub fn lock(self: *RwLock) Cancelable!void {
     while (self.permits < max_permits) {
         self.cond.wait(&self.mutex) catch {
             self.writers_waiting -= 1;
-            self.cond.signal();
+            self.cond.broadcast();
             return error.Canceled;
         };
     }
@@ -284,4 +284,47 @@ test "RwLock writer exclusion" {
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(400, counter);
+}
+
+test "RwLock cancel waiting writer" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var rwlock = RwLock.init;
+
+    // Hold a read lock to block the writer
+    try rwlock.lockShared();
+
+    const TestFn = struct {
+        fn writer(rw: *RwLock) !void {
+            try rw.lock();
+            rw.unlock();
+        }
+    };
+
+    // Spawn a writer that will block waiting for the read lock to release
+    var handle = try runtime.spawn(TestFn.writer, .{&rwlock});
+
+    // Wait until the writer is actually waiting
+    while (true) {
+        rwlock.mutex.lockUncancelable();
+        const waiting = rwlock.writers_waiting > 0;
+        rwlock.mutex.unlock();
+        if (waiting) break;
+        try yield();
+    }
+
+    // Cancel the writer while it's waiting
+    handle.cancel();
+
+    // writers_waiting should be back to 0, so readers can still acquire
+    try std.testing.expect(rwlock.tryLockShared());
+    rwlock.unlockShared();
+
+    // Release the original read lock
+    rwlock.unlockShared();
+
+    // Writer lock should also work now
+    try std.testing.expect(rwlock.tryLock());
+    rwlock.unlock();
 }
