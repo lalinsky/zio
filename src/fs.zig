@@ -337,16 +337,26 @@ pub const File = struct {
         return try op.getResult();
     }
 
+    pub const ReadOptions = struct {
+        ioprio: ev.IoPrio = if (ev.IoPrio == void) {} else 0,
+    };
+
+    pub const WriteOptions = struct {
+        ioprio: ev.IoPrio = if (ev.IoPrio == void) {} else 0,
+    };
+
     /// Read from file using ReadBuf (vectored read).
-    pub fn readBuf(self: File, buf: ev.ReadBuf, offset: u64) ReadError!usize {
+    pub fn readBuf(self: File, buf: ev.ReadBuf, offset: u64, options: ReadOptions) ReadError!usize {
         var op = ev.FileRead.init(self.fd, buf, offset);
+        op.ioprio = options.ioprio;
         try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Write to file using WriteBuf (vectored write).
-    pub fn writeBuf(self: File, buf: ev.WriteBuf, offset: u64) WriteError!usize {
+    pub fn writeBuf(self: File, buf: ev.WriteBuf, offset: u64, options: WriteOptions) WriteError!usize {
         var op = ev.FileWrite.init(self.fd, buf, offset);
+        op.ioprio = options.ioprio;
         try waitForIo(&op.c);
         return try op.getResult();
     }
@@ -426,6 +436,7 @@ pub const File = struct {
 pub const FileReader = struct {
     file: File,
     position: u64 = 0,
+    ioprio: ev.IoPrio = if (ev.IoPrio == void) {} else 0,
     err: ?File.ReadError = null,
     interface: std.Io.Reader,
 
@@ -453,7 +464,8 @@ pub const FileReader = struct {
         const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
         const dest = limit.slice(try w.writableSliceGreedy(1));
 
-        const n = r.file.read(dest, r.position) catch |err| {
+        var iovec_storage: [1]os.iovec = undefined;
+        const n = r.file.readBuf(.fromSlice(dest, &iovec_storage), r.position, .{ .ioprio = r.ioprio }) catch |err| {
             r.err = err;
             return error.ReadFailed;
         };
@@ -479,7 +491,8 @@ pub const FileReader = struct {
         // - 1 byte at position-1 (last byte we claim to have discarded)
         // - 1 byte at position (to verify there's more data or we're exactly at EOF)
         var buf: [2]u8 = undefined;
-        const n = r.file.read(&buf, r.position - 1) catch |err| {
+        var iovec_storage: [1]os.iovec = undefined;
+        const n = r.file.readBuf(.fromSlice(&buf, &iovec_storage), r.position - 1, .{ .ioprio = r.ioprio }) catch |err| {
             r.err = err;
             return error.ReadFailed;
         };
@@ -501,7 +514,7 @@ pub const FileReader = struct {
         if (dest_n == 0) return 0;
 
         const buf = ev.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
-        const n = r.file.readBuf(buf, r.position) catch |err| {
+        const n = r.file.readBuf(buf, r.position, .{ .ioprio = r.ioprio }) catch |err| {
             r.err = err;
             return error.ReadFailed;
         };
@@ -522,6 +535,7 @@ pub const FileReader = struct {
 pub const FileWriter = struct {
     file: File,
     position: u64 = 0,
+    ioprio: ev.IoPrio = if (ev.IoPrio == void) {} else 0,
     err: ?File.WriteError = null,
     interface: std.Io.Writer,
 
@@ -553,7 +567,8 @@ pub const FileWriter = struct {
 
         if (buf_len == 0) return 0;
 
-        const n = w.file.writeVec(slices[0..buf_len], w.position) catch |err| {
+        var iovec_storage: [max_vecs]os.iovec_const = undefined;
+        const n = w.file.writeBuf(.fromSlices(slices[0..buf_len], &iovec_storage), w.position, .{ .ioprio = w.ioprio }) catch |err| {
             w.err = err;
             return error.WriteFailed;
         };
@@ -567,7 +582,8 @@ pub const FileWriter = struct {
 
         while (io_writer.end > 0) {
             const buffered = io_writer.buffered();
-            const n = w.file.write(buffered, w.position) catch |err| {
+            var iovec_storage: [1]os.iovec_const = undefined;
+            const n = w.file.writeBuf(.fromSlice(buffered, &iovec_storage), w.position, .{ .ioprio = w.ioprio }) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
