@@ -41,11 +41,16 @@ const Condition = @import("Condition.zig");
 
 const RwLock = @This();
 
-const max_permits: u32 = std.math.maxInt(u32);
+const max_permits: u31 = std.math.maxInt(u31);
+
+const State = packed struct(u32) {
+    writer_waiting: bool = false,
+    permits: u31 = max_permits,
+};
 
 mutex: Mutex = Mutex.init,
 cond: Condition = Condition.init,
-permits: u32 = max_permits,
+state: State = .{},
 
 /// Creates a new unlocked RwLock.
 pub const init: RwLock = .{};
@@ -57,8 +62,8 @@ pub fn tryLock(self: *RwLock) bool {
     if (!self.mutex.tryLock()) return false;
     defer self.mutex.unlock();
 
-    if (self.permits == max_permits) {
-        self.permits = 0;
+    if (self.state.permits == max_permits) {
+        self.state.permits = 0;
         return true;
     }
 
@@ -75,11 +80,17 @@ pub fn lock(self: *RwLock) Cancelable!void {
     try self.mutex.lock();
     defer self.mutex.unlock();
 
-    while (self.permits < max_permits) {
-        try self.cond.wait(&self.mutex);
+    while (self.state.permits < max_permits) {
+        self.cond.wait(&self.mutex) catch {
+            self.state.writer_waiting = false;
+            self.cond.signal();
+            return error.Canceled;
+        };
+        self.state.writer_waiting = true;
     }
 
-    self.permits = 0;
+    self.state.writer_waiting = false;
+    self.state.permits = 0;
 }
 
 /// Acquires the write lock, ignoring cancellation.
@@ -91,11 +102,13 @@ pub fn lockUncancelable(self: *RwLock) void {
     self.mutex.lockUncancelable();
     defer self.mutex.unlock();
 
-    while (self.permits < max_permits) {
+    while (self.state.permits < max_permits) {
         self.cond.waitUncancelable(&self.mutex);
+        self.state.writer_waiting = true;
     }
 
-    self.permits = 0;
+    self.state.writer_waiting = false;
+    self.state.permits = 0;
 }
 
 /// Releases the write lock.
@@ -103,7 +116,7 @@ pub fn lockUncancelable(self: *RwLock) void {
 /// It is undefined behavior to call this without holding the write lock.
 pub fn unlock(self: *RwLock) void {
     self.mutex.lockUncancelable();
-    self.permits = max_permits;
+    self.state.permits = max_permits;
     self.mutex.unlock();
     self.cond.broadcast();
 }
@@ -115,8 +128,8 @@ pub fn tryLockShared(self: *RwLock) bool {
     if (!self.mutex.tryLock()) return false;
     defer self.mutex.unlock();
 
-    if (self.permits >= 1) {
-        self.permits -= 1;
+    if (self.state.permits >= 1 and !self.state.writer_waiting) {
+        self.state.permits -= 1;
         return true;
     }
 
@@ -133,11 +146,11 @@ pub fn lockShared(self: *RwLock) Cancelable!void {
     try self.mutex.lock();
     defer self.mutex.unlock();
 
-    while (self.permits < 1) {
+    while (self.state.permits < 1 or self.state.writer_waiting) {
         try self.cond.wait(&self.mutex);
     }
 
-    self.permits -= 1;
+    self.state.permits -= 1;
 }
 
 /// Acquires a read lock, ignoring cancellation.
@@ -149,11 +162,11 @@ pub fn lockSharedUncancelable(self: *RwLock) void {
     self.mutex.lockUncancelable();
     defer self.mutex.unlock();
 
-    while (self.permits < 1) {
+    while (self.state.permits < 1 or self.state.writer_waiting) {
         self.cond.waitUncancelable(&self.mutex);
     }
 
-    self.permits -= 1;
+    self.state.permits -= 1;
 }
 
 /// Releases a read lock.
@@ -161,7 +174,7 @@ pub fn lockSharedUncancelable(self: *RwLock) void {
 /// It is undefined behavior to call this without holding a read lock.
 pub fn unlockShared(self: *RwLock) void {
     self.mutex.lockUncancelable();
-    self.permits += 1;
+    self.state.permits += 1;
     self.mutex.unlock();
     self.cond.signal();
 }
