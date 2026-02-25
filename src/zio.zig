@@ -58,6 +58,8 @@ pub const Channel = @import("sync/channel.zig").Channel;
 pub const BroadcastChannel = @import("sync/broadcast_channel.zig").BroadcastChannel;
 pub const Future = @import("sync/future.zig").Future;
 
+pub const process = @import("process.zig");
+
 pub const Signal = @import("signal.zig").Signal;
 pub const SignalKind = @import("signal.zig").SignalKind;
 

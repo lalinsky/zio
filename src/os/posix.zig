@@ -37,6 +37,9 @@ pub const IPPROTO = struct {
 };
 pub const TCP = system.TCP;
 
+pub const pid_t = system.pid_t;
+pub const getpid = system.getpid;
+
 pub const timespec = sys.timespec;
 pub const off_t = sys.off_t;
 
