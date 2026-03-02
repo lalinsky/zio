@@ -2,13 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## [0.9.0] - 2026-03-02
 
 ### Added
 
 - Fully asynchronous DNS resolver on macOS and Windows using their native APIs.
 - Added support for 64-bit PowerPC CPUs.
 - Added `RwLock` for async readers-writer locking.
+- Added `Timestamp.fromSeconds()` and `toSeconds()` for second-based conversions.
+- Added `Timestamp.untilNow()` to get the duration elapsed since a timestamp.
+
+### Changed
+
+- Removed unused `JoinHandle.cast()` method.
 
 ### Fixed
 
@@ -216,6 +222,7 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.9.0]: https://github.com/lalinsky/zio/releases/tag/v0.9.0
 [0.8.2]: https://github.com/lalinsky/zio/releases/tag/v0.8.2
 [0.8.1]: https://github.com/lalinsky/zio/releases/tag/v0.8.1
 [0.8.0]: https://github.com/lalinsky/zio/releases/tag/v0.8.0
