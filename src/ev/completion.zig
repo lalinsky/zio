@@ -10,6 +10,8 @@ const fs = @import("../os/fs.zig");
 const Timestamp = @import("../time.zig").Timestamp;
 const Timeout = @import("../time.zig").Timeout;
 
+pub const IoPrio = if (Backend.capabilities.ioprio) u16 else void;
+
 pub const BackendCapabilities = struct {
     file_read: bool = false,
     file_write: bool = false,
@@ -46,6 +48,8 @@ pub const BackendCapabilities = struct {
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
     is_multi_threaded: bool = false,
+
+    ioprio: bool = false,
 
     pub fn supportsNonBlockingFileIo(comptime self: BackendCapabilities) bool {
         return self.file_read or self.file_write;
@@ -948,6 +952,7 @@ pub const FileRead = struct {
     handle: fs.fd_t,
     buffer: ReadBuf,
     offset: u64,
+    ioprio: IoPrio = if (IoPrio == void) {} else 0,
 
     pub const Error = fs.FileReadError || Cancelable;
 
@@ -975,6 +980,7 @@ pub const FileWrite = struct {
     handle: fs.fd_t,
     buffer: WriteBuf,
     offset: u64,
+    ioprio: IoPrio = if (IoPrio == void) {} else 0,
 
     pub const Error = fs.FileWriteError || Cancelable;
 

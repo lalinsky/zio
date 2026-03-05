@@ -68,6 +68,7 @@ pub const capabilities: BackendCapabilities = .{
     .file_stat = true,
     .dir_open = true,
     .dir_close = true,
+    .ioprio = true,
 };
 
 pub const SharedState = struct {};
@@ -504,6 +505,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 return;
             };
             sqe.prep_readv(data.handle, data.buffer.iovecs, data.offset);
+            sqe.ioprio = data.ioprio;
             sqe.user_data = @intFromPtr(c);
         },
         .file_write => {
@@ -515,6 +517,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 return;
             };
             sqe.prep_writev(data.handle, data.buffer.iovecs, data.offset);
+            sqe.ioprio = data.ioprio;
             sqe.user_data = @intFromPtr(c);
         },
         .file_sync => {

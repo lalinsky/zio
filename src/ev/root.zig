@@ -25,6 +25,7 @@ pub const executeBlocking = @import("blocking.zig").executeBlocking;
 
 const completion = @import("completion.zig");
 pub const Completion = completion.Completion;
+pub const IoPrio = completion.IoPrio;
 pub const Op = completion.Op;
 pub const Cancelable = completion.Cancelable;
 pub const Group = completion.Group;
