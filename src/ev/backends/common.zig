@@ -707,9 +707,10 @@ pub fn handleProcessWait(c: *Completion) void {
             .signal = null, // Windows doesn't have signals
         });
     } else {
-        var status: c_int = 0;
-        const rc = std.c.waitpid(data.handle, &status, 0);
-        if (rc < 0) {
+        const posix = @import("../../os/posix.zig");
+        var status: u32 = 0;
+        const rc = posix.system.waitpid(data.handle, &status, 0);
+        if (posix.errno(rc) != .SUCCESS) {
             c.setError(error.Unexpected);
         } else {
             // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
