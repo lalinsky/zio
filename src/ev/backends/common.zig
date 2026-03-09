@@ -38,6 +38,7 @@ const DirRealPath = @import("../completion.zig").DirRealPath;
 const DirRealPathFile = @import("../completion.zig").DirRealPathFile;
 const FileRealPath = @import("../completion.zig").FileRealPath;
 const FileHardLink = @import("../completion.zig").FileHardLink;
+const ProcessWait = @import("../completion.zig").ProcessWait;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 
@@ -680,4 +681,23 @@ pub fn dirCloseWork(work: *Work) void {
     const internal: *@FieldType(DirClose, "internal") = @fieldParentPtr("work", work);
     const dir_close: *DirClose = @fieldParentPtr("internal", internal);
     handleDirClose(&dir_close.c);
+}
+
+/// Work function for ProcessWait - performs blocking waitpid() syscall
+pub fn processWaitWork(work: *Work) void {
+    const internal: *@FieldType(ProcessWait, "internal") = @fieldParentPtr("work", work);
+    const process_wait: *ProcessWait = @fieldParentPtr("internal", internal);
+    var status: c_int = 0;
+    const rc = std.c.waitpid(process_wait.handle, &status, 0);
+    if (rc < 0) {
+        process_wait.c.setError(error.Unexpected);
+    } else {
+        // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
+        const exit_code: u8 = @intCast((status >> 8) & 0xff);
+        const signal_num: u8 = @intCast(status & 0x7f);
+        process_wait.c.setResult(.process_wait, .{
+            .code = exit_code,
+            .signal = if (signal_num != 0) signal_num else null,
+        });
+    }
 }
