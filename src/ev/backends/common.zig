@@ -706,12 +706,33 @@ pub fn handleProcessWait(c: *Completion) void {
             .code = @truncate(exit_code),
             .signal = null, // Windows doesn't have signals
         });
-    } else {
+    } else if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
         const posix = @import("../../os/posix.zig");
-        // Linux uses u32, macOS/BSD uses c_int for wait status
-        var status: if (builtin.os.tag == .linux) u32 else c_int = 0;
-        const rc = posix.system.waitpid(data.handle, &status, 0);
-        if (posix.errno(rc) != .SUCCESS) {
+        var siginfo: linux.siginfo_t = undefined;
+        const rc = linux.waitid(.PID, data.handle, &siginfo, linux.W.EXITED);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                // With waitid(), si_status contains the value directly (not encoded like waitpid)
+                const si_status = siginfo.fields.common.second.sigchld.status;
+                const si_code = siginfo.code;
+                const CLD_EXITED = 1;
+                const CLD_KILLED = 2;
+                const CLD_DUMPED = 3;
+                const terminated_by_signal = (si_code == CLD_KILLED or si_code == CLD_DUMPED);
+                c.setResult(.process_wait, .{
+                    .code = if (si_code == CLD_EXITED) @intCast(si_status) else 0,
+                    .signal = if (terminated_by_signal) @intCast(si_status) else null,
+                });
+            },
+            .CHILD => c.setError(error.ProcessNotFound),
+            else => c.setError(error.Unexpected),
+        }
+    } else {
+        // macOS, BSDs - use waitpid via libc
+        var status: c_int = 0;
+        const rc = std.c.waitpid(data.handle, &status, 0);
+        if (rc < 0) {
             c.setError(error.Unexpected);
         } else {
             // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
