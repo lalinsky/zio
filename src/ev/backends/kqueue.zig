@@ -361,11 +361,13 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompletedFromBackend(c);
                 return;
             };
+            // NOTE.EXITSTATUS is required on macOS to get exit status in data
+            const fflags = std.c.NOTE.EXIT | (if (@hasDecl(std.c.NOTE, "EXITSTATUS")) std.c.NOTE.EXITSTATUS else 0);
             change.* = .{
                 .ident = @intCast(data.handle),
                 .filter = std.c.EVFILT.PROC,
                 .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
-                .fflags = std.c.NOTE.EXIT | std.c.NOTE.EXITSTATUS,
+                .fflags = fflags,
                 .data = 0,
                 .udata = @intFromPtr(c),
             };
