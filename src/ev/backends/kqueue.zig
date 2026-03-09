@@ -696,24 +696,21 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             return .completed;
         },
         .process_wait => {
-            // Process exited - call waitpid to get status and reap
+            // Process exited - use exit status from kevent data, then reap zombie
             const data = comp.cast(ProcessWait);
-            var status: c_int = 0;
-            const wait_rc = std.c.waitpid(data.handle, &status, 0);
-            if (wait_rc < 0) {
-                switch (posix.errno(wait_rc)) {
-                    .CHILD => comp.setError(error.ProcessNotFound),
-                    else => comp.setError(error.Unexpected),
-                }
-            } else {
-                // Decode wait status
-                const exit_code: u8 = @intCast((status >> 8) & 0xff);
-                const signal_num: u8 = @intCast(status & 0x7f);
-                comp.setResult(.process_wait, .{
-                    .code = exit_code,
-                    .signal = if (signal_num != 0) signal_num else null,
-                });
-            }
+
+            // kevent.data contains the exit status for NOTE_EXIT
+            const status: u32 = @intCast(event.data);
+            const exit_code: u8 = @intCast((status >> 8) & 0xff);
+            const signal_num: u8 = @intCast(status & 0x7f);
+            comp.setResult(.process_wait, .{
+                .code = exit_code,
+                .signal = if (signal_num != 0) signal_num else null,
+            });
+
+            // Reap the zombie process (ignore result - we already have the status)
+            _ = std.c.waitpid(data.handle, null, std.c.W.NOHANG);
+
             return .completed;
         },
         else => {
