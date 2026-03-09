@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Completion = @import("../completion.zig").Completion;
 const Work = @import("../completion.zig").Work;
 const NetOpen = @import("../completion.zig").NetOpen;
@@ -683,21 +684,48 @@ pub fn dirCloseWork(work: *Work) void {
     handleDirClose(&dir_close.c);
 }
 
-/// Work function for ProcessWait - performs blocking waitpid() syscall
+/// Helper to handle process wait operation
+pub fn handleProcessWait(c: *Completion) void {
+    const data = c.cast(ProcessWait);
+
+    if (builtin.os.tag == .windows) {
+        const windows = @import("../../os/windows.zig");
+        // Wait for the process to exit
+        const wait_result = windows.WaitForSingleObject(data.handle, windows.INFINITE);
+        if (wait_result != windows.WAIT_OBJECT_0) {
+            c.setError(error.Unexpected);
+            return;
+        }
+        // Get the exit code
+        var exit_code: windows.DWORD = 0;
+        if (windows.GetExitCodeProcess(data.handle, &exit_code) == 0) {
+            c.setError(error.Unexpected);
+            return;
+        }
+        c.setResult(.process_wait, .{
+            .code = @truncate(exit_code),
+            .signal = null, // Windows doesn't have signals
+        });
+    } else {
+        var status: c_int = 0;
+        const rc = std.c.waitpid(data.handle, &status, 0);
+        if (rc < 0) {
+            c.setError(error.Unexpected);
+        } else {
+            // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
+            const exit_code: u8 = @intCast((status >> 8) & 0xff);
+            const signal_num: u8 = @intCast(status & 0x7f);
+            c.setResult(.process_wait, .{
+                .code = exit_code,
+                .signal = if (signal_num != 0) signal_num else null,
+            });
+        }
+    }
+}
+
+/// Work function for ProcessWait - performs blocking wait for process exit
 pub fn processWaitWork(work: *Work) void {
     const internal: *@FieldType(ProcessWait, "internal") = @fieldParentPtr("work", work);
     const process_wait: *ProcessWait = @fieldParentPtr("internal", internal);
-    var status: c_int = 0;
-    const rc = std.c.waitpid(process_wait.handle, &status, 0);
-    if (rc < 0) {
-        process_wait.c.setError(error.Unexpected);
-    } else {
-        // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
-        const exit_code: u8 = @intCast((status >> 8) & 0xff);
-        const signal_num: u8 = @intCast(status & 0x7f);
-        process_wait.c.setResult(.process_wait, .{
-            .code = exit_code,
-            .signal = if (signal_num != 0) signal_num else null,
-        });
-    }
+    handleProcessWait(&process_wait.c);
 }

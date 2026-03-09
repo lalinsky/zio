@@ -106,8 +106,8 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         // Work operation
         .work => handleWork(c),
 
-        // Process wait - blocking waitpid
-        .process_wait => handleProcessWait(c),
+        // Process wait - blocking wait
+        .process_wait => common.handleProcessWait(c),
 
         // Async operations require the event loop
         .async,
@@ -571,22 +571,4 @@ fn handleWork(c: *Completion) void {
     data.func(data);
     data.state.store(.completed, .monotonic);
     c.setResult(.work, {});
-}
-
-/// Helper to handle process wait operation
-fn handleProcessWait(c: *Completion) void {
-    const data = c.cast(ProcessWait);
-    var status: c_int = 0;
-    const rc = std.c.waitpid(data.handle, &status, 0);
-    if (rc < 0) {
-        c.setError(error.Unexpected);
-    } else {
-        // Decode wait status
-        const exit_code: u8 = @intCast((status >> 8) & 0xff);
-        const signal_num: u8 = @intCast(status & 0x7f);
-        c.setResult(.process_wait, .{
-            .code = exit_code,
-            .signal = if (signal_num != 0) signal_num else null,
-        });
-    }
 }

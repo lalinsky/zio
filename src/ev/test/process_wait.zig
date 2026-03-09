@@ -10,8 +10,6 @@ fn processWaitCallback(loop: *Loop, c: *@import("../completion.zig").Completion)
 }
 
 test "ProcessWait: wait for child process exit code 0" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     var tp: ThreadPool = undefined;
     try tp.init(std.testing.allocator, .{ .min_threads = 1 });
     defer tp.deinit();
@@ -20,8 +18,12 @@ test "ProcessWait: wait for child process exit code 0" {
     try loop.init(.{ .thread_pool = &tp });
     defer loop.deinit();
 
-    // Spawn /bin/true which exits with code 0
-    var child = std.process.Child.init(&.{"/bin/true"}, std.testing.allocator);
+    // Spawn a process that exits with code 0
+    const argv: []const []const u8 = if (builtin.os.tag == .windows)
+        &.{ "cmd.exe", "/c", "exit 0" }
+    else
+        &.{"/bin/true"};
+    var child = std.process.Child.init(argv, std.testing.allocator);
     try child.spawn();
 
     var wait = ProcessWait.init(child.id);
@@ -36,8 +38,6 @@ test "ProcessWait: wait for child process exit code 0" {
 }
 
 test "ProcessWait: wait for child process exit code 1" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     var tp: ThreadPool = undefined;
     try tp.init(std.testing.allocator, .{ .min_threads = 1 });
     defer tp.deinit();
@@ -46,8 +46,12 @@ test "ProcessWait: wait for child process exit code 1" {
     try loop.init(.{ .thread_pool = &tp });
     defer loop.deinit();
 
-    // Spawn /bin/false which exits with code 1
-    var child = std.process.Child.init(&.{"/bin/false"}, std.testing.allocator);
+    // Spawn a process that exits with code 1
+    const argv: []const []const u8 = if (builtin.os.tag == .windows)
+        &.{ "cmd.exe", "/c", "exit 1" }
+    else
+        &.{"/bin/false"};
+    var child = std.process.Child.init(argv, std.testing.allocator);
     try child.spawn();
 
     var wait = ProcessWait.init(child.id);
@@ -62,6 +66,7 @@ test "ProcessWait: wait for child process exit code 1" {
 }
 
 test "ProcessWait: wait for child process killed by signal" {
+    // Windows doesn't have signals
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var tp: ThreadPool = undefined;

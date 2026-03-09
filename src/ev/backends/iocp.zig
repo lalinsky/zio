@@ -486,6 +486,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_real_path_file,
         .file_real_path,
         .file_hard_link,
+        .process_wait,
         => unreachable, // These are handled by thread pool (capabilities = false)
 
         .pipe_poll => {
