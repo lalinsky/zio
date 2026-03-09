@@ -472,6 +472,12 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
         log.err("Failed to remove completion from poll queue during cancel: {}", .{err});
     };
 
+    // Close pidfd if this is a process_wait (it won't go through completion path)
+    if (target.op == .process_wait) {
+        const data = target.cast(ProcessWait);
+        _ = linux.close(@intCast(data.internal.pidfd));
+    }
+
     // Always complete target with error.Canceled
     target.setError(error.Canceled);
     state.markCompletedFromBackend(target);
