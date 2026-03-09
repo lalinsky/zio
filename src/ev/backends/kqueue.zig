@@ -365,7 +365,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .ident = @intCast(data.handle),
                 .filter = std.c.EVFILT.PROC,
                 .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
-                .fflags = std.c.NOTE.EXIT,
+                .fflags = std.c.NOTE.EXIT | std.c.NOTE.EXITSTATUS,
                 .data = 0,
                 .udata = @intFromPtr(c),
             };
