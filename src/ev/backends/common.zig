@@ -708,14 +708,16 @@ pub fn handleProcessWait(c: *Completion) void {
         });
     } else {
         const posix = @import("../../os/posix.zig");
-        var status: u32 = 0;
+        // Linux uses u32, macOS/BSD uses c_int for wait status
+        var status: if (builtin.os.tag == .linux) u32 else c_int = 0;
         const rc = posix.system.waitpid(data.handle, &status, 0);
         if (posix.errno(rc) != .SUCCESS) {
             c.setError(error.Unexpected);
         } else {
             // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
-            const exit_code: u8 = @intCast((status >> 8) & 0xff);
-            const signal_num: u8 = @intCast(status & 0x7f);
+            const ustatus: u32 = @bitCast(status);
+            const exit_code: u8 = @intCast((ustatus >> 8) & 0xff);
+            const signal_num: u8 = @intCast(ustatus & 0x7f);
             c.setResult(.process_wait, .{
                 .code = exit_code,
                 .signal = if (signal_num != 0) signal_num else null,
