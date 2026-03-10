@@ -32,7 +32,7 @@ pub const NetHandle = net.fd_t;
 const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 
 pub const capabilities: BackendCapabilities = .{
-    .process_wait = true,
+    .process_wait = false,
 };
 
 pub const SharedState = struct {};
