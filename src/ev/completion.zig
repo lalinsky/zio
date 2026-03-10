@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Loop = @import("loop.zig").Loop;
 const Backend = @import("backend.zig").Backend;
@@ -43,6 +44,7 @@ pub const BackendCapabilities = struct {
     dir_real_path_file: bool = false,
     file_real_path: bool = false,
     file_hard_link: bool = false,
+    process_wait: bool = false,
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
     is_multi_threaded: bool = false,
@@ -109,6 +111,7 @@ pub const Op = enum {
     pipe_write,
     pipe_close,
     mach_port,
+    process_wait,
 
     /// Get the completion type for this operation
     pub fn toType(comptime op: Op) type {
@@ -169,6 +172,7 @@ pub const Op = enum {
             .pipe_write => PipeWrite,
             .pipe_close => PipeClose,
             .mach_port => MachPort,
+            .process_wait => ProcessWait,
         };
     }
 
@@ -231,6 +235,7 @@ pub const Op = enum {
             PipeWrite => .pipe_write,
             PipeClose => .pipe_close,
             MachPort => .mach_port,
+            ProcessWait => .process_wait,
             else => @compileError("unknown completion type"),
         };
     }
@@ -1862,5 +1867,38 @@ pub const MachPort = struct {
 
     pub fn getResult(self: *const MachPort) Error!void {
         return self.c.getResult(.mach_port);
+    }
+};
+
+pub const ProcessWait = struct {
+    c: Completion,
+    result_private_do_not_touch: ExitStatus = undefined,
+    handle: ProcessHandle,
+    internal: switch (Backend.capabilities.process_wait) {
+        true => if (@hasDecl(Backend, "ProcessWaitData")) Backend.ProcessWaitData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+
+    pub const ProcessHandle = switch (builtin.os.tag) {
+        .windows => std.os.windows.HANDLE,
+        else => std.posix.pid_t,
+    };
+
+    pub const ExitStatus = struct {
+        code: u8,
+        signal: ?u8 = null,
+    };
+
+    pub const Error = error{ ProcessNotFound, SystemResources, Unexpected } || Cancelable;
+
+    pub fn init(handle: ProcessHandle) ProcessWait {
+        return .{
+            .c = .init(.process_wait),
+            .handle = handle,
+        };
+    }
+
+    pub fn getResult(self: *const ProcessWait) Error!ExitStatus {
+        return self.c.getResult(.process_wait);
     }
 };

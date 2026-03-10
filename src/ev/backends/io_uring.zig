@@ -47,6 +47,7 @@ const PipePoll = @import("../completion.zig").PipePoll;
 const PipeRead = @import("../completion.zig").PipeRead;
 const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
+const ProcessWait = @import("../completion.zig").ProcessWait;
 
 pub const NetHandle = net.fd_t;
 
@@ -68,6 +69,7 @@ pub const capabilities: BackendCapabilities = .{
     .file_stat = true,
     .dir_open = true,
     .dir_close = true,
+    .process_wait = true,
 };
 
 pub const SharedState = struct {};
@@ -132,6 +134,10 @@ pub const FileStatData = struct {
 
 pub const DirOpenData = struct {
     path: [:0]const u8 = "",
+};
+
+pub const ProcessWaitData = struct {
+    siginfo: linux.siginfo_t = undefined,
 };
 
 const Self = @This();
@@ -792,6 +798,18 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
+        .process_wait => {
+            const data = c.cast(ProcessWait);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for process_wait", .{});
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            // Use WAITID to wait for process exit
+            sqe.prep_waitid(linux.P.PID, data.handle, &data.internal.siginfo, linux.W.EXITED, 0);
+            sqe.user_data = @intFromPtr(c);
+        },
         .mach_port => unreachable,
     }
 }
@@ -1208,6 +1226,29 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
             } else {
                 c.setResult(.pipe_close, {});
+            }
+        },
+        .process_wait => {
+            if (res < 0) {
+                const err: linux.E = @enumFromInt(-res);
+                switch (err) {
+                    .CHILD => c.setError(error.ProcessNotFound),
+                    else => c.setError(error.Unexpected),
+                }
+            } else {
+                // Extract exit status from siginfo
+                // With waitid(), si_status contains the value directly (not encoded like waitpid)
+                const data = c.cast(ProcessWait);
+                const si_status = data.internal.siginfo.fields.common.second.sigchld.status;
+                const si_code = data.internal.siginfo.code;
+                const CLD_EXITED = 1;
+                const CLD_KILLED = 2;
+                const CLD_DUMPED = 3;
+                const terminated_by_signal = (si_code == CLD_KILLED or si_code == CLD_DUMPED);
+                c.setResult(.process_wait, .{
+                    .code = if (si_code == CLD_EXITED) @intCast(si_status) else 0,
+                    .signal = if (terminated_by_signal) @intCast(si_status) else null,
+                });
             }
         },
         .mach_port => unreachable,

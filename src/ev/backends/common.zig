@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Completion = @import("../completion.zig").Completion;
 const Work = @import("../completion.zig").Work;
 const NetOpen = @import("../completion.zig").NetOpen;
@@ -38,6 +39,7 @@ const DirRealPath = @import("../completion.zig").DirRealPath;
 const DirRealPathFile = @import("../completion.zig").DirRealPathFile;
 const FileRealPath = @import("../completion.zig").FileRealPath;
 const FileHardLink = @import("../completion.zig").FileHardLink;
+const ProcessWait = @import("../completion.zig").ProcessWait;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 
@@ -680,4 +682,74 @@ pub fn dirCloseWork(work: *Work) void {
     const internal: *@FieldType(DirClose, "internal") = @fieldParentPtr("work", work);
     const dir_close: *DirClose = @fieldParentPtr("internal", internal);
     handleDirClose(&dir_close.c);
+}
+
+/// Helper to handle process wait operation
+pub fn handleProcessWait(c: *Completion) void {
+    const data = c.cast(ProcessWait);
+
+    if (builtin.os.tag == .windows) {
+        const windows = @import("../../os/windows.zig");
+        // Wait for the process to exit
+        const wait_result = windows.WaitForSingleObject(data.handle, windows.INFINITE);
+        if (wait_result != windows.WAIT_OBJECT_0) {
+            c.setError(error.Unexpected);
+            return;
+        }
+        // Get the exit code
+        var exit_code: windows.DWORD = 0;
+        if (windows.GetExitCodeProcess(data.handle, &exit_code) == 0) {
+            c.setError(error.Unexpected);
+            return;
+        }
+        c.setResult(.process_wait, .{
+            .code = @truncate(exit_code),
+            .signal = null, // Windows doesn't have signals
+        });
+    } else if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        const posix = @import("../../os/posix.zig");
+        var siginfo: linux.siginfo_t = undefined;
+        const rc = linux.waitid(.PID, data.handle, &siginfo, linux.W.EXITED);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                // With waitid(), si_status contains the value directly (not encoded like waitpid)
+                const si_status = siginfo.fields.common.second.sigchld.status;
+                const si_code = siginfo.code;
+                const CLD_EXITED = 1;
+                const CLD_KILLED = 2;
+                const CLD_DUMPED = 3;
+                const terminated_by_signal = (si_code == CLD_KILLED or si_code == CLD_DUMPED);
+                c.setResult(.process_wait, .{
+                    .code = if (si_code == CLD_EXITED) @intCast(si_status) else 0,
+                    .signal = if (terminated_by_signal) @intCast(si_status) else null,
+                });
+            },
+            .CHILD => c.setError(error.ProcessNotFound),
+            else => c.setError(error.Unexpected),
+        }
+    } else {
+        // macOS, BSDs - use waitpid via libc
+        var status: c_int = 0;
+        const rc = std.c.waitpid(data.handle, &status, 0);
+        if (rc < 0) {
+            c.setError(error.Unexpected);
+        } else {
+            // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
+            const ustatus: u32 = @bitCast(status);
+            const exit_code: u8 = @intCast((ustatus >> 8) & 0xff);
+            const signal_num: u8 = @intCast(ustatus & 0x7f);
+            c.setResult(.process_wait, .{
+                .code = exit_code,
+                .signal = if (signal_num != 0) signal_num else null,
+            });
+        }
+    }
+}
+
+/// Work function for ProcessWait - performs blocking wait for process exit
+pub fn processWaitWork(work: *Work) void {
+    const internal: *@FieldType(ProcessWait, "internal") = @fieldParentPtr("work", work);
+    const process_wait: *ProcessWait = @fieldParentPtr("internal", internal);
+    handleProcessWait(&process_wait.c);
 }
