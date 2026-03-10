@@ -353,26 +353,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(MachPort);
             self.queueRegister(state, data.port, c);
         },
-        .process_wait => {
-            const data = c.cast(ProcessWait);
-            const change = self.reserveChange(state) catch {
-                log.err("Failed to reserve kevent change slot for process_wait", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
-            change.* = .{
-                .ident = @intCast(data.handle),
-                .filter = std.c.EVFILT.PROC,
-                .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
-                .fflags = std.c.NOTE.EXIT,
-                .data = 0,
-                .udata = @intFromPtr(c),
-            };
-        },
-
-        // File operations are handled by Loop via thread pool
-        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link => unreachable,
+        // File/process operations are handled by Loop via thread pool
+        .process_wait, .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link => unreachable,
     }
 }
 
@@ -693,26 +675,6 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
         },
         .mach_port => {
             comp.setResult(.mach_port, {});
-            return .completed;
-        },
-        .process_wait => {
-            // Process exited - use waitpid to get exit status and reap zombie
-            const data = comp.cast(ProcessWait);
-
-            var status: c_int = 0;
-            const rc = posix.system.waitpid(data.handle, &status, 0);
-            if (rc < 0) {
-                comp.setError(error.Unexpected);
-            } else {
-                const ustatus: u32 = @bitCast(status);
-                const exit_code: u8 = @intCast((ustatus >> 8) & 0xff);
-                const signal_num: u8 = @intCast(ustatus & 0x7f);
-                comp.setResult(.process_wait, .{
-                    .code = exit_code,
-                    .signal = if (signal_num != 0) signal_num else null,
-                });
-            }
-
             return .completed;
         },
         else => {
