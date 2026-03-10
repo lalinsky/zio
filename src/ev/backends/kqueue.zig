@@ -361,13 +361,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompletedFromBackend(c);
                 return;
             };
-            // NOTE.EXITSTATUS is required on macOS to get exit status in data
-            const fflags = std.c.NOTE.EXIT | (if (@hasDecl(std.c.NOTE, "EXITSTATUS")) std.c.NOTE.EXITSTATUS else 0);
             change.* = .{
                 .ident = @intCast(data.handle),
                 .filter = std.c.EVFILT.PROC,
                 .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
-                .fflags = fflags,
+                .fflags = std.c.NOTE.EXIT,
                 .data = 0,
                 .udata = @intFromPtr(c),
             };
@@ -698,20 +696,22 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             return .completed;
         },
         .process_wait => {
-            // Process exited - use exit status from kevent data, then reap zombie
+            // Process exited - use waitpid to get exit status and reap zombie
             const data = comp.cast(ProcessWait);
 
-            // kevent.data contains the exit status for NOTE_EXIT
-            const status: u32 = @intCast(event.data);
-            const exit_code: u8 = @intCast((status >> 8) & 0xff);
-            const signal_num: u8 = @intCast(status & 0x7f);
-            comp.setResult(.process_wait, .{
-                .code = exit_code,
-                .signal = if (signal_num != 0) signal_num else null,
-            });
-
-            // Reap the zombie process (ignore result - we already have the status)
-            _ = std.c.waitpid(data.handle, null, std.c.W.NOHANG);
+            var status: c_int = 0;
+            const rc = posix.system.waitpid(data.handle, &status, posix.system.W.NOHANG);
+            if (rc < 0) {
+                comp.setError(error.Unexpected);
+            } else {
+                const ustatus: u32 = @bitCast(status);
+                const exit_code: u8 = @intCast((ustatus >> 8) & 0xff);
+                const signal_num: u8 = @intCast(ustatus & 0x7f);
+                comp.setResult(.process_wait, .{
+                    .code = exit_code,
+                    .signal = if (signal_num != 0) signal_num else null,
+                });
+            }
 
             return .completed;
         },
