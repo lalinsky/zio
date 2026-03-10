@@ -700,7 +700,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             const data = comp.cast(ProcessWait);
 
             var status: c_int = 0;
-            const rc = posix.system.waitpid(data.handle, &status, posix.system.W.NOHANG);
+            const rc = posix.system.waitpid(data.handle, &status, 0);
             if (rc < 0) {
                 comp.setError(error.Unexpected);
             } else {
