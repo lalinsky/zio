@@ -394,6 +394,31 @@ pub extern "kernel32" fn GetExitCodeProcess(
     lpExitCode: *DWORD,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn PostQueuedCompletionStatus(
+    CompletionPort: HANDLE,
+    dwNumberOfBytesTransferred: DWORD,
+    dwCompletionKey: ULONG_PTR,
+    lpOverlapped: ?*OVERLAPPED,
+) callconv(.winapi) BOOL;
+
+pub const WAITORTIMERCALLBACK = *const fn (PVOID, BOOLEAN) callconv(.winapi) void;
+
+pub const WT_EXECUTEONLYONCE: ULONG = 0x00000008;
+
+pub extern "kernel32" fn RegisterWaitForSingleObject(
+    phNewWaitObject: *HANDLE,
+    hObject: HANDLE,
+    Callback: WAITORTIMERCALLBACK,
+    Context: ?PVOID,
+    dwMilliseconds: ULONG,
+    dwFlags: ULONG,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn UnregisterWaitEx(
+    WaitHandle: HANDLE,
+    CompletionEvent: ?HANDLE,
+) callconv(.winapi) BOOL;
+
 // File deletion
 pub extern "kernel32" fn DeleteFileW(lpFileName: LPCWSTR) callconv(.winapi) BOOL;
 
