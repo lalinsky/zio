@@ -23,15 +23,23 @@ const PipePoll = @import("../completion.zig").PipePoll;
 const PipeRead = @import("../completion.zig").PipeRead;
 const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
+const ProcessWait = @import("../completion.zig").ProcessWait;
 const fs = @import("../../os/fs.zig");
+const linux = std.os.linux;
 
 pub const NetHandle = net.fd_t;
 
 const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 
-pub const capabilities: BackendCapabilities = .{};
+pub const capabilities: BackendCapabilities = .{
+    .process_wait = true,
+};
 
 pub const SharedState = struct {};
+
+pub const ProcessWaitData = struct {
+    pidfd: std.posix.fd_t = -1,
+};
 
 pub const NetOpenError = error{
     Unexpected,
@@ -145,6 +153,7 @@ fn getEvents(completion: *Completion) u32 {
                 .write => std.os.linux.EPOLL.OUT,
             };
         },
+        .process_wait => std.os.linux.EPOLL.IN,
         else => unreachable,
     };
 }
@@ -163,6 +172,7 @@ fn getPollType(op: Op) PollEntryType {
         .pipe_read => .send_or_recv,
         .pipe_write => .send_or_recv,
         .pipe_poll => .send_or_recv,
+        .process_wait => .send_or_recv,
         else => unreachable,
     };
 }
@@ -255,9 +265,10 @@ fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !voi
         std.debug.assert(was_removed);
 
         switch (err) {
-            .SUCCESS, .NOENT => {
+            .SUCCESS, .NOENT, .BADF => {
                 // SUCCESS: successfully removed
                 // NOENT: fd was not registered (already removed or never added) - safe to proceed
+                // BADF: fd was closed (and auto-removed from epoll) - safe to proceed
             },
             else => return unexpectedError(err),
         }
@@ -301,6 +312,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .pipe_read => completion.cast(PipeRead).handle,
         .pipe_write => completion.cast(PipeWrite).handle,
         .pipe_close => completion.cast(PipeClose).handle,
+        .process_wait => completion.cast(ProcessWait).internal.pidfd,
         else => unreachable,
     };
 }
@@ -418,6 +430,29 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             }
             state.markCompletedFromBackend(c);
         },
+        .process_wait => {
+            const data = c.cast(ProcessWait);
+            // Create pidfd for polling
+            const rc = linux.pidfd_open(data.handle, 0);
+            switch (posix.errno(rc)) {
+                .SUCCESS => {
+                    data.internal.pidfd = @intCast(rc);
+                    self.addToPollQueue(state, data.internal.pidfd, c);
+                },
+                .SRCH => {
+                    c.setError(error.ProcessNotFound);
+                    state.markCompletedFromBackend(c);
+                },
+                .NFILE, .MFILE => {
+                    c.setError(error.SystemResources);
+                    state.markCompletedFromBackend(c);
+                },
+                else => {
+                    c.setError(error.Unexpected);
+                    state.markCompletedFromBackend(c);
+                },
+            }
+        },
 
         // File operations are handled by Loop via thread pool
         .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link => unreachable,
@@ -436,6 +471,12 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
         // the target to avoid leaving it stuck in running state.
         log.err("Failed to remove completion from poll queue during cancel: {}", .{err});
     };
+
+    // Close pidfd if this is a process_wait (it won't go through completion path)
+    if (target.op == .process_wait) {
+        const data = target.cast(ProcessWait);
+        _ = linux.close(@intCast(data.internal.pidfd));
+    }
 
     // Always complete target with error.Canceled
     target.setError(error.Canceled);
@@ -724,6 +765,33 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
             }
             // Requested events not ready yet - requeue
             return .requeue;
+        },
+        .process_wait => {
+            // pidfd is readable - process has exited, get the status
+            const data = c.cast(ProcessWait);
+            defer _ = linux.close(@intCast(data.internal.pidfd));
+
+            var siginfo: linux.siginfo_t = undefined;
+            const wait_rc = linux.waitid(.PIDFD, @intCast(data.internal.pidfd), &siginfo, linux.W.EXITED);
+            switch (posix.errno(wait_rc)) {
+                .SUCCESS => {
+                    // Extract exit status from siginfo
+                    // With waitid(), si_status contains the value directly (not encoded like waitpid)
+                    const si_status = siginfo.fields.common.second.sigchld.status;
+                    const si_code = siginfo.code;
+                    const CLD_EXITED = 1;
+                    const CLD_KILLED = 2;
+                    const CLD_DUMPED = 3;
+                    const terminated_by_signal = (si_code == CLD_KILLED or si_code == CLD_DUMPED);
+                    c.setResult(.process_wait, .{
+                        .code = if (si_code == CLD_EXITED) @intCast(si_status) else 0,
+                        .signal = if (terminated_by_signal) @intCast(si_status) else null,
+                    });
+                },
+                .CHILD => c.setError(error.ProcessNotFound),
+                else => c.setError(error.Unexpected),
+            }
+            return .completed;
         },
         else => {
             std.debug.panic("unexpected completion type in complete: {}", .{c.op});

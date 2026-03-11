@@ -24,6 +24,7 @@ const PipeCreate = @import("../completion.zig").PipeCreate;
 const PipeRead = @import("../completion.zig").PipeRead;
 const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
+const ProcessWait = @import("../completion.zig").ProcessWait;
 
 // WAIT_IO_COMPLETION is returned when an alertable wait is interrupted by an APC
 const WAIT_IO_COMPLETION: windows.Win32Error = @enumFromInt(0xC0);
@@ -145,11 +146,20 @@ pub const capabilities: BackendCapabilities = .{
     .file_read = true,
     .file_write = true,
     .is_multi_threaded = true,
+    .process_wait = true,
 };
 
 // Backend-specific data stored in Completion.internal
 pub const CompletionData = struct {
     overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED),
+};
+
+// Backend-specific data stored in ProcessWait.internal
+pub const ProcessWaitData = struct {
+    wait_handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
+    iocp: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
+    /// Atomic flag to ensure only one path (callback or cancel) posts to IOCP.
+    posted: std.atomic.Value(bool) = .init(false),
 };
 
 // AcceptEx needs an extra buffer for address data
@@ -451,6 +461,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_poll => {
             const data = c.cast(NetPoll);
             self.submitPoll(state, data) catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+            };
+        },
+
+        .process_wait => {
+            const data = c.cast(ProcessWait);
+            self.submitProcessWait(state, data) catch |err| {
                 c.setError(err);
                 state.markCompletedFromBackend(c);
             };
@@ -1210,6 +1228,45 @@ fn submitPipeClose(self: *Self, state: *LoopState, data: *PipeClose) !void {
     state.markCompletedFromBackend(&data.c);
 }
 
+/// Thread-pool callback invoked by Windows when the process exits.
+/// Posts an IOCP completion so the event loop can process the result.
+fn processWaitCallback(lpParameter: windows.PVOID, TimerOrWaitFired: windows.BOOLEAN) callconv(.winapi) void {
+    _ = TimerOrWaitFired;
+    const pw_internal: *ProcessWaitData = @ptrCast(@alignCast(lpParameter));
+    const pw: *ProcessWait = @fieldParentPtr("internal", pw_internal);
+    // Use CAS to ensure only one path (callback or cancel) posts to IOCP
+    if (pw_internal.posted.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+        _ = windows.PostQueuedCompletionStatus(pw_internal.iocp, 0, 0, &pw.c.internal.overlapped);
+    }
+}
+
+fn submitProcessWait(self: *Self, state: *LoopState, data: *ProcessWait) !void {
+    _ = state;
+
+    // Zero the overlapped structure so IOCP can use it
+    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+
+    // Reset the posted flag for this submission
+    data.internal.posted.store(false, .release);
+
+    // Store the IOCP handle so the callback can post the completion
+    data.internal.iocp = self.shared_state.iocp;
+
+    // Register a wait: when the process handle is signaled (process exits),
+    // the callback fires once and posts an IOCP completion packet.
+    const ok = windows.RegisterWaitForSingleObject(
+        &data.internal.wait_handle,
+        data.handle,
+        processWaitCallback,
+        &data.internal,
+        windows.INFINITE,
+        windows.WT_EXECUTEONLYONCE,
+    );
+    if (ok == windows.FALSE) {
+        return error.Unexpected;
+    }
+}
+
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
@@ -1269,6 +1326,21 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                         else => unreachable,
                     };
                     break :blk h;
+                },
+                .process_wait => {
+                    const data = target.cast(ProcessWait);
+                    if (data.internal.wait_handle != windows.INVALID_HANDLE_VALUE) {
+                        // Unregister and wait for any in-flight callback to finish.
+                        // INVALID_HANDLE_VALUE means block until all running callbacks complete,
+                        // preventing a race where the callback posts after we do.
+                        _ = windows.UnregisterWaitEx(data.internal.wait_handle, windows.INVALID_HANDLE_VALUE);
+                        data.internal.wait_handle = windows.INVALID_HANDLE_VALUE;
+                        // If the callback didn't already post, post the completion ourselves
+                        if (data.internal.posted.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                            _ = windows.PostQueuedCompletionStatus(data.internal.iocp, 0, 0, &target.internal.overlapped);
+                        }
+                    }
+                    return;
                 },
                 else => {
                     // Operations that can't be canceled or are synchronous
@@ -1698,6 +1770,33 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             } else {
                 c.setResult(.pipe_write, @intCast(bytes_transferred));
+            }
+
+            state.markCompletedFromBackend(c);
+        },
+
+        .process_wait => {
+            const data = c.cast(ProcessWait);
+
+            // Unregister the wait handle to clean up the thread-pool registration.
+            // If cancel() already unregistered it, this is a no-op.
+            if (data.internal.wait_handle != windows.INVALID_HANDLE_VALUE) {
+                _ = windows.UnregisterWaitEx(data.internal.wait_handle, null);
+                data.internal.wait_handle = windows.INVALID_HANDLE_VALUE;
+            }
+
+            if (c.cancel_state.load(.acquire).requested) {
+                c.setError(error.Canceled);
+            } else {
+                var exit_code: windows.DWORD = 0;
+                if (windows.GetExitCodeProcess(data.handle, &exit_code) == windows.FALSE) {
+                    c.setError(error.Unexpected);
+                } else {
+                    c.setResult(.process_wait, .{
+                        .code = @truncate(exit_code),
+                        .signal = null, // Windows doesn't have signals
+                    });
+                }
             }
 
             state.markCompletedFromBackend(c);

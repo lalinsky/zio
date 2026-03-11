@@ -24,13 +24,16 @@ const PipeRead = @import("../completion.zig").PipeRead;
 const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
 const MachPort = @import("../completion.zig").MachPort;
+const ProcessWait = @import("../completion.zig").ProcessWait;
 const fs = @import("../../os/fs.zig");
 
 pub const NetHandle = net.fd_t;
 
 const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 
-pub const capabilities: BackendCapabilities = .{};
+pub const capabilities: BackendCapabilities = .{
+    .process_wait = true,
+};
 
 pub const SharedState = struct {};
 
@@ -349,6 +352,23 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .mach_port => {
             const data = c.cast(MachPort);
             self.queueRegister(state, data.port, c);
+        },
+        .process_wait => {
+            const data = c.cast(ProcessWait);
+            const change = self.reserveChange(state) catch {
+                log.err("Failed to reserve kevent change slot for process_wait", .{});
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            change.* = .{
+                .ident = @intCast(data.handle),
+                .filter = std.c.EVFILT.PROC,
+                .flags = std.c.EV.ADD | std.c.EV.ONESHOT,
+                .fflags = std.c.NOTE.EXIT,
+                .data = 0,
+                .udata = @intFromPtr(c),
+            };
         },
 
         // File operations are handled by Loop via thread pool
@@ -673,6 +693,31 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
         },
         .mach_port => {
             comp.setResult(.mach_port, {});
+            return .completed;
+        },
+        .process_wait => {
+            // Process exited - call waitpid to get exit status and reap zombie
+            // Following libuv pattern: kevent just notifies us, waitpid gets the status
+            const data = comp.cast(ProcessWait);
+
+            var status: c_int = 0;
+            const rc = posix.system.waitpid(data.handle, &status, 0);
+            if (rc < 0) {
+                switch (posix.errno(rc)) {
+                    .CHILD => comp.setError(error.ProcessNotFound),
+                    else => comp.setError(error.Unexpected),
+                }
+            } else {
+                // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
+                const ustatus: u32 = @bitCast(status);
+                const exit_code: u8 = @intCast((ustatus >> 8) & 0xff);
+                const signal_num: u8 = @intCast(ustatus & 0x7f);
+                comp.setResult(.process_wait, .{
+                    .code = exit_code,
+                    .signal = if (signal_num != 0) signal_num else null,
+                });
+            }
+
             return .completed;
         },
         else => {

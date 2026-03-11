@@ -29,6 +29,7 @@ const NetPoll = @import("completion.zig").NetPoll;
 const PipePoll = @import("completion.zig").PipePoll;
 const Timer = @import("completion.zig").Timer;
 const Work = @import("completion.zig").Work;
+const ProcessWait = @import("completion.zig").ProcessWait;
 const common = @import("backends/common.zig");
 const os = @import("../os/root.zig");
 const time = @import("../time.zig");
@@ -104,6 +105,9 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
 
         // Work operation
         .work => handleWork(c),
+
+        // Process wait - blocking wait
+        .process_wait => common.handleProcessWait(c),
 
         // Async operations require the event loop
         .async,
