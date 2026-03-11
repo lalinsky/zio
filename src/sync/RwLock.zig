@@ -115,8 +115,8 @@ pub fn lockUncancelable(self: *RwLock) void {
 pub fn unlock(self: *RwLock) void {
     self.mutex.lockUncancelable();
     self.permits = max_permits;
-    self.mutex.unlock();
     self.cond.broadcast();
+    self.mutex.unlock();
 }
 
 /// Attempts to acquire a read lock without blocking.
@@ -173,8 +173,8 @@ pub fn lockSharedUncancelable(self: *RwLock) void {
 pub fn unlockShared(self: *RwLock) void {
     self.mutex.lockUncancelable();
     self.permits += 1;
-    self.mutex.unlock();
     self.cond.signal();
+    self.mutex.unlock();
 }
 
 test "RwLock basic write lock/unlock" {
