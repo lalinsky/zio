@@ -703,7 +703,10 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             var status: c_int = 0;
             const rc = posix.system.waitpid(data.handle, &status, 0);
             if (rc < 0) {
-                comp.setError(error.Unexpected);
+                switch (posix.errno(rc)) {
+                    .CHILD => comp.setError(error.ProcessNotFound),
+                    else => comp.setError(error.Unexpected),
+                }
             } else {
                 // Decode wait status (WEXITSTATUS and WTERMSIG equivalent)
                 const ustatus: u32 = @bitCast(status);
