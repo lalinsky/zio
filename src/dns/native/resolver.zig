@@ -436,23 +436,34 @@ pub const Resolver = struct {
         // Skip questions
         parser.skipQuestions() catch return error.InvalidResponse;
 
-        // Parse answers
+        // Parse answers into temporary result to avoid partial data on error
+        var tmp: LookupResult = .{};
         var remaining = parser.header.an_count;
         while (true) {
             const rr = parser.nextAnswer(&remaining) catch return error.InvalidResponse;
             if (rr == null) break;
             const record = rr.?;
             if (record.parseA()) |ipv4| {
-                if (result.addresses.len < LookupResult.max_addresses) {
-                    result.addresses.appendAssumeCapacity(net.IpAddress.initIp4(ipv4, 0));
+                if (tmp.addresses.len < LookupResult.max_addresses) {
+                    tmp.addresses.appendAssumeCapacity(net.IpAddress.initIp4(ipv4, 0));
                 }
             } else if (record.parseAAAA()) |ipv6| {
-                if (result.addresses.len < LookupResult.max_addresses) {
-                    result.addresses.appendAssumeCapacity(net.IpAddress.initIp6(ipv6, 0, 0, 0));
+                if (tmp.addresses.len < LookupResult.max_addresses) {
+                    tmp.addresses.appendAssumeCapacity(net.IpAddress.initIp6(ipv6, 0, 0, 0));
                 }
-            } else if (record.rtype == .CNAME and result.canonical_name == null) {
-                result.canonical_name = record.parseCNAME(response);
+            } else if (record.rtype == .CNAME and tmp.canonical_name == null) {
+                tmp.canonical_name = record.parseCNAME(response);
             }
+        }
+
+        // Merge successful results
+        for (tmp.addresses.constSlice()) |addr| {
+            if (result.addresses.len < LookupResult.max_addresses) {
+                result.addresses.appendAssumeCapacity(addr);
+            }
+        }
+        if (result.canonical_name == null) {
+            result.canonical_name = tmp.canonical_name;
         }
     }
 };
