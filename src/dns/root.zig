@@ -132,7 +132,8 @@ const native_wrapper = struct {
         try mutex.lock();
         defer mutex.unlock();
 
-        // Lazy init under lock
+        // Lazy init under lock. Mutex is held during lookup because
+        // Resolver has mutable state (server_offset, prng, config reload).
         if (resolver_init_error) return error.Unexpected;
         if (resolver == null) {
             resolver = native.Resolver.initFromSystem() catch |err| {

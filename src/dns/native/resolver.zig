@@ -345,12 +345,18 @@ pub const Resolver = struct {
             else => return error.Unexpected,
         };
 
-        // Validate response came from expected server (ignore port)
+        // Validate response came from expected server (IP and port)
         const from = recv_result.from.ip;
         if (from.any.family != server.any.family) return error.InvalidResponse;
         switch (from.any.family) {
-            os.net.AF.INET => if (from.in.addr != server.in.addr) return error.InvalidResponse,
-            os.net.AF.INET6 => if (!std.mem.eql(u8, &from.in6.addr, &server.in6.addr)) return error.InvalidResponse,
+            os.net.AF.INET => {
+                if (from.in.addr != server.in.addr) return error.InvalidResponse;
+                if (from.in.port != server.in.port) return error.InvalidResponse;
+            },
+            os.net.AF.INET6 => {
+                if (!std.mem.eql(u8, &from.in6.addr, &server.in6.addr)) return error.InvalidResponse;
+                if (from.in6.port != server.in6.port) return error.InvalidResponse;
+            },
             else => return error.InvalidResponse,
         }
 

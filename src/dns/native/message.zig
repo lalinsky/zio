@@ -160,7 +160,7 @@ pub const Name = struct {
         var name: Name = .{};
         var pos: usize = 0;
 
-        if (s.len == 0) {
+        if (s.len == 0 or (s.len == 1 and s[0] == '.')) {
             // Root domain
             name.data[0] = 0;
             name.len = 1;
