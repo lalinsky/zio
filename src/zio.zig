@@ -45,6 +45,7 @@ pub const stdout = fs.stdout;
 pub const stderr = fs.stderr;
 
 pub const net = @import("net.zig");
+pub const dns = @import("dns/root.zig");
 
 pub const Mutex = @import("sync/Mutex.zig");
 pub const Condition = @import("sync/Condition.zig");

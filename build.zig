@@ -13,9 +13,16 @@ pub fn build(b: *std.Build) void {
         "Override the default event loop backend (io_uring, epoll, kqueue, iocp, poll)",
     );
 
+    const dns_resolver = b.option(
+        []const u8,
+        "dns-resolver",
+        "Override the default DNS resolver (system, native)",
+    );
+
     // Create options for backend selection
     var options = b.addOptions();
     options.addOption(?[]const u8, "backend", backend);
+    options.addOption(?[]const u8, "dns_resolver", dns_resolver);
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
