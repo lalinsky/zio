@@ -130,8 +130,15 @@ pub const Config = struct {
         } else if (std.mem.eql(u8, keyword, "domain")) {
             // "domain" is like "search" but with a single domain
             self.search.len = 0;
-            if (tokens.next()) |domain| {
-                self.addSearchDomain(domain);
+            if (tokens.next()) |token| {
+                if (token[0] == '#') return;
+                const domain = if (std.mem.indexOfScalar(u8, token, '#')) |idx|
+                    token[0..idx]
+                else
+                    token;
+                if (domain.len > 0) {
+                    self.addSearchDomain(domain);
+                }
             }
         } else if (std.mem.eql(u8, keyword, "options")) {
             self.parseOptions(&tokens);
@@ -180,14 +187,14 @@ pub const Config = struct {
     fn parseOptions(self: *Config, tokens: *std.mem.TokenIterator(u8, .any)) void {
         while (tokens.next()) |opt| {
             if (std.mem.startsWith(u8, opt, "ndots:")) {
-                const ndots = std.fmt.parseInt(u8, opt[6..], 10) catch 1;
-                self.ndots = @intCast(@min(ndots, @as(u8, std.math.maxInt(u4))));
+                const ndots = std.fmt.parseInt(u16, opt[6..], 10) catch continue;
+                self.ndots = @intCast(@min(ndots, @as(u16, std.math.maxInt(u4))));
             } else if (std.mem.startsWith(u8, opt, "timeout:")) {
                 self.timeout = std.fmt.parseInt(u8, opt[8..], 10) catch 5;
                 if (self.timeout < 1) self.timeout = 1;
             } else if (std.mem.startsWith(u8, opt, "attempts:")) {
-                const attempts = std.fmt.parseInt(u8, opt[9..], 10) catch 2;
-                self.attempts = @intCast(@max(@as(u8, 1), @min(attempts, @as(u8, std.math.maxInt(u4)))));
+                const attempts = std.fmt.parseInt(u16, opt[9..], 10) catch continue;
+                self.attempts = @intCast(@max(@as(u16, 1), @min(attempts, @as(u16, std.math.maxInt(u4)))));
             } else if (std.mem.eql(u8, opt, "rotate")) {
                 self.rotate = true;
             } else if (std.mem.eql(u8, opt, "use-vc") or

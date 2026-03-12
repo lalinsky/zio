@@ -446,21 +446,37 @@ pub const Resolver = struct {
 
         // Parse answers into temporary result to avoid partial data on error
         var tmp: LookupResult = .{};
+        var current_name = expected_name;
         var remaining = parser.header.an_count;
         while (true) {
             const rr = parser.nextAnswer(&remaining) catch return error.InvalidResponse;
             if (rr == null) break;
             const record = rr.?;
-            if (record.parseA()) |ipv4| {
-                if (tmp.addresses.len < LookupResult.max_addresses) {
-                    tmp.addresses.appendAssumeCapacity(net.IpAddress.initIp4(ipv4, 0));
+            if (record.class != .IN) continue;
+
+            // Follow CNAME chain: update current_name when we see a CNAME for the active name
+            if (record.rtype == .CNAME and record.name.eql(current_name)) {
+                const cname = record.parseCNAME(response) orelse return error.InvalidResponse;
+                if (tmp.canonical_name == null) tmp.canonical_name = cname;
+                current_name = cname;
+                continue;
+            }
+
+            // Only accept records for the active name (original or CNAME target)
+            if (!record.name.eql(current_name)) continue;
+
+            if (expected_qtype == .A) {
+                if (record.parseA()) |ipv4| {
+                    if (tmp.addresses.len < LookupResult.max_addresses) {
+                        tmp.addresses.appendAssumeCapacity(net.IpAddress.initIp4(ipv4, 0));
+                    }
                 }
-            } else if (record.parseAAAA()) |ipv6| {
-                if (tmp.addresses.len < LookupResult.max_addresses) {
-                    tmp.addresses.appendAssumeCapacity(net.IpAddress.initIp6(ipv6, 0, 0, 0));
+            } else if (expected_qtype == .AAAA) {
+                if (record.parseAAAA()) |ipv6| {
+                    if (tmp.addresses.len < LookupResult.max_addresses) {
+                        tmp.addresses.appendAssumeCapacity(net.IpAddress.initIp6(ipv6, 0, 0, 0));
+                    }
                 }
-            } else if (record.rtype == .CNAME and tmp.canonical_name == null) {
-                tmp.canonical_name = record.parseCNAME(response);
             }
         }
 
