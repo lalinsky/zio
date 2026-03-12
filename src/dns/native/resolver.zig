@@ -52,6 +52,7 @@ pub const LookupResult = struct {
         len: usize = 0,
 
         pub fn appendAssumeCapacity(self: *Addresses, addr: net.IpAddress) void {
+            std.debug.assert(self.len < max_addresses);
             self.buffer[self.len] = addr;
             self.len += 1;
         }
@@ -344,6 +345,15 @@ pub const Resolver = struct {
             else => return error.Unexpected,
         };
 
+        // Validate response came from expected server (ignore port)
+        const from = recv_result.from.ip;
+        if (from.any.family != server.any.family) return error.InvalidResponse;
+        switch (from.any.family) {
+            os.net.AF.INET => if (from.in.addr != server.in.addr) return error.InvalidResponse,
+            os.net.AF.INET6 => if (!std.mem.eql(u8, &from.in6.addr, &server.in6.addr)) return error.InvalidResponse,
+            else => return error.InvalidResponse,
+        }
+
         // Validate response ID matches
         if (recv_result.len < 12) return error.InvalidResponse;
         const resp_id = std.mem.readInt(u16, recv_buf[0..2], .big);
@@ -422,17 +432,20 @@ pub const Resolver = struct {
 
         // Parse answers
         var remaining = parser.header.an_count;
-        while (parser.nextAnswer(&remaining) catch null) |rr| {
-            if (rr.parseA()) |ipv4| {
+        while (true) {
+            const rr = parser.nextAnswer(&remaining) catch return error.InvalidResponse;
+            if (rr == null) break;
+            const record = rr.?;
+            if (record.parseA()) |ipv4| {
                 if (result.addresses.len < LookupResult.max_addresses) {
                     result.addresses.appendAssumeCapacity(net.IpAddress.initIp4(ipv4, 0));
                 }
-            } else if (rr.parseAAAA()) |ipv6| {
+            } else if (record.parseAAAA()) |ipv6| {
                 if (result.addresses.len < LookupResult.max_addresses) {
                     result.addresses.appendAssumeCapacity(net.IpAddress.initIp6(ipv6, 0, 0, 0));
                 }
-            } else if (rr.rtype == .CNAME and result.canonical_name == null) {
-                result.canonical_name = rr.parseCNAME(response);
+            } else if (record.rtype == .CNAME and result.canonical_name == null) {
+                result.canonical_name = record.parseCNAME(response);
             }
         }
     }
