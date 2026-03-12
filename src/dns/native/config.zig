@@ -180,13 +180,14 @@ pub const Config = struct {
     fn parseOptions(self: *Config, tokens: *std.mem.TokenIterator(u8, .any)) void {
         while (tokens.next()) |opt| {
             if (std.mem.startsWith(u8, opt, "ndots:")) {
-                self.ndots = std.fmt.parseInt(u4, opt[6..], 10) catch 1;
+                const ndots = std.fmt.parseInt(u8, opt[6..], 10) catch 1;
+                self.ndots = @intCast(@min(ndots, @as(u8, std.math.maxInt(u4))));
             } else if (std.mem.startsWith(u8, opt, "timeout:")) {
                 self.timeout = std.fmt.parseInt(u8, opt[8..], 10) catch 5;
                 if (self.timeout < 1) self.timeout = 1;
             } else if (std.mem.startsWith(u8, opt, "attempts:")) {
-                self.attempts = std.fmt.parseInt(u4, opt[9..], 10) catch 2;
-                if (self.attempts < 1) self.attempts = 1;
+                const attempts = std.fmt.parseInt(u8, opt[9..], 10) catch 2;
+                self.attempts = @intCast(@max(@as(u8, 1), @min(attempts, @as(u8, std.math.maxInt(u4)))));
             } else if (std.mem.eql(u8, opt, "rotate")) {
                 self.rotate = true;
             } else if (std.mem.eql(u8, opt, "use-vc") or

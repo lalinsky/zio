@@ -266,11 +266,12 @@ pub const Resolver = struct {
                 const query_result = self.queryServer(server.addr, name, qtype, options, &recv_buf);
 
                 if (query_result) |response| {
-                    parseResponse(result, response) catch |err| {
+                    parseResponse(result, response, name, qtype) catch |err| {
                         // Propagate definitive errors, retry on parse failures
                         if (err == error.UnknownHostName) return err;
                         if (err == error.NameServerFailure) return err;
                         if (err == error.TemporaryNameServerFailure) return err;
+                        if (err == error.HostLacksNetworkAddresses) return err;
                         continue; // Try next server on InvalidResponse
                     };
 
@@ -422,7 +423,7 @@ pub const Resolver = struct {
     }
 
     /// Parse DNS response and extract addresses.
-    fn parseResponse(result: *LookupResult, response: []const u8) !void {
+    fn parseResponse(result: *LookupResult, response: []const u8, expected_name: Name, expected_qtype: Type) !void {
         var parser = ResponseParser.init(response) catch return error.InvalidResponse;
 
         // Check response code
@@ -433,8 +434,15 @@ pub const Resolver = struct {
             else => return error.NameServerFailure,
         }
 
-        // Skip questions
-        parser.skipQuestions() catch return error.InvalidResponse;
+        // Validate question section matches our query
+        if (parser.header.qd_count != 1) return error.InvalidResponse;
+        const q_name = Name.decode(response, parser.pos) catch return error.InvalidResponse;
+        const q_name_len = Name.wireLen(response, parser.pos) catch return error.InvalidResponse;
+        parser.pos += q_name_len;
+        if (parser.pos + 4 > response.len) return error.InvalidResponse;
+        const q_type: Type = @enumFromInt(std.mem.readInt(u16, response[parser.pos..][0..2], .big));
+        parser.pos += 4; // skip type and class
+        if (!q_name.eql(expected_name) or q_type != expected_qtype) return error.InvalidResponse;
 
         // Parse answers into temporary result to avoid partial data on error
         var tmp: LookupResult = .{};
@@ -454,6 +462,11 @@ pub const Resolver = struct {
             } else if (record.rtype == .CNAME and tmp.canonical_name == null) {
                 tmp.canonical_name = record.parseCNAME(response);
             }
+        }
+
+        // NOERROR with no addresses means host exists but lacks records of this type
+        if (tmp.addresses.len == 0) {
+            return error.HostLacksNetworkAddresses;
         }
 
         // Merge successful results
