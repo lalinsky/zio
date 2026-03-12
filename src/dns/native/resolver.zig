@@ -230,7 +230,8 @@ pub const Resolver = struct {
         return last_err orelse error.UnknownHostName;
     }
 
-    /// Query for both A and AAAA records sequentially.
+    /// Query for both A and AAAA records.
+    /// Note: Queries are always sequential (matching single-request behavior).
     fn queryBoth(self: *Resolver, result: *LookupResult, name: Name, options: LookupOptions) ?LookupError {
         const err_a = self.queryOne(result, name, .A, options);
         if (err_a) |e| if (e == error.Canceled) return e;

@@ -38,9 +38,6 @@ pub const Config = struct {
     /// Force TCP instead of UDP.
     use_tcp: bool = false,
 
-    /// Send A and AAAA queries sequentially instead of in parallel.
-    single_request: bool = false,
-
     pub const Server = struct {
         addr: net.IpAddress,
 
@@ -197,11 +194,9 @@ pub const Config = struct {
                 std.mem.eql(u8, opt, "tcp"))
             {
                 self.use_tcp = true;
-            } else if (std.mem.eql(u8, opt, "single-request") or
-                std.mem.eql(u8, opt, "single-request-reopen"))
-            {
-                self.single_request = true;
             }
+            // Note: single-request and single-request-reopen are intentionally
+            // not supported - queries are always sequential in this implementation.
         }
     }
 
