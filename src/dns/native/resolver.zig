@@ -37,8 +37,8 @@ pub const LookupError = error{
 pub const LookupOptions = struct {
     /// Address family filter.
     family: ?net.IpAddress.Family = null,
-    /// Query timeout per attempt.
-    timeout_ms: u32 = 5000,
+    /// Query timeout per attempt (overrides config timeout if set).
+    timeout_ms: ?u32 = null,
 };
 
 pub const LookupResult = struct {
@@ -303,17 +303,20 @@ pub const Resolver = struct {
         const query = message.buildQuery(&query_buf, id, name, qtype, !self.config.use_tcp) catch
             return error.Unexpected;
 
+        // Use explicit timeout if provided, otherwise use config timeout
+        const timeout_ms = options.timeout_ms orelse @as(u32, self.config.timeout) * 1000;
+
         if (self.config.use_tcp) {
-            return queryTcp(server, id, name, qtype, options, recv_buf);
+            return queryTcp(server, id, name, qtype, timeout_ms, recv_buf);
         }
 
         // Try UDP first
-        const udp_result = queryUdp(server, id, query, options, recv_buf);
+        const udp_result = queryUdp(server, id, query, timeout_ms, recv_buf);
         if (udp_result) |response| {
             // Check if truncated - fall back to TCP
             const header = Header.decode(response) catch return error.InvalidResponse;
             if (header.flags.tc) {
-                return queryTcp(server, id, name, qtype, options, recv_buf);
+                return queryTcp(server, id, name, qtype, timeout_ms, recv_buf);
             }
             return response;
         } else |err| {
@@ -326,13 +329,13 @@ pub const Resolver = struct {
         server: net.IpAddress,
         id: u16,
         query: []const u8,
-        options: LookupOptions,
+        timeout_ms: u32,
         recv_buf: *[message.max_packet_size]u8,
     ) LookupError![]const u8 {
         var socket = net.Socket.open(.dgram, os.net.Domain.fromPosix(server.any.family), .udp) catch return error.Unexpected;
         defer socket.close();
 
-        const timeout = time.Timeout.fromMilliseconds(options.timeout_ms);
+        const timeout = time.Timeout.fromMilliseconds(timeout_ms);
 
         // Send query
         _ = socket.sendTo(.{ .ip = server }, query, timeout) catch |err| {
@@ -375,7 +378,7 @@ pub const Resolver = struct {
         id: u16,
         name: Name,
         qtype: Type,
-        options: LookupOptions,
+        timeout_ms: u32,
         recv_buf: *[message.max_packet_size]u8,
     ) LookupError![]const u8 {
         // Rebuild query for TCP (with length prefix)
@@ -387,7 +390,7 @@ pub const Resolver = struct {
         std.mem.writeInt(u16, query_buf[0..2], @intCast(query_body.len), .big);
         const full_query = query_buf[0 .. 2 + query_body.len];
 
-        const timeout = time.Timeout.fromMilliseconds(options.timeout_ms);
+        const timeout = time.Timeout.fromMilliseconds(timeout_ms);
 
         var stream = server.connect(.{ .timeout = timeout }) catch |err| {
             return if (err == error.Canceled) error.Canceled else if (err == error.Timeout) error.Timeout else error.Unexpected;
