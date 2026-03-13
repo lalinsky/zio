@@ -280,7 +280,7 @@ pub const Executor = struct {
         // the task context for async operations called from main.
         // main_task.coro.context is where spawned tasks yield back to.
         self.main_task = .{
-            .state = std.atomic.Value(u8).init(@bitCast(AnyTask.State.init(.ready))),
+            .state = std.atomic.Value(AnyTask.State).init(AnyTask.State.init(.ready)),
             .awaitable = .{
                 .kind = .task,
                 .wait_node = .{},

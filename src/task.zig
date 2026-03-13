@@ -157,7 +157,7 @@ pub const CancelKind = enum { user, auto };
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
-    state: std.atomic.Value(u8),
+    state: std.atomic.Value(State),
 
     // Cancellation status - tracks user cancel, timeout, pending errors, and shield count
     canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -194,25 +194,19 @@ pub const AnyTask = struct {
     };
 
     pub inline fn loadState(self: *const AnyTask, ordering: std.builtin.AtomicOrder) State {
-        return @bitCast(self.state.load(ordering));
+        return self.state.load(ordering);
     }
 
     pub inline fn storeState(self: *AnyTask, s: State, ordering: std.builtin.AtomicOrder) void {
-        self.state.store(@bitCast(s), ordering);
+        self.state.store(s, ordering);
     }
 
     pub inline fn cmpxchgWeakState(self: *AnyTask, expected: State, desired: State, success_order: std.builtin.AtomicOrder, fail_order: std.builtin.AtomicOrder) ?State {
-        if (self.state.cmpxchgWeak(@bitCast(expected), @bitCast(desired), success_order, fail_order)) |actual| {
-            return @bitCast(actual);
-        }
-        return null;
+        return self.state.cmpxchgWeak(expected, desired, success_order, fail_order);
     }
 
     pub inline fn cmpxchgStrongState(self: *AnyTask, expected: State, desired: State, success_order: std.builtin.AtomicOrder, fail_order: std.builtin.AtomicOrder) ?State {
-        if (self.state.cmpxchgStrong(@bitCast(expected), @bitCast(desired), success_order, fail_order)) |actual| {
-            return @bitCast(actual);
-        }
-        return null;
+        return self.state.cmpxchgStrong(expected, desired, success_order, fail_order);
     }
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
@@ -508,7 +502,7 @@ pub const AnyTask = struct {
 
         const self = alloc_result.task;
         self.* = .{
-            .state = .init(@bitCast(State.init(.new))),
+            .state = .init(State.init(.new)),
             .awaitable = .{
                 .kind = .task,
                 .wait_node = .{},
