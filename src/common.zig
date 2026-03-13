@@ -211,7 +211,16 @@ pub const Waiter = struct {
             if (current >= expected) {
                 return;
             }
+
             task.state.store(.preparing_to_wait, .release);
+
+            // Recheck after arming to close the race window where a signal
+            // between the check and the store sees .ready and is a no-op.
+            current = d.notify.state.load(.acquire);
+            if (current >= expected) {
+                task.state.store(.ready, .release);
+                return;
+            }
         }
     }
 
