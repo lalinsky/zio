@@ -187,10 +187,6 @@ pub const AnyTask = struct {
             waiting = 2,
             finished = 3,
         };
-
-        pub fn init(tag: Tag) State {
-            return .{ .tag = tag };
-        }
     };
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
@@ -251,7 +247,7 @@ pub const AnyTask = struct {
         // On cancel: restore clean .ready state (clearing any awaken bit) before returning.
         if (cancel_mode == .allow_cancel) {
             self.checkCancel() catch |err| {
-                self.state.store(.init(.ready), .release);
+                self.state.store(.{ .tag = .ready }, .release);
                 return err;
             };
         }
@@ -486,7 +482,7 @@ pub const AnyTask = struct {
 
         const self = alloc_result.task;
         self.* = .{
-            .state = .init(State.init(.new)),
+            .state = .init(.{ .tag = .new }),
             .awaitable = .{
                 .kind = .task,
                 .wait_node = .{},

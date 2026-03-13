@@ -280,7 +280,7 @@ pub const Executor = struct {
         // the task context for async operations called from main.
         // main_task.coro.context is where spawned tasks yield back to.
         self.main_task = .{
-            .state = std.atomic.Value(AnyTask.State).init(AnyTask.State.init(.ready)),
+            .state = std.atomic.Value(AnyTask.State).init(.{ .tag = .ready }),
             .awaitable = .{
                 .kind = .task,
                 .wait_node = .{},
@@ -559,7 +559,7 @@ pub const Executor = struct {
             },
             .finish => |task| {
                 self.pending_cleanup = .none;
-                task.state.store(.init(.finished), .release);
+                task.state.store(.{ .tag = .finished }, .release);
                 if (task.coro.context.stack_info.allocation_len > 0) {
                     self.runtime.stack_pool.release(task.coro.context.stack_info, self.loop.now());
                     task.coro.context.stack_info.allocation_len = 0;
