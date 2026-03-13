@@ -250,13 +250,10 @@ pub fn pipe(flags: PipeFlags) PipeError![2]fd_t {
 }
 
 pub fn close(fd: fd_t) void {
-    while (true) {
-        switch (errno(system.close(fd))) {
-            .SUCCESS => return,
-            .INTR => continue,
-            .BADF => unreachable, // Invalid fd - would be a bug
-            else => return, // Ignore other errors (e.g., EIO)
-        }
+    switch (errno(system.close(fd))) {
+        .SUCCESS, .INTR => return,
+        .BADF => unreachable, // Invalid fd - would be a bug
+        else => return, // Ignore other errors (e.g., EIO)
     }
 }
 
