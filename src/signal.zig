@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const posix = @import("os/posix.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Group = @import("group.zig").Group;
 const Cancelable = @import("common.zig").Cancelable;
@@ -20,15 +21,15 @@ pub const SignalKind = switch (builtin.os.tag) {
         terminate = w.CTRL_CLOSE_EVENT,
     },
     else => enum(u8) {
-        interrupt = std.posix.SIG.INT,
-        terminate = std.posix.SIG.TERM,
-        hangup = std.posix.SIG.HUP,
-        alarm = std.posix.SIG.ALRM,
-        child = std.posix.SIG.CHLD,
-        pipe = std.posix.SIG.PIPE,
-        quit = std.posix.SIG.QUIT,
-        user1 = std.posix.SIG.USR1,
-        user2 = std.posix.SIG.USR2,
+        interrupt = posix.SIG.INT,
+        terminate = posix.SIG.TERM,
+        hangup = posix.SIG.HUP,
+        alarm = posix.SIG.ALRM,
+        child = posix.SIG.CHLD,
+        pipe = posix.SIG.PIPE,
+        quit = posix.SIG.QUIT,
+        user1 = posix.SIG.USR1,
+        user2 = posix.SIG.USR2,
         _,
     },
 };
@@ -49,7 +50,7 @@ const HandlerRegistryUnix = struct {
     // Each signal type has its own OS-level handler that needs tracking
     installed_handlers: [256]std.atomic.Value(u8) = [_]std.atomic.Value(u8){.init(0)} ** 256,
     // Store previous signal handlers to restore when refcount reaches 0
-    prev_handlers: [256]std.posix.Sigaction = undefined,
+    prev_handlers: [256]posix.Sigaction = undefined,
 
     fn install(self: *HandlerRegistryUnix, kind: SignalKind) !*HandlerEntry {
         const signum: u8 = @intFromEnum(kind);
@@ -60,20 +61,20 @@ const HandlerRegistryUnix = struct {
 
         if (prev_count == 0) {
             // First handler for this signal type - install OS signal handler
-            var sa = std.posix.Sigaction{
+            var sa = posix.Sigaction{
                 .handler = .{ .handler = signalHandlerUnix },
-                .mask = std.posix.sigemptyset(),
-                .flags = std.posix.SA.RESTART,
+                .mask = posix.sigemptyset(),
+                .flags = posix.SA.RESTART,
             };
 
             // Save the previous handler so we can restore it later
-            std.posix.sigaction(@intFromEnum(kind), &sa, &self.prev_handlers[signum]);
+            posix.sigaction(@intFromEnum(kind), &sa, &self.prev_handlers[signum]);
         }
 
         errdefer {
             // Restore previous handler if this was the last handler
             if (prev_count == 0) {
-                std.posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
+                posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
             }
         }
 
@@ -105,7 +106,7 @@ const HandlerRegistryUnix = struct {
         // Restore previous handler if this was the last handler for this signal type
         const new_count = self.installed_handlers[signum].fetchSub(1, .acq_rel) - 1;
         if (new_count == 0) {
-            std.posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
+            posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
         }
 
         // Mark as available
@@ -408,7 +409,7 @@ test "Signal: basic signal handling" {
 
         fn sendSignal(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try std.posix.raise(@intFromEnum(SignalKind.interrupt));
+            try posix.raise(@intFromEnum(SignalKind.interrupt));
         }
     };
 
@@ -451,7 +452,7 @@ test "Signal: multiple handlers for same signal" {
 
         fn sendSignal(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try std.posix.raise(@intFromEnum(SignalKind.interrupt));
+            try posix.raise(@intFromEnum(SignalKind.interrupt));
         }
     };
 
@@ -523,7 +524,7 @@ test "Signal: timedWait receives signal before timeout" {
 
         fn sendSignal(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try std.posix.raise(@intFromEnum(SignalKind.interrupt));
+            try posix.raise(@intFromEnum(SignalKind.interrupt));
         }
     };
 
@@ -571,7 +572,7 @@ test "Signal: select on multiple signals" {
 
         fn sendSignal(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try std.posix.raise(@intFromEnum(SignalKind.user2));
+            try posix.raise(@intFromEnum(SignalKind.user2));
         }
     };
 
@@ -598,7 +599,7 @@ test "Signal: select with signal already received (fast path)" {
             defer sig.deinit();
 
             // Send signal first
-            try std.posix.raise(@intFromEnum(SignalKind.user1));
+            try posix.raise(@intFromEnum(SignalKind.user1));
 
             // Small delay to ensure signal is processed
             try r.sleep(.fromMilliseconds(10));
@@ -659,7 +660,7 @@ test "Signal: select with signal and task" {
 
         fn sendSignal(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try std.posix.raise(@intFromEnum(SignalKind.user1));
+            try posix.raise(@intFromEnum(SignalKind.user1));
         }
     };
 

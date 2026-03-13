@@ -38,7 +38,7 @@ pub const capabilities: BackendCapabilities = .{
 pub const SharedState = struct {};
 
 pub const ProcessWaitData = struct {
-    pidfd: std.posix.fd_t = -1,
+    pidfd: posix.fd_t = -1,
 };
 
 pub const NetOpenError = error{

@@ -24,7 +24,7 @@ pub fn cwd() fd_t {
 pub fn stdin() fd_t {
     return switch (builtin.os.tag) {
         .windows => std.os.windows.peb().ProcessParameters.hStdInput,
-        else => std.posix.STDIN_FILENO,
+        else => 0,
     };
 }
 
@@ -32,7 +32,7 @@ pub fn stdin() fd_t {
 pub fn stdout() fd_t {
     return switch (builtin.os.tag) {
         .windows => std.os.windows.peb().ProcessParameters.hStdOutput,
-        else => std.posix.STDOUT_FILENO,
+        else => 1,
     };
 }
 
@@ -40,7 +40,7 @@ pub fn stdout() fd_t {
 pub fn stderr() fd_t {
     return switch (builtin.os.tag) {
         .windows => std.os.windows.peb().ProcessParameters.hStdError,
-        else => std.posix.STDERR_FILENO,
+        else => 2,
     };
 }
 
@@ -61,8 +61,8 @@ pub fn pipe() PipeError![2]fd_t {
 pub const iovec = @import("base.zig").iovec;
 pub const iovec_const = @import("base.zig").iovec_const;
 
-pub const mode_t = std.posix.mode_t;
-pub const ino_t = std.posix.ino_t;
+pub const mode_t = posix.sys.mode_t;
+pub const ino_t = posix.sys.ino_t;
 
 pub const FileKind = enum {
     block_device,
@@ -436,14 +436,14 @@ pub const DirEntryIterator = struct {
     fn extractKind(_: *DirEntryIterator, entry: *align(1) const RawEntry) FileKind {
         return switch (builtin.os.tag) {
             .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => switch (entry.type) {
-                std.posix.DT.BLK => .block_device,
-                std.posix.DT.CHR => .character_device,
-                std.posix.DT.DIR => .directory,
-                std.posix.DT.FIFO => .named_pipe,
-                std.posix.DT.LNK => .sym_link,
-                std.posix.DT.REG => .file,
-                std.posix.DT.SOCK => .unix_domain_socket,
-                std.posix.DT.WHT => .whiteout,
+                posix.system.DT.BLK => .block_device,
+                posix.system.DT.CHR => .character_device,
+                posix.system.DT.DIR => .directory,
+                posix.system.DT.FIFO => .named_pipe,
+                posix.system.DT.LNK => .sym_link,
+                posix.system.DT.REG => .file,
+                posix.system.DT.SOCK => .unix_domain_socket,
+                posix.system.DT.WHT => .whiteout,
                 else => .unknown,
             },
             .windows => blk: {
@@ -2307,13 +2307,13 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
     }
 
     // Handle AT_FDCWD specially - it's not a real fd
-    const actual_fd: std.posix.fd_t = if (fd == posix.AT.FDCWD) blk: {
+    const actual_fd: fd_t = if (fd == posix.AT.FDCWD) blk: {
         // Open "." to get a real fd for cwd
         const rc = posix.system.openat(fd, ".", .{ .CLOEXEC = true }, @as(mode_t, 0));
         if (posix.errno(rc) != .SUCCESS) return error.FileNotFound;
         break :blk @intCast(rc);
     } else fd;
-    defer if (fd == posix.AT.FDCWD) std.posix.close(actual_fd);
+    defer if (fd == posix.AT.FDCWD) posix.close(actual_fd);
 
     if (builtin.os.tag == .linux) {
         // Use /proc/self/fd/{fd} with readlink
@@ -2397,7 +2397,7 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
     var open_flags: posix.system.O = .{ .CLOEXEC = true };
     if (@hasField(posix.system.O, "PATH")) open_flags.PATH = true;
 
-    const file_fd: std.posix.fd_t = while (true) {
+    const file_fd: fd_t = while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => break @intCast(rc),
@@ -2405,7 +2405,7 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
             else => |err| return errnoToDirRealPathFileError(err),
         }
     };
-    defer std.posix.close(file_fd);
+    defer posix.close(file_fd);
 
     // Now get the real path of the opened fd
     return dirRealPath(file_fd, buffer);

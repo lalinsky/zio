@@ -35,7 +35,7 @@ pub const LookupError = error{
     RuntimeShutdown,
     Closed,
     NoThreadPool,
-} || std.posix.UnexpectedError;
+};
 
 const backend = @import("../ev/backend.zig");
 

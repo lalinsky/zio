@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const posix = @import("../os/posix.zig");
 
 const Loop = @import("loop.zig").Loop;
 const Backend = @import("backend.zig").Backend;
@@ -1881,7 +1882,7 @@ pub const ProcessWait = struct {
 
     pub const ProcessHandle = switch (builtin.os.tag) {
         .windows => std.os.windows.HANDLE,
-        else => std.posix.pid_t,
+        else => posix.sys.pid_t,
     };
 
     pub const ExitStatus = struct {

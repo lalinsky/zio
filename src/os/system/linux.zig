@@ -20,6 +20,8 @@ pub const uid_t = linux.uid_t;
 pub const gid_t = linux.gid_t;
 pub const timespec = linux.timespec;
 pub const off_t = linux.off_t;
+pub const ino_t = linux.ino_t;
+pub const pid_t = linux.pid_t;
 
 /// Alternate signal stack flags
 /// Values from asm-generic/signal-defs.h

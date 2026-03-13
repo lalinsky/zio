@@ -14,14 +14,14 @@ pub const page_size = if (builtin.os.tag == .freestanding) 1 else std.heap.page_
 
 // Signal type changed from c_int to enum in Zig 0.16
 const is_pre_016 = builtin.zig_version.major == 0 and builtin.zig_version.minor < 16;
-const SigInt = if (is_pre_016) c_int else std.posix.SIG;
+const SigInt = if (is_pre_016) c_int else posix.SIG;
 
 // Stack growth signal handler state (POSIX only)
 threadlocal var altstack_installed: bool = false;
 threadlocal var altstack_mem: ?[]u8 = null;
 var signal_handler_refcount: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
-var old_sigsegv_action: std.posix.Sigaction = undefined;
-var old_sigbus_action: std.posix.Sigaction = undefined;
+var old_sigsegv_action: posix.Sigaction = undefined;
+var old_sigbus_action: posix.Sigaction = undefined;
 
 pub const StackInfo = extern struct {
     allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
@@ -322,17 +322,17 @@ pub fn setupStackGrowth() !void {
     // Increment refcount; if this is the first caller, install the handler
     const prev_refcount = signal_handler_refcount.fetchAdd(1, .acquire);
     if (prev_refcount == 0) {
-        var sa = std.posix.Sigaction{
+        var sa = posix.Sigaction{
             .handler = .{ .sigaction = stackFaultHandler },
-            .mask = std.posix.sigemptyset(),
-            .flags = std.posix.SA.SIGINFO | std.posix.SA.ONSTACK,
+            .mask = posix.sigemptyset(),
+            .flags = posix.SA.SIGINFO | posix.SA.ONSTACK,
         };
 
-        std.posix.sigaction(std.posix.SIG.SEGV, &sa, &old_sigsegv_action);
+        posix.sigaction(posix.SIG.SEGV, &sa, &old_sigsegv_action);
 
         // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
         if (builtin.os.tag.isDarwin()) {
-            std.posix.sigaction(std.posix.SIG.BUS, &sa, &old_sigbus_action);
+            posix.sigaction(posix.SIG.BUS, &sa, &old_sigbus_action);
         }
     }
 }
@@ -371,15 +371,15 @@ pub fn cleanupStackGrowth() void {
     const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
     if (prev_refcount == 1) {
         // We were the last thread - restore the old signal handlers
-        std.posix.sigaction(std.posix.SIG.SEGV, &old_sigsegv_action, null);
+        posix.sigaction(posix.SIG.SEGV, &old_sigsegv_action, null);
         if (builtin.os.tag.isDarwin()) {
-            std.posix.sigaction(std.posix.SIG.BUS, &old_sigbus_action, null);
+            posix.sigaction(posix.SIG.BUS, &old_sigbus_action, null);
         }
     }
 }
 
 /// Extract fault address from siginfo_t in a platform-agnostic way
-inline fn getFaultAddress(info: *const std.posix.siginfo_t) usize {
+inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
     return @intFromPtr(switch (builtin.os.tag) {
         .linux => info.fields.sigfault.addr,
         .macos, .ios, .tvos, .watchos, .visionos => info.addr,
@@ -392,12 +392,12 @@ inline fn getFaultAddress(info: *const std.posix.siginfo_t) usize {
 
 /// Invoke the previous signal handler or use default behavior.
 /// This allows proper signal handler chaining instead of unconditionally aborting.
-fn invokePreviousHandler(sig: SigInt, info: *const std.posix.siginfo_t, ctx: ?*anyopaque) noreturn {
+fn invokePreviousHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque) noreturn {
     // Get the appropriate old sigaction based on signal number
-    const old_sa = if (sig == std.posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
+    const old_sa = if (sig == posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
 
     // Check if the old handler had SA_SIGINFO flag set
-    if ((old_sa.flags & std.posix.SA.SIGINFO) != 0) {
+    if ((old_sa.flags & posix.SA.SIGINFO) != 0) {
         // Previous handler was a sigaction-style handler
         if (old_sa.handler.sigaction) |sa| {
             sa(sig, info, ctx);
@@ -405,36 +405,32 @@ fn invokePreviousHandler(sig: SigInt, info: *const std.posix.siginfo_t, ctx: ?*a
     } else {
         // Previous handler was a simple handler (or SIG_DFL/SIG_IGN)
         if (old_sa.handler.handler) |h| {
-            if (h == std.posix.SIG.DFL or h == std.posix.SIG.IGN) {
+            // SIG_DFL = 0, SIG_IGN = 1 (POSIX-universal sentinel values)
+            if (@intFromPtr(h) <= 1) {
                 // Restore the previous handler and re-raise the signal
                 // We must restore the handler first, otherwise the signal comes back to us
-                if (is_pre_016) {
-                    std.posix.sigaction(@intCast(sig), old_sa, null);
-                    _ = std.posix.raise(@intCast(sig)) catch {};
-                } else {
-                    std.posix.sigaction(sig, old_sa, null);
-                    _ = std.posix.raise(sig) catch {};
-                }
+                posix.sigaction(sig, old_sa, null);
+                _ = posix.raise(sig) catch {};
             } else {
                 // Call the previous simple handler
-                h(sig);
+                if (comptime is_pre_016) {
+                    h(sig);
+                } else {
+                    h(@intFromEnum(sig));
+                }
             }
         }
     }
 
     // If we reach here, either raise failed or the handler returned
     // In either case, abort
-    if (is_pre_016) {
-        std.posix.abort();
-    } else {
-        std.process.abort();
-    }
+    std.process.abort();
 }
 
 /// Signal handler for automatic stack growth (SIGSEGV on Linux/BSD, SIGBUS on macOS).
 /// This handler checks if the fault is within a coroutine's uncommitted stack region
 /// and extends the stack if so. Real faults are propagated to the previous handler.
-fn stackFaultHandler(sig: SigInt, info: *const std.posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
+fn stackFaultHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
     const fault_addr = getFaultAddress(info);
 
     // Get current_context from coroutines module
@@ -503,12 +499,8 @@ fn abortOnStackOverflow(fault_addr: usize, stack_info: *const StackInfo) noretur
         },
     ) catch "Coroutine stack overflow (error formatting message)\n";
 
-    _ = fs.write(std.posix.STDERR_FILENO, msg) catch {};
-    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-        std.posix.abort();
-    } else {
-        std.process.abort();
-    }
+    _ = fs.write(fs.stderr(), msg) catch {};
+    std.process.abort();
 }
 
 test "Stack: alloc/free" {

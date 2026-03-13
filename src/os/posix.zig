@@ -23,7 +23,8 @@ pub const SS = sys.SS;
 pub const MINSIGSTKSZ = sys.MINSIGSTKSZ;
 pub const SIGSTKSZ = sys.SIGSTKSZ;
 pub const stack_t = sys.stack_t;
-pub const PATH_MAX = std.posix.PATH_MAX;
+pub const fd_t = sys.fd_t;
+pub const PATH_MAX = system.PATH_MAX;
 pub const SO = system.SO;
 pub const SOL = system.SOL;
 pub const IPPROTO = struct {
@@ -115,7 +116,7 @@ pub fn mmap(
     len: usize,
     prot: u32,
     flags: u32,
-    fd: std.posix.fd_t,
+    fd: fd_t,
     offset: u64,
 ) MmapError![]align(std.heap.page_size_min) u8 {
     while (true) {
@@ -160,7 +161,7 @@ pub fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) SigaltstackError!void
     }
 }
 
-pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
+pub fn setNonblocking(fd: fd_t) error{Unexpected}!void {
     const fl_flags = system.fcntl(fd, system.F.GETFL, @as(c_int, 0));
     switch (errno(fl_flags)) {
         .SUCCESS => {},
@@ -178,7 +179,7 @@ pub fn setNonblocking(fd: std.posix.fd_t) error{Unexpected}!void {
     }
 }
 
-pub fn setCloexec(fd: std.posix.fd_t) error{Unexpected}!void {
+pub fn setCloexec(fd: fd_t) error{Unexpected}!void {
     switch (errno(system.fcntl(fd, system.F.SETFD, @as(c_int, system.FD_CLOEXEC)))) {
         .SUCCESS => {},
         .BADF => unreachable,
@@ -198,11 +199,11 @@ pub const PipeError = error{
     Unexpected,
 };
 
-pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
+pub fn pipe(flags: PipeFlags) PipeError![2]fd_t {
     switch (system) {
         std.c => {
             // BSD/non-Linux: use pipe() + fcntl()
-            var fds: [2]std.posix.fd_t = undefined;
+            var fds: [2]fd_t = undefined;
 
             switch (errno(system.pipe(&fds))) {
                 .SUCCESS => {},
@@ -212,8 +213,8 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
                 else => |err| return unexpectedError(err),
             }
             errdefer {
-                std.posix.close(fds[0]);
-                std.posix.close(fds[1]);
+                close(fds[0]);
+                close(fds[1]);
             }
 
             // Set flags using fcntl
@@ -229,7 +230,7 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
             return fds;
         },
         std.os.linux => {
-            var fds: [2]std.posix.fd_t = undefined;
+            var fds: [2]fd_t = undefined;
             const pipe_flags: std.os.linux.O = .{
                 .NONBLOCK = flags.nonblocking,
                 .CLOEXEC = flags.cloexec,
@@ -246,6 +247,54 @@ pub fn pipe(flags: PipeFlags) PipeError![2]std.posix.fd_t {
         },
         else => @compileError("unsupported OS"),
     }
+}
+
+pub fn close(fd: fd_t) void {
+    while (true) {
+        switch (errno(system.close(fd))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .BADF => unreachable, // Invalid fd - would be a bug
+            else => return, // Ignore other errors (e.g., EIO)
+        }
+    }
+}
+
+// Signal handling types and functions (non-Windows only)
+// These are lazily evaluated and only accessed in non-Windows code paths.
+pub const Sigaction = system.Sigaction;
+pub const SIG = system.SIG;
+pub const SA = system.SA;
+pub const siginfo_t = system.siginfo_t;
+pub const sigset_t = system.sigset_t;
+
+pub fn sigemptyset() sigset_t {
+    return std.mem.zeroes(sigset_t);
+}
+
+/// Install a signal handler. sig must be convertible to an integer (e.g. SIG enum or integer).
+pub fn sigaction(sig: anytype, act: ?*const Sigaction, oact: ?*Sigaction) void {
+    const sig_int: c_int = switch (@typeInfo(@TypeOf(sig))) {
+        .int, .comptime_int => @intCast(sig),
+        .@"enum" => @intFromEnum(sig),
+        else => @compileError("sig must be an integer or enum"),
+    };
+    if (builtin.os.tag == .linux) {
+        _ = system.sigaction(@as(u8, @intCast(sig_int)), act, oact);
+    } else {
+        _ = system.sigaction(sig_int, act, oact);
+    }
+}
+
+/// Send a signal to the calling process. sig must be convertible to c_int.
+pub fn raise(sig: anytype) !void {
+    const sig_int: c_int = switch (@typeInfo(@TypeOf(sig))) {
+        .int, .comptime_int => @intCast(sig),
+        .@"enum" => @intFromEnum(sig),
+        else => @compileError("sig must be an integer or enum"),
+    };
+    const rc = std.c.raise(sig_int);
+    if (rc != 0) return error.Unexpected;
 }
 
 pub const EFD = @import("eventfd.zig").EFD;
