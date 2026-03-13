@@ -372,7 +372,7 @@ pub const Executor = struct {
             }
 
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
-            const main_ready = check_ready and self.main_task.loadState(.acquire).tag == .ready;
+            const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
             const has_work = self.ready_queue.head != null or main_ready;
             try self.loop.run(if (has_work) .no_wait else .once);
 
@@ -382,7 +382,7 @@ pub const Executor = struct {
             self.last_tick_time = self.loop.now();
 
             // Check again after I/O
-            if (check_ready and self.main_task.loadState(.acquire).tag == .ready) {
+            if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
                 return;
             }
         }
@@ -454,7 +454,7 @@ pub const Executor = struct {
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
     pub fn scheduleTask(self: *Executor, task: *AnyTask) void {
-        var old = task.loadState(.acquire);
+        var old = task.state.load(.acquire);
         while (true) {
             switch (old.tag) {
                 // Task already finished (race between completion and cancel) - nothing to do
@@ -465,7 +465,7 @@ pub const Executor = struct {
                 .ready => {
                     if (old.awaken) return; // Token already set, nothing to do
                     const desired = AnyTask.State{ .tag = .ready, .awaken = true };
-                    if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+                    if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                         old = actual;
                         continue;
                     }
@@ -475,7 +475,7 @@ pub const Executor = struct {
                 .new, .waiting => {},
             }
             const desired = AnyTask.State{ .tag = .ready, .awaken = false };
-            if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+            if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                 old = actual;
                 continue;
             }
@@ -535,13 +535,13 @@ pub const Executor = struct {
                 // Atomically check the awaken bit and either:
                 // - Transition (ready, awaken=false) → (waiting, awaken=false): normal park
                 // - Consume (ready, awaken=true) → (ready, awaken=false): pre-woken, reschedule
-                var old = task.loadState(.acquire);
+                var old = task.state.load(.acquire);
                 while (true) {
                     std.debug.assert(old.tag == .ready);
                     if (old.awaken) {
                         // Pre-woken: consume the token, keep .ready, and reschedule
                         const desired = AnyTask.State{ .tag = .ready, .awaken = false };
-                        if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+                        if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                             old = actual;
                             continue;
                         }
@@ -550,7 +550,7 @@ pub const Executor = struct {
                     }
                     // Normal: transition to .waiting
                     const desired = AnyTask.State{ .tag = .waiting, .awaken = false };
-                    if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+                    if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                         old = actual;
                         continue;
                     }
@@ -559,7 +559,7 @@ pub const Executor = struct {
             },
             .finish => |task| {
                 self.pending_cleanup = .none;
-                task.storeState(.init(.finished), .release);
+                task.state.store(.init(.finished), .release);
                 if (task.coro.context.stack_info.allocation_len > 0) {
                     self.runtime.stack_pool.release(task.coro.context.stack_info, self.loop.now());
                     task.coro.context.stack_info.allocation_len = 0;

@@ -193,22 +193,6 @@ pub const AnyTask = struct {
         }
     };
 
-    pub inline fn loadState(self: *const AnyTask, ordering: std.builtin.AtomicOrder) State {
-        return self.state.load(ordering);
-    }
-
-    pub inline fn storeState(self: *AnyTask, s: State, ordering: std.builtin.AtomicOrder) void {
-        self.state.store(s, ordering);
-    }
-
-    pub inline fn cmpxchgWeakState(self: *AnyTask, expected: State, desired: State, success_order: std.builtin.AtomicOrder, fail_order: std.builtin.AtomicOrder) ?State {
-        return self.state.cmpxchgWeak(expected, desired, success_order, fail_order);
-    }
-
-    pub inline fn cmpxchgStrongState(self: *AnyTask, expected: State, desired: State, success_order: std.builtin.AtomicOrder, fail_order: std.builtin.AtomicOrder) ?State {
-        return self.state.cmpxchgStrong(expected, desired, success_order, fail_order);
-    }
-
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         std.debug.assert(awaitable.kind == .task);
         return @fieldParentPtr("awaitable", awaitable);
@@ -267,7 +251,7 @@ pub const AnyTask = struct {
         // On cancel: restore clean .ready state (clearing any awaken bit) before returning.
         if (cancel_mode == .allow_cancel) {
             self.checkCancel() catch |err| {
-                self.storeState(.init(.ready), .release);
+                self.state.store(.init(.ready), .release);
                 return err;
             };
         }
@@ -292,7 +276,7 @@ pub const AnyTask = struct {
             executor.processCleanup();
         }
 
-        std.debug.assert(self.loadState(.acquire).tag == .ready);
+        std.debug.assert(self.state.load(.acquire).tag == .ready);
 
         // Check after resuming in case we were canceled while suspended
         if (cancel_mode == .allow_cancel) {
