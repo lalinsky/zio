@@ -4,6 +4,7 @@
 //! Parser for /etc/hosts file.
 
 const std = @import("std");
+const fs = @import("../../fs.zig");
 const net = @import("../../net.zig");
 
 /// Maximum number of addresses from hosts file per lookup.
@@ -26,17 +27,32 @@ pub const HostsResult = struct {
     }
 };
 
+const hosts_path = "/etc/hosts";
+
 /// Look up a hostname in /etc/hosts.
 /// Returns null if the hostname is not found.
-pub fn lookup(hostname: []const u8, family: ?net.IpAddress.Family) ?HostsResult {
-    const content = std.fs.cwd().readFileAlloc(
-        std.heap.page_allocator,
-        "/etc/hosts",
-        256 * 1024,
-    ) catch return null;
-    defer std.heap.page_allocator.free(content);
+pub fn lookup(hostname: []const u8, family: ?net.IpAddress.Family) error{Canceled}!?HostsResult {
+    const file = fs.openFile(hosts_path) catch |err| {
+        if (err == error.Canceled) return error.Canceled;
+        return null;
+    };
+    defer file.close();
 
-    return lookupInContent(content, hostname, family);
+    var read_buf: [512]u8 = undefined;
+    var reader = file.reader(&read_buf);
+
+    var buf: [65536]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    const len = reader.interface.streamRemaining(&writer) catch |err| {
+        if (err == error.ReadFailed) {
+            if (reader.err) |e| {
+                if (e == error.Canceled) return error.Canceled;
+            }
+        }
+        return null;
+    };
+
+    return lookupInContent(buf[0..len], hostname, family);
 }
 
 /// Look up a hostname in hosts file content (for testing).
