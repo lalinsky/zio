@@ -73,8 +73,9 @@ pub const LookupResult = struct {
 };
 
 const resolv_conf_path = "/etc/resolv.conf";
+const hosts_path = "/etc/hosts";
 
-/// How often to check if resolv.conf has changed (in seconds).
+/// How often to check if resolv.conf or /etc/hosts has changed (in seconds).
 const config_reload_interval_s = 5;
 
 /// Native DNS resolver.
@@ -88,6 +89,14 @@ pub const Resolver = struct {
     last_checked: time.Timestamp = .zero,
     /// Modification time of resolv.conf when we last loaded it.
     mtime: i64 = 0,
+    /// Cached /etc/hosts file content.
+    hosts_content: [65536]u8 = undefined,
+    /// Length of valid data in hosts_content.
+    hosts_content_len: usize = 0,
+    /// Last time we checked /etc/hosts for changes.
+    hosts_last_checked: time.Timestamp = .zero,
+    /// Modification time of /etc/hosts when we last loaded it.
+    hosts_mtime: i64 = 0,
 
     pub fn init(cfg: Config) Resolver {
         var seed: u64 = undefined;
@@ -105,6 +114,9 @@ pub const Resolver = struct {
         var resolver = try loadConfig();
         resolver.last_checked = time.Timestamp.now(.monotonic);
         resolver.mtime = try getResolvConfMtime();
+        resolver.hosts_last_checked = time.Timestamp.now(.monotonic);
+        resolver.hosts_mtime = try getHostsMtime();
+        try resolver.loadHosts();
         return resolver;
     }
 
@@ -139,6 +151,38 @@ pub const Resolver = struct {
         return stat_info.mtime;
     }
 
+    fn getHostsMtime() error{Canceled}!i64 {
+        const stat_info = fs.stat(hosts_path) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            return 0;
+        };
+        return stat_info.mtime;
+    }
+
+    fn loadHosts(self: *Resolver) error{Canceled}!void {
+        const file = fs.openFile(hosts_path) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            self.hosts_content_len = 0;
+            return;
+        };
+        defer file.close();
+
+        var read_buf: [512]u8 = undefined;
+        var reader = file.reader(&read_buf);
+
+        var writer = std.Io.Writer.fixed(&self.hosts_content);
+        const len = reader.interface.streamRemaining(&writer) catch |err| {
+            if (err == error.ReadFailed) {
+                if (reader.err) |e| {
+                    if (e == error.Canceled) return error.Canceled;
+                }
+            }
+            self.hosts_content_len = 0;
+            return;
+        };
+        self.hosts_content_len = len;
+    }
+
     /// Check if resolv.conf has changed and reload if necessary.
     fn tryReloadConfig(self: *Resolver) error{Canceled}!void {
         const now = time.Timestamp.now(.monotonic);
@@ -159,9 +203,28 @@ pub const Resolver = struct {
         // Keep server_offset and prng state
     }
 
+    /// Check if /etc/hosts has changed and reload if necessary.
+    fn tryReloadHosts(self: *Resolver) error{Canceled}!void {
+        const now = time.Timestamp.now(.monotonic);
+        if (self.hosts_last_checked.durationTo(now).toSeconds() < config_reload_interval_s) {
+            return;
+        }
+        self.hosts_last_checked = now;
+
+        const new_mtime = try getHostsMtime();
+        if (new_mtime == self.hosts_mtime) {
+            return;
+        }
+
+        // Hosts changed, reload it
+        try self.loadHosts();
+        self.hosts_mtime = new_mtime;
+    }
+
     /// Look up IP addresses for a hostname.
     pub fn lookup(self: *Resolver, hostname: []const u8, port: u16, options: LookupOptions) LookupError!LookupResult {
         try self.tryReloadConfig();
+        try self.tryReloadHosts();
 
         var result: LookupResult = .{};
 
@@ -176,8 +239,8 @@ pub const Resolver = struct {
             return error.HostLacksNetworkAddresses;
         } else |_| {}
 
-        // Check /etc/hosts before DNS query
-        if (hosts.lookup(hostname, options.family)) |hosts_result| {
+        // Check /etc/hosts before DNS query (using cached content)
+        if (hosts.lookupInContent(self.hosts_content[0..self.hosts_content_len], hostname, options.family)) |hosts_result| {
             for (hosts_result.slice()) |addr| {
                 var addr_with_port = addr;
                 addr_with_port.setPort(port);
