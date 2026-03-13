@@ -1201,3 +1201,66 @@ test "Runtime: multi-threaded with task migration" {
 
     try std.testing.expectEqual(100, ctx.counter.load(.acquire));
 }
+
+test "runtime: wake-before-park awaken bit stress (single executor)" {
+    try wakeBeforeParkStress(1);
+}
+
+test "runtime: wake-before-park awaken bit stress (two executors)" {
+    try wakeBeforeParkStress(2);
+}
+
+fn wakeBeforeParkStress(executor_count: u6) !void {
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(executor_count),
+    });
+    defer runtime.deinit();
+
+    const Ctx = struct {
+        // Number of ping-pong iterations to exercise the wake-before-park window.
+        const iterations: u32 = 10_000;
+
+        ping: ResetEvent = .{},
+        pong: ResetEvent = .{},
+        counter: std.atomic.Value(u32) = .init(0),
+
+        // Waits on ping each iteration — this is the task that parks, and the one
+        // whose awaken bit gets set when the waker fires between the condition check
+        // and the actual park CAS in processCleanup.park.
+        fn parker(ctx: *@This()) !void {
+            for (0..iterations) |_| {
+                try ctx.ping.wait();
+                ctx.ping.reset();
+                _ = ctx.counter.fetchAdd(1, .release);
+                ctx.pong.set();
+            }
+        }
+
+        // Fires ping immediately each iteration, without waiting for parker to park first.
+        // With two executors this races directly with the park CAS, exercising the path
+        // where scheduleTask sets awaken=true on a .ready task and processCleanup.park
+        // consumes the token instead of transitioning to .waiting.
+        fn waker(ctx: *@This()) !void {
+            for (0..iterations) |_| {
+                ctx.ping.set();
+                try ctx.pong.wait();
+                ctx.pong.reset();
+            }
+        }
+    };
+
+    var ctx: Ctx = .{};
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Ctx.parker, .{&ctx});
+    try group.spawn(Ctx.waker, .{&ctx});
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+    // Any lost wake would cause parker to hang in ping.wait() forever — group.wait()
+    // would never return. The counter confirms all iterations ran to completion.
+    try std.testing.expectEqual(Ctx.iterations, ctx.counter.load(.acquire));
+}
