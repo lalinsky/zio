@@ -192,14 +192,16 @@ pub const Waiter = struct {
     }
 
     fn waitTask(d: *Direct, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        task.state.store(.preparing_to_wait, .release);
-
         var current = d.notify.state.load(.acquire);
-        if (current >= expected) {
-            task.state.store(.ready, .release);
-            return;
-        }
+        if (current >= expected) return;
 
+        // Park loop: yield until the condition is met.
+        //
+        // Race safety: if a signal fires while the task is in .ready state (between
+        // the condition check above and the actual context switch in yield), the waker
+        // sets the `awaken` bit. `processCleanup.park` then consumes the bit and
+        // reschedules the task instead of transitioning it to .waiting, so the wake
+        // is never lost.
         while (true) {
             if (cancel_mode == .allow_cancel) {
                 try task.yield(.park, .allow_cancel);
@@ -208,19 +210,7 @@ pub const Waiter = struct {
             }
 
             current = d.notify.state.load(.acquire);
-            if (current >= expected) {
-                return;
-            }
-
-            task.state.store(.preparing_to_wait, .release);
-
-            // Recheck after arming to close the race window where a signal
-            // between the check and the store sees .ready and is a no-op.
-            current = d.notify.state.load(.acquire);
-            if (current >= expected) {
-                task.state.store(.ready, .release);
-                return;
-            }
+            if (current >= expected) return;
         }
     }
 

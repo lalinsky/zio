@@ -157,7 +157,7 @@ pub const CancelKind = enum { user, auto };
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
-    state: std.atomic.Value(State),
+    state: std.atomic.Value(u8),
 
     // Cancellation status - tracks user cancel, timeout, pending errors, and shield count
     canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -170,13 +170,50 @@ pub const AnyTask = struct {
     // Closure for the task
     closure: Closure,
 
-    pub const State = enum(u8) {
-        new,
-        ready,
-        preparing_to_wait,
-        waiting,
-        finished,
+    /// Task state and park token, packed into a single byte for atomic operations.
+    ///
+    /// The `awaken` bit implements a NetBSD-style park token:
+    /// - Set by wakers when the task is in `.ready` state (not yet parked)
+    /// - Consumed by `processCleanup.park` to reschedule the task instead of
+    ///   transitioning it to `.waiting` when the task was pre-woken
+    pub const State = packed struct(u8) {
+        tag: Tag = .new,
+        awaken: bool = false,
+        _: u4 = 0,
+
+        pub const Tag = enum(u3) {
+            new = 0,
+            ready = 1,
+            waiting = 2,
+            finished = 3,
+        };
+
+        pub fn init(tag: Tag) State {
+            return .{ .tag = tag };
+        }
     };
+
+    pub inline fn loadState(self: *const AnyTask, ordering: std.builtin.AtomicOrder) State {
+        return @bitCast(self.state.load(ordering));
+    }
+
+    pub inline fn storeState(self: *AnyTask, s: State, ordering: std.builtin.AtomicOrder) void {
+        self.state.store(@bitCast(s), ordering);
+    }
+
+    pub inline fn cmpxchgWeakState(self: *AnyTask, expected: State, desired: State, success_order: std.builtin.AtomicOrder, fail_order: std.builtin.AtomicOrder) ?State {
+        if (self.state.cmpxchgWeak(@bitCast(expected), @bitCast(desired), success_order, fail_order)) |actual| {
+            return @bitCast(actual);
+        }
+        return null;
+    }
+
+    pub inline fn cmpxchgStrongState(self: *AnyTask, expected: State, desired: State, success_order: std.builtin.AtomicOrder, fail_order: std.builtin.AtomicOrder) ?State {
+        if (self.state.cmpxchgStrong(@bitCast(expected), @bitCast(desired), success_order, fail_order)) |actual| {
+            return @bitCast(actual);
+        }
+        return null;
+    }
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
         std.debug.assert(awaitable.kind == .task);
@@ -224,18 +261,19 @@ pub const AnyTask = struct {
     /// Cooperatively yield control to other tasks.
     ///
     /// - `.park`: Suspend until resumed (I/O, sync primitives, timeout, cancellation).
-    ///   The task state must be `.preparing_to_wait` before calling.
-    ///   The actual transition to `.waiting` is deferred until after the context is saved.
+    ///   The actual transition to `.waiting` is deferred until after the context is saved
+    ///   (in `processCleanup.park`), which also handles any pre-wake via the `awaken` bit.
     ///
     /// - `.reschedule`: Reschedule immediately (cooperative yielding).
     ///   The task state remains `.ready`.
     pub fn yield(self: *AnyTask, comptime mode: YieldMode, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         var executor = self.getExecutor();
 
-        // Check and consume cancellation flag before yielding (unless no_cancel)
+        // Check and consume cancellation flag before yielding (unless no_cancel).
+        // On cancel: restore clean .ready state (clearing any awaken bit) before returning.
         if (cancel_mode == .allow_cancel) {
             self.checkCancel() catch |err| {
-                self.state.store(.ready, .release);
+                self.storeState(.init(.ready), .release);
                 return err;
             };
         }
@@ -260,7 +298,7 @@ pub const AnyTask = struct {
             executor.processCleanup();
         }
 
-        std.debug.assert(self.state.load(.acquire) == .ready);
+        std.debug.assert(self.loadState(.acquire).tag == .ready);
 
         // Check after resuming in case we were canceled while suspended
         if (cancel_mode == .allow_cancel) {
@@ -470,7 +508,7 @@ pub const AnyTask = struct {
 
         const self = alloc_result.task;
         self.* = .{
-            .state = .init(.new),
+            .state = .init(@bitCast(State.init(.new))),
             .awaitable = .{
                 .kind = .task,
                 .wait_node = .{},

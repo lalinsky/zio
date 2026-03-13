@@ -280,7 +280,7 @@ pub const Executor = struct {
         // the task context for async operations called from main.
         // main_task.coro.context is where spawned tasks yield back to.
         self.main_task = .{
-            .state = std.atomic.Value(AnyTask.State).init(.ready),
+            .state = std.atomic.Value(u8).init(@bitCast(AnyTask.State.init(.ready))),
             .awaitable = .{
                 .kind = .task,
                 .wait_node = .{},
@@ -372,7 +372,7 @@ pub const Executor = struct {
             }
 
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
-            const main_ready = check_ready and self.main_task.state.load(.acquire) == .ready;
+            const main_ready = check_ready and self.main_task.loadState(.acquire).tag == .ready;
             const has_work = self.ready_queue.head != null or main_ready;
             try self.loop.run(if (has_work) .no_wait else .once);
 
@@ -382,7 +382,7 @@ pub const Executor = struct {
             self.last_tick_time = self.loop.now();
 
             // Check again after I/O
-            if (check_ready and self.main_task.state.load(.acquire) == .ready) {
+            if (check_ready and self.main_task.loadState(.acquire).tag == .ready) {
                 return;
             }
         }
@@ -454,25 +454,33 @@ pub const Executor = struct {
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
     pub fn scheduleTask(self: *Executor, task: *AnyTask) void {
-        var old_state = task.state.load(.acquire);
+        var old = task.loadState(.acquire);
         while (true) {
-            switch (old_state) {
+            switch (old.tag) {
                 // Task already finished (race between completion and cancel) - nothing to do
                 .finished => return,
-                // Task already transitioned to .ready by another thread - avoid double-schedule
-                .ready => return,
-                // Valid states to transition from
-                .new, .waiting, .preparing_to_wait => {},
+                // Task is in .ready state (running or about to park).
+                // Set the awaken bit as a park token; processCleanup.park will consume it
+                // and reschedule the task instead of transitioning to .waiting.
+                .ready => {
+                    if (old.awaken) return; // Token already set, nothing to do
+                    const desired = AnyTask.State{ .tag = .ready, .awaken = true };
+                    if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+                        old = actual;
+                        continue;
+                    }
+                    return; // Awaken token set; task will handle it before/during next park
+                },
+                // Valid states to transition to .ready
+                .new, .waiting => {},
             }
-            if (task.state.cmpxchgWeak(old_state, .ready, .acq_rel, .acquire)) |actual| {
-                old_state = actual;
+            const desired = AnyTask.State{ .tag = .ready, .awaken = false };
+            if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+                old = actual;
                 continue;
             }
             break;
         }
-
-        // Task hasn't yielded yet - it will see .ready and skip the yield
-        if (old_state == .preparing_to_wait) return;
 
         // main_task is never queued - it just checks state in run()
         if (task == &self.main_task) {
@@ -488,7 +496,7 @@ pub const Executor = struct {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
-            if (current_exec.runtime == self.runtime and old_state != .new) {
+            if (current_exec.runtime == self.runtime and old.tag != .new) {
                 if (current_exec != self) {
                     task.coro.parent_context_ptr.store(&current_exec.main_task.coro.context, .release);
                     task.last_run_tick = 0; // Allow immediate execution on new executor
@@ -524,19 +532,34 @@ pub const Executor = struct {
             .park => |task| {
                 self.pending_cleanup = .none;
                 // Context is now saved — safe to make the task wakeable.
-                // CAS preparing_to_wait → waiting. If it fails, the waker already
-                // swapped to .ready, so we schedule the task immediately.
-                if (task.state.cmpxchgStrong(.preparing_to_wait, .waiting, .release, .acquire)) |actual| {
-                    if (actual == .ready) {
+                // Atomically check the awaken bit and either:
+                // - Transition (ready, awaken=false) → (waiting, awaken=false): normal park
+                // - Consume (ready, awaken=true) → (ready, awaken=false): pre-woken, reschedule
+                var old = task.loadState(.acquire);
+                while (true) {
+                    std.debug.assert(old.tag == .ready);
+                    if (old.awaken) {
+                        // Pre-woken: consume the token, keep .ready, and reschedule
+                        const desired = AnyTask.State{ .tag = .ready, .awaken = false };
+                        if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+                            old = actual;
+                            continue;
+                        }
                         self.scheduleTaskLocal(task);
-                    } else {
-                        std.debug.panic("park cleanup: unexpected state {} for task {*}", .{ actual, task });
+                        return;
                     }
+                    // Normal: transition to .waiting
+                    const desired = AnyTask.State{ .tag = .waiting, .awaken = false };
+                    if (task.cmpxchgWeakState(old, desired, .acq_rel, .acquire)) |actual| {
+                        old = actual;
+                        continue;
+                    }
+                    break; // Task is now .waiting
                 }
             },
             .finish => |task| {
                 self.pending_cleanup = .none;
-                task.state.store(.finished, .release);
+                task.storeState(.init(.finished), .release);
                 if (task.coro.context.stack_info.allocation_len > 0) {
                     self.runtime.stack_pool.release(task.coro.context.stack_info, self.loop.now());
                     task.coro.context.stack_info.allocation_len = 0;
