@@ -273,6 +273,10 @@ test "Notify broadcast to multiple waiters" {
             while (ready_flag.load(.acquire) < 3) {
                 try yield();
             }
+            // Wait for waiters to actually enter wait() and push to the queue.
+            // The ready_flag only indicates they're about to wait, not that
+            // they've pushed to the queue yet.
+            try sleep(.fromMilliseconds(1));
             n.broadcast();
         }
     };
@@ -310,6 +314,8 @@ test "Notify multiple signals to multiple waiters" {
             while (ready_flag.load(.acquire) < 3) {
                 try yield();
             }
+            // Wait for waiters to actually enter wait() and push to the queue.
+            try sleep(.fromMilliseconds(1));
             // Signal three times to wake all three waiters one by one (FIFO)
             n.signal();
             n.signal();
