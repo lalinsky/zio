@@ -450,10 +450,17 @@ pub const Executor = struct {
         self.loop.wake();
     }
 
-    /// Schedule a task for execution. Called on the task's home executor (self).
+    /// Schedule a task for execution.
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
-    pub fn scheduleTask(self: *Executor, task: *AnyTask) void {
+    ///
+    /// IMPORTANT: The task's home executor (from parent_context_ptr) is read AFTER
+    /// the state CAS, not before. The CAS on task.state provides the synchronization
+    /// point — reading parent_context_ptr before the CAS could see a stale value
+    /// on weakly-ordered architectures, because the store to parent_context_ptr
+    /// (during migration) is only ordered before the subsequent task.state CAS,
+    /// not before an unrelated load on another thread.
+    pub fn scheduleTask(task: *AnyTask) void {
         var old = task.state.load(.acquire);
         while (true) {
             switch (old.tag) {
@@ -482,11 +489,17 @@ pub const Executor = struct {
             break;
         }
 
+        // CAS succeeded — now safe to read parent_context_ptr because the CAS
+        // on task.state synchronizes-with the previous executor's CAS that
+        // transitioned the task to .waiting (which happens-after the
+        // parent_context_ptr store during migration).
+        const home_executor = Executor.fromCoroutine(&task.coro);
+
         // main_task is never queued - it just checks state in run()
-        if (task == &self.main_task) {
+        if (task == &home_executor.main_task) {
             // Wake the loop if called from another thread
-            if (getCurrentExecutorOrNull() != self) {
-                self.loop.wake();
+            if (getCurrentExecutorOrNull() != home_executor) {
+                home_executor.loop.wake();
             }
             return;
         }
@@ -496,8 +509,8 @@ pub const Executor = struct {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
-            if (current_exec.runtime == self.runtime and old.tag != .new) {
-                if (current_exec != self) {
+            if (current_exec.runtime == home_executor.runtime and old.tag != .new) {
+                if (current_exec != home_executor) {
                     task.coro.parent_context_ptr.store(&current_exec.main_task.coro.context, .release);
                     task.last_run_tick = 0; // Allow immediate execution on new executor
                 }
@@ -507,7 +520,7 @@ pub const Executor = struct {
         }
 
         // No current executor or different runtime
-        self.scheduleTaskRemote(task);
+        home_executor.scheduleTaskRemote(task);
     }
 
     const TaskCleanup = union(enum) {
@@ -1263,4 +1276,34 @@ fn wakeBeforeParkStress(executor_count: u6) !void {
     // Any lost wake would cause parker to hang in ping.wait() forever — group.wait()
     // would never return. The counter confirms all iterations ran to completion.
     try std.testing.expectEqual(Ctx.iterations, ctx.counter.load(.acquire));
+}
+
+test "runtime: mutex contention with task migration" {
+    const Mutex = @import("sync/Mutex.zig");
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var mutex: Mutex = .init;
+    var counter: u32 = 0;
+
+    const Worker = struct {
+        fn run(m: *Mutex, c: *u32) !void {
+            for (0..1_000) |_| {
+                try m.lock();
+                defer m.unlock();
+                c.* += 1;
+            }
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Worker.run, .{ &mutex, &counter });
+    try group.spawn(Worker.run, .{ &mutex, &counter });
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+    try std.testing.expectEqual(2_000, counter);
 }
