@@ -7,64 +7,7 @@ on:
   pull_request:
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      extended: ${{ steps.filter.outputs.extended || steps.keyword.outputs.extended }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            extended:
-              - 'src/coro/**'
-              - 'src/ev/**'
-              - 'src/os/**'
-              - '.github/workflows/test.yml'
-      - name: Check for [ci:extended] in PR body
-        id: keyword
-        if: github.event_name == 'pull_request'
-        run: |
-          if echo "$PR_BODY" | grep -qF '[ci:extended]'; then
-            echo "extended=true" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-
-  basic:
-    needs: changes
-    if: needs.changes.outputs.extended != 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-          - os: macos-latest
-          - os: windows-latest
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Zig
-      uses: mlugg/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Apply Zig stdlib patches
-      run: ./patches/apply-zig-patches.sh
-
-    - name: Run check script
-      run: ./check.sh --full
-      timeout-minutes: 10
-      env:
-        TEST_VERBOSE: true
-
-  extended:
-    needs: changes
-    if: needs.changes.outputs.extended == 'true'
+  test:
     strategy:
       fail-fast: false
       matrix:
