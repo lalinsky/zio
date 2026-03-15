@@ -261,9 +261,10 @@ pub const Executor = struct {
 
     /// Get the Executor instance from any coroutine that belongs to it.
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
-    /// so we navigate: context -> coro -> main_task -> executor
+    /// so we navigate: context -> coro -> main_task -> executor.
+    /// Only valid on the executor thread that is currently running the coroutine.
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
-        const main_coro: *Coroutine = @fieldParentPtr("context", coro.parent_context_ptr.load(.acquire));
+        const main_coro: *Coroutine = @fieldParentPtr("context", coro.parent_context_ptr);
         const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
         return @alignCast(@fieldParentPtr("main_task", main_task));
     }
@@ -289,9 +290,10 @@ pub const Executor = struct {
                 .context = std.mem.zeroes(Context),
                 .parent_context_ptr = undefined,
             },
+            .runtime = runtime,
             .closure = undefined, // main_task has no closure
         };
-        self.main_task.coro.parent_context_ptr = .init(&self.main_task.coro.context);
+        self.main_task.coro.parent_context_ptr = &self.main_task.coro.context;
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
@@ -355,7 +357,7 @@ pub const Executor = struct {
                 // Store parent_context_ptr just before stepping into the coroutine.
                 // Both the store and the subsequent load in fromCoroutine() happen on
                 // the same executor thread, so no cross-thread ordering is needed.
-                next_task.coro.parent_context_ptr.store(&self.main_task.coro.context, .monotonic);
+                next_task.coro.parent_context_ptr = &self.main_task.coro.context;
                 next_task.coro.step();
                 self.processCleanup();
             }
@@ -457,16 +459,6 @@ pub const Executor = struct {
     /// Schedule a task for execution.
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
-    ///
-    /// IMPORTANT: The task's home executor (from parent_context_ptr) is read AFTER
-    /// the state CAS, not before. The CAS on task.state provides the synchronization
-    /// point — reading parent_context_ptr before the CAS could see a stale value
-    /// on weakly-ordered architectures.
-    ///
-    /// NOTE: parent_context_ptr is NOT updated here during migration. Instead, it is
-    /// stored immediately before the coroutine is stepped into (in run() and switchOut()),
-    /// ensuring the store and load are always on the same executor thread — no
-    /// cross-thread memory ordering concerns for parent_context_ptr at all.
     pub fn scheduleTask(task: *AnyTask) void {
         var old = task.state.load(.acquire);
         while (true) {
@@ -496,15 +488,10 @@ pub const Executor = struct {
             break;
         }
 
-        // CAS succeeded — now safe to read parent_context_ptr. Since parent_context_ptr
-        // is always stored just before the coroutine runs (on the same thread), the
-        // .acq_rel CAS above synchronizes-with the previous .waiting CAS, which
-        // happens-after the last time parent_context_ptr was written (before step/yieldTo).
-        const home_executor = Executor.fromCoroutine(&task.coro);
-
-        // main_task is never queued - it just checks state in run()
-        if (task == &home_executor.main_task) {
-            // Wake the loop if called from another thread
+        // Main task: parent_context_ptr points to its own context (self-referencing, immutable).
+        // main_task is never queued - it just checks state in run().
+        if (task.coro.parent_context_ptr == &task.coro.context) {
+            const home_executor: *Executor = @alignCast(@fieldParentPtr("main_task", task));
             if (getCurrentExecutorOrNull() != home_executor) {
                 home_executor.loop.wake();
             }
@@ -516,18 +503,17 @@ pub const Executor = struct {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
-            if (current_exec.runtime == home_executor.runtime and old.tag != .new) {
-                if (current_exec != home_executor) {
-                    task.last_run_tick = 0; // Allow immediate execution on new executor
-                    // parent_context_ptr is updated just before the coroutine runs
-                }
+            if (current_exec.runtime == task.runtime and old.tag != .new) {
+                task.last_run_tick = 0; // Allow immediate execution on new executor
                 current_exec.scheduleTaskLocal(task);
                 return;
             }
         }
 
-        // No current executor or different runtime
-        home_executor.scheduleTaskRemote(task);
+        // No current executor or different runtime — pick an executor round-robin
+        const executors = task.runtime.executors.items;
+        const index = task.runtime.next_executor_index.fetchAdd(1, .monotonic);
+        executors[index % executors.len].scheduleTaskRemote(task);
     }
 
     const TaskCleanup = union(enum) {
@@ -596,7 +582,7 @@ pub const Executor = struct {
             // Store parent_context_ptr just before switching into the coroutine.
             // Both the store and the subsequent load in fromCoroutine() happen on
             // the same executor thread, so no cross-thread ordering is needed.
-            next_task.coro.parent_context_ptr.store(&self.main_task.coro.context, .monotonic);
+            next_task.coro.parent_context_ptr = &self.main_task.coro.context;
             coro.yieldTo(&next_task.coro);
         } else {
             coro.yield();

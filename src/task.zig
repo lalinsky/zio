@@ -167,6 +167,9 @@ pub const AnyTask = struct {
     // Reset to 0 when stolen, allowing immediate execution on the thief.
     last_run_tick: u32 = 0,
 
+    // Runtime this task belongs to (set at creation, never changes)
+    runtime: *Runtime,
+
     // Closure for the task
     closure: Closure,
 
@@ -223,7 +226,7 @@ pub const AnyTask = struct {
     }
 
     pub inline fn getRuntime(self: *AnyTask) *Runtime {
-        return self.getExecutor().runtime;
+        return self.runtime;
     }
 
     pub inline fn getThreadPool(self: *AnyTask) *ev.ThreadPool {
@@ -487,8 +490,9 @@ pub const AnyTask = struct {
                 .wait_node = .{},
             },
             .coro = .{
-                .parent_context_ptr = .init(&executor.main_task.coro.context),
+                .parent_context_ptr = &executor.main_task.coro.context,
             },
+            .runtime = executor.runtime,
             .closure = alloc_result.closure,
         };
 
@@ -523,7 +527,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     Executor.scheduleTask(task);
 
     if (getCurrentExecutorOrNull()) |current_executor| {
-        if (current_executor == Executor.fromCoroutine(&task.coro)) {
+        if (current_executor.runtime == task.runtime) {
             current_executor.maybeYield(.reschedule, .no_cancel);
         }
     }
