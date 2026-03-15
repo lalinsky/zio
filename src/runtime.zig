@@ -884,8 +884,9 @@ pub const Runtime = struct {
         var backoff = Duration.fromMilliseconds(10);
         const max_backoff = Duration.fromMilliseconds(1000);
 
-        while (!self.shutting_down.load(.acquire)) {
+        while (true) {
             worker.executor.run(.until_stopped) catch |e| {
+                if (self.shutting_down.load(.acquire)) break;
                 log.err("Worker executor error: {}, retrying in {f}", .{ e, backoff });
                 os.time.sleep(backoff);
                 backoff = .{ .value = @min(backoff.value *| 2, max_backoff.value) };
