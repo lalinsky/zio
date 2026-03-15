@@ -352,6 +352,10 @@ pub const Executor = struct {
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
+                // Store parent_context_ptr just before stepping into the coroutine.
+                // Both the store and the subsequent load in fromCoroutine() happen on
+                // the same executor thread, so no cross-thread ordering is needed.
+                next_task.coro.parent_context_ptr.store(&self.main_task.coro.context, .monotonic);
                 next_task.coro.step();
                 self.processCleanup();
             }
@@ -457,9 +461,12 @@ pub const Executor = struct {
     /// IMPORTANT: The task's home executor (from parent_context_ptr) is read AFTER
     /// the state CAS, not before. The CAS on task.state provides the synchronization
     /// point — reading parent_context_ptr before the CAS could see a stale value
-    /// on weakly-ordered architectures, because the store to parent_context_ptr
-    /// (during migration) is only ordered before the subsequent task.state CAS,
-    /// not before an unrelated load on another thread.
+    /// on weakly-ordered architectures.
+    ///
+    /// NOTE: parent_context_ptr is NOT updated here during migration. Instead, it is
+    /// stored immediately before the coroutine is stepped into (in run() and switchOut()),
+    /// ensuring the store and load are always on the same executor thread — no
+    /// cross-thread memory ordering concerns for parent_context_ptr at all.
     pub fn scheduleTask(task: *AnyTask) void {
         var old = task.state.load(.acquire);
         while (true) {
@@ -489,10 +496,10 @@ pub const Executor = struct {
             break;
         }
 
-        // CAS succeeded — now safe to read parent_context_ptr because the CAS
-        // on task.state synchronizes-with the previous executor's CAS that
-        // transitioned the task to .waiting (which happens-after the
-        // parent_context_ptr store during migration).
+        // CAS succeeded — now safe to read parent_context_ptr. Since parent_context_ptr
+        // is always stored just before the coroutine runs (on the same thread), the
+        // .acq_rel CAS above synchronizes-with the previous .waiting CAS, which
+        // happens-after the last time parent_context_ptr was written (before step/yieldTo).
         const home_executor = Executor.fromCoroutine(&task.coro);
 
         // main_task is never queued - it just checks state in run()
@@ -511,8 +518,8 @@ pub const Executor = struct {
             //       for re-balancing them
             if (current_exec.runtime == home_executor.runtime and old.tag != .new) {
                 if (current_exec != home_executor) {
-                    task.coro.parent_context_ptr.store(&current_exec.main_task.coro.context, .release);
                     task.last_run_tick = 0; // Allow immediate execution on new executor
+                    // parent_context_ptr is updated just before the coroutine runs
                 }
                 current_exec.scheduleTaskLocal(task);
                 return;
@@ -586,6 +593,10 @@ pub const Executor = struct {
     /// Sets current_task for the target and performs the context switch.
     pub fn switchOut(self: *Executor, coro: *Coroutine) void {
         if (self.getNextTask()) |next_task| {
+            // Store parent_context_ptr just before switching into the coroutine.
+            // Both the store and the subsequent load in fromCoroutine() happen on
+            // the same executor thread, so no cross-thread ordering is needed.
+            next_task.coro.parent_context_ptr.store(&self.main_task.coro.context, .monotonic);
             coro.yieldTo(&next_task.coro);
         } else {
             coro.yield();
