@@ -450,10 +450,17 @@ pub const Executor = struct {
         self.loop.wake();
     }
 
-    /// Schedule a task for execution. Called on the task's home executor (self).
+    /// Schedule a task for execution.
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
-    pub fn scheduleTask(self: *Executor, task: *AnyTask) void {
+    ///
+    /// IMPORTANT: The task's home executor (from parent_context_ptr) is read AFTER
+    /// the state CAS, not before. The CAS on task.state provides the synchronization
+    /// point — reading parent_context_ptr before the CAS could see a stale value
+    /// on weakly-ordered architectures, because the store to parent_context_ptr
+    /// (during migration) is only ordered before the subsequent task.state CAS,
+    /// not before an unrelated load on another thread.
+    pub fn scheduleTask(task: *AnyTask) void {
         var old_state = task.state.load(.acquire);
         while (true) {
             switch (old_state) {
@@ -474,11 +481,14 @@ pub const Executor = struct {
         // Task hasn't yielded yet - it will see .ready and skip the yield
         if (old_state == .preparing_to_wait) return;
 
+        // CAS succeeded — now safe to read parent_context_ptr.
+        const home_executor = Executor.fromCoroutine(&task.coro);
+
         // main_task is never queued - it just checks state in run()
-        if (task == &self.main_task) {
+        if (task == &home_executor.main_task) {
             // Wake the loop if called from another thread
-            if (getCurrentExecutorOrNull() != self) {
-                self.loop.wake();
+            if (getCurrentExecutorOrNull() != home_executor) {
+                home_executor.loop.wake();
             }
             return;
         }
@@ -488,8 +498,8 @@ pub const Executor = struct {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
-            if (current_exec.runtime == self.runtime and old_state != .new) {
-                if (current_exec != self) {
+            if (current_exec.runtime == home_executor.runtime and old_state != .new) {
+                if (current_exec != home_executor) {
                     task.coro.parent_context_ptr.store(&current_exec.main_task.coro.context, .release);
                     task.last_run_tick = 0; // Allow immediate execution on new executor
                 }
@@ -499,7 +509,7 @@ pub const Executor = struct {
         }
 
         // No current executor or different runtime
-        self.scheduleTaskRemote(task);
+        home_executor.scheduleTaskRemote(task);
     }
 
     const TaskCleanup = union(enum) {

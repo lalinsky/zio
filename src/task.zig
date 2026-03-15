@@ -418,8 +418,7 @@ pub const AnyTask = struct {
 
     /// Wake this task (mark it as ready and schedule for execution).
     pub fn wake(self: *AnyTask) void {
-        const executor = Executor.fromCoroutine(&self.coro);
-        executor.scheduleTask(self);
+        Executor.scheduleTask(self);
     }
 
     pub fn destroy(self: *AnyTask) void {
@@ -509,11 +508,10 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
 
     _ = rt.task_count.fetchAdd(1, .acq_rel);
 
-    const executor = Executor.fromCoroutine(&task.coro);
-    executor.scheduleTask(task);
+    Executor.scheduleTask(task);
 
     if (getCurrentExecutorOrNull()) |current_executor| {
-        if (current_executor == executor) {
+        if (current_executor == Executor.fromCoroutine(&task.coro)) {
             current_executor.maybeYield(.reschedule, .no_cancel);
         }
     }
