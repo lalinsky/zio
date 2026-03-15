@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, revert-awaken-bit ]
     tags:
   pull_request:
 
