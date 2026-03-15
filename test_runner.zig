@@ -127,7 +127,7 @@ pub fn main() !void {
         break :blk count;
     };
 
-    const root_node = if (!env.verbose) std.Progress.start(.{
+    const root_node = if (env.verbose == .off) std.Progress.start(.{
         .root_name = "Running tests",
         .estimated_total_items = test_count,
     }) else std.Progress.Node.none;
@@ -183,8 +183,10 @@ pub fn main() !void {
         }
 
         // Print test name before running (for debugging hangs)
-        if (env.verbose) {
-            Printer.fmt("{s} .. ", .{friendly_name});
+        switch (env.verbose) {
+            .naming => Printer.fmt("{s} .. ", .{friendly_name}),
+            .tracing => Printer.fmt("{s}\n", .{friendly_name}),
+            .off => {},
         }
 
         const result = t.func();
@@ -225,9 +227,17 @@ pub fn main() !void {
             .skip => "SKIP",
             .text => "",
         };
-        if (env.verbose) {
-            Printer.status(status, "{s}", .{status_str});
-            Printer.fmt(" ({d:.2}ms)\n", .{ms});
+        switch (env.verbose) {
+            .naming => {
+                Printer.status(status, "{s}", .{status_str});
+                Printer.fmt(" ({d:.2}ms)\n", .{ms});
+            },
+            .tracing => {
+                Printer.fmt("  ", .{});
+                Printer.status(status, "{s}", .{status_str});
+                Printer.fmt(" ({d:.2}ms)\n", .{ms});
+            },
+            .off => {},
         }
 
         // Print error details for failures (in non-verbose mode, progress will show above this)
@@ -389,7 +399,9 @@ const SlowTracker = struct {
 };
 
 const Env = struct {
-    verbose: bool,
+    const Verbose = enum { off, naming, tracing };
+
+    verbose: Verbose,
     fail_first: bool,
     filters: std.ArrayList([]const u8),
     do_log_capture: bool,
@@ -411,7 +423,7 @@ const Env = struct {
         }
 
         return .{
-            .verbose = readEnvBool(allocator, "TEST_VERBOSE", false),
+            .verbose = readEnvVerbose(allocator),
             .fail_first = readEnvBool(allocator, "TEST_FAIL_FIRST", false),
             .filters = filters,
             .do_log_capture = readEnvBool(allocator, "TEST_LOG_CAPTURE", true),
@@ -440,6 +452,14 @@ const Env = struct {
         const value = readEnv(allocator, key) orelse return deflt;
         defer allocator.free(value);
         return std.ascii.eqlIgnoreCase(value, "true");
+    }
+
+    fn readEnvVerbose(allocator: Allocator) Verbose {
+        const value = readEnv(allocator, "TEST_VERBOSE") orelse return .off;
+        defer allocator.free(value);
+        if (std.ascii.eqlIgnoreCase(value, "2")) return .tracing;
+        if (std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "1")) return .naming;
+        return .off;
     }
 };
 
