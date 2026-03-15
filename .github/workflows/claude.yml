@@ -35,6 +35,11 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Install QEMU and Wine
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y qemu-user-static wine
+
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
