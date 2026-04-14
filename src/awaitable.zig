@@ -72,9 +72,12 @@ pub const Awaitable = struct {
     /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
     /// Can be called from any context.
     pub fn markComplete(self: *Awaitable) void {
-        // Pop and wake all waiters while setting the flag
-        while (self.waiting_list.popAndSetFlag()) |node| {
-            Waiter.fromNode(node).signal();
+        // Pop and wake all waiters while setting the flag.
+        // Break as soon as we pop the last waiter - signaling it can free `self`
+        // if the awaitable is destroyed after being observed as complete.
+        while (self.waiting_list.popAndSetFlag()) |result| {
+            Waiter.fromNode(result.node).signal();
+            if (result.is_last) break;
         }
     }
 

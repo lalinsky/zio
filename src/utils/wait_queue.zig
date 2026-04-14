@@ -429,12 +429,28 @@ pub fn WaitQueue(comptime T: type) type {
             return self.popInternal(old_state, old_head, false);
         }
 
+        /// Result of popAndSetFlag: the popped node plus whether the queue is now empty.
+        /// `is_last == true` means this node was the final waiter and callers must not
+        /// call popAndSetFlag again - it is safe to stop iterating without touching self.
+        ///
+        /// This matters for use cases like ResetEvent where `self` lives on a coroutine
+        /// stack: signaling the last waiter can resume the parent task on another
+        /// executor in parallel, which may return and free the stack before we get a
+        /// chance to touch `self` again.
+        pub const PopResult = struct {
+            node: *T,
+            is_last: bool,
+        };
+
         /// Pop a waiter while also setting the flag.
-        /// Returns the popped waiter, or null if no waiters (flag is still set).
+        /// Returns the popped waiter and whether it was the last one, or null if no
+        /// waiters (flag is still set).
         ///
         /// This is useful for ResetEvent.set() / Future.set() - set the flag and
-        /// wake all waiters. Call in a loop until null is returned.
-        pub fn popAndSetFlag(self: *Self) ?*T {
+        /// wake all waiters. Callers MUST break out of the loop once `is_last` is true
+        /// without calling popAndSetFlag again, because signaling the last waiter can
+        /// cause `self` to be freed.
+        pub fn popAndSetFlag(self: *Self) ?PopResult {
             const old_state = self.acquireMutationLock();
 
             const old_head = getHeadPtr(old_state) orelse {
@@ -443,7 +459,9 @@ pub fn WaitQueue(comptime T: type) type {
                 return null;
             };
 
-            return self.popInternal(old_state, old_head, true);
+            const is_last = old_head.next == null;
+            const node = self.popInternal(old_state, old_head, true);
+            return .{ .node = node, .is_last = is_last };
         }
     };
 }
