@@ -520,6 +520,13 @@ pub const Executor = struct {
             }
         }
 
+        // Non-migratable tasks must go home, even when scheduled from a foreign
+        // thread or a different runtime. Only .new tasks get round-robin distribution.
+        if (old.tag != .new and !task.canMigrate()) {
+            Executor.fromCoroutine(&task.coro).scheduleTaskRemote(task);
+            return;
+        }
+
         // No current executor or different runtime — pick an executor round-robin
         const executors = task.runtime.executors.items;
         const index = task.runtime.next_executor_index.fetchAdd(1, .monotonic);
