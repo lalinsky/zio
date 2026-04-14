@@ -259,6 +259,9 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
+    // Executor dedicated to this thread. Written once on init, never updated.
+    pub threadlocal var current: ?*Executor = null;
+
     /// Get the Executor instance from any coroutine that belongs to it.
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
     /// so we navigate: context -> coro -> main_task -> executor.
@@ -310,9 +313,11 @@ pub const Executor = struct {
         self.loop.add(&self.shutdown.c);
 
         self.main_task.coro.setCurrent();
+        Executor.current = self;
     }
 
     pub fn deinit(self: *Executor) void {
+        Executor.current = null;
         Coroutine.clearCurrent();
 
         self.loop.deinit();
@@ -504,8 +509,13 @@ pub const Executor = struct {
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
             if (current_exec.runtime == task.runtime and old.tag != .new) {
-                task.last_run_tick = 0; // Allow immediate execution on new executor
-                current_exec.scheduleTaskLocal(task);
+                const home_exec = Executor.fromCoroutine(&task.coro);
+                if (current_exec == home_exec or task.canMigrate()) {
+                    task.last_run_tick = 0; // Allow immediate execution on new executor
+                    current_exec.scheduleTaskLocal(task);
+                } else {
+                    home_exec.scheduleTaskRemote(task);
+                }
                 return;
             }
         }

@@ -225,6 +225,13 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
+    /// Check if this task can be migrated to a different executor.
+    // TODO: Enable migration once we have work-stealing for re-balancing
+    pub inline fn canMigrate(self: *const AnyTask) bool {
+        _ = self;
+        return false;
+    }
+
     pub inline fn getRuntime(self: *AnyTask) *Runtime {
         return self.runtime;
     }
