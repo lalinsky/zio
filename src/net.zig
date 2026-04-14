@@ -873,7 +873,7 @@ pub const Socket = struct {
         } else {
             const value: c_int = if (enabled) 1 else 0;
             const bytes = std.mem.asBytes(&value);
-            try std.posix.setsockopt(self.handle, level, optname, bytes);
+            try os.net.setsockopt(self.handle, level, optname, bytes);
         }
     }
 
@@ -887,7 +887,7 @@ pub const Socket = struct {
             }
         } else {
             const bytes = std.mem.asBytes(&int_value);
-            try std.posix.setsockopt(self.handle, level, optname, bytes);
+            try os.net.setsockopt(self.handle, level, optname, bytes);
         }
     }
 
@@ -901,7 +901,7 @@ pub const Socket = struct {
                 return error.Unexpected;
             }
         } else {
-            try std.posix.getsockopt(self.handle, level, optname, std.mem.asBytes(&int_value));
+            try os.net.getsockopt(self.handle, level, optname, std.mem.asBytes(&int_value));
         }
         return @intCast(int_value);
     }

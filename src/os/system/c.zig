@@ -24,6 +24,8 @@ pub const mode_t = c.mode_t;
 pub const uid_t = c.uid_t;
 pub const gid_t = c.gid_t;
 pub const off_t = c.off_t;
+pub const ino_t = c.ino_t;
+pub const pid_t = c.pid_t;
 
 pub const kinfo_file = c.kinfo_file;
 pub const KINFO_FILE_SIZE = c.KINFO_FILE_SIZE;

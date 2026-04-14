@@ -44,8 +44,8 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
         .ipv4 => os_net.AF.INET,
         .ipv6 => os_net.AF.INET6,
     } else os_net.AF.UNSPEC;
-    hints.socktype = std.posix.SOCK.STREAM;
-    hints.protocol = std.posix.IPPROTO.TCP;
+    hints.socktype = os_net.SOCK.STREAM;
+    hints.protocol = os_net.IPPROTO.TCP;
     if (options.canonical_name) {
         hints.flags.CANONNAME = true;
     }

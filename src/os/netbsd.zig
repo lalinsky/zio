@@ -12,7 +12,7 @@ pub extern "c" fn _lwp_self() c_int;
 pub extern "c" fn ___lwp_park60(
     clock_id: c_int,
     flags: c_int,
-    ts: ?*const std.posix.timespec,
+    ts: ?*const std.c.timespec,
     unpark: c_int,
     hint: ?*const anyopaque,
     unparkhint: ?*const anyopaque,
@@ -27,5 +27,7 @@ pub const pthread_cond_wait = std.c.pthread_cond_wait;
 pub const pthread_cond_timedwait = std.c.pthread_cond_timedwait;
 pub const pthread_cond_signal = std.c.pthread_cond_signal;
 pub const pthread_cond_broadcast = std.c.pthread_cond_broadcast;
+
+pub const CLOCK = std.c.CLOCK;
 
 pub const sched_yield = @import("c.zig").sched_yield;

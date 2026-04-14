@@ -4,12 +4,12 @@ const windows = @import("windows.zig");
 
 pub const iovec = switch (builtin.os.tag) {
     .windows => windows.WSABUF,
-    else => std.posix.iovec,
+    else => std.c.iovec,
 };
 
 pub const iovec_const = switch (builtin.os.tag) {
     .windows => windows.WSABUF,
-    else => std.posix.iovec_const,
+    else => std.c.iovec_const,
 };
 
 pub const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.zig_backend) {

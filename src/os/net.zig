@@ -641,24 +641,45 @@ pub fn getsockname(fd: fd_t, addr: *sockaddr, addr_len: *socklen_t) GetSockNameE
 pub const GetSockErrorError = error{Unexpected};
 
 pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
+    var err: i32 = 0;
+    try getsockopt(fd, SOL.SOCKET, SO.ERROR, std.mem.asBytes(&err));
+    return err;
+}
+
+pub const SetsockoptError = error{Unexpected};
+
+pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) SetsockoptError!void {
     switch (builtin.os.tag) {
         .windows => {
-            var err: i32 = 0;
-            var len: i32 = @sizeOf(i32);
-            const rc = windows.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
-            if (rc != 0) {
-                return unexpectedError(windows.WSAGetLastError());
-            }
-            return err;
+            const rc = windows.setsockopt(fd, level, optname, optval.ptr, @intCast(optval.len));
+            if (rc != 0) return unexpectedError(windows.WSAGetLastError());
         },
         else => {
-            var err: i32 = 0;
-            var len: socklen_t = @sizeOf(i32);
-            const rc = posix.system.getsockopt(fd, SOL.SOCKET, SO.ERROR, @ptrCast(&err), &len);
-            if (rc != 0) {
-                return unexpectedError(posix.errno(rc));
+            const rc = posix.system.setsockopt(fd, level, @intCast(optname), optval.ptr, @intCast(optval.len));
+            switch (posix.errno(rc)) {
+                .SUCCESS => {},
+                else => |err| return unexpectedError(err),
             }
-            return err;
+        },
+    }
+}
+
+pub const GetsockoptError = error{Unexpected};
+
+pub fn getsockopt(fd: fd_t, level: i32, optname: u32, optval: []u8) GetsockoptError!void {
+    switch (builtin.os.tag) {
+        .windows => {
+            var len: i32 = @intCast(optval.len);
+            const rc = windows.getsockopt(fd, level, @intCast(optname), optval.ptr, &len);
+            if (rc != 0) return unexpectedError(windows.WSAGetLastError());
+        },
+        else => {
+            var len: socklen_t = @intCast(optval.len);
+            const rc = posix.system.getsockopt(fd, level, @intCast(optname), optval.ptr, &len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => {},
+                else => |err| return unexpectedError(err),
+            }
         },
     }
 }
@@ -1380,13 +1401,13 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     errdefer close(listen_sock);
 
     // Bind to 127.0.0.1:0 (any available port)
-    var bind_addr: sockaddr = @bitCast(std.posix.sockaddr.in{
+    var bind_addr: sockaddr = @bitCast(posix.system.sockaddr.in{
         .family = AF.INET,
         .port = 0, // Let OS choose port
         .addr = 0x0100007F, // 127.0.0.1 in network byte order (little-endian)
         .zero = [_]u8{0} ** 8,
     });
-    try bind(listen_sock, &bind_addr, @sizeOf(std.posix.sockaddr.in));
+    try bind(listen_sock, &bind_addr, @sizeOf(posix.system.sockaddr.in));
 
     // Listen for connections
     try listen(listen_sock, 1);

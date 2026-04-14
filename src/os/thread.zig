@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const posix = @import("posix.zig");
 
 const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
@@ -311,7 +312,7 @@ const FutexDarwin = struct {
         );
 
         if (rc < 0) {
-            const err: std.posix.E = @enumFromInt(-rc);
+            const err: posix.sys.E = @enumFromInt(-rc);
             if (err == .TIMEDOUT) return error.Timeout;
         }
     }
@@ -352,7 +353,7 @@ const FutexFreeBSD = struct {
         );
 
         if (rc == -1) {
-            const err = std.posix.errno(rc);
+            const err = posix.errno(rc);
             if (err == .TIMEDOUT) return error.Timeout;
         }
     }
@@ -464,7 +465,7 @@ const ConditionFreeBSD = struct {
         );
 
         // Check if we timed out
-        if (result == -1 and std.posix.errno(result) == .TIMEDOUT) {
+        if (result == -1 and posix.errno(result) == .TIMEDOUT) {
             return error.Timeout;
         }
     }
@@ -507,7 +508,7 @@ const FutexOpenBSD = struct {
         );
 
         if (rc == -1) {
-            const err = std.posix.errno(rc);
+            const err = posix.errno(rc);
             if (err == .TIMEDOUT) return error.Timeout;
         }
     }
@@ -551,7 +552,7 @@ const FutexDragonFly = struct {
         );
 
         if (rc == -1) {
-            const err = std.posix.errno(rc);
+            const err = posix.errno(rc);
             if (err == .TIMEDOUT or err == .WOULDBLOCK) return error.Timeout;
         }
     }
@@ -618,7 +619,7 @@ const NotifyNetBSD = struct {
         // Safe to call even if signal() was already called - the kernel remembers
         // the unpark and will return EALREADY immediately without blocking.
         _ = sys.___lwp_park60(
-            @intFromEnum(std.posix.CLOCK.MONOTONIC),
+            @intFromEnum(sys.CLOCK.MONOTONIC),
             0,
             null,
             0, // unpark: don't unpark anyone
@@ -636,7 +637,7 @@ const NotifyNetBSD = struct {
         // Safe to call even if signal() was already called - the kernel remembers
         // the unpark and will return EALREADY immediately without blocking.
         const result = sys.___lwp_park60(
-            @intFromEnum(std.posix.CLOCK.MONOTONIC),
+            @intFromEnum(sys.CLOCK.MONOTONIC),
             0,
             &timeout_ts,
             0, // unpark: don't unpark anyone
@@ -645,7 +646,7 @@ const NotifyNetBSD = struct {
         );
 
         if (result == -1) {
-            const err = std.posix.errno(result);
+            const err = posix.errno(result);
             if (err == .TIMEDOUT) {
                 return error.Timeout;
             }
