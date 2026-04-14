@@ -1082,7 +1082,7 @@ fn coroEntry() callconv(.naked) noreturn {
 
 pub const Coroutine = struct {
     context: Context = undefined,
-    parent_context_ptr: std.atomic.Value(*Context),
+    parent_context_ptr: *Context,
 
     /// Returns the current coroutine for this thread, or null if not in a coroutine.
     pub fn getCurrent() ?*Coroutine {
@@ -1104,12 +1104,12 @@ pub const Coroutine = struct {
 
     /// Step into the coroutine
     pub fn step(self: *Coroutine) void {
-        switchContext(self.parent_context_ptr.raw, &self.context);
+        switchContext(self.parent_context_ptr, &self.context);
     }
 
     /// Yield control back to the caller
     pub fn yield(self: *Coroutine) void {
-        switchContext(&self.context, self.parent_context_ptr.raw);
+        switchContext(&self.context, self.parent_context_ptr);
     }
 
     /// Yield control to another coroutine
@@ -1200,7 +1200,7 @@ test "Coroutine: basic" {
     var parent_context: Context = undefined;
 
     var coro: Coroutine = .{
-        .parent_context_ptr = .init(&parent_context),
+        .parent_context_ptr = &parent_context,
         .context = undefined,
     };
     try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
@@ -1227,7 +1227,7 @@ test "Coroutine: recursion" {
     var parent_context: Context = undefined;
 
     var coro: Coroutine = .{
-        .parent_context_ptr = .init(&parent_context),
+        .parent_context_ptr = &parent_context,
         .context = undefined,
     };
     try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
@@ -1255,14 +1255,14 @@ test "Coroutine: message passing" {
     var parent_context: Context = undefined;
 
     var coro1: Coroutine = .{
-        .parent_context_ptr = .init(&parent_context),
+        .parent_context_ptr = &parent_context,
         .context = undefined,
     };
     try stackAlloc(&coro1.context.stack_info, 64 * 1024, 4096);
     defer stackFree(coro1.context.stack_info);
 
     var coro2: Coroutine = .{
-        .parent_context_ptr = .init(&parent_context),
+        .parent_context_ptr = &parent_context,
         .context = undefined,
     };
     try stackAlloc(&coro2.context.stack_info, 64 * 1024, 4096);
@@ -1351,7 +1351,7 @@ test "Coroutine: allocator inside coroutine" {
     var parent_context: Context = undefined;
 
     var coro: Coroutine = .{
-        .parent_context_ptr = .init(&parent_context),
+        .parent_context_ptr = &parent_context,
         .context = undefined,
     };
     try stackAlloc(&coro.context.stack_info, 8 * 1024 * 1024, 4096);
@@ -1389,7 +1389,7 @@ test "Coroutine: stack trace" {
 
     var parent_ctx: Context = undefined;
     var coro = Coroutine{
-        .parent_context_ptr = .init(&parent_ctx),
+        .parent_context_ptr = &parent_ctx,
         .context = undefined,
     };
 

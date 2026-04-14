@@ -14,10 +14,11 @@ BACKEND=""
 USE_WINE=false
 USE_QEMU=false
 NO_EXEC=false
+TIMEOUT=""
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--ci] [--full] [--release] [--verbose]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--ci] [--full] [--release] [--verbose] [--timeout <seconds>]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -65,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --timeout)
+            [[ $# -ge 2 ]] || { echo "--timeout requires an argument"; usage; exit 1; }
+            TIMEOUT="$2"; shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             usage
@@ -83,36 +88,40 @@ else
 fi
 
 echo "=== Running unit tests ==="
-BUILD_ARGS="test"
+BUILD_ARGS=(test)
 if [ -n "$TEST_FILTER" ]; then
     echo "Filter: $TEST_FILTER"
-    BUILD_ARGS="$BUILD_ARGS -Dtest-filter=\"$TEST_FILTER\""
+    BUILD_ARGS+=("-Dtest-filter=$TEST_FILTER")
 fi
 if [ -n "$TARGET" ]; then
     echo "Target: $TARGET"
-    BUILD_ARGS="$BUILD_ARGS -Dtarget=$TARGET"
+    BUILD_ARGS+=("-Dtarget=$TARGET")
 fi
 if [ -n "$BACKEND" ]; then
     echo "Backend: $BACKEND"
-    BUILD_ARGS="$BUILD_ARGS -Dbackend=$BACKEND"
+    BUILD_ARGS+=("-Dbackend=$BACKEND")
 fi
 if [ "$USE_WINE" = true ]; then
-    BUILD_ARGS="$BUILD_ARGS -Demit-test-bin"
+    BUILD_ARGS+=(-Demit-test-bin)
 fi
 if [ "$USE_QEMU" = true ]; then
-    BUILD_ARGS="$BUILD_ARGS -fqemu"
+    BUILD_ARGS+=(-fqemu)
 fi
 if [ "$NO_EXEC" = true ]; then
-    BUILD_ARGS="$BUILD_ARGS -Demit-test-bin"
+    BUILD_ARGS+=(-Demit-test-bin)
 fi
 if [ "$RELEASE_MODE" = true ]; then
     echo "Build mode: ReleaseSafe"
-    BUILD_ARGS="$BUILD_ARGS -Doptimize=ReleaseSafe"
+    BUILD_ARGS+=(-Doptimize=ReleaseSafe)
 fi
 if [ "$VERBOSE" = true ]; then
     export TEST_VERBOSE=true
 fi
-eval zig build $BUILD_ARGS --summary all
+if [ -n "$TIMEOUT" ]; then
+    timeout "$TIMEOUT" zig build "${BUILD_ARGS[@]}" --summary all
+else
+    zig build "${BUILD_ARGS[@]}" --summary all
+fi
 
 if [ "$USE_WINE" = true ]; then
     echo "=== Running tests with Wine ==="

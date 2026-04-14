@@ -196,11 +196,14 @@ pub const Group = struct {
 
         group.setCanceled();
 
-        // Pop all tasks to cancel them while setting the "canceled" flag
-        while (group.getTasks().popAndSetFlag()) |node| {
-            const awaitable: *Awaitable = @fieldParentPtr("group_node", node);
+        // Pop all tasks to cancel them while setting the "canceled" flag.
+        // Note: the group typically lives on the caller's stack so cancel()/release()
+        // don't free `self`, but we still break on is_last for consistency.
+        while (group.getTasks().popAndSetFlag()) |result| {
+            const awaitable: *Awaitable = @fieldParentPtr("group_node", result.node);
             awaitable.cancel();
             awaitable.release();
+            if (result.is_last) break;
         }
 
         // Wait for all tasks to complete

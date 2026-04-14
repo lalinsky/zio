@@ -88,9 +88,12 @@ pub fn Future(comptime T: type) type {
                 return;
             }
 
-            // Pop and wake all waiters while setting the flag
-            while (self.wait_queue.popAndSetFlag()) |node| {
-                Waiter.fromNode(node).signal();
+            // Pop and wake all waiters while setting the flag.
+            // Break as soon as we pop the last waiter - signaling it can free `self`
+            // if it lives on a coroutine stack.
+            while (self.wait_queue.popAndSetFlag()) |result| {
+                Waiter.fromNode(result.node).signal();
+                if (result.is_last) break;
             }
         }
 

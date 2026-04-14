@@ -78,9 +78,15 @@ pub fn isSet(self: *const ResetEvent) bool {
 /// The event remains set until `reset()` is called. Multiple calls to `set()` while
 /// already set have no effect.
 pub fn set(self: *ResetEvent) void {
-    // Pop and wake all waiters while setting the flag
-    while (self.wait_queue.popAndSetFlag()) |node| {
-        Waiter.fromNode(node).signal();
+    // Pop and wake all waiters while setting the flag.
+    //
+    // UAF safety: `self` may live on a coroutine stack belonging to a waiting task.
+    // Signaling the last waiter can resume that task on another executor, which may
+    // return and free its stack before we touch `self` again. Break out of the loop
+    // as soon as we've popped the last waiter so we never touch `self` afterwards.
+    while (self.wait_queue.popAndSetFlag()) |result| {
+        Waiter.fromNode(result.node).signal();
+        if (result.is_last) break;
     }
 }
 
