@@ -1066,17 +1066,6 @@ pub const Stream = struct {
         return self.readBuf(.fromSlice(buf, &storage), timeout);
     }
 
-    /// Reads data from the stream into the provided buffer until it is full or the stream is closed.
-    /// A return value of 0 indicates end-of-stream.
-    pub fn readAll(self: Stream, buf: []u8, timeout: Timeout) !void {
-        var offset: usize = 0;
-        while (offset < buf.len) {
-            const n = try self.read(buf[offset..], timeout);
-            if (n == 0) break;
-            offset += n;
-        }
-    }
-
     /// Reads data from the stream into multiple buffers using vectored I/O.
     /// Returns the number of bytes read across all buffers, which may be less than the total capacity.
     /// A return value of 0 indicates end-of-stream.
