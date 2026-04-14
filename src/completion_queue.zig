@@ -31,6 +31,7 @@ const os = @import("os/root.zig");
 const common = @import("common.zig");
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 const Runtime = @import("runtime.zig").Runtime;
+const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 
 const Waiter = common.Waiter;
 const Cancelable = common.Cancelable;
@@ -56,8 +57,8 @@ pub const CompletionQueue = struct {
         };
     }
 
-    fn getLoop(self: *CompletionQueue) *ev.Loop {
-        return &self.waiter.mode.direct.task.?.getExecutor().loop;
+    fn getLoop(_: *CompletionQueue) *ev.Loop {
+        return &getCurrentExecutor().loop;
     }
 
     /// Get the Completion that owns a group node.

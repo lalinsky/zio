@@ -259,6 +259,9 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
+    // Executor for the current thread (set once in init, cleared in deinit)
+    pub threadlocal var current: ?*Executor = null;
+
     /// Get the Executor instance from any coroutine that belongs to it.
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
     /// so we navigate: context -> coro -> main_task -> executor
@@ -289,6 +292,7 @@ pub const Executor = struct {
                 .context = std.mem.zeroes(Context),
                 .parent_context_ptr = undefined,
             },
+            .runtime = runtime,
             .closure = undefined, // main_task has no closure
         };
         self.main_task.coro.parent_context_ptr = .init(&self.main_task.coro.context);
@@ -307,10 +311,14 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
+        std.debug.assert(Executor.current == null);
+        Executor.current = self;
         self.main_task.coro.setCurrent();
     }
 
     pub fn deinit(self: *Executor) void {
+        std.debug.assert(Executor.current == self);
+        Executor.current = null;
         Coroutine.clearCurrent();
 
         self.loop.deinit();
@@ -611,8 +619,7 @@ pub fn getCurrentExecutor() *Executor {
 }
 
 pub fn getCurrentExecutorOrNull() ?*Executor {
-    const task = getCurrentTaskOrNull() orelse return null;
-    return task.getExecutor();
+    return Executor.current;
 }
 
 /// Get the currently executing task.

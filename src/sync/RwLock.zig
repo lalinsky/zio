@@ -207,6 +207,7 @@ test "RwLock basic shared lock/unlock" {
 }
 
 test "RwLock concurrent readers and writers" {
+    std.debug.print("test start\n", .{});
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
@@ -216,10 +217,18 @@ test "RwLock concurrent readers and writers" {
     var reads = std.atomic.Value(u32).init(0);
 
     const TestFn = struct {
+        const tid = std.Thread.getCurrentId;
+
         fn reader(rw: *RwLock, a: *usize, b: *usize, read_count: *std.atomic.Value(u32)) !void {
-            for (0..100) |_| {
+            std.debug.print("[t={d}] reader start\n", .{tid()});
+            for (0..100) |i| {
+                std.debug.print("[t={d}] reader {d} lockShared...\n", .{ tid(), i });
                 try rw.lockShared();
-                defer rw.unlockShared();
+                std.debug.print("[t={d}] reader {d} got shared lock\n", .{ tid(), i });
+                defer {
+                    rw.unlockShared();
+                    std.debug.print("[t={d}] reader {d} unlocked shared\n", .{ tid(), i });
+                }
 
                 // Both values should always be equal under the lock
                 const va: *const volatile usize = a;
@@ -227,27 +236,37 @@ test "RwLock concurrent readers and writers" {
                 try std.testing.expectEqual(va.*, vb.*);
                 _ = read_count.fetchAdd(1, .monotonic);
             }
+            std.debug.print("[t={d}] reader done\n", .{tid()});
         }
 
         fn writer(rw: *RwLock, a: *usize, b: *usize) !void {
-            for (0..100) |_| {
+            std.debug.print("[t={d}] writer start\n", .{tid()});
+            for (0..100) |i| {
+                std.debug.print("[t={d}] writer {d} lock...\n", .{ tid(), i });
                 try rw.lock();
-                defer rw.unlock();
+                std.debug.print("[t={d}] writer {d} got lock\n", .{ tid(), i });
+                defer {
+                    rw.unlock();
+                    std.debug.print("[t={d}] writer {d} unlocked\n", .{ tid(), i });
+                }
 
                 a.* += 1;
                 b.* += 1;
             }
+            std.debug.print("[t={d}] writer done\n", .{tid()});
         }
     };
 
     var group: Group = .init;
     defer group.cancel();
 
+    std.debug.print("spawning tasks\n", .{});
     try group.spawn(TestFn.writer, .{ &rwlock, &val_a, &val_b });
     try group.spawn(TestFn.writer, .{ &rwlock, &val_a, &val_b });
     try group.spawn(TestFn.reader, .{ &rwlock, &val_a, &val_b, &reads });
     try group.spawn(TestFn.reader, .{ &rwlock, &val_a, &val_b, &reads });
 
+    std.debug.print("waiting for group\n", .{});
     try group.wait();
     try std.testing.expect(!group.hasFailed());
 

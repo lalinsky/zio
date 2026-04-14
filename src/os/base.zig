@@ -25,7 +25,7 @@ pub fn unexpectedError(err: anytype) error{Unexpected} {
             \\
         , .{err});
         if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            std.debug.dumpCurrentStackTrace(null);
+            //            std.debug.dumpCurrentStackTrace(null);
         } else {
             std.debug.dumpCurrentStackTrace(.{});
         }

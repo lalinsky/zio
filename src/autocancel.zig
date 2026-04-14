@@ -5,6 +5,7 @@ const std = @import("std");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
+const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
 const AnyTask = @import("task.zig").AnyTask;
@@ -38,7 +39,7 @@ pub const AutoCancel = struct {
         }
 
         const task = getCurrentTask();
-        const executor = task.getExecutor();
+        const executor = getCurrentExecutor();
 
         // Set task reference and reset triggered flag
         self.task = task;

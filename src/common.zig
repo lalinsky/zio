@@ -10,6 +10,7 @@ const Timeout = @import("time.zig").Timeout;
 const Stopwatch = @import("time.zig").Stopwatch;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
+const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const AnyTask = @import("task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
@@ -162,7 +163,7 @@ pub const Waiter = struct {
         timer.c.userdata = self;
         timer.c.callback = callback;
 
-        task.getExecutor().loop.setTimer(&timer, timeout);
+        getCurrentExecutor().loop.setTimer(&timer, timeout);
         defer timer.c.loop.?.clearTimer(&timer);
 
         return waitTask(d, task, expected, cancel_mode);
@@ -244,11 +245,11 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     };
 
     // Async path: Submit to the event loop and wait for completion
-    task.getExecutor().loop.add(c);
+    getCurrentExecutor().loop.add(c);
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
             // On cancellation, cancel the I/O and wait for completion
-            task.getExecutor().loop.cancel(c);
+            getCurrentExecutor().loop.cancel(c);
             waiter.wait(1, .no_cancel);
 
             // Check if I/O was actually canceled
@@ -280,14 +281,14 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     };
 
     // Blocking path: Execute synchronously without event loop
-    const task = waiter.mode.direct.task orelse {
+    if (waiter.mode.direct.task == null) {
         // TODO: Don't use std.heap.smp_allocator - it should be passed as a parameter
         ev.executeBlocking(c, std.heap.smp_allocator);
         return;
-    };
+    }
 
     // Async path: Submit to the event loop and wait for completion (no cancel)
-    task.getExecutor().loop.add(c);
+    getCurrentExecutor().loop.add(c);
     waiter.wait(1, .no_cancel);
 }
 
