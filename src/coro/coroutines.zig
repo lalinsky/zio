@@ -1046,15 +1046,38 @@ fn coroEntry() callconv(.naked) noreturn {
                 }
             }
         },
-        .aarch64 => asm volatile (
-            \\ ldp x2, x0, [sp]
-            \\ br x2
-        ),
-        .arm, .thumb => asm volatile (
-            \\ ldr r0, [sp, #4]
-            \\ ldr r2, [sp, #0]
-            \\ bx r2
-        ),
+        .aarch64 => {
+            // Create sentinel frame for FP-based unwinding (needed for macOS/aarch64)
+            asm volatile (
+                \\ stp xzr, xzr, [sp, #-16]!
+                \\ mov x29, sp
+                \\ mov x30, xzr
+                \\ ldp x2, x0, [sp, #16]
+                \\ br x2
+            );
+        },
+        .arm => {
+            // Create sentinel frame for FP-based unwinding (ARM uses r11 for fp)
+            asm volatile (
+                \\ push {r0, r1}
+                \\ mov r11, sp
+                \\ mov r14, #0
+                \\ ldr r0, [sp, #12]
+                \\ ldr r2, [sp, #8]
+                \\ bx r2
+            );
+        },
+        .thumb => {
+            // Create sentinel frame for FP-based unwinding (Thumb uses r7 for fp)
+            asm volatile (
+                \\ push {r0, r1}
+                \\ mov r7, sp
+                \\ mov r14, #0
+                \\ ldr r0, [sp, #12]
+                \\ ldr r2, [sp, #8]
+                \\ bx r2
+            );
+        },
         .riscv64 => asm volatile (
             \\ ld a0, 8(sp)
             \\ ld t0, 0(sp)
@@ -1384,6 +1407,10 @@ test "Coroutine: allocator inside coroutine" {
 
 test "Coroutine: stack trace" {
     if (builtin.cpu.arch == .powerpc64 or builtin.cpu.arch == .powerpc64le) return error.SkipZigTest;
+    // Stack unwinding works on ARM/Thumb in Zig 0.15.2 but is broken in 0.16 -
+    // captureCurrentStackTrace returns an empty trace even with a sentinel frame installed.
+    // See https://codeberg.org/ziglang/zig/issues/31082
+    if (builtin.cpu.arch == .arm or builtin.cpu.arch == .thumb) return error.SkipZigTest;
 
     const stack = @import("stack.zig");
 
