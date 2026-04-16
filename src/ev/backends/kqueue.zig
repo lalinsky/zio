@@ -66,7 +66,7 @@ const NOTE_TRIGGER: u32 = 0x01000000;
 allocator: std.mem.Allocator,
 kqueue_fd: i32 = -1,
 waker_ident: usize = undefined,
-change_buffer: std.ArrayList(std.c.Kevent) = .{},
+change_buffer: std.ArrayList(std.c.Kevent) = .empty,
 events: []std.c.Kevent,
 queue_size: u16,
 

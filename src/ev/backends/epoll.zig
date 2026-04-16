@@ -772,7 +772,7 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
             defer _ = linux.close(@intCast(data.internal.pidfd));
 
             var siginfo: linux.siginfo_t = undefined;
-            const wait_rc = linux.waitid(.PIDFD, @intCast(data.internal.pidfd), &siginfo, linux.W.EXITED);
+            const wait_rc = linux.waitid(.PIDFD, @intCast(data.internal.pidfd), &siginfo, linux.W.EXITED, null);
             switch (posix.errno(wait_rc)) {
                 .SUCCESS => {
                     // Extract exit status from siginfo
