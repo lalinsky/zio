@@ -7,11 +7,7 @@ const std = @import("std");
 const zio = @import("zio");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const rt = try zio.Runtime.init(allocator, .{});
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);

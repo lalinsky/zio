@@ -76,17 +76,13 @@ fn clientTask(
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
     std.debug.print("Echo Server Benchmark\n", .{});
     std.debug.print("  Clients: {}\n", .{NUM_CLIENTS});
     std.debug.print("  Messages per client: {}\n", .{MESSAGES_PER_CLIENT});
     std.debug.print("  Message size: {} bytes\n", .{MESSAGE_SIZE});
     std.debug.print("  Total messages: {}\n\n", .{NUM_CLIENTS * MESSAGES_PER_CLIENT});
 
-    var rt = try zio.Runtime.init(allocator, .{ .executors = .auto });
+    var rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .auto });
     defer rt.deinit();
 
     var server_ready = zio.ResetEvent.init;
