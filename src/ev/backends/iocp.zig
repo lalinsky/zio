@@ -284,7 +284,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         windows.FALSE,
         windows.DUPLICATE_SAME_ACCESS,
     );
-    if (dup_result == 0) {
+    if (dup_result == .FALSE) {
         return error.Unexpected;
     }
     errdefer windows.CloseHandle(thread_handle);
@@ -1048,7 +1048,7 @@ fn submitFileRead(self: *Self, state: *LoopState, data: *FileRead) !void {
 
     // When ReadFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
     // the completion will be posted to the IOCP port.
-    if (result == 0) {
+    if (result == .FALSE) {
         const err = windows.GetLastError();
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
@@ -1084,7 +1084,7 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
 
     // When WriteFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
     // the completion will be posted to the IOCP port.
-    if (result == 0) {
+    if (result == .FALSE) {
         const err = windows.GetLastError();
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
@@ -1160,7 +1160,7 @@ fn submitPipeRead(self: *Self, state: *LoopState, data: *PipeRead) !void {
 
     // When ReadFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
     // the completion will be posted to the IOCP port.
-    if (result == 0) {
+    if (result == .FALSE) {
         const err = windows.GetLastError();
         if (err == .BROKEN_PIPE) {
             // Write end closed - this is EOF, not an error
@@ -1199,7 +1199,7 @@ fn submitPipeWrite(self: *Self, state: *LoopState, data: *PipeWrite) !void {
 
     // When WriteFile succeeds (result == TRUE) OR returns ERROR_IO_PENDING,
     // the completion will be posted to the IOCP port.
-    if (result == 0) {
+    if (result == .FALSE) {
         const err = windows.GetLastError();
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
@@ -1351,7 +1351,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
 
             // Cancel the I/O operation
             const result = windows.CancelIoEx(handle, &target.internal.overlapped);
-            if (result == 0) {
+            if (result == .FALSE) {
                 const err = windows.GetLastError();
                 // ERROR_NOT_FOUND means the operation already completed - that's fine
                 if (err != .NOT_FOUND) {
@@ -1377,7 +1377,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
         log.warn("Received IOCP completion with NULL overlapped", .{});
         return;
     }
-    const overlapped = entry.lpOverlapped;
+    const overlapped = entry.lpOverlapped.?;
 
     // Use @fieldParentPtr to get from OVERLAPPED to CompletionData
     const completion_data: *CompletionData = @fieldParentPtr("overlapped", overlapped);
@@ -1692,7 +1692,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 windows.FALSE,
             );
 
-            if (result == 0) {
+            if (result == .FALSE) {
                 const err = windows.GetLastError();
                 // HANDLE_EOF is not an error - it means we successfully read 0 bytes (EOF)
                 if (err == .HANDLE_EOF) {
@@ -1718,7 +1718,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 windows.FALSE,
             );
 
-            if (result == 0) {
+            if (result == .FALSE) {
                 const err = windows.GetLastError();
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             } else {
@@ -1739,7 +1739,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 windows.FALSE,
             );
 
-            if (result == 0) {
+            if (result == .FALSE) {
                 const err = windows.GetLastError();
                 // HANDLE_EOF and BROKEN_PIPE are not errors for pipe reads - they mean EOF (0 bytes)
                 if (err == .HANDLE_EOF or err == .BROKEN_PIPE) {
@@ -1765,7 +1765,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 windows.FALSE,
             );
 
-            if (result == 0) {
+            if (result == .FALSE) {
                 const err = windows.GetLastError();
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             } else {

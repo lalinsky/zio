@@ -2253,9 +2253,9 @@ fn dirReadWindows(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize 
             buffer.ptr,
             @intCast(buffer.len),
             .FileBothDirectoryInformation,
-            0, // ReturnSingleEntry
+            .FALSE, // ReturnSingleEntry
             null, // FileName filter
-            @intFromBool(restart),
+            w.BOOLEAN.fromBool(restart),
         );
 
         switch (rc) {

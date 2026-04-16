@@ -790,7 +790,7 @@ const MutexWindows = struct {
     }
 
     pub fn tryLock(self: *MutexWindows) bool {
-        return sys.TryAcquireSRWLockExclusive(&self.srwlock) != 0;
+        return sys.TryAcquireSRWLockExclusive(&self.srwlock).toBool();
     }
 };
 
@@ -928,7 +928,7 @@ const ConditionWindows = struct {
         const ms = @min(duration.toMilliseconds(), std.math.maxInt(sys.DWORD));
         const result = sys.SleepConditionVariableSRW(&self.cond, &mutex.srwlock, @intCast(ms), 0);
         if (result == sys.FALSE) {
-            const err = std.os.windows.kernel32.GetLastError();
+            const err = sys.GetLastError();
             if (err == .TIMEOUT) {
                 return error.Timeout;
             }

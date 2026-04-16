@@ -7,8 +7,6 @@ pub const BOOL = std.os.windows.BOOL;
 pub const HANDLE = std.os.windows.HANDLE;
 pub const LPVOID = std.os.windows.LPVOID;
 pub const LARGE_INTEGER = std.os.windows.LARGE_INTEGER;
-pub const OVERLAPPED = std.os.windows.OVERLAPPED;
-pub const OVERLAPPED_ENTRY = std.os.windows.OVERLAPPED_ENTRY;
 pub const ULONG = std.os.windows.ULONG;
 pub const ULONG_PTR = std.os.windows.ULONG_PTR;
 pub const SECURITY_ATTRIBUTES = std.os.windows.SECURITY_ATTRIBUTES;
@@ -18,17 +16,98 @@ pub const NTSTATUS = std.os.windows.NTSTATUS;
 pub const BOOLEAN = std.os.windows.BOOLEAN;
 pub const IO_STATUS_BLOCK = std.os.windows.IO_STATUS_BLOCK;
 pub const FILE_BOTH_DIR_INFORMATION = std.os.windows.FILE_BOTH_DIR_INFORMATION;
-pub const FILE_INFORMATION_CLASS = std.os.windows.FILE_INFORMATION_CLASS;
+
+/// FILE_INFORMATION_CLASS enum (removed from std.os.windows in Zig 0.16).
+/// Values match the Windows DDK NtQueryDirectoryFile API.
+pub const FILE_INFORMATION_CLASS = enum(c_int) {
+    FileDirectoryInformation = 1,
+    FileFullDirectoryInformation = 2,
+    FileBothDirectoryInformation = 3,
+    FileBasicInformation = 4,
+    FileStandardInformation = 5,
+    FileInternalInformation = 6,
+    FileEaInformation = 7,
+    FileAccessInformation = 8,
+    FileNameInformation = 9,
+    FileRenameInformation = 10,
+    FileLinkInformation = 11,
+    FileNamesInformation = 12,
+    FileDispositionInformation = 13,
+    FilePositionInformation = 14,
+    FileFullEaInformation = 15,
+    FileModeInformation = 16,
+    FileAlignmentInformation = 17,
+    FileAllInformation = 18,
+    FileAllocationInformation = 19,
+    FileEndOfFileInformation = 20,
+    FileAlternateNameInformation = 21,
+    FileStreamInformation = 22,
+    FilePipeInformation = 23,
+    FilePipeLocalInformation = 24,
+    FilePipeRemoteInformation = 25,
+    FileMailslotQueryInformation = 26,
+    FileMailslotSetInformation = 27,
+    FileCompressionInformation = 28,
+    FileObjectIdInformation = 29,
+    FileCompletionInformation = 30,
+    FileMoveClusterInformation = 31,
+    FileQuotaInformation = 32,
+    FileReparsePointInformation = 33,
+    FileNetworkOpenInformation = 34,
+    FileAttributeTagInformation = 35,
+    FileTrackingInformation = 36,
+    FileIdBothDirectoryInformation = 37,
+    FileIdFullDirectoryInformation = 38,
+    FileValidDataLengthInformation = 39,
+    FileShortNameInformation = 40,
+    FileIoCompletionNotificationInformation = 41,
+    FileIoStatusBlockRangeInformation = 42,
+    FileIoPriorityHintInformation = 43,
+    FileSfioReserveInformation = 44,
+    FileSfioVolumeInformation = 45,
+    FileHardLinkInformation = 46,
+    FileProcessIdsUsingFileInformation = 47,
+    FileNormalizedNameInformation = 48,
+    FileNetworkPhysicalNameInformation = 49,
+    FileIdGlobalTxDirectoryInformation = 50,
+    FileIsRemoteDeviceInformation = 51,
+    FileAttributeCacheInformation = 52,
+    FileNumaNodeInformation = 53,
+    FileStandardLinkInformation = 54,
+    FileRemoteProtocolInformation = 55,
+    FileMaximumInformation = 56,
+};
 pub const WCHAR = std.os.windows.WCHAR;
 pub const PAPCFUNC = *const fn (ULONG_PTR) callconv(.winapi) void;
 pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(.winapi) BOOL;
 
+// OVERLAPPED structure (removed from std.os.windows in Zig 0.16)
+pub const OVERLAPPED = extern struct {
+    Internal: ULONG_PTR,
+    InternalHigh: ULONG_PTR,
+    DUMMYUNIONNAME: extern union {
+        DUMMYSTRUCTNAME: extern struct {
+            Offset: DWORD,
+            OffsetHigh: DWORD,
+        },
+        Pointer: ?PVOID,
+    },
+    hEvent: ?HANDLE,
+};
+
+pub const OVERLAPPED_ENTRY = extern struct {
+    lpCompletionKey: ULONG_PTR,
+    lpOverlapped: ?*OVERLAPPED,
+    Internal: ULONG_PTR,
+    dwNumberOfBytesTransferred: DWORD,
+};
+
 // Constants
-pub const TRUE: BOOL = 1;
-pub const FALSE: BOOL = 0;
+pub const TRUE: BOOL = BOOL.TRUE;
+pub const FALSE: BOOL = .FALSE;
 pub const NAME_MAX = std.os.windows.NAME_MAX;
 pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
-pub const INFINITE: DWORD = std.os.windows.INFINITE;
+pub const INFINITE: DWORD = 0xFFFFFFFF;
 
 /// Sentinel value representing the current working directory.
 /// Similar to POSIX AT_FDCWD. This is not a real handle - it must be
@@ -537,14 +616,14 @@ pub const Win32Error = @import("windows/win32error.zig").Win32Error;
 /// Query the performance counter (monotonic clock ticks).
 pub fn QueryPerformanceCounter() u64 {
     var result: LARGE_INTEGER = undefined;
-    std.debug.assert(RtlQueryPerformanceCounter(&result) != 0);
+    std.debug.assert(RtlQueryPerformanceCounter(&result) != .FALSE);
     return @bitCast(result);
 }
 
 /// Query the performance counter frequency (ticks per second).
 pub fn QueryPerformanceFrequency() u64 {
     var result: LARGE_INTEGER = undefined;
-    std.debug.assert(RtlQueryPerformanceFrequency(&result) != 0);
+    std.debug.assert(RtlQueryPerformanceFrequency(&result) != .FALSE);
     return @bitCast(result);
 }
 
@@ -666,8 +745,8 @@ pub const WORD = std.os.windows.WORD;
 pub const SHORT = std.os.windows.SHORT;
 pub const INT = std.os.windows.INT;
 
-pub const SOCKET = std.os.windows.ws2_32.SOCKET;
-pub const INVALID_SOCKET = std.os.windows.ws2_32.INVALID_SOCKET;
+pub const SOCKET = *opaque {};
+pub const INVALID_SOCKET: SOCKET = @ptrFromInt(std.math.maxInt(usize));
 pub const SOCKET_ERROR: i32 = -1;
 
 pub const ADDRESS_FAMILY = u16;
@@ -705,9 +784,17 @@ pub const sockaddr = extern struct {
     };
 };
 
-// Forward from std to maintain compatibility with std.Io.Reader
-pub const WSABUF = std.os.windows.ws2_32.WSABUF;
-pub const LPWSAOVERLAPPED_COMPLETION_ROUTINE = std.os.windows.ws2_32.LPWSAOVERLAPPED_COMPLETION_ROUTINE;
+// WSABUF structure for WSARecv/WSASend (removed from std.os.windows.ws2_32 in Zig 0.16).
+// Aliased to std.os.windows.AFD.WSABUF(.@"var") so it is compatible with the std.Io.Reader
+// APIs (writableVectorWsa) that use that same type.
+pub const WSABUF = std.os.windows.AFD.WSABUF(.@"var");
+
+pub const LPWSAOVERLAPPED_COMPLETION_ROUTINE = *const fn (
+    dwError: DWORD,
+    cbTransferred: DWORD,
+    lpOverlapped: *OVERLAPPED,
+    dwFlags: DWORD,
+) callconv(.winapi) void;
 
 // WSAMSG structures for WSARecvMsg/WSASendMsg
 // WSABUF with optional buf pointer for Control field

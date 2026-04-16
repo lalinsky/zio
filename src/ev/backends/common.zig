@@ -698,7 +698,7 @@ pub fn handleProcessWait(c: *Completion) void {
         }
         // Get the exit code
         var exit_code: windows.DWORD = 0;
-        if (windows.GetExitCodeProcess(data.handle, &exit_code) == 0) {
+        if (windows.GetExitCodeProcess(data.handle, &exit_code) == .FALSE) {
             c.setError(error.Unexpected);
             return;
         }
