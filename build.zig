@@ -110,8 +110,7 @@ pub fn build(b: *std.Build) void {
 
     const lib_unit_tests = b.addTest(.{
         .root_module = zio,
-        // TODO: re-enable custom test runner once ported to Zig 0.16
-        // .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         .filters = if (test_filter) |f| &.{f} else &.{},
     });
 
