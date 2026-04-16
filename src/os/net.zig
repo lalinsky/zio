@@ -4,6 +4,7 @@ const posix = @import("posix.zig");
 const windows = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
+const thread = @import("thread.zig");
 
 const log = @import("../common.zig").log;
 
@@ -44,7 +45,8 @@ pub const has_unix_dgram_sockets = switch (builtin.os.tag) {
     else => true,
 };
 
-var wsa_init_once = std.once(wsaInit);
+var wsa_init_done: std.atomic.Value(bool) = .init(false);
+var wsa_init_mutex: thread.Mutex = .init();
 
 fn wsaInit() void {
     if (builtin.os.tag == .windows) {
@@ -54,7 +56,12 @@ fn wsaInit() void {
 }
 
 pub fn ensureWSAInitialized() void {
-    wsa_init_once.call();
+    if (wsa_init_done.load(.acquire)) return;
+    wsa_init_mutex.lock();
+    defer wsa_init_mutex.unlock();
+    if (wsa_init_done.load(.acquire)) return;
+    wsaInit();
+    wsa_init_done.store(true, .release);
 }
 
 pub const fd_t = switch (builtin.os.tag) {

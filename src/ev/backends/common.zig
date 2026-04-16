@@ -710,7 +710,7 @@ pub fn handleProcessWait(c: *Completion) void {
         const linux = std.os.linux;
         const posix = @import("../../os/posix.zig");
         var siginfo: linux.siginfo_t = undefined;
-        const rc = linux.waitid(.PID, data.handle, &siginfo, linux.W.EXITED);
+        const rc = linux.waitid(.PID, data.handle, &siginfo, linux.W.EXITED, null);
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 // With waitid(), si_status contains the value directly (not encoded like waitpid)

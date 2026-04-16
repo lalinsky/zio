@@ -21,15 +21,15 @@ pub const SignalKind = switch (builtin.os.tag) {
         terminate = w.CTRL_CLOSE_EVENT,
     },
     else => enum(u8) {
-        interrupt = posix.SIG.INT,
-        terminate = posix.SIG.TERM,
-        hangup = posix.SIG.HUP,
-        alarm = posix.SIG.ALRM,
-        child = posix.SIG.CHLD,
-        pipe = posix.SIG.PIPE,
-        quit = posix.SIG.QUIT,
-        user1 = posix.SIG.USR1,
-        user2 = posix.SIG.USR2,
+        interrupt = @intFromEnum(posix.SIG.INT),
+        terminate = @intFromEnum(posix.SIG.TERM),
+        hangup = @intFromEnum(posix.SIG.HUP),
+        alarm = @intFromEnum(posix.SIG.ALRM),
+        child = @intFromEnum(posix.SIG.CHLD),
+        pipe = @intFromEnum(posix.SIG.PIPE),
+        quit = @intFromEnum(posix.SIG.QUIT),
+        user1 = @intFromEnum(posix.SIG.USR1),
+        user2 = @intFromEnum(posix.SIG.USR2),
         _,
     },
 };
@@ -181,7 +181,8 @@ const HandlerRegistry = if (builtin.os.tag == .windows) HandlerRegistryWindows e
 
 var registry: HandlerRegistry = .{};
 
-fn signalHandlerUnix(signum: c_int) callconv(.c) void {
+fn signalHandlerUnix(sig: posix.SIG) callconv(.c) void {
+    const signum: u8 = @intCast(@intFromEnum(sig));
     for (&registry.handlers) |*entry| {
         const kind = entry.kind.load(.acquire);
         if (kind == signum) {

@@ -413,11 +413,7 @@ fn invokePreviousHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyop
                 _ = posix.raise(sig) catch {};
             } else {
                 // Call the previous simple handler
-                if (comptime is_pre_016) {
-                    h(sig);
-                } else {
-                    h(@intFromEnum(sig));
-                }
+                h(sig);
             }
         }
     }

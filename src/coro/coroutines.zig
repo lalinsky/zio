@@ -1397,20 +1397,14 @@ test "Coroutine: stack trace" {
     defer stack.stackFree(coro.context.stack_info);
 
     const TestData = struct {
-        trace: std.builtin.StackTrace = undefined,
+        trace: std.debug.StackTrace = undefined,
         trace_addrs: [32]usize = undefined,
         finished: bool = false,
 
         fn coroFunc(c: *Coroutine, userdata: ?*anyopaque) void {
             c.yield(); // make it slightly more complicated and yield once
             const self: *@This() = @ptrCast(@alignCast(userdata));
-            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-                self.trace.index = 0;
-                self.trace.instruction_addresses = &self.trace_addrs;
-                std.debug.captureStackTrace(null, &self.trace);
-            } else {
-                self.trace = std.debug.captureCurrentStackTrace(.{}, &self.trace_addrs);
-            }
+            self.trace = std.debug.captureCurrentStackTrace(.{}, &self.trace_addrs);
             self.finished = true;
         }
     };
@@ -1422,14 +1416,11 @@ test "Coroutine: stack trace" {
         coro.step();
     }
 
-    std.debug.dumpStackTrace(test_data.trace);
+    std.debug.dumpStackTrace(&test_data.trace);
 
-    std.testing.expect(test_data.trace.index > 1 and test_data.trace.index < 7) catch |err| {
-        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            std.debug.dumpStackTrace(test_data.trace);
-        } else {
-            std.debug.dumpStackTrace(&test_data.trace);
-        }
+    const trace_len = test_data.trace.return_addresses.len;
+    std.testing.expect(trace_len > 1 and trace_len < 7) catch |err| {
+        std.debug.dumpStackTrace(&test_data.trace);
         return err;
     };
 }
