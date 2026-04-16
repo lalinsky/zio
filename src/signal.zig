@@ -129,7 +129,7 @@ const HandlerRegistryWindows = struct {
         if (prev_total == 0) {
             // First handler of any type - install the global console control handler
             const result = w.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, w.TRUE);
-            if (result == 0) {
+            if (result == w.FALSE) {
                 return error.SetConsoleCtrlHandlerFailed;
             }
         }
@@ -201,7 +201,7 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
     const signal_value: u8 = switch (ctrl_type) {
         w.CTRL_C_EVENT => @intFromEnum(SignalKind.interrupt),
         w.CTRL_CLOSE_EVENT => @intFromEnum(SignalKind.terminate),
-        else => return 0, // Not handled
+        else => return w.FALSE, // Not handled
     };
 
     // Notify all matching handlers
@@ -220,8 +220,8 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
         }
     }
 
-    // Return 1 if we handled it, 0 to pass to default handler
-    return if (found_handler) 1 else 0;
+    // Return TRUE if we handled it, FALSE to pass to default handler
+    return if (found_handler) w.TRUE else w.FALSE;
 }
 
 /// OS signal watcher.
