@@ -985,6 +985,8 @@ test "io: Io.Mutex lock/unlock serializes tasks" {
 }
 
 test "io: Io.Condition wakes waiter after signal" {
+    if (@sizeOf(usize) < 8) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
