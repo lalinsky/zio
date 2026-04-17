@@ -12,7 +12,19 @@ const std = @import("std");
 const Io = std.Io;
 const Alignment = std.mem.Alignment;
 
-const Runtime = @import("runtime.zig").Runtime;
+const runtime_mod = @import("runtime.zig");
+const Runtime = runtime_mod.Runtime;
+const getCurrentTask = runtime_mod.getCurrentTask;
+const beginShield = runtime_mod.beginShield;
+const endShield = runtime_mod.endShield;
+const checkCancel = runtime_mod.checkCancel;
+
+const AnyTask = @import("task.zig").AnyTask;
+const spawnTask = @import("task.zig").spawnTask;
+const Awaitable = @import("awaitable.zig").Awaitable;
+const Group = @import("group.zig").Group;
+const groupSpawnTask = @import("group.zig").groupSpawnTask;
+const select = @import("select.zig");
 
 /// Construct a `std.Io` instance backed by `rt`.
 pub fn fromRuntime(rt: *Runtime) Io {
@@ -165,73 +177,113 @@ fn crashHandlerImpl(_: ?*anyopaque) void {
 }
 
 fn asyncImpl(
-    _: ?*anyopaque,
-    _: []u8,
-    _: Alignment,
-    _: []const u8,
-    _: Alignment,
-    _: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    userdata: ?*anyopaque,
+    result: []u8,
+    result_alignment: Alignment,
+    context: []const u8,
+    context_alignment: Alignment,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
 ) ?*Io.AnyFuture {
-    @panic("TODO: async");
+    return concurrentImpl(userdata, result.len, result_alignment, context, context_alignment, start) catch {
+        // Couldn't schedule asynchronously - run synchronously and return null.
+        start(context.ptr, result.ptr);
+        return null;
+    };
 }
 
 fn concurrentImpl(
-    _: ?*anyopaque,
-    _: usize,
-    _: Alignment,
-    _: []const u8,
-    _: Alignment,
-    _: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    userdata: ?*anyopaque,
+    result_len: usize,
+    result_alignment: Alignment,
+    context: []const u8,
+    context_alignment: Alignment,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
 ) Io.ConcurrentError!*Io.AnyFuture {
-    @panic("TODO: concurrent");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const task = spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch {
+        return error.ConcurrencyUnavailable;
+    };
+    return @ptrCast(&task.awaitable);
 }
 
-fn awaitImpl(_: ?*anyopaque, _: *Io.AnyFuture, _: []u8, _: Alignment) void {
-    @panic("TODO: await");
+fn awaitOrCancel(any_future: *Io.AnyFuture, result: []u8, should_cancel: bool) void {
+    const awaitable: *Awaitable = @ptrCast(@alignCast(any_future));
+
+    if (should_cancel and !awaitable.hasResult()) {
+        awaitable.cancel();
+    }
+
+    _ = select.waitUntilComplete(awaitable);
+
+    const task = AnyTask.fromAwaitable(awaitable);
+    const task_result = task.closure.getResultSlice(AnyTask, task);
+    @memcpy(result, task_result);
+
+    awaitable.release();
 }
 
-fn cancelImpl(_: ?*anyopaque, _: *Io.AnyFuture, _: []u8, _: Alignment) void {
-    @panic("TODO: cancel");
+fn awaitImpl(_: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8, _: Alignment) void {
+    awaitOrCancel(any_future, result, false);
+}
+
+fn cancelImpl(_: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8, _: Alignment) void {
+    awaitOrCancel(any_future, result, true);
 }
 
 fn groupAsyncImpl(
-    _: ?*anyopaque,
-    _: *Io.Group,
-    _: []const u8,
-    _: Alignment,
-    _: *const fn (context: *const anyopaque) void,
+    userdata: ?*anyopaque,
+    group: *Io.Group,
+    context: []const u8,
+    context_alignment: Alignment,
+    start: *const fn (context: *const anyopaque) void,
 ) void {
-    @panic("TODO: groupAsync");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    groupSpawnTask(Group.fromStd(group), rt, context, context_alignment, start) catch {
+        // Couldn't schedule - run synchronously, matching std.Io.Threaded fallback.
+        start(context.ptr);
+    };
 }
 
 fn groupConcurrentImpl(
-    _: ?*anyopaque,
-    _: *Io.Group,
-    _: []const u8,
-    _: Alignment,
-    _: *const fn (context: *const anyopaque) void,
+    userdata: ?*anyopaque,
+    group: *Io.Group,
+    context: []const u8,
+    context_alignment: Alignment,
+    start: *const fn (context: *const anyopaque) void,
 ) Io.ConcurrentError!void {
-    @panic("TODO: groupConcurrent");
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    groupSpawnTask(Group.fromStd(group), rt, context, context_alignment, start) catch {
+        return error.ConcurrencyUnavailable;
+    };
 }
 
-fn groupAwaitImpl(_: ?*anyopaque, _: *Io.Group, _: *anyopaque) Io.Cancelable!void {
-    @panic("TODO: groupAwait");
+fn groupAwaitImpl(_: ?*anyopaque, group: *Io.Group, _: *anyopaque) Io.Cancelable!void {
+    return Group.fromStd(group).wait();
 }
 
-fn groupCancelImpl(_: ?*anyopaque, _: *Io.Group, _: *anyopaque) void {
-    @panic("TODO: groupCancel");
+fn groupCancelImpl(_: ?*anyopaque, group: *Io.Group, _: *anyopaque) void {
+    Group.fromStd(group).cancel();
 }
 
 fn recancelImpl(_: ?*anyopaque) void {
-    @panic("TODO: recancel");
+    getCurrentTask().recancel();
 }
 
-fn swapCancelProtectionImpl(_: ?*anyopaque, _: Io.CancelProtection) Io.CancelProtection {
-    @panic("TODO: swapCancelProtection");
+fn swapCancelProtectionImpl(_: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
+    switch (new) {
+        .blocked => {
+            beginShield();
+            return .unblocked;
+        },
+        .unblocked => {
+            endShield();
+            return .blocked;
+        },
+    }
 }
 
 fn checkCancelImpl(_: ?*anyopaque) Io.Cancelable!void {
-    @panic("TODO: checkCancel");
+    try checkCancel();
 }
 
 fn futexWaitImpl(_: ?*anyopaque, _: *const u32, _: u32, _: Io.Timeout) Io.Cancelable!void {
@@ -629,4 +681,48 @@ test "Runtime.io / Runtime.fromIo round-trip" {
     const value = rt.io();
     try std.testing.expect(value.vtable == &vtable);
     try std.testing.expectEqual(rt, Runtime.fromIo(value));
+}
+
+test "io: async/await returns task result" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn doubleIt(x: i32) i32 {
+            return x * 2;
+        }
+
+        fn run(io: Io) !void {
+            var future = io.async(doubleIt, .{21});
+            const value = future.await(io);
+            try std.testing.expectEqual(@as(i32, 42), value);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: group runs spawned tasks to completion" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn bump(counter: *std.atomic.Value(u32)) void {
+            _ = counter.fetchAdd(1, .acq_rel);
+        }
+
+        fn run(io: Io) !void {
+            var counter: std.atomic.Value(u32) = .init(0);
+            var group: Io.Group = .init;
+            group.async(io, bump, .{&counter});
+            group.async(io, bump, .{&counter});
+            group.async(io, bump, .{&counter});
+            try group.await(io);
+            try std.testing.expectEqual(@as(u32, 3), counter.load(.acquire));
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
