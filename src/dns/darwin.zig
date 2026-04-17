@@ -117,10 +117,10 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
 fn eaiToLookupError(status: i32) dns.LookupError {
     const err: std.c.EAI = @enumFromInt(status);
     return switch (err) {
-        .ADDRFAMILY => error.AddressFamilyNotSupported,
+        .ADDRFAMILY => error.AddressFamilyUnsupported,
         .AGAIN => error.TemporaryNameServerFailure,
         .FAIL => error.NameServerFailure,
-        .FAMILY => error.AddressFamilyNotSupported,
+        .FAMILY => error.AddressFamilyUnsupported,
         .MEMORY => error.OutOfMemory,
         .NODATA => error.HostLacksNetworkAddresses,
         .NONAME => error.UnknownHostName,

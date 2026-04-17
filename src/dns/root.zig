@@ -24,7 +24,7 @@ pub const LookupError = error{
     HostLacksNetworkAddresses,
     TemporaryNameServerFailure,
     NameServerFailure,
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     OutOfMemory,
     UnknownHostName,
     ServiceUnavailable,

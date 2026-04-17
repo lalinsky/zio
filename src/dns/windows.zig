@@ -149,7 +149,7 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
 fn winsockToLookupError(err: i32) dns.LookupError {
     const wsa_err: windows.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
     return switch (wsa_err) {
-        .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+        .EAFNOSUPPORT => error.AddressFamilyUnsupported,
         .EINVAL => error.Unexpected,
         .ESOCKTNOSUPPORT => error.Unexpected,
         .NO_DATA => error.UnknownHostName,
