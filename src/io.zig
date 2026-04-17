@@ -688,7 +688,7 @@ const AcceptOrCancel = os_net.AcceptError || common.Cancelable;
 /// they can surface through.
 fn openErrToListenErr(err: OpenOrCancel) Io.net.IpAddress.ListenError {
     return switch (err) {
-        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
         error.ProtocolNotSupported => error.ProtocolUnsupportedBySystem,
         error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
@@ -702,8 +702,8 @@ fn openErrToListenErr(err: OpenOrCancel) Io.net.IpAddress.ListenError {
 fn bindErrToListenErr(err: BindOrCancel) Io.net.IpAddress.ListenError {
     return switch (err) {
         error.AddressInUse => error.AddressInUse,
-        error.AddressNotAvailable => error.AddressUnavailable,
-        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.AddressUnavailable => error.AddressUnavailable,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
@@ -806,7 +806,7 @@ fn netBindIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress
 
 fn openErrToConnectErr(err: OpenOrCancel) Io.net.IpAddress.ConnectError {
     return switch (err) {
-        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
         error.ProtocolNotSupported => error.ProtocolUnsupportedBySystem,
         error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
@@ -820,13 +820,13 @@ fn openErrToConnectErr(err: OpenOrCancel) Io.net.IpAddress.ConnectError {
 fn connectErrToConnectErr(err: ConnectOrCancel) Io.net.IpAddress.ConnectError {
     return switch (err) {
         error.AccessDenied => error.AccessDenied,
-        error.AddressNotAvailable => error.AddressUnavailable,
-        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.AddressUnavailable => error.AddressUnavailable,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
         error.WouldBlock => error.WouldBlock,
         error.ConnectionPending => error.ConnectionPending,
         error.ConnectionRefused => error.ConnectionRefused,
         error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-        error.ConnectionTimedOut => error.Timeout,
+        error.Timeout => error.Timeout,
         error.NetworkUnreachable => error.NetworkUnreachable,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,

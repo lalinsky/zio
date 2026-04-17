@@ -282,7 +282,7 @@ pub const OpenFlags = packed struct {
 };
 
 pub const OpenError = error{
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     ProtocolNotSupported,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
@@ -358,8 +358,8 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
 
 pub const BindError = error{
     AddressInUse,
-    AddressNotAvailable,
-    AddressFamilyNotSupported,
+    AddressUnavailable,
+    AddressFamilyUnsupported,
     AccessDenied,
     FileDescriptorNotASocket,
     SymLinkLoop,
@@ -378,8 +378,8 @@ pub fn errnoToBindError(err: E) BindError {
         .windows => {
             return switch (err) {
                 .EADDRINUSE => error.AddressInUse,
-                .EADDRNOTAVAIL => error.AddressNotAvailable,
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EADDRNOTAVAIL => error.AddressUnavailable,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EACCES => error.AccessDenied,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ENETDOWN => error.NetworkDown,
@@ -393,8 +393,8 @@ pub fn errnoToBindError(err: E) BindError {
                 .ACCES, .PERM => error.AccessDenied,
                 .ADDRINUSE => error.AddressInUse,
                 .NOTSOCK => error.FileDescriptorNotASocket,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
-                .ADDRNOTAVAIL => error.AddressNotAvailable,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
+                .ADDRNOTAVAIL => error.AddressUnavailable,
                 .LOOP => error.SymLinkLoop,
                 .NAMETOOLONG => error.NameTooLong,
                 .NOENT => error.FileNotFound,
@@ -493,14 +493,14 @@ pub fn listen(fd: fd_t, backlog: u31) ListenError!void {
 pub const ConnectError = error{
     AccessDenied,
     AddressInUse,
-    AddressNotAvailable,
-    AddressFamilyNotSupported,
+    AddressUnavailable,
+    AddressFamilyUnsupported,
     WouldBlock,
     AlreadyConnected,
     ConnectionPending,
     ConnectionRefused,
     ConnectionResetByPeer,
-    ConnectionTimedOut,
+    Timeout,
     NetworkUnreachable,
     FileDescriptorNotASocket,
     FileNotFound,
@@ -696,12 +696,12 @@ pub fn errnoToConnectError(err: E) ConnectError {
         .windows => {
             return switch (err) {
                 .ECONNREFUSED => error.ConnectionRefused,
-                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ETIMEDOUT => error.Timeout,
                 .EHOSTUNREACH, .ENETUNREACH => error.NetworkUnreachable,
                 .EACCES => error.AccessDenied,
                 .EADDRINUSE => error.AddressInUse,
-                .EADDRNOTAVAIL => error.AddressNotAvailable,
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EADDRNOTAVAIL => error.AddressUnavailable,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EISCONN => error.AlreadyConnected,
                 .EALREADY => error.ConnectionPending,
                 .EWOULDBLOCK => error.WouldBlock,
@@ -717,12 +717,12 @@ pub fn errnoToConnectError(err: E) ConnectError {
                 .SUCCESS => unreachable,
                 .CONNREFUSED => error.ConnectionRefused,
                 .CONNRESET => error.ConnectionResetByPeer,
-                .TIMEDOUT => error.ConnectionTimedOut,
+                .TIMEDOUT => error.Timeout,
                 .HOSTUNREACH, .NETUNREACH => error.NetworkUnreachable,
                 .ACCES, .PERM => error.AccessDenied,
                 .ADDRINUSE => error.AddressInUse,
-                .ADDRNOTAVAIL => error.AddressNotAvailable,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .ADDRNOTAVAIL => error.AddressUnavailable,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .ISCONN => error.AlreadyConnected,
                 .ALREADY, .INPROGRESS => error.ConnectionPending,
                 .AGAIN => error.WouldBlock, // Also: insufficient routing cache or no auto-assigned ports
@@ -786,7 +786,7 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .ECONNREFUSED => error.ConnectionRefused,
                 .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
                 .ECONNABORTED => error.ConnectionAborted,
-                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ETIMEDOUT => error.Timeout,
                 .ENOTCONN => error.SocketNotConnected,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ESHUTDOWN => error.SocketShutdown,
@@ -821,7 +821,7 @@ pub fn errnoToSendError(err: E) SendError {
                 .EACCES => error.AccessDenied,
                 .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
                 .ECONNABORTED => error.ConnectionAborted,
-                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ETIMEDOUT => error.Timeout,
                 .ENOTCONN => error.SocketNotConnected,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .EMSGSIZE => error.MessageTooBig,
@@ -884,7 +884,7 @@ pub fn errnoToOpenError(err: E) OpenError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EPROTONOSUPPORT => error.ProtocolNotSupported,
                 .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS => error.SystemResources,
@@ -896,7 +896,7 @@ pub fn errnoToOpenError(err: E) OpenError {
             return switch (err) {
                 .SUCCESS => unreachable,
                 .ACCES => error.PermissionDenied,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .MFILE => error.ProcessFdQuotaExceeded,
                 .NFILE => error.SystemFdQuotaExceeded,
                 .NOBUFS, .NOMEM => error.SystemResources,
@@ -918,7 +918,7 @@ pub const RecvError = error{
     ConnectionRefused,
     ConnectionResetByPeer,
     ConnectionAborted,
-    ConnectionTimedOut,
+    Timeout,
     SocketNotConnected,
     FileDescriptorNotASocket,
     SocketShutdown,
@@ -1010,7 +1010,7 @@ pub const SendError = error{
     AccessDenied,
     ConnectionResetByPeer,
     ConnectionAborted,
-    ConnectionTimedOut,
+    Timeout,
     SocketNotConnected,
     FileDescriptorNotASocket,
     MessageTooBig,
@@ -1455,7 +1455,7 @@ pub const AI = switch (builtin.os.tag) {
 };
 
 pub const GetAddrInfoError = error{
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     TemporaryNameServerFailure,
     InvalidFlags,
     NameServerFailure,
@@ -1505,7 +1505,7 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
         .windows => {
             const wsa_err: windows.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
             return switch (wsa_err) {
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EINVAL => error.InvalidFlags,
                 .ESOCKTNOSUPPORT => error.SocketTypeNotSupported,
                 .NO_DATA => error.UnknownHostName,
@@ -1520,11 +1520,11 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
         else => {
             // EAI_* error codes - err is std.c.EAI
             return switch (err) {
-                .ADDRFAMILY => error.AddressFamilyNotSupported,
+                .ADDRFAMILY => error.AddressFamilyUnsupported,
                 .AGAIN => error.TemporaryNameServerFailure,
                 .BADFLAGS => error.InvalidFlags,
                 .FAIL => error.NameServerFailure,
-                .FAMILY => error.AddressFamilyNotSupported,
+                .FAMILY => error.AddressFamilyUnsupported,
                 .MEMORY => error.SystemResources,
                 .NODATA => error.UnknownHostName,
                 .NONAME => error.UnknownHostName,

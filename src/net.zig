@@ -2017,7 +2017,7 @@ test "IpAddress: listen/accept/connect/read/write IPv6" {
     var write_buffer: [32]u8 = undefined;
     const addr = try IpAddress.parseIp6("::1", 0);
     checkListen(addr, IpAddress.ListenOptions{}, &write_buffer) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }
@@ -2040,7 +2040,7 @@ test "IpAddress: listen/accept/connect/read/write unbuffered IPv4" {
 test "IpAddress: listen/accept/connect/read/write unbuffered IPv6" {
     const addr = try IpAddress.parseIp6("::1", 0);
     checkListen(addr, IpAddress.ListenOptions{}, &.{}) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }
@@ -2053,7 +2053,7 @@ test "IpAddress: bind/sendTo/receiveFrom IPv4" {
 test "IpAddress: bind/sendTo/receiveFrom IPv6" {
     const addr = try IpAddress.parseIp6("::1", 0);
     checkBind(addr, addr) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }
@@ -2122,7 +2122,7 @@ test "IpAddress: listen/accept/connect/read/EOF IPv4" {
 test "IpAddress: listen/accept/connect/read/EOF IPv6" {
     const addr = try IpAddress.parseIp6("::1", 0);
     checkShutdown(addr, IpAddress.ListenOptions{}) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }
