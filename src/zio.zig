@@ -77,4 +77,5 @@ pub const os = @import("os/root.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("io.zig");
 }

@@ -1,0 +1,632 @@
+// SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-License-Identifier: MIT
+
+//! Implementation of the `std.Io` interface backed by zio's runtime.
+//!
+//! Every vtable method is currently stubbed with `@panic("TODO: ...")`. They
+//! will be filled in incrementally; the goal of this initial skeleton is to
+//! get the wiring right so callers can already obtain a `std.Io` from a
+//! `*Runtime` via `Runtime.io()`.
+
+const std = @import("std");
+const Io = std.Io;
+const Alignment = std.mem.Alignment;
+
+const Runtime = @import("runtime.zig").Runtime;
+
+/// Construct a `std.Io` instance backed by `rt`.
+pub fn fromRuntime(rt: *Runtime) Io {
+    return .{
+        .userdata = @ptrCast(rt),
+        .vtable = &vtable,
+    };
+}
+
+/// Recover the underlying runtime from a `std.Io` produced by `fromRuntime`.
+///
+/// Asserts that the vtable matches; passing a `std.Io` from another backend
+/// is a programming error.
+pub fn toRuntime(io: Io) *Runtime {
+    std.debug.assert(io.vtable == &vtable);
+    return @ptrCast(@alignCast(io.userdata));
+}
+
+pub const vtable: Io.VTable = .{
+    .crashHandler = crashHandlerImpl,
+
+    .async = asyncImpl,
+    .concurrent = concurrentImpl,
+    .await = awaitImpl,
+    .cancel = cancelImpl,
+
+    .groupAsync = groupAsyncImpl,
+    .groupConcurrent = groupConcurrentImpl,
+    .groupAwait = groupAwaitImpl,
+    .groupCancel = groupCancelImpl,
+
+    .recancel = recancelImpl,
+    .swapCancelProtection = swapCancelProtectionImpl,
+    .checkCancel = checkCancelImpl,
+
+    .futexWait = futexWaitImpl,
+    .futexWaitUncancelable = futexWaitUncancelableImpl,
+    .futexWake = futexWakeImpl,
+
+    .operate = operateImpl,
+    .batchAwaitAsync = batchAwaitAsyncImpl,
+    .batchAwaitConcurrent = batchAwaitConcurrentImpl,
+    .batchCancel = batchCancelImpl,
+
+    .dirCreateDir = dirCreateDirImpl,
+    .dirCreateDirPath = dirCreateDirPathImpl,
+    .dirCreateDirPathOpen = dirCreateDirPathOpenImpl,
+    .dirOpenDir = dirOpenDirImpl,
+    .dirStat = dirStatImpl,
+    .dirStatFile = dirStatFileImpl,
+    .dirAccess = dirAccessImpl,
+    .dirCreateFile = dirCreateFileImpl,
+    .dirCreateFileAtomic = dirCreateFileAtomicImpl,
+    .dirOpenFile = dirOpenFileImpl,
+    .dirClose = dirCloseImpl,
+    .dirRead = dirReadImpl,
+    .dirRealPath = dirRealPathImpl,
+    .dirRealPathFile = dirRealPathFileImpl,
+    .dirDeleteFile = dirDeleteFileImpl,
+    .dirDeleteDir = dirDeleteDirImpl,
+    .dirRename = dirRenameImpl,
+    .dirRenamePreserve = dirRenamePreserveImpl,
+    .dirSymLink = dirSymLinkImpl,
+    .dirReadLink = dirReadLinkImpl,
+    .dirSetOwner = dirSetOwnerImpl,
+    .dirSetFileOwner = dirSetFileOwnerImpl,
+    .dirSetPermissions = dirSetPermissionsImpl,
+    .dirSetFilePermissions = dirSetFilePermissionsImpl,
+    .dirSetTimestamps = dirSetTimestampsImpl,
+    .dirHardLink = dirHardLinkImpl,
+
+    .fileStat = fileStatImpl,
+    .fileLength = fileLengthImpl,
+    .fileClose = fileCloseImpl,
+    .fileWritePositional = fileWritePositionalImpl,
+    .fileWriteFileStreaming = fileWriteFileStreamingImpl,
+    .fileWriteFilePositional = fileWriteFilePositionalImpl,
+    .fileReadPositional = fileReadPositionalImpl,
+    .fileSeekBy = fileSeekByImpl,
+    .fileSeekTo = fileSeekToImpl,
+    .fileSync = fileSyncImpl,
+    .fileIsTty = fileIsTtyImpl,
+    .fileEnableAnsiEscapeCodes = fileEnableAnsiEscapeCodesImpl,
+    .fileSupportsAnsiEscapeCodes = fileSupportsAnsiEscapeCodesImpl,
+    .fileSetLength = fileSetLengthImpl,
+    .fileSetOwner = fileSetOwnerImpl,
+    .fileSetPermissions = fileSetPermissionsImpl,
+    .fileSetTimestamps = fileSetTimestampsImpl,
+    .fileLock = fileLockImpl,
+    .fileTryLock = fileTryLockImpl,
+    .fileUnlock = fileUnlockImpl,
+    .fileDowngradeLock = fileDowngradeLockImpl,
+    .fileRealPath = fileRealPathImpl,
+    .fileHardLink = fileHardLinkImpl,
+
+    .fileMemoryMapCreate = fileMemoryMapCreateImpl,
+    .fileMemoryMapDestroy = fileMemoryMapDestroyImpl,
+    .fileMemoryMapSetLength = fileMemoryMapSetLengthImpl,
+    .fileMemoryMapRead = fileMemoryMapReadImpl,
+    .fileMemoryMapWrite = fileMemoryMapWriteImpl,
+
+    .processExecutableOpen = processExecutableOpenImpl,
+    .processExecutablePath = processExecutablePathImpl,
+    .lockStderr = lockStderrImpl,
+    .tryLockStderr = tryLockStderrImpl,
+    .unlockStderr = unlockStderrImpl,
+    .processCurrentPath = processCurrentPathImpl,
+    .processSetCurrentDir = processSetCurrentDirImpl,
+    .processSetCurrentPath = processSetCurrentPathImpl,
+    .processReplace = processReplaceImpl,
+    .processReplacePath = processReplacePathImpl,
+    .processSpawn = processSpawnImpl,
+    .processSpawnPath = processSpawnPathImpl,
+    .childWait = childWaitImpl,
+    .childKill = childKillImpl,
+
+    .progressParentFile = progressParentFileImpl,
+
+    .now = nowImpl,
+    .clockResolution = clockResolutionImpl,
+    .sleep = sleepImpl,
+
+    .random = randomImpl,
+    .randomSecure = randomSecureImpl,
+
+    .netListenIp = netListenIpImpl,
+    .netAccept = netAcceptImpl,
+    .netBindIp = netBindIpImpl,
+    .netConnectIp = netConnectIpImpl,
+    .netListenUnix = netListenUnixImpl,
+    .netConnectUnix = netConnectUnixImpl,
+    .netSocketCreatePair = netSocketCreatePairImpl,
+    .netSend = netSendImpl,
+    .netRead = netReadImpl,
+    .netWrite = netWriteImpl,
+    .netWriteFile = netWriteFileImpl,
+    .netClose = netCloseImpl,
+    .netShutdown = netShutdownImpl,
+    .netInterfaceNameResolve = netInterfaceNameResolveImpl,
+    .netInterfaceName = netInterfaceNameImpl,
+    .netLookup = netLookupImpl,
+};
+
+// ---------------------------------------------------------------------------
+// VTable stubs. Every function below is intentionally a `@panic("TODO: …")`.
+// ---------------------------------------------------------------------------
+
+fn crashHandlerImpl(_: ?*anyopaque) void {
+    @panic("TODO: crashHandler");
+}
+
+fn asyncImpl(
+    _: ?*anyopaque,
+    _: []u8,
+    _: Alignment,
+    _: []const u8,
+    _: Alignment,
+    _: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) ?*Io.AnyFuture {
+    @panic("TODO: async");
+}
+
+fn concurrentImpl(
+    _: ?*anyopaque,
+    _: usize,
+    _: Alignment,
+    _: []const u8,
+    _: Alignment,
+    _: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) Io.ConcurrentError!*Io.AnyFuture {
+    @panic("TODO: concurrent");
+}
+
+fn awaitImpl(_: ?*anyopaque, _: *Io.AnyFuture, _: []u8, _: Alignment) void {
+    @panic("TODO: await");
+}
+
+fn cancelImpl(_: ?*anyopaque, _: *Io.AnyFuture, _: []u8, _: Alignment) void {
+    @panic("TODO: cancel");
+}
+
+fn groupAsyncImpl(
+    _: ?*anyopaque,
+    _: *Io.Group,
+    _: []const u8,
+    _: Alignment,
+    _: *const fn (context: *const anyopaque) void,
+) void {
+    @panic("TODO: groupAsync");
+}
+
+fn groupConcurrentImpl(
+    _: ?*anyopaque,
+    _: *Io.Group,
+    _: []const u8,
+    _: Alignment,
+    _: *const fn (context: *const anyopaque) void,
+) Io.ConcurrentError!void {
+    @panic("TODO: groupConcurrent");
+}
+
+fn groupAwaitImpl(_: ?*anyopaque, _: *Io.Group, _: *anyopaque) Io.Cancelable!void {
+    @panic("TODO: groupAwait");
+}
+
+fn groupCancelImpl(_: ?*anyopaque, _: *Io.Group, _: *anyopaque) void {
+    @panic("TODO: groupCancel");
+}
+
+fn recancelImpl(_: ?*anyopaque) void {
+    @panic("TODO: recancel");
+}
+
+fn swapCancelProtectionImpl(_: ?*anyopaque, _: Io.CancelProtection) Io.CancelProtection {
+    @panic("TODO: swapCancelProtection");
+}
+
+fn checkCancelImpl(_: ?*anyopaque) Io.Cancelable!void {
+    @panic("TODO: checkCancel");
+}
+
+fn futexWaitImpl(_: ?*anyopaque, _: *const u32, _: u32, _: Io.Timeout) Io.Cancelable!void {
+    @panic("TODO: futexWait");
+}
+
+fn futexWaitUncancelableImpl(_: ?*anyopaque, _: *const u32, _: u32) void {
+    @panic("TODO: futexWaitUncancelable");
+}
+
+fn futexWakeImpl(_: ?*anyopaque, _: *const u32, _: u32) void {
+    @panic("TODO: futexWake");
+}
+
+fn operateImpl(_: ?*anyopaque, _: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    @panic("TODO: operate");
+}
+
+fn batchAwaitAsyncImpl(_: ?*anyopaque, _: *Io.Batch) Io.Cancelable!void {
+    @panic("TODO: batchAwaitAsync");
+}
+
+fn batchAwaitConcurrentImpl(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+    @panic("TODO: batchAwaitConcurrent");
+}
+
+fn batchCancelImpl(_: ?*anyopaque, _: *Io.Batch) void {
+    @panic("TODO: batchCancel");
+}
+
+fn dirCreateDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
+    @panic("TODO: dirCreateDir");
+}
+
+fn dirCreateDirPathImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
+    @panic("TODO: dirCreateDirPath");
+}
+
+fn dirCreateDirPathOpenImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions, _: Io.Dir.OpenOptions) Io.Dir.CreateDirPathOpenError!Io.Dir {
+    @panic("TODO: dirCreateDirPathOpen");
+}
+
+fn dirOpenDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+    @panic("TODO: dirOpenDir");
+}
+
+fn dirStatImpl(_: ?*anyopaque, _: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
+    @panic("TODO: dirStat");
+}
+
+fn dirStatFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+    @panic("TODO: dirStatFile");
+}
+
+fn dirAccessImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
+    @panic("TODO: dirAccess");
+}
+
+fn dirCreateFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
+    @panic("TODO: dirCreateFile");
+}
+
+fn dirCreateFileAtomicImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
+    @panic("TODO: dirCreateFileAtomic");
+}
+
+fn dirOpenFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+    @panic("TODO: dirOpenFile");
+}
+
+fn dirCloseImpl(_: ?*anyopaque, _: []const Io.Dir) void {
+    @panic("TODO: dirClose");
+}
+
+fn dirReadImpl(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+    @panic("TODO: dirRead");
+}
+
+fn dirRealPathImpl(_: ?*anyopaque, _: Io.Dir, _: []u8) Io.Dir.RealPathError!usize {
+    @panic("TODO: dirRealPath");
+}
+
+fn dirRealPathFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.RealPathFileError!usize {
+    @panic("TODO: dirRealPathFile");
+}
+
+fn dirDeleteFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8) Io.Dir.DeleteFileError!void {
+    @panic("TODO: dirDeleteFile");
+}
+
+fn dirDeleteDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8) Io.Dir.DeleteDirError!void {
+    @panic("TODO: dirDeleteDir");
+}
+
+fn dirRenameImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8) Io.Dir.RenameError!void {
+    @panic("TODO: dirRename");
+}
+
+fn dirRenamePreserveImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8) Io.Dir.RenamePreserveError!void {
+    @panic("TODO: dirRenamePreserve");
+}
+
+fn dirSymLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []const u8, _: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
+    @panic("TODO: dirSymLink");
+}
+
+fn dirReadLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.ReadLinkError!usize {
+    @panic("TODO: dirReadLink");
+}
+
+fn dirSetOwnerImpl(_: ?*anyopaque, _: Io.Dir, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
+    @panic("TODO: dirSetOwner");
+}
+
+fn dirSetFileOwnerImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: ?Io.File.Uid, _: ?Io.File.Gid, _: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
+    @panic("TODO: dirSetFileOwner");
+}
+
+fn dirSetPermissionsImpl(_: ?*anyopaque, _: Io.Dir, _: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
+    @panic("TODO: dirSetPermissions");
+}
+
+fn dirSetFilePermissionsImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.File.Permissions, _: Io.Dir.SetFilePermissionsOptions) Io.Dir.SetFilePermissionsError!void {
+    @panic("TODO: dirSetFilePermissions");
+}
+
+fn dirSetTimestampsImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.SetTimestampsOptions) Io.Dir.SetTimestampsError!void {
+    @panic("TODO: dirSetTimestamps");
+}
+
+fn dirHardLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8, _: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
+    @panic("TODO: dirHardLink");
+}
+
+fn fileStatImpl(_: ?*anyopaque, _: Io.File) Io.File.StatError!Io.File.Stat {
+    @panic("TODO: fileStat");
+}
+
+fn fileLengthImpl(_: ?*anyopaque, _: Io.File) Io.File.LengthError!u64 {
+    @panic("TODO: fileLength");
+}
+
+fn fileCloseImpl(_: ?*anyopaque, _: []const Io.File) void {
+    @panic("TODO: fileClose");
+}
+
+fn fileWritePositionalImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) Io.File.WritePositionalError!usize {
+    @panic("TODO: fileWritePositional");
+}
+
+fn fileWriteFileStreamingImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.File.Writer.WriteFileError!usize {
+    @panic("TODO: fileWriteFileStreaming");
+}
+
+fn fileWriteFilePositionalImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io.File.Reader, _: Io.Limit, _: u64) Io.File.WriteFilePositionalError!usize {
+    @panic("TODO: fileWriteFilePositional");
+}
+
+fn fileReadPositionalImpl(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
+    @panic("TODO: fileReadPositional");
+}
+
+fn fileSeekByImpl(_: ?*anyopaque, _: Io.File, _: i64) Io.File.SeekError!void {
+    @panic("TODO: fileSeekBy");
+}
+
+fn fileSeekToImpl(_: ?*anyopaque, _: Io.File, _: u64) Io.File.SeekError!void {
+    @panic("TODO: fileSeekTo");
+}
+
+fn fileSyncImpl(_: ?*anyopaque, _: Io.File) Io.File.SyncError!void {
+    @panic("TODO: fileSync");
+}
+
+fn fileIsTtyImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!bool {
+    @panic("TODO: fileIsTty");
+}
+
+fn fileEnableAnsiEscapeCodesImpl(_: ?*anyopaque, _: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
+    @panic("TODO: fileEnableAnsiEscapeCodes");
+}
+
+fn fileSupportsAnsiEscapeCodesImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!bool {
+    @panic("TODO: fileSupportsAnsiEscapeCodes");
+}
+
+fn fileSetLengthImpl(_: ?*anyopaque, _: Io.File, _: u64) Io.File.SetLengthError!void {
+    @panic("TODO: fileSetLength");
+}
+
+fn fileSetOwnerImpl(_: ?*anyopaque, _: Io.File, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.File.SetOwnerError!void {
+    @panic("TODO: fileSetOwner");
+}
+
+fn fileSetPermissionsImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Permissions) Io.File.SetPermissionsError!void {
+    @panic("TODO: fileSetPermissions");
+}
+
+fn fileSetTimestampsImpl(_: ?*anyopaque, _: Io.File, _: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
+    @panic("TODO: fileSetTimestamps");
+}
+
+fn fileLockImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Lock) Io.File.LockError!void {
+    @panic("TODO: fileLock");
+}
+
+fn fileTryLockImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Lock) Io.File.LockError!bool {
+    @panic("TODO: fileTryLock");
+}
+
+fn fileUnlockImpl(_: ?*anyopaque, _: Io.File) void {
+    @panic("TODO: fileUnlock");
+}
+
+fn fileDowngradeLockImpl(_: ?*anyopaque, _: Io.File) Io.File.DowngradeLockError!void {
+    @panic("TODO: fileDowngradeLock");
+}
+
+fn fileRealPathImpl(_: ?*anyopaque, _: Io.File, _: []u8) Io.File.RealPathError!usize {
+    @panic("TODO: fileRealPath");
+}
+
+fn fileHardLinkImpl(_: ?*anyopaque, _: Io.File, _: Io.Dir, _: []const u8, _: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
+    @panic("TODO: fileHardLink");
+}
+
+fn fileMemoryMapCreateImpl(_: ?*anyopaque, _: Io.File, _: Io.File.MemoryMap.CreateOptions) Io.File.MemoryMap.CreateError!Io.File.MemoryMap {
+    @panic("TODO: fileMemoryMapCreate");
+}
+
+fn fileMemoryMapDestroyImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) void {
+    @panic("TODO: fileMemoryMapDestroy");
+}
+
+fn fileMemoryMapSetLengthImpl(_: ?*anyopaque, _: *Io.File.MemoryMap, _: usize) Io.File.MemoryMap.SetLengthError!void {
+    @panic("TODO: fileMemoryMapSetLength");
+}
+
+fn fileMemoryMapReadImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.ReadPositionalError!void {
+    @panic("TODO: fileMemoryMapRead");
+}
+
+fn fileMemoryMapWriteImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.WritePositionalError!void {
+    @panic("TODO: fileMemoryMapWrite");
+}
+
+fn processExecutableOpenImpl(_: ?*anyopaque, _: Io.Dir.OpenFileOptions) std.process.OpenExecutableError!Io.File {
+    @panic("TODO: processExecutableOpen");
+}
+
+fn processExecutablePathImpl(_: ?*anyopaque, _: []u8) std.process.ExecutablePathError!usize {
+    @panic("TODO: processExecutablePath");
+}
+
+fn lockStderrImpl(_: ?*anyopaque, _: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
+    @panic("TODO: lockStderr");
+}
+
+fn tryLockStderrImpl(_: ?*anyopaque, _: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
+    @panic("TODO: tryLockStderr");
+}
+
+fn unlockStderrImpl(_: ?*anyopaque) void {
+    @panic("TODO: unlockStderr");
+}
+
+fn processCurrentPathImpl(_: ?*anyopaque, _: []u8) std.process.CurrentPathError!usize {
+    @panic("TODO: processCurrentPath");
+}
+
+fn processSetCurrentDirImpl(_: ?*anyopaque, _: Io.Dir) std.process.SetCurrentDirError!void {
+    @panic("TODO: processSetCurrentDir");
+}
+
+fn processSetCurrentPathImpl(_: ?*anyopaque, _: []const u8) std.process.SetCurrentPathError!void {
+    @panic("TODO: processSetCurrentPath");
+}
+
+fn processReplaceImpl(_: ?*anyopaque, _: std.process.ReplaceOptions) std.process.ReplaceError {
+    @panic("TODO: processReplace");
+}
+
+fn processReplacePathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.ReplaceOptions) std.process.ReplaceError {
+    @panic("TODO: processReplacePath");
+}
+
+fn processSpawnImpl(_: ?*anyopaque, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    @panic("TODO: processSpawn");
+}
+
+fn processSpawnPathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    @panic("TODO: processSpawnPath");
+}
+
+fn childWaitImpl(_: ?*anyopaque, _: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
+    @panic("TODO: childWait");
+}
+
+fn childKillImpl(_: ?*anyopaque, _: *std.process.Child) void {
+    @panic("TODO: childKill");
+}
+
+fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
+    @panic("TODO: progressParentFile");
+}
+
+fn nowImpl(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
+    @panic("TODO: now");
+}
+
+fn clockResolutionImpl(_: ?*anyopaque, _: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
+    @panic("TODO: clockResolution");
+}
+
+fn sleepImpl(_: ?*anyopaque, _: Io.Timeout) Io.Cancelable!void {
+    @panic("TODO: sleep");
+}
+
+fn randomImpl(_: ?*anyopaque, _: []u8) void {
+    @panic("TODO: random");
+}
+
+fn randomSecureImpl(_: ?*anyopaque, _: []u8) Io.RandomSecureError!void {
+    @panic("TODO: randomSecure");
+}
+
+fn netListenIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
+    @panic("TODO: netListenIp");
+}
+
+fn netAcceptImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
+    @panic("TODO: netAccept");
+}
+
+fn netBindIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
+    @panic("TODO: netBindIp");
+}
+
+fn netConnectIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
+    @panic("TODO: netConnectIp");
+}
+
+fn netListenUnixImpl(_: ?*anyopaque, _: *const Io.net.UnixAddress, _: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
+    @panic("TODO: netListenUnix");
+}
+
+fn netConnectUnixImpl(_: ?*anyopaque, _: *const Io.net.UnixAddress) Io.net.UnixAddress.ConnectError!Io.net.Socket.Handle {
+    @panic("TODO: netConnectUnix");
+}
+
+fn netSocketCreatePairImpl(_: ?*anyopaque, _: Io.net.Socket.CreatePairOptions) Io.net.Socket.CreatePairError![2]Io.net.Socket {
+    @panic("TODO: netSocketCreatePair");
+}
+
+fn netSendImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []Io.net.OutgoingMessage, _: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
+    @panic("TODO: netSend");
+}
+
+fn netReadImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: [][]u8) Io.net.Stream.Reader.Error!usize {
+    @panic("TODO: netRead");
+}
+
+fn netWriteImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: []const []const u8, _: usize) Io.net.Stream.Writer.Error!usize {
+    @panic("TODO: netWrite");
+}
+
+fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.net.Stream.Writer.WriteFileError!usize {
+    @panic("TODO: netWriteFile");
+}
+
+fn netCloseImpl(_: ?*anyopaque, _: []const Io.net.Socket.Handle) void {
+    @panic("TODO: netClose");
+}
+
+fn netShutdownImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.ShutdownHow) Io.net.ShutdownError!void {
+    @panic("TODO: netShutdown");
+}
+
+fn netInterfaceNameResolveImpl(_: ?*anyopaque, _: *const Io.net.Interface.Name) Io.net.Interface.Name.ResolveError!Io.net.Interface {
+    @panic("TODO: netInterfaceNameResolve");
+}
+
+fn netInterfaceNameImpl(_: ?*anyopaque, _: Io.net.Interface) Io.net.Interface.NameError!Io.net.Interface.Name {
+    @panic("TODO: netInterfaceName");
+}
+
+fn netLookupImpl(_: ?*anyopaque, _: Io.net.HostName, _: *Io.Queue(Io.net.HostName.LookupResult), _: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
+    @panic("TODO: netLookup");
+}
+
+test "Runtime.io / Runtime.fromIo round-trip" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const value = rt.io();
+    try std.testing.expect(value.vtable == &vtable);
+    try std.testing.expectEqual(rt, Runtime.fromIo(value));
+}
