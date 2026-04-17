@@ -12,6 +12,7 @@ const posix = @import("posix.zig");
 
 const Duration = @import("../time.zig").Duration;
 const Timeout = @import("../time.zig").Timeout;
+const os_time = @import("time.zig");
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 
@@ -223,7 +224,7 @@ const FutexLinux = struct {
             null,
             0,
         );
-        if (linux.E.init(rc) == .TIMEDOUT) return error.Timeout;
+        if (linux.errno(rc) == .TIMEDOUT) return error.Timeout;
     }
 
     fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
@@ -789,7 +790,7 @@ const MutexWindows = struct {
     }
 
     pub fn tryLock(self: *MutexWindows) bool {
-        return sys.TryAcquireSRWLockExclusive(&self.srwlock) != 0;
+        return sys.TryAcquireSRWLockExclusive(&self.srwlock).toBool();
     }
 };
 
@@ -927,7 +928,7 @@ const ConditionWindows = struct {
         const ms = @min(duration.toMilliseconds(), std.math.maxInt(sys.DWORD));
         const result = sys.SleepConditionVariableSRW(&self.cond, &mutex.srwlock, @intCast(ms), 0);
         if (result == sys.FALSE) {
-            const err = std.os.windows.kernel32.GetLastError();
+            const err = sys.GetLastError();
             if (err == .TIMEOUT) {
                 return error.Timeout;
             }
@@ -1326,7 +1327,7 @@ test "Notify - timeout" {
     var notify = Notify.init();
 
     // Loop to handle spurious wakeups (e.g., stale EALREADY from previous tests)
-    const start = std.time.nanoTimestamp();
+    const start = os_time.now(.monotonic);
     while (true) {
         const result = notify.timedWait(0, .fromMilliseconds(50));
 
@@ -1346,7 +1347,7 @@ test "Notify - timeout" {
         }
     }
 
-    const elapsed = std.time.nanoTimestamp() - start;
+    const elapsed = start.untilNow(.monotonic).toNanoseconds();
     // Allow some slack for scheduling
     try std.testing.expect(elapsed >= 40 * std.time.ns_per_ms);
     try std.testing.expect(elapsed < 200 * std.time.ns_per_ms);
@@ -1546,7 +1547,7 @@ fn checkConditionBroadcast(comptime MutexType: type, comptime ConditionType: typ
     }
 
     // Brief sleep to ensure threads have entered kernel wait
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    os_time.sleep(.fromMilliseconds(10));
 
     // Broadcast to all waiters
     mutex.lock();

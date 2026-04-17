@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.15.2']
+        zig_version: ['0.16.0']
         mode: [debug, release]
         config:
           - { os: ubuntu-24.04, target: native, backends: 'io_uring epoll poll' }

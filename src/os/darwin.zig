@@ -46,7 +46,7 @@ pub const mach_msg_header_t = extern struct {
     msgh_id: std.c.mach_msg_id_t,
 };
 
-pub const MACH_RCV_MSG: std.c.mach_msg_option_t = 2;
+pub const MACH_RCV_MSG: std.c.mach_msg_option_t = .{ .RCV = .{} };
 pub const MACH_PORT_NULL: std.c.mach_port_t = 0;
 
 pub extern "c" fn mach_msg(

@@ -23,11 +23,7 @@ fn ponger(ping_rx: *zio.Channel(u32), pong_tx: *zio.Channel(u32), rounds: u32) !
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var runtime = try zio.Runtime.init(allocator, .{ .executors = .auto });
+    var runtime = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .auto });
     defer runtime.deinit();
 
     // Create channels for ping-pong communication

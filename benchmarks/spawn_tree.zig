@@ -22,11 +22,7 @@ fn task(runtime: *zio.Runtime) !void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var runtime = try zio.Runtime.init(allocator, .{ .executors = .auto });
+    var runtime = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .auto });
     defer runtime.deinit();
 
     std.debug.print("Running spawn tree benchmark with {} spawns...\n", .{NUM_SPAWNS});

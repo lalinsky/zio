@@ -42,10 +42,7 @@ fn signalHandler(shutdown: *std.atomic.Value(bool)) !void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    var rt = try zio.Runtime.init(gpa.allocator(), .{});
+    var rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
     // Create shutdown flag

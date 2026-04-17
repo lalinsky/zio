@@ -271,26 +271,26 @@ pub fn sigemptyset() sigset_t {
 
 /// Install a signal handler. sig must be convertible to an integer (e.g. SIG enum or integer).
 pub fn sigaction(sig: anytype, act: ?*const Sigaction, oact: ?*Sigaction) void {
-    const sig_int: c_int = switch (@typeInfo(@TypeOf(sig))) {
-        .int, .comptime_int => @intCast(sig),
-        .@"enum" => @intFromEnum(sig),
+    const sig_enum: SIG = switch (@typeInfo(@TypeOf(sig))) {
+        .int, .comptime_int => @enumFromInt(sig),
+        .@"enum" => sig,
         else => @compileError("sig must be an integer or enum"),
     };
     if (builtin.os.tag == .linux) {
-        _ = system.sigaction(@as(u8, @intCast(sig_int)), act, oact);
+        _ = sys.sigaction(sig_enum, act, oact);
     } else {
-        _ = system.sigaction(sig_int, act, oact);
+        _ = system.sigaction(sig_enum, act, oact);
     }
 }
 
 /// Send a signal to the calling process. sig must be convertible to c_int.
 pub fn raise(sig: anytype) !void {
-    const sig_int: c_int = switch (@typeInfo(@TypeOf(sig))) {
-        .int, .comptime_int => @intCast(sig),
-        .@"enum" => @intFromEnum(sig),
+    const sig_enum: SIG = switch (@typeInfo(@TypeOf(sig))) {
+        .int, .comptime_int => @enumFromInt(sig),
+        .@"enum" => sig,
         else => @compileError("sig must be an integer or enum"),
     };
-    const rc = std.c.raise(sig_int);
+    const rc = std.c.raise(sig_enum);
     if (rc != 0) return error.Unexpected;
 }
 

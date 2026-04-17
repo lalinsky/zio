@@ -16,7 +16,16 @@ const native_os = builtin.os.tag;
 const c = std.c;
 const linux = @import("linux.zig");
 
-pub const timespec = c.timespec;
+/// Windows lacks a proper `time_t` in Zig 0.16 (time_t is void), so `std.c.timespec`
+/// is unusable there. Define our own POSIX-compatible timespec for Windows, used
+/// solely as a data interchange format by the time.zig API.
+pub const timespec = if (native_os == .windows)
+    extern struct {
+        sec: i64,
+        nsec: c_long,
+    }
+else
+    c.timespec;
 
 pub const E = c.E;
 pub const fd_t = c.fd_t;

@@ -106,11 +106,10 @@ fn queryNtpServer(server: []const u8, port: u16, timeout: zio.Timeout) !void {
     });
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.smp_allocator;
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const server = if (args.len > 1) args[1] else "pool.ntp.org";
     const port: u16 = 123;

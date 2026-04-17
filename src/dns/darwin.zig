@@ -88,7 +88,7 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
         0,
         @sizeOf(MachMsgRcv),
         machport,
-        0, // MACH_MSG_TIMEOUT_NONE
+        .NONE, // MACH_MSG_TIMEOUT_NONE
         darwin.MACH_PORT_NULL,
     );
     if (status != 0) { // KERN_SUCCESS = 0

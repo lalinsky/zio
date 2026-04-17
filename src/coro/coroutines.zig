@@ -1046,15 +1046,38 @@ fn coroEntry() callconv(.naked) noreturn {
                 }
             }
         },
-        .aarch64 => asm volatile (
-            \\ ldp x2, x0, [sp]
-            \\ br x2
-        ),
-        .arm, .thumb => asm volatile (
-            \\ ldr r0, [sp, #4]
-            \\ ldr r2, [sp, #0]
-            \\ bx r2
-        ),
+        .aarch64 => {
+            // Create sentinel frame for FP-based unwinding (needed for macOS/aarch64)
+            asm volatile (
+                \\ stp xzr, xzr, [sp, #-16]!
+                \\ mov x29, sp
+                \\ mov x30, xzr
+                \\ ldp x2, x0, [sp, #16]
+                \\ br x2
+            );
+        },
+        .arm => {
+            // Create sentinel frame for FP-based unwinding (ARM uses r11 for fp)
+            asm volatile (
+                \\ push {r0, r1}
+                \\ mov r11, sp
+                \\ mov r14, #0
+                \\ ldr r0, [sp, #12]
+                \\ ldr r2, [sp, #8]
+                \\ bx r2
+            );
+        },
+        .thumb => {
+            // Create sentinel frame for FP-based unwinding (Thumb uses r7 for fp)
+            asm volatile (
+                \\ push {r0, r1}
+                \\ mov r7, sp
+                \\ mov r14, #0
+                \\ ldr r0, [sp, #12]
+                \\ ldr r2, [sp, #8]
+                \\ bx r2
+            );
+        },
         .riscv64 => asm volatile (
             \\ ld a0, 8(sp)
             \\ ld t0, 0(sp)
@@ -1384,6 +1407,10 @@ test "Coroutine: allocator inside coroutine" {
 
 test "Coroutine: stack trace" {
     if (builtin.cpu.arch == .powerpc64 or builtin.cpu.arch == .powerpc64le) return error.SkipZigTest;
+    // Stack unwinding works on ARM/Thumb in Zig 0.15.2 but is broken in 0.16 -
+    // captureCurrentStackTrace returns an empty trace even with a sentinel frame installed.
+    // See https://codeberg.org/ziglang/zig/issues/31082
+    if (builtin.cpu.arch == .arm or builtin.cpu.arch == .thumb) return error.SkipZigTest;
 
     const stack = @import("stack.zig");
 
@@ -1397,20 +1424,14 @@ test "Coroutine: stack trace" {
     defer stack.stackFree(coro.context.stack_info);
 
     const TestData = struct {
-        trace: std.builtin.StackTrace = undefined,
+        trace: std.debug.StackTrace = undefined,
         trace_addrs: [32]usize = undefined,
         finished: bool = false,
 
         fn coroFunc(c: *Coroutine, userdata: ?*anyopaque) void {
             c.yield(); // make it slightly more complicated and yield once
             const self: *@This() = @ptrCast(@alignCast(userdata));
-            if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-                self.trace.index = 0;
-                self.trace.instruction_addresses = &self.trace_addrs;
-                std.debug.captureStackTrace(null, &self.trace);
-            } else {
-                self.trace = std.debug.captureCurrentStackTrace(.{}, &self.trace_addrs);
-            }
+            self.trace = std.debug.captureCurrentStackTrace(.{}, &self.trace_addrs);
             self.finished = true;
         }
     };
@@ -1422,14 +1443,11 @@ test "Coroutine: stack trace" {
         coro.step();
     }
 
-    std.debug.dumpStackTrace(test_data.trace);
+    std.debug.dumpStackTrace(&test_data.trace);
 
-    std.testing.expect(test_data.trace.index > 1 and test_data.trace.index < 7) catch |err| {
-        if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-            std.debug.dumpStackTrace(test_data.trace);
-        } else {
-            std.debug.dumpStackTrace(&test_data.trace);
-        }
+    const trace_len = test_data.trace.return_addresses.len;
+    std.testing.expect(trace_len > 1 and trace_len < 7) catch |err| {
+        std.debug.dumpStackTrace(&test_data.trace);
         return err;
     };
 }

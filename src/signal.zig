@@ -21,15 +21,15 @@ pub const SignalKind = switch (builtin.os.tag) {
         terminate = w.CTRL_CLOSE_EVENT,
     },
     else => enum(u8) {
-        interrupt = posix.SIG.INT,
-        terminate = posix.SIG.TERM,
-        hangup = posix.SIG.HUP,
-        alarm = posix.SIG.ALRM,
-        child = posix.SIG.CHLD,
-        pipe = posix.SIG.PIPE,
-        quit = posix.SIG.QUIT,
-        user1 = posix.SIG.USR1,
-        user2 = posix.SIG.USR2,
+        interrupt = @intFromEnum(posix.SIG.INT),
+        terminate = @intFromEnum(posix.SIG.TERM),
+        hangup = @intFromEnum(posix.SIG.HUP),
+        alarm = @intFromEnum(posix.SIG.ALRM),
+        child = @intFromEnum(posix.SIG.CHLD),
+        pipe = @intFromEnum(posix.SIG.PIPE),
+        quit = @intFromEnum(posix.SIG.QUIT),
+        user1 = @intFromEnum(posix.SIG.USR1),
+        user2 = @intFromEnum(posix.SIG.USR2),
         _,
     },
 };
@@ -129,7 +129,7 @@ const HandlerRegistryWindows = struct {
         if (prev_total == 0) {
             // First handler of any type - install the global console control handler
             const result = w.SetConsoleCtrlHandler(consoleCtrlHandlerWindows, w.TRUE);
-            if (result == 0) {
+            if (result == w.FALSE) {
                 return error.SetConsoleCtrlHandlerFailed;
             }
         }
@@ -181,7 +181,8 @@ const HandlerRegistry = if (builtin.os.tag == .windows) HandlerRegistryWindows e
 
 var registry: HandlerRegistry = .{};
 
-fn signalHandlerUnix(signum: c_int) callconv(.c) void {
+fn signalHandlerUnix(sig: posix.SIG) callconv(.c) void {
+    const signum: u8 = @intCast(@intFromEnum(sig));
     for (&registry.handlers) |*entry| {
         const kind = entry.kind.load(.acquire);
         if (kind == signum) {
@@ -200,7 +201,7 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
     const signal_value: u8 = switch (ctrl_type) {
         w.CTRL_C_EVENT => @intFromEnum(SignalKind.interrupt),
         w.CTRL_CLOSE_EVENT => @intFromEnum(SignalKind.terminate),
-        else => return 0, // Not handled
+        else => return w.FALSE, // Not handled
     };
 
     // Notify all matching handlers
@@ -219,8 +220,8 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
         }
     }
 
-    // Return 1 if we handled it, 0 to pass to default handler
-    return if (found_handler) 1 else 0;
+    // Return TRUE if we handled it, FALSE to pass to default handler
+    return if (found_handler) w.TRUE else w.FALSE;
 }
 
 /// OS signal watcher.
