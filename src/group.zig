@@ -28,6 +28,12 @@ pub const Group = struct {
 
     pub const init: Group = .{};
 
+    /// Reinterpret a `*std.Io.Group` as `*Group`. The two share layout via
+    /// `IoGroup`, so a pointer cast is sufficient.
+    pub fn fromStd(g: *std.Io.Group) *Group {
+        return @ptrCast(@alignCast(g));
+    }
+
     // Interpret inner.token as WaitQueue head
     //   null (0)  = sentinel0 = idle/done
     //   1         = sentinel1 = closing (reject new spawns)
@@ -121,14 +127,13 @@ pub const Group = struct {
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
         const Context = struct { group: *Group, args: Args };
         const Wrapper = struct {
-            fn start(ctx: *const anyopaque) Cancelable!void {
+            fn start(ctx: *const anyopaque) void {
                 const context: *const Context = @ptrCast(@alignCast(ctx));
                 const group = context.group;
                 if (@typeInfo(ReturnType) == .error_union) {
                     @call(.auto, func, context.args) catch |err| {
                         if (err == error.Canceled) {
                             group.setCanceled();
-                            return error.Canceled;
                         } else {
                             log.err("Group task failed with error: {}", .{err});
                             group.setFailed();
@@ -227,7 +232,7 @@ pub fn groupSpawnTask(
     rt: *Runtime,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque) Cancelable!void,
+    start: *const fn (context: *const anyopaque) void,
 ) !void {
     _ = try spawnTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, group);
 }

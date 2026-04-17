@@ -27,8 +27,8 @@ pub const Closure = struct {
     pub const Start = union(enum) {
         /// Regular task: fn(context, result) -> void
         regular: *const fn (context: *const anyopaque, result: *anyopaque) void,
-        /// Group task: fn(context) -> Cancelable!void
-        group: *const fn (context: *const anyopaque) Cancelable!void,
+        /// Group task: fn(context) -> void
+        group: *const fn (context: *const anyopaque) void,
     };
 
     pub const max_result_len = 1 << 12;
@@ -71,8 +71,7 @@ pub const Closure = struct {
                 start(context, result);
             },
             .group => |start| {
-                // The start signature returns Cancelable!void for std.Io compatibility
-                start(context) catch {};
+                start(context);
             },
         }
     }
