@@ -27,7 +27,14 @@ const groupSpawnTask = @import("group.zig").groupSpawnTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const time = @import("time.zig");
-const Waiter = @import("common.zig").Waiter;
+const common = @import("common.zig");
+const Waiter = common.Waiter;
+const waitForIo = common.waitForIo;
+const waitForIoUncancelable = common.waitForIoUncancelable;
+
+const ev = @import("ev/root.zig");
+const os_net = @import("os/net.zig");
+const zio_net = @import("net.zig");
 
 /// Construct a `std.Io` instance backed by `rt`.
 pub fn fromRuntime(rt: *Runtime) Io {
@@ -640,20 +647,223 @@ fn randomSecureImpl(_: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
     return io.vtable.randomSecure(io.userdata, buffer);
 }
 
-fn netListenIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
-    @panic("TODO: netListenIp");
+fn stdIoIpToZio(addr: Io.net.IpAddress) zio_net.IpAddress {
+    return switch (addr) {
+        .ip4 => |ip4| zio_net.IpAddress.initIp4(ip4.bytes, ip4.port),
+        .ip6 => |ip6| zio_net.IpAddress.initIp6(ip6.bytes, ip6.port, ip6.flow, ip6.interface.index),
+    };
 }
 
-fn netAcceptImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
-    @panic("TODO: netAccept");
+fn zioIpToStdIo(addr: zio_net.IpAddress) Io.net.IpAddress {
+    return switch (addr.any.family) {
+        std.posix.AF.INET => .{ .ip4 = .{
+            .bytes = @bitCast(addr.in.addr),
+            .port = std.mem.bigToNative(u16, addr.in.port),
+        } },
+        std.posix.AF.INET6 => .{ .ip6 = .{
+            .bytes = addr.in6.addr,
+            .port = std.mem.bigToNative(u16, addr.in6.port),
+            .flow = addr.in6.flowinfo,
+            .interface = .{ .index = addr.in6.scope_id },
+        } },
+        else => unreachable,
+    };
+}
+
+fn sockAddrLen(addr: *const os_net.sockaddr) os_net.socklen_t {
+    return switch (addr.family) {
+        std.posix.AF.INET => @sizeOf(os_net.sockaddr.in),
+        std.posix.AF.INET6 => @sizeOf(os_net.sockaddr.in6),
+        else => unreachable,
+    };
+}
+
+const OpenOrCancel = os_net.OpenError || common.Cancelable;
+const BindOrCancel = os_net.BindError || common.Cancelable;
+const ListenOrCancel = os_net.ListenError || common.Cancelable;
+const ConnectOrCancel = os_net.ConnectError || common.Cancelable;
+const AcceptOrCancel = os_net.AcceptError || common.Cancelable;
+
+/// Map zio socket-open errors into the subset of std.Io listen/connect errors
+/// they can surface through.
+fn openErrToListenErr(err: OpenOrCancel) Io.net.IpAddress.ListenError {
+    return switch (err) {
+        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.ProtocolNotSupported => error.ProtocolUnsupportedBySystem,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.SystemResources => error.SystemResources,
+        error.PermissionDenied => error.Unexpected,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+    };
+}
+
+fn bindErrToListenErr(err: BindOrCancel) Io.net.IpAddress.ListenError {
+    return switch (err) {
+        error.AddressInUse => error.AddressInUse,
+        error.AddressNotAvailable => error.AddressUnavailable,
+        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.AccessDenied,
+        error.FileDescriptorNotASocket,
+        error.SymLinkLoop,
+        error.NameTooLong,
+        error.FileNotFound,
+        error.NotDir,
+        error.ReadOnlyFileSystem,
+        error.InputOutput,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn listenErrToListenErr(err: ListenOrCancel) Io.net.IpAddress.ListenError {
+    return switch (err) {
+        error.AddressInUse => error.AddressInUse,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        error.OperationNotSupported => error.SocketModeUnsupported,
+        error.Canceled => error.Canceled,
+        error.AlreadyConnected,
+        error.FileDescriptorNotASocket,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
+    const zio_addr = stdIoIpToZio(address.*);
+    const domain = os_net.Domain.fromPosix(zio_addr.any.family);
+
+    var open_op = ev.NetOpen.init(domain, .stream, .ip, .{});
+    try waitForIo(&open_op.c);
+    const handle = open_op.getResult() catch |err| return openErrToListenErr(err);
+    errdefer {
+        var close_op = ev.NetClose.init(handle);
+        waitForIoUncancelable(&close_op.c);
+    }
+
+    if (options.reuse_address) {
+        const value: c_int = 1;
+        os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEADDR, std.mem.asBytes(&value)) catch {};
+        if (@hasDecl(os_net.SO, "REUSEPORT")) {
+            os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEPORT, std.mem.asBytes(&value)) catch {};
+        }
+    }
+
+    var bind_addr = zio_addr;
+    var addr_len = sockAddrLen(&bind_addr.any);
+    var bind_op = ev.NetBind.init(handle, &bind_addr.any, &addr_len);
+    try waitForIo(&bind_op.c);
+    bind_op.getResult() catch |err| return bindErrToListenErr(err);
+
+    var listen_op = ev.NetListen.init(handle, options.kernel_backlog);
+    try waitForIo(&listen_op.c);
+    listen_op.getResult() catch |err| return listenErrToListenErr(err);
+
+    return .{
+        .handle = handle,
+        .address = zioIpToStdIo(bind_addr),
+    };
+}
+
+fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
+    var peer_addr: zio_net.IpAddress = undefined;
+    var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.IpAddress);
+
+    var op = ev.NetAccept.init(server, &peer_addr.any, &peer_addr_len);
+    try waitForIo(&op.c);
+    const handle = op.getResult() catch |err| switch (err) {
+        error.WouldBlock => return error.WouldBlock,
+        error.ConnectionAborted => return error.ConnectionAborted,
+        error.ProcessFdQuotaExceeded => return error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => return error.SystemFdQuotaExceeded,
+        error.SystemResources => return error.SystemResources,
+        error.SocketNotListening => return error.SocketNotListening,
+        error.ProtocolFailure => return error.ProtocolFailure,
+        error.BlockedByFirewall => return error.BlockedByFirewall,
+        error.NetworkDown => return error.NetworkDown,
+        error.Canceled => return error.Canceled,
+        error.ConnectionResetByPeer,
+        error.FileDescriptorNotASocket,
+        error.OperationNotSupported,
+        error.Unexpected,
+        => return error.Unexpected,
+    };
+
+    return .{
+        .handle = handle,
+        .address = zioIpToStdIo(peer_addr),
+    };
 }
 
 fn netBindIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
     @panic("TODO: netBindIp");
 }
 
-fn netConnectIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
-    @panic("TODO: netConnectIp");
+fn openErrToConnectErr(err: OpenOrCancel) Io.net.IpAddress.ConnectError {
+    return switch (err) {
+        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.ProtocolNotSupported => error.ProtocolUnsupportedBySystem,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.SystemResources => error.SystemResources,
+        error.PermissionDenied => error.AccessDenied,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+    };
+}
+
+fn connectErrToConnectErr(err: ConnectOrCancel) Io.net.IpAddress.ConnectError {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.AddressNotAvailable => error.AddressUnavailable,
+        error.AddressFamilyNotSupported => error.AddressFamilyUnsupported,
+        error.WouldBlock => error.WouldBlock,
+        error.ConnectionPending => error.ConnectionPending,
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.ConnectionTimedOut => error.Timeout,
+        error.NetworkUnreachable => error.NetworkUnreachable,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.AddressInUse,
+        error.AlreadyConnected,
+        error.FileDescriptorNotASocket,
+        error.FileNotFound,
+        error.SymLinkLoop,
+        error.NameTooLong,
+        error.NotDir,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
+    const zio_addr = stdIoIpToZio(address.*);
+    const domain = os_net.Domain.fromPosix(zio_addr.any.family);
+
+    var open_op = ev.NetOpen.init(domain, .stream, .ip, .{});
+    try waitForIo(&open_op.c);
+    const handle = open_op.getResult() catch |err| return openErrToConnectErr(err);
+    errdefer {
+        var close_op = ev.NetClose.init(handle);
+        waitForIoUncancelable(&close_op.c);
+    }
+
+    const addr_len = sockAddrLen(&zio_addr.any);
+    var connect_op = ev.NetConnect.init(handle, &zio_addr.any, addr_len);
+    try waitForIo(&connect_op.c);
+    connect_op.getResult() catch |err| return connectErrToConnectErr(err);
+
+    return .{
+        .handle = handle,
+        .address = zioIpToStdIo(zio_addr),
+    };
 }
 
 fn netListenUnixImpl(_: ?*anyopaque, _: *const Io.net.UnixAddress, _: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
@@ -684,8 +894,11 @@ fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *
     @panic("TODO: netWriteFile");
 }
 
-fn netCloseImpl(_: ?*anyopaque, _: []const Io.net.Socket.Handle) void {
-    @panic("TODO: netClose");
+fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
+    for (handles) |handle| {
+        var op = ev.NetClose.init(handle);
+        waitForIoUncancelable(&op.c);
+    }
 }
 
 fn netShutdownImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.ShutdownHow) Io.net.ShutdownError!void {
@@ -964,6 +1177,39 @@ test "io: sleep is cancelable" {
             try io.sleep(.fromMilliseconds(10), .awake);
             future.cancel(io);
             try std.testing.expectError(error.Canceled, observed);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net TCP listen/connect/accept handshake" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn connector(io: Io, address: *const Io.net.IpAddress, result: *Io.net.IpAddress.ConnectError!Io.net.Stream) void {
+            result.* = Io.net.IpAddress.connect(address, io, .{ .mode = .stream });
+        }
+
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(
+                &.{ .ip4 = .loopback(0) },
+                io,
+                .{ .reuse_address = true },
+            );
+            defer server.deinit(io);
+
+            var connect_result: Io.net.IpAddress.ConnectError!Io.net.Stream = undefined;
+            var future = io.async(connector, .{ io, &server.socket.address, &connect_result });
+            defer future.cancel(io);
+
+            const accepted = try server.accept(io);
+            defer accepted.close(io);
+
+            const client = try connect_result;
+            defer client.close(io);
         }
     };
 
