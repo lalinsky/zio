@@ -6,6 +6,10 @@ const os = @import("../../os/root.zig");
 const net = os.net;
 
 test "Blocking sockets: basic smoke test" {
+    // Normally done by Loop.init; this test bypasses the loop and uses
+    // blocking ops directly from raw threads.
+    net.ensureWSAInitialized();
+
     // Shared state between threads
     const SharedState = struct {
         server_addr: net.sockaddr.in,
