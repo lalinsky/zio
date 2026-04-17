@@ -175,9 +175,14 @@ pub const vtable: Io.VTable = .{
 // VTable stubs. Every function below is intentionally a `@panic("TODO: …")`.
 // ---------------------------------------------------------------------------
 
-fn crashHandlerImpl(_: ?*anyopaque) void {
-    @panic("TODO: crashHandler");
+/// Delegate target for vtable methods that are pure OS calls with no event-loop
+/// integration. Only safe for methods that don't open or return backend-owned
+/// handles/futures.
+fn globalIo() Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
+
+fn crashHandlerImpl(_: ?*anyopaque) void {}
 
 fn asyncImpl(
     userdata: ?*anyopaque,
@@ -542,8 +547,9 @@ fn processExecutableOpenImpl(_: ?*anyopaque, _: Io.Dir.OpenFileOptions) std.proc
     @panic("TODO: processExecutableOpen");
 }
 
-fn processExecutablePathImpl(_: ?*anyopaque, _: []u8) std.process.ExecutablePathError!usize {
-    @panic("TODO: processExecutablePath");
+fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
+    const io = globalIo();
+    return io.vtable.processExecutablePath(io.userdata, buffer);
 }
 
 fn lockStderrImpl(_: ?*anyopaque, _: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
@@ -558,16 +564,19 @@ fn unlockStderrImpl(_: ?*anyopaque) void {
     @panic("TODO: unlockStderr");
 }
 
-fn processCurrentPathImpl(_: ?*anyopaque, _: []u8) std.process.CurrentPathError!usize {
-    @panic("TODO: processCurrentPath");
+fn processCurrentPathImpl(_: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
+    const io = globalIo();
+    return io.vtable.processCurrentPath(io.userdata, buffer);
 }
 
-fn processSetCurrentDirImpl(_: ?*anyopaque, _: Io.Dir) std.process.SetCurrentDirError!void {
-    @panic("TODO: processSetCurrentDir");
+fn processSetCurrentDirImpl(_: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
+    const io = globalIo();
+    return io.vtable.processSetCurrentDir(io.userdata, dir);
 }
 
-fn processSetCurrentPathImpl(_: ?*anyopaque, _: []const u8) std.process.SetCurrentPathError!void {
-    @panic("TODO: processSetCurrentPath");
+fn processSetCurrentPathImpl(_: ?*anyopaque, path: []const u8) std.process.SetCurrentPathError!void {
+    const io = globalIo();
+    return io.vtable.processSetCurrentPath(io.userdata, path);
 }
 
 fn processReplaceImpl(_: ?*anyopaque, _: std.process.ReplaceOptions) std.process.ReplaceError {
@@ -622,13 +631,13 @@ fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
 }
 
 fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
-    const fallback = std.Io.Threaded.global_single_threaded.io();
-    fallback.vtable.random(fallback.userdata, buffer);
+    const io = globalIo();
+    io.vtable.random(io.userdata, buffer);
 }
 
 fn randomSecureImpl(_: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
-    const fallback = std.Io.Threaded.global_single_threaded.io();
-    return fallback.vtable.randomSecure(fallback.userdata, buffer);
+    const io = globalIo();
+    return io.vtable.randomSecure(io.userdata, buffer);
 }
 
 fn netListenIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
@@ -831,6 +840,22 @@ test "io: Io.Semaphore limits concurrent workers" {
             }
             try group.await(io);
             try std.testing.expect(shared.peak.load(.acquire) <= 2);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: processExecutablePath returns a non-empty path" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const len = try std.process.executablePath(io, &buf);
+            try std.testing.expect(len > 0);
         }
     };
 
