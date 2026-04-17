@@ -598,12 +598,22 @@ fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
     @panic("TODO: progressParentFile");
 }
 
-fn nowImpl(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
-    @panic("TODO: now");
+fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
+    const ts = switch (clock) {
+        .real => time.Timestamp.now(.realtime),
+        .awake, .boot => time.Timestamp.now(.monotonic),
+        // zio does not expose CPU-time clocks yet. Callers should check
+        // `clockResolution` (returns `ClockUnavailable`) before relying on these.
+        .cpu_process, .cpu_thread => return .{ .nanoseconds = 0 },
+    };
+    return .{ .nanoseconds = @intCast(ts.toNanoseconds()) };
 }
 
-fn clockResolutionImpl(_: ?*anyopaque, _: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
-    @panic("TODO: clockResolution");
+fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
+    return switch (clock) {
+        .real, .awake, .boot => .{ .nanoseconds = 1 },
+        .cpu_process, .cpu_thread => error.ClockUnavailable,
+    };
 }
 
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
@@ -611,12 +621,14 @@ fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     try waiter.timedWait(1, time.Timeout.fromStd(timeout), .allow_cancel);
 }
 
-fn randomImpl(_: ?*anyopaque, _: []u8) void {
-    @panic("TODO: random");
+fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
+    const fallback = std.Io.Threaded.global_single_threaded.io();
+    fallback.vtable.random(fallback.userdata, buffer);
 }
 
-fn randomSecureImpl(_: ?*anyopaque, _: []u8) Io.RandomSecureError!void {
-    @panic("TODO: randomSecure");
+fn randomSecureImpl(_: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
+    const fallback = std.Io.Threaded.global_single_threaded.io();
+    return fallback.vtable.randomSecure(fallback.userdata, buffer);
 }
 
 fn netListenIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
@@ -819,6 +831,76 @@ test "io: Io.Semaphore limits concurrent workers" {
             }
             try group.await(io);
             try std.testing.expect(shared.peak.load(.acquire) <= 2);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: now returns monotonically increasing awake timestamps" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            const a = Io.Timestamp.now(io, .awake);
+            try io.sleep(.fromMilliseconds(5), .awake);
+            const b = Io.Timestamp.now(io, .awake);
+            try std.testing.expect(b.nanoseconds >= a.nanoseconds + 5 * std.time.ns_per_ms);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: clockResolution reports availability per clock" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const res_awake = try Io.Clock.resolution(.awake, io);
+    try std.testing.expect(res_awake.nanoseconds > 0);
+
+    try std.testing.expectError(error.ClockUnavailable, Io.Clock.resolution(.cpu_process, io));
+    try std.testing.expectError(error.ClockUnavailable, Io.Clock.resolution(.cpu_thread, io));
+}
+
+test "io: random fills buffer with varying bytes" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var buf: [64]u8 = @splat(0);
+            io.random(&buf);
+            // Probabilistically asserts we actually filled the buffer.
+            var nonzero: usize = 0;
+            for (buf) |b| if (b != 0) {
+                nonzero += 1;
+            };
+            try std.testing.expect(nonzero > 32);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: randomSecure fills buffer with varying bytes" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var buf: [64]u8 = @splat(0);
+            try io.randomSecure(&buf);
+            var nonzero: usize = 0;
+            for (buf) |b| if (b != 0) {
+                nonzero += 1;
+            };
+            try std.testing.expect(nonzero > 32);
         }
     };
 
