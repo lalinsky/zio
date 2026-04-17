@@ -279,6 +279,95 @@ pub fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) usize {
     return linux.syscall2(.sigaltstack, @intFromPtr(ss), @intFromPtr(old_ss));
 }
 
+pub const Sigaction = linux.Sigaction;
+pub const SIG = linux.SIG;
+pub const SA = linux.SA;
+pub const siginfo_t = linux.siginfo_t;
+pub const sigset_t = linux.sigset_t;
+
+/// Install a signal handler, working around a qemu-user bug on archs whose Linux
+/// kABI has no `sa_restorer` field in `struct k_sigaction`.
+///
+/// Background:
+///   - The real Linux kernel ABI for hexagon, loongarch, mips, or1k, and riscv has
+///     no `sa_restorer` in `struct k_sigaction` (these archs use VDSO-based
+///     sigreturn, so the kernel never needs a user-supplied restorer pointer).
+///   - Zig 0.16 (commit 42e4411377, PR #25388) made `std.os.linux.k_sigaction`
+///     match that kABI, shrinking the struct by one word on those archs. The
+///     `oldksa` buffer inside `std.os.linux.sigaction` shrunk accordingly
+///     (e.g. 20 → 16 bytes on riscv32, 24 → 32 bytes less than before on riscv64).
+///   - qemu-user's `target_sigaction` (linux-user/syscall_defs.h) still includes
+///     `sa_restorer` for these archs, because linux-user/generic/signal.h
+///     unconditionally `#define`s `TARGET_SA_RESTORER` and the riscv/loongarch
+///     target headers don't `#undef` it. So when the rt_sigaction syscall
+///     returns, qemu writes a restorer-sized word back into `oldksa`, past the
+///     end of the (now correctly sized) buffer.
+///   - That overflow lands right on the stack protector canary that
+///     ReleaseSafe places immediately after the buffer. Next function epilogue
+///     the canary check fails and we SIGABRT with __stack_chk_fail.
+///
+/// On real hardware the kernel never writes that slot, so the bug only shows up
+/// under qemu-user — specifically in ReleaseSafe + poll backend on riscv32,
+/// riscv64, and loongarch64 CI jobs.
+///
+/// Fix: on the affected archs, call rt_sigaction ourselves with a locally
+/// defined `KSigactionPadded` that has a trailing word to absorb the spurious
+/// restorer write. Other archs fall through to std.os.linux.sigaction unchanged.
+pub fn sigaction(sig: SIG, act: ?*const Sigaction, oact: ?*Sigaction) usize {
+    const needs_padding = switch (builtin.cpu.arch) {
+        .hexagon, .loongarch32, .loongarch64, .mips, .mipsel, .mips64, .mips64el, .or1k, .riscv32, .riscv64 => true,
+        else => false,
+    };
+    if (!needs_padding) return linux.sigaction(sig, act, oact);
+
+    std.debug.assert(@intFromEnum(sig) > 0);
+    std.debug.assert(@intFromEnum(sig) < linux.NSIG);
+    std.debug.assert(sig != .KILL);
+    std.debug.assert(sig != .STOP);
+
+    // Layout matches the real kABI (handler, flags, mask). The trailing
+    // `_qemu_pad` word is not part of the kABI — it exists purely to catch
+    // the extra restorer-sized store qemu-user performs on return, so that
+    // store doesn't clobber the stack canary immediately after this buffer.
+    const KSigactionPadded = extern struct {
+        handler: ?*align(1) const fn (SIG) callconv(.c) void,
+        flags: c_ulong,
+        mask: sigset_t,
+        _qemu_pad: usize = 0,
+    };
+
+    var ksa: KSigactionPadded = undefined;
+    var oldksa: KSigactionPadded = undefined;
+
+    if (act) |new| {
+        ksa = .{
+            .handler = new.handler.handler,
+            .flags = new.flags,
+            .mask = new.mask,
+        };
+    }
+
+    const ksa_arg: usize = if (act != null) @intFromPtr(&ksa) else 0;
+    const oldksa_arg: usize = if (oact != null) @intFromPtr(&oldksa) else 0;
+
+    const result = linux.syscall4(
+        .rt_sigaction,
+        @intFromEnum(sig),
+        ksa_arg,
+        oldksa_arg,
+        @sizeOf(sigset_t),
+    );
+    if (linux.errno(result) != .SUCCESS) return result;
+
+    if (oact) |old| {
+        old.handler.handler = oldksa.handler;
+        old.flags = oldksa.flags;
+        old.mask = oldksa.mask;
+    }
+
+    return 0;
+}
+
 pub fn utimensat(dirfd: fd_t, path: ?[*:0]const u8, times: ?*const [2]timespec, flags: u32) usize {
     if (@hasField(linux.SYS, "utimensat")) {
         return linux.syscall4(

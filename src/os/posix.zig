@@ -276,7 +276,11 @@ pub fn sigaction(sig: anytype, act: ?*const Sigaction, oact: ?*Sigaction) void {
         .@"enum" => sig,
         else => @compileError("sig must be an integer or enum"),
     };
-    _ = system.sigaction(sig_enum, act, oact);
+    if (builtin.os.tag == .linux) {
+        _ = sys.sigaction(sig_enum, act, oact);
+    } else {
+        _ = system.sigaction(sig_enum, act, oact);
+    }
 }
 
 /// Send a signal to the calling process. sig must be convertible to c_int.
