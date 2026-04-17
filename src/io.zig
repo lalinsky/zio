@@ -678,6 +678,10 @@ fn sockAddrLen(addr: *const os_net.sockaddr) os_net.socklen_t {
     };
 }
 
+fn stdIoHandleToZio(h: Io.net.Socket.Handle) os_net.fd_t {
+    return if (@typeInfo(os_net.fd_t) == .pointer) @ptrCast(h) else h;
+}
+
 const OpenOrCancel = os_net.OpenError || common.Cancelable;
 const BindOrCancel = os_net.BindError || common.Cancelable;
 const ListenOrCancel = os_net.ListenError || common.Cancelable;
@@ -774,7 +778,7 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
     var peer_addr: zio_net.IpAddress = undefined;
     var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.IpAddress);
 
-    var op = ev.NetAccept.init(server, &peer_addr.any, &peer_addr_len);
+    var op = ev.NetAccept.init(stdIoHandleToZio(server), &peer_addr.any, &peer_addr_len);
     try waitForIo(&op.c);
     const handle = op.getResult() catch |err| switch (err) {
         error.WouldBlock => return error.WouldBlock,
@@ -896,7 +900,7 @@ fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *
 
 fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
     for (handles) |handle| {
-        var op = ev.NetClose.init(handle);
+        var op = ev.NetClose.init(stdIoHandleToZio(handle));
         waitForIoUncancelable(&op.c);
     }
 }
