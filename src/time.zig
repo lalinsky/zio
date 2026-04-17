@@ -408,6 +408,27 @@ pub const Timeout = union(enum) {
     duration: Duration,
     deadline: Timestamp,
 
+    /// Convert a `std.Io.Timeout` into the zio equivalent.
+    ///
+    /// Deadlines are resolved against the monotonic clock regardless of the
+    /// deadline's `Clock` tag; the zio loop only exposes a single internal
+    /// clock. This matches `nowImpl` returning a monotonic `Io.Timestamp`.
+    pub fn fromStd(t: std.Io.Timeout) Timeout {
+        return switch (t) {
+            .none => .none,
+            .duration => |d| fromSignedNanoseconds(d.raw.nanoseconds),
+            .deadline => |d| blk: {
+                const now_ns: i96 = @intCast(Timestamp.now(.monotonic).toNanoseconds());
+                break :blk fromSignedNanoseconds(d.raw.nanoseconds - now_ns);
+            },
+        };
+    }
+
+    fn fromSignedNanoseconds(ns: i96) Timeout {
+        if (ns <= 0) return .{ .duration = Duration.zero };
+        return .{ .duration = Duration.fromNanoseconds(@intCast(ns)) };
+    }
+
     /// Creates a timeout from a duration in nanoseconds.
     pub fn fromNanoseconds(ns: u64) Timeout {
         return .{ .duration = .fromNanoseconds(ns) };
