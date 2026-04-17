@@ -27,6 +27,7 @@ const groupSpawnTask = @import("group.zig").groupSpawnTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const time = @import("time.zig");
+const Waiter = @import("common.zig").Waiter;
 
 /// Construct a `std.Io` instance backed by `rt`.
 pub fn fromRuntime(rt: *Runtime) Io {
@@ -605,8 +606,9 @@ fn clockResolutionImpl(_: ?*anyopaque, _: Io.Clock) Io.Clock.ResolutionError!Io.
     @panic("TODO: clockResolution");
 }
 
-fn sleepImpl(_: ?*anyopaque, _: Io.Timeout) Io.Cancelable!void {
-    @panic("TODO: sleep");
+fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
+    var waiter: Waiter = .init();
+    try waiter.timedWait(1, time.Timeout.fromStd(timeout), .allow_cancel);
 }
 
 fn randomImpl(_: ?*anyopaque, _: []u8) void {
@@ -817,6 +819,44 @@ test "io: Io.Semaphore limits concurrent workers" {
             }
             try group.await(io);
             try std.testing.expect(shared.peak.load(.acquire) <= 2);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: sleep with duration returns after delay" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var sw = time.Stopwatch.start();
+            try io.sleep(.fromMilliseconds(20), .awake);
+            try std.testing.expect(sw.read().toMilliseconds() >= 20);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: sleep is cancelable" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn sleeper(io: Io, observed: *Io.Cancelable!void) void {
+            observed.* = io.sleep(.fromSeconds(60), .awake);
+        }
+
+        fn run(io: Io) !void {
+            var observed: Io.Cancelable!void = {};
+            var future = io.async(sleeper, .{ io, &observed });
+            try io.sleep(.fromMilliseconds(10), .awake);
+            future.cancel(io);
+            try std.testing.expectError(error.Canceled, observed);
         }
     };
 
