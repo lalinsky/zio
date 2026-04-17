@@ -17,14 +17,8 @@ const spawnTask = @import("task.zig").spawnTask;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Futex = @import("sync/Futex.zig");
 
-/// Matches std.Io.Group layout exactly for future vtable compatibility.
-pub const IoGroup = extern struct {
-    token: std.atomic.Value(?*anyopaque) = .init(null),
-    state: u64 = 0,
-};
-
 pub const Group = struct {
-    inner: IoGroup = .{},
+    inner: std.Io.Group = .init,
 
     pub const init: Group = .{};
 
@@ -58,8 +52,8 @@ pub const Group = struct {
     }
 
     fn getState(self: *Group) *u32 {
-        // Cast u64* to u32* - gets lower u32 on little-endian
-        return @ptrCast(&self.inner.state);
+        // Cast usize* to u32* - identity on 32-bit, gets lower u32 on 64-bit little-endian
+        return @ptrCast(@alignCast(&self.inner.state));
     }
 
     /// Set the failed flag. If fail_fast is set, also closes the group.
