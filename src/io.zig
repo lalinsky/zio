@@ -25,6 +25,8 @@ const Awaitable = @import("awaitable.zig").Awaitable;
 const Group = @import("group.zig").Group;
 const groupSpawnTask = @import("group.zig").groupSpawnTask;
 const select = @import("select.zig");
+const Futex = @import("sync/Futex.zig");
+const time = @import("time.zig");
 
 /// Construct a `std.Io` instance backed by `rt`.
 pub fn fromRuntime(rt: *Runtime) Io {
@@ -286,16 +288,21 @@ fn checkCancelImpl(_: ?*anyopaque) Io.Cancelable!void {
     try checkCancel();
 }
 
-fn futexWaitImpl(_: ?*anyopaque, _: *const u32, _: u32, _: Io.Timeout) Io.Cancelable!void {
-    @panic("TODO: futexWait");
+fn futexWaitImpl(_: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
+    Futex.timedWait(ptr, expected, time.Timeout.fromStd(timeout)) catch |err| switch (err) {
+        error.Timeout => return,
+        error.Canceled => return error.Canceled,
+    };
 }
 
-fn futexWaitUncancelableImpl(_: ?*anyopaque, _: *const u32, _: u32) void {
-    @panic("TODO: futexWaitUncancelable");
+fn futexWaitUncancelableImpl(_: ?*anyopaque, ptr: *const u32, expected: u32) void {
+    beginShield();
+    defer endShield();
+    Futex.wait(ptr, expected) catch unreachable;
 }
 
-fn futexWakeImpl(_: ?*anyopaque, _: *const u32, _: u32) void {
-    @panic("TODO: futexWake");
+fn futexWakeImpl(_: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
+    Futex.wake(ptr, max_waiters);
 }
 
 fn operateImpl(_: ?*anyopaque, _: Io.Operation) Io.Cancelable!Io.Operation.Result {
@@ -696,6 +703,120 @@ test "io: async/await returns task result" {
             var future = io.async(doubleIt, .{21});
             const value = future.await(io);
             try std.testing.expectEqual(@as(i32, 42), value);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: Io.Mutex lock/unlock serializes tasks" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const State = struct {
+        mutex: Io.Mutex = .init,
+        counter: u32 = 0,
+    };
+
+    const Worker = struct {
+        fn bump(io: Io, s: *State) !void {
+            var i: usize = 0;
+            while (i < 100) : (i += 1) {
+                try s.mutex.lock(io);
+                s.counter += 1;
+                s.mutex.unlock(io);
+            }
+        }
+
+        fn run(io: Io) !void {
+            var s: State = .{};
+            var group: Io.Group = .init;
+            group.async(io, bump, .{ io, &s });
+            group.async(io, bump, .{ io, &s });
+            group.async(io, bump, .{ io, &s });
+            try group.await(io);
+            try std.testing.expectEqual(@as(u32, 300), s.counter);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: Io.Condition wakes waiter after signal" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const State = struct {
+        mutex: Io.Mutex = .init,
+        cond: Io.Condition = .init,
+        ready: bool = false,
+    };
+
+    const Worker = struct {
+        fn producer(io: Io, s: *State) !void {
+            try s.mutex.lock(io);
+            defer s.mutex.unlock(io);
+            s.ready = true;
+            s.cond.signal(io);
+        }
+
+        fn consumer(io: Io, s: *State, observed: *bool) !void {
+            try s.mutex.lock(io);
+            defer s.mutex.unlock(io);
+            while (!s.ready) try s.cond.wait(io, &s.mutex);
+            observed.* = true;
+        }
+
+        fn run(io: Io) !void {
+            var s: State = .{};
+            var observed = false;
+            var group: Io.Group = .init;
+            group.async(io, consumer, .{ io, &s, &observed });
+            group.async(io, producer, .{ io, &s });
+            try group.await(io);
+            try std.testing.expect(observed);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: Io.Semaphore limits concurrent workers" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Shared = struct {
+        sem: Io.Semaphore = .{ .permits = 2 },
+        active: std.atomic.Value(u32) = .init(0),
+        peak: std.atomic.Value(u32) = .init(0),
+    };
+
+    const Worker = struct {
+        fn work(io: Io, shared: *Shared) !void {
+            try shared.sem.wait(io);
+            defer shared.sem.post(io);
+
+            const current = shared.active.fetchAdd(1, .acq_rel) + 1;
+            // Track peak concurrency.
+            var peak = shared.peak.load(.monotonic);
+            while (current > peak) {
+                peak = shared.peak.cmpxchgWeak(peak, current, .acq_rel, .monotonic) orelse break;
+            }
+            _ = shared.active.fetchSub(1, .acq_rel);
+        }
+
+        fn run(io: Io) !void {
+            var shared: Shared = .{};
+            var group: Io.Group = .init;
+            var i: usize = 0;
+            while (i < 8) : (i += 1) {
+                group.async(io, work, .{ io, &shared });
+            }
+            try group.await(io);
+            try std.testing.expect(shared.peak.load(.acquire) <= 2);
         }
     };
 
