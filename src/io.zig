@@ -2056,6 +2056,10 @@ test "io: file/dir stat and dir statFile" {
     try std.testing.expectEqual(@as(u64, 5), at_stat.size);
     try std.testing.expectEqual(file_stat.inode, at_stat.inode);
 
+    // Windows: the PEB's cwd handle lacks FILE_READ_ATTRIBUTES, so
+    // GetFileInformationByHandle fails. Revisit once dirOpenDir is
+    // implemented and we can stat a real opened directory handle.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const dir_stat = try dir.stat(io);
     try std.testing.expectEqual(Io.File.Kind.directory, dir_stat.kind);
 }
