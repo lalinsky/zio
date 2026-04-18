@@ -373,8 +373,33 @@ fn dirCreateDirPathOpenImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.
     @panic("TODO: dirCreateDirPathOpen");
 }
 
-fn dirOpenDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-    @panic("TODO: dirOpenDir");
+fn dirOpenDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+    var op = ev.DirOpen.init(stdIoHandleToZio(dir.handle), sub_path, .{
+        .follow_symlinks = options.follow_symlinks,
+        .iterate = options.iterate,
+    });
+    try waitForIo(&op.c);
+    const fd = op.getResult() catch |err| return dirOpenErrToStdErr(err);
+    return .{ .handle = fd };
+}
+
+fn dirOpenErrToStdErr(err: ev.DirOpen.Error) Io.Dir.OpenError {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.PermissionDenied => error.PermissionDenied,
+        error.SymLinkLoop => error.SymLinkLoop,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.NoDevice => error.NoDevice,
+        error.FileNotFound => error.FileNotFound,
+        error.NameTooLong => error.NameTooLong,
+        error.SystemResources => error.SystemResources,
+        error.NotDir => error.NotDir,
+        error.BadPathName => error.BadPathName,
+        error.NetworkNotFound => error.NetworkNotFound,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+    };
 }
 
 fn dirStatImpl(_: ?*anyopaque, dir: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
@@ -479,8 +504,19 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
-fn dirCloseImpl(_: ?*anyopaque, _: []const Io.Dir) void {
-    @panic("TODO: dirClose");
+fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {
+    var i: usize = 0;
+    while (i < dirs.len) {
+        var ops: [8]ev.DirClose = undefined;
+        var group = ev.Group.init(.gather);
+        const n = @min(ops.len, dirs.len - i);
+        for (0..n) |j| {
+            ops[j] = ev.DirClose.init(stdIoHandleToZio(dirs[i + j].handle));
+            group.add(&ops[j].c);
+        }
+        waitForIoUncancelable(&group.c);
+        i += n;
+    }
 }
 
 fn dirReadImpl(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
@@ -2056,11 +2092,12 @@ test "io: file/dir stat and dir statFile" {
     try std.testing.expectEqual(@as(u64, 5), at_stat.size);
     try std.testing.expectEqual(file_stat.inode, at_stat.inode);
 
-    // Windows: the PEB's cwd handle lacks FILE_READ_ATTRIBUTES, so
-    // GetFileInformationByHandle fails. Revisit once dirOpenDir is
-    // implemented and we can stat a real opened directory handle.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    const dir_stat = try dir.stat(io);
+    const dir_path = "test_io_stat_dir";
+    try dir.createDir(io, dir_path, .default_dir);
+    defer dir.deleteDir(io, dir_path) catch {};
+    var sub_dir = try dir.openDir(io, dir_path, .{});
+    defer sub_dir.close(io);
+    const dir_stat = try sub_dir.stat(io);
     try std.testing.expectEqual(Io.File.Kind.directory, dir_stat.kind);
 }
 
