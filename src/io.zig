@@ -37,6 +37,7 @@ const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
 const zio_net = @import("net.zig");
+const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
 
 /// Must match `net.Stream.max_iovecs_len` in std.Io. Used as the cap on
@@ -1450,8 +1451,59 @@ fn netInterfaceNameImpl(_: ?*anyopaque, interface: Io.net.Interface) Io.net.Inte
     return io.vtable.netInterfaceName(io.userdata, interface);
 }
 
-fn netLookupImpl(_: ?*anyopaque, _: Io.net.HostName, _: *Io.Queue(Io.net.HostName.LookupResult), _: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
-    @panic("TODO: netLookup");
+fn netLookupImpl(
+    userdata: ?*anyopaque,
+    host_name: Io.net.HostName,
+    resolved: *Io.Queue(Io.net.HostName.LookupResult),
+    options: Io.net.HostName.LookupOptions,
+) Io.net.HostName.LookupError!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const io = fromRuntime(rt);
+    defer resolved.close(io);
+
+    var result = zio_dns.lookup(.{
+        .name = host_name.bytes,
+        .port = options.port,
+        .family = if (options.family) |f| switch (f) {
+            .ip4 => .ipv4,
+            .ip6 => .ipv6,
+        } else null,
+        .canonical_name = options.canonical_name_buffer != null,
+    }) catch |err| return dnsLookupErrToStdErr(err);
+    defer result.deinit();
+
+    while (result.next()) |entry| switch (entry) {
+        .address => |addr| {
+            resolved.putOne(io, .{ .address = zioIpToStdIo(addr) }) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Closed => unreachable, // caller must not close `resolved` until we return
+            };
+        },
+        .canonical_name => |name| {
+            if (name.bytes.len > Io.net.HostName.max_len) return error.InvalidDnsCnameRecord;
+            const buf = options.canonical_name_buffer.?;
+            const dest = buf[0..name.bytes.len];
+            @memcpy(dest, name.bytes);
+            resolved.putOne(io, .{ .canonical_name = .{ .bytes = dest } }) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Closed => unreachable,
+            };
+        },
+    };
+}
+
+fn dnsLookupErrToStdErr(err: zio_dns.LookupError) Io.net.HostName.LookupError {
+    return switch (err) {
+        error.UnknownHostName => error.UnknownHostName,
+        error.NameServerFailure, error.TemporaryNameServerFailure => error.NameServerFailure,
+        error.HostLacksNetworkAddresses => error.NoAddressReturned,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemResources, error.OutOfMemory => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.Unexpected, error.ServiceUnavailable, error.NoThreadPool, error.RuntimeShutdown => error.Unexpected,
+        error.Closed => unreachable,
+    };
 }
 
 test "Runtime.io / Runtime.fromIo round-trip" {
@@ -1850,6 +1902,57 @@ test "io: net UDP bind assigns ephemeral port" {
     defer socket.close(io);
 
     try std.testing.expect(socket.address.ip4.port != 0);
+}
+
+test "io: netLookup resolves numeric IPv4" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const host: Io.net.HostName = try .init("127.0.0.1");
+    var buf: [16]Io.net.HostName.LookupResult = undefined;
+    var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buf);
+    try Io.net.HostName.lookup(host, io, &queue, .{ .port = 8080 });
+
+    var got_address = false;
+    while (queue.getOneUncancelable(io)) |entry| switch (entry) {
+        .address => |addr| {
+            got_address = true;
+            try std.testing.expectEqual(@as(u16, 8080), addr.getPort());
+            try std.testing.expectEqual(Io.net.IpAddress.Family.ip4, @as(Io.net.IpAddress.Family, addr));
+        },
+        .canonical_name => {},
+    } else |err| switch (err) {
+        error.Closed => {},
+    }
+    try std.testing.expect(got_address);
+}
+
+test "io: netLookup returns canonical name when buffer provided" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const host: Io.net.HostName = try .init("127.0.0.1");
+    var buf: [16]Io.net.HostName.LookupResult = undefined;
+    var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buf);
+    var canon_buf: [Io.net.HostName.max_len]u8 = undefined;
+    try Io.net.HostName.lookup(host, io, &queue, .{
+        .port = 0,
+        .canonical_name_buffer = &canon_buf,
+    });
+
+    var got_canonical = false;
+    while (queue.getOneUncancelable(io)) |entry| switch (entry) {
+        .address => {},
+        .canonical_name => |name| {
+            got_canonical = true;
+            try std.testing.expect(name.bytes.len > 0);
+        },
+    } else |err| switch (err) {
+        error.Closed => {},
+    }
+    try std.testing.expect(got_canonical);
 }
 
 test "io: file create/open/close" {
