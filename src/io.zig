@@ -518,8 +518,22 @@ fn fileStatImpl(_: ?*anyopaque, _: Io.File) Io.File.StatError!Io.File.Stat {
     @panic("TODO: fileStat");
 }
 
-fn fileLengthImpl(_: ?*anyopaque, _: Io.File) Io.File.LengthError!u64 {
-    @panic("TODO: fileLength");
+fn fileLengthImpl(_: ?*anyopaque, file: Io.File) Io.File.LengthError!u64 {
+    var op = ev.FileStat.init(stdIoHandleToZio(file.handle), null);
+    try waitForIo(&op.c);
+    const info = op.getResult() catch |err| switch (err) {
+        error.AccessDenied => return error.AccessDenied,
+        error.SystemResources => return error.SystemResources,
+        error.Canceled => return error.Canceled,
+        error.InvalidFileDescriptor,
+        error.FileNotFound,
+        error.NameTooLong,
+        error.NotDir,
+        error.SymLinkLoop,
+        error.Unexpected,
+        => return error.Unexpected,
+    };
+    return info.size;
 }
 
 fn fileCloseImpl(_: ?*anyopaque, files: []const Io.File) void {
@@ -587,8 +601,10 @@ fn fileSeekToImpl(_: ?*anyopaque, _: Io.File, _: u64) Io.File.SeekError!void {
     @panic("TODO: fileSeekTo");
 }
 
-fn fileSyncImpl(_: ?*anyopaque, _: Io.File) Io.File.SyncError!void {
-    @panic("TODO: fileSync");
+fn fileSyncImpl(_: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
+    var op = ev.FileSync.init(stdIoHandleToZio(file.handle), .{});
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn fileIsTtyImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!bool {
@@ -603,8 +619,10 @@ fn fileSupportsAnsiEscapeCodesImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!boo
     @panic("TODO: fileSupportsAnsiEscapeCodes");
 }
 
-fn fileSetLengthImpl(_: ?*anyopaque, _: Io.File, _: u64) Io.File.SetLengthError!void {
-    @panic("TODO: fileSetLength");
+fn fileSetLengthImpl(_: ?*anyopaque, file: Io.File, new_length: u64) Io.File.SetLengthError!void {
+    var op = ev.FileSetSize.init(stdIoHandleToZio(file.handle), new_length);
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn fileSetOwnerImpl(_: ?*anyopaque, _: Io.File, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.File.SetOwnerError!void {
@@ -1507,6 +1525,32 @@ test "io: file positional read/write round-trip" {
     try std.testing.expectEqualStrings("HELLO", &buf);
     try std.testing.expectEqual(5, try file.readPositional(io, &.{&buf}, 10));
     try std.testing.expectEqualStrings("WORLD", &buf);
+}
+
+test "io: file length/sync/setLength" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_length_sync.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    try std.testing.expectEqual(0, try file.length(io));
+
+    _ = try file.writePositional(io, &.{"1234567890"}, 0);
+    try std.testing.expectEqual(10, try file.length(io));
+
+    try file.sync(io);
+
+    try file.setLength(io, 4);
+    try std.testing.expectEqual(4, try file.length(io));
+
+    try file.setLength(io, 20);
+    try std.testing.expectEqual(20, try file.length(io));
 }
 
 test "io: dir create/delete" {
