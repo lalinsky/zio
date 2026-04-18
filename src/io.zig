@@ -531,8 +531,18 @@ fn fileCloseImpl(_: ?*anyopaque, files: []const Io.File) void {
     }
 }
 
-fn fileWritePositionalImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) Io.File.WritePositionalError!usize {
-    @panic("TODO: fileWritePositional");
+fn fileWritePositionalImpl(_: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
+    var slices: [max_iovecs_len][]const u8 = undefined;
+    var splat_buf: [64]u8 = undefined;
+    const n = fillBuf(&slices, header, data, splat, &splat_buf);
+    if (n == 0) return 0;
+
+    var iovecs: [max_iovecs_len]os_fs.iovec_const = undefined;
+    const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
+
+    var op = ev.FileWrite.init(stdIoHandleToZio(file.handle), wbuf, offset);
+    try waitForIo(&op.c);
+    return try op.getResult();
 }
 
 fn fileWriteFileStreamingImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.File.Writer.WriteFileError!usize {
@@ -543,8 +553,24 @@ fn fileWriteFilePositionalImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io
     @panic("TODO: fileWriteFilePositional");
 }
 
-fn fileReadPositionalImpl(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
-    @panic("TODO: fileReadPositional");
+fn fileReadPositionalImpl(_: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+    var iovecs: [max_iovecs_len]os_fs.iovec = undefined;
+    var count: usize = 0;
+    for (data) |buf| {
+        if (count == iovecs.len) break;
+        if (buf.len != 0) {
+            iovecs[count] = os_net.iovecFromSlice(buf);
+            count += 1;
+        }
+    }
+    if (count == 0) return 0;
+
+    var op = ev.FileRead.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] }, offset);
+    try waitForIo(&op.c);
+    return op.getResult() catch |err| switch (err) {
+        error.BrokenPipe => error.Unexpected,
+        else => |e| e,
+    };
 }
 
 fn fileSeekByImpl(_: ?*anyopaque, _: Io.File, _: i64) Io.File.SeekError!void {
@@ -1451,6 +1477,28 @@ test "io: file open returns FileNotFound for missing file" {
         error.FileNotFound,
         dir.openFile(io, "definitely-not-a-real-file-xyz123.txt", .{}),
     );
+}
+
+test "io: file positional read/write round-trip" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_positional_rw.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    try std.testing.expectEqual(5, try file.writePositional(io, &.{"HELLO"}, 0));
+    try std.testing.expectEqual(5, try file.writePositional(io, &.{"WORLD"}, 10));
+
+    var buf: [5]u8 = undefined;
+    try std.testing.expectEqual(5, try file.readPositional(io, &.{&buf}, 0));
+    try std.testing.expectEqualStrings("HELLO", &buf);
+    try std.testing.expectEqual(5, try file.readPositional(io, &.{&buf}, 10));
+    try std.testing.expectEqualStrings("WORLD", &buf);
 }
 
 test "io: dir create/delete" {
