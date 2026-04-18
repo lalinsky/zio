@@ -353,6 +353,17 @@ fn permissionsToZioMode(permissions: Io.File.Permissions) os_fs.mode_t {
     return permissions.toMode();
 }
 
+/// Resolve a `std.Io.File.SetTimestamp` union into the `?i96` nanoseconds
+/// representation expected by `os_fs.FileTimestamps` (null == UTIME_OMIT).
+/// `.now` is evaluated against the realtime clock at call time.
+fn resolveSetTimestamp(t: Io.File.SetTimestamp) ?i96 {
+    return switch (t) {
+        .unchanged => null,
+        .now => @intCast(time.Timestamp.now(.realtime).toNanoseconds()),
+        .new => |ts| ts.nanoseconds,
+    };
+}
+
 fn dirCreateDirPathImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
     @panic("TODO: dirCreateDirPath");
 }
@@ -461,12 +472,16 @@ fn dirReadImpl(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Read
     @panic("TODO: dirRead");
 }
 
-fn dirRealPathImpl(_: ?*anyopaque, _: Io.Dir, _: []u8) Io.Dir.RealPathError!usize {
-    @panic("TODO: dirRealPath");
+fn dirRealPathImpl(_: ?*anyopaque, dir: Io.Dir, out_buffer: []u8) Io.Dir.RealPathError!usize {
+    var op = ev.DirRealPath.init(stdIoHandleToZio(dir.handle), out_buffer);
+    try waitForIo(&op.c);
+    return try op.getResult();
 }
 
-fn dirRealPathFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.RealPathFileError!usize {
-    @panic("TODO: dirRealPathFile");
+fn dirRealPathFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, out_buffer: []u8) Io.Dir.RealPathFileError!usize {
+    var op = ev.DirRealPathFile.init(stdIoHandleToZio(dir.handle), sub_path, out_buffer);
+    try waitForIo(&op.c);
+    return try op.getResult();
 }
 
 fn dirDeleteFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
@@ -505,24 +520,41 @@ fn dirReadLinkImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, buffer: []
     return try op.getResult();
 }
 
-fn dirSetOwnerImpl(_: ?*anyopaque, _: Io.Dir, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
-    @panic("TODO: dirSetOwner");
+fn dirSetOwnerImpl(_: ?*anyopaque, dir: Io.Dir, owner: ?Io.File.Uid, group: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
+    var op = ev.DirSetOwner.init(stdIoHandleToZio(dir.handle), owner, group);
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn dirSetFileOwnerImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: ?Io.File.Uid, _: ?Io.File.Gid, _: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
-    @panic("TODO: dirSetFileOwner");
+fn dirSetFileOwnerImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, owner: ?Io.File.Uid, group: ?Io.File.Gid, options: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
+    var op = ev.DirSetFileOwner.init(stdIoHandleToZio(dir.handle), sub_path, owner, group, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn dirSetPermissionsImpl(_: ?*anyopaque, _: Io.Dir, _: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
-    @panic("TODO: dirSetPermissions");
+fn dirSetPermissionsImpl(_: ?*anyopaque, dir: Io.Dir, permissions: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
+    var op = ev.DirSetPermissions.init(stdIoHandleToZio(dir.handle), permissionsToZioMode(permissions));
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn dirSetFilePermissionsImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.File.Permissions, _: Io.Dir.SetFilePermissionsOptions) Io.Dir.SetFilePermissionsError!void {
-    @panic("TODO: dirSetFilePermissions");
+fn dirSetFilePermissionsImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.File.Permissions, options: Io.Dir.SetFilePermissionsOptions) Io.Dir.SetFilePermissionsError!void {
+    var op = ev.DirSetFilePermissions.init(stdIoHandleToZio(dir.handle), sub_path, permissionsToZioMode(permissions), .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn dirSetTimestampsImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.SetTimestampsOptions) Io.Dir.SetTimestampsError!void {
-    @panic("TODO: dirSetTimestamps");
+fn dirSetTimestampsImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.SetTimestampsOptions) Io.Dir.SetTimestampsError!void {
+    var op = ev.DirSetFileTimestamps.init(stdIoHandleToZio(dir.handle), sub_path, .{
+        .atime = resolveSetTimestamp(options.access_timestamp),
+        .mtime = resolveSetTimestamp(options.modify_timestamp),
+    }, .{ .follow_symlinks = options.follow_symlinks });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn dirHardLinkImpl(_: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
@@ -644,16 +676,25 @@ fn fileSetLengthImpl(_: ?*anyopaque, file: Io.File, new_length: u64) Io.File.Set
     try op.getResult();
 }
 
-fn fileSetOwnerImpl(_: ?*anyopaque, _: Io.File, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.File.SetOwnerError!void {
-    @panic("TODO: fileSetOwner");
+fn fileSetOwnerImpl(_: ?*anyopaque, file: Io.File, owner: ?Io.File.Uid, group: ?Io.File.Gid) Io.File.SetOwnerError!void {
+    var op = ev.FileSetOwner.init(stdIoHandleToZio(file.handle), owner, group);
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn fileSetPermissionsImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Permissions) Io.File.SetPermissionsError!void {
-    @panic("TODO: fileSetPermissions");
+fn fileSetPermissionsImpl(_: ?*anyopaque, file: Io.File, permissions: Io.File.Permissions) Io.File.SetPermissionsError!void {
+    var op = ev.FileSetPermissions.init(stdIoHandleToZio(file.handle), permissionsToZioMode(permissions));
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn fileSetTimestampsImpl(_: ?*anyopaque, _: Io.File, _: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
-    @panic("TODO: fileSetTimestamps");
+fn fileSetTimestampsImpl(_: ?*anyopaque, file: Io.File, options: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
+    var op = ev.FileSetTimestamps.init(stdIoHandleToZio(file.handle), .{
+        .atime = resolveSetTimestamp(options.access_timestamp),
+        .mtime = resolveSetTimestamp(options.modify_timestamp),
+    });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn fileLockImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Lock) Io.File.LockError!void {
@@ -672,12 +713,18 @@ fn fileDowngradeLockImpl(_: ?*anyopaque, _: Io.File) Io.File.DowngradeLockError!
     @panic("TODO: fileDowngradeLock");
 }
 
-fn fileRealPathImpl(_: ?*anyopaque, _: Io.File, _: []u8) Io.File.RealPathError!usize {
-    @panic("TODO: fileRealPath");
+fn fileRealPathImpl(_: ?*anyopaque, file: Io.File, out_buffer: []u8) Io.File.RealPathError!usize {
+    var op = ev.FileRealPath.init(stdIoHandleToZio(file.handle), out_buffer);
+    try waitForIo(&op.c);
+    return try op.getResult();
 }
 
-fn fileHardLinkImpl(_: ?*anyopaque, _: Io.File, _: Io.Dir, _: []const u8, _: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
-    @panic("TODO: fileHardLink");
+fn fileHardLinkImpl(_: ?*anyopaque, file: Io.File, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
+    var op = ev.FileHardLink.init(stdIoHandleToZio(file.handle), stdIoHandleToZio(new_dir.handle), new_sub_path, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn fileMemoryMapCreateImpl(_: ?*anyopaque, _: Io.File, _: Io.File.MemoryMap.CreateOptions) Io.File.MemoryMap.CreateError!Io.File.MemoryMap {
@@ -1673,6 +1720,179 @@ test "io: dir create/delete" {
     try std.testing.expectError(error.PathAlreadyExists, dir.createDir(io, dir_path, .default_dir));
     try dir.deleteDir(io, dir_path);
     try std.testing.expectError(error.FileNotFound, dir.deleteDir(io, dir_path));
+}
+
+test "io: file setPermissions" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_set_permissions.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    defer file.close(io);
+
+    try file.setPermissions(io, .fromMode(0o444));
+    try file.setPermissions(io, .fromMode(0o644));
+}
+
+test "io: file setOwner accepts null uid/gid as no-op" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_set_owner.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    defer file.close(io);
+
+    try file.setOwner(io, null, null);
+}
+
+test "io: file setTimestamps round-trip" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_set_timestamps.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    defer file.close(io);
+
+    const atime: i96 = 1_700_000_000 * std.time.ns_per_s;
+    const mtime: i96 = 1_700_000_123 * std.time.ns_per_s;
+    try file.setTimestamps(io, .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = atime } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = mtime } },
+    });
+
+    try file.setTimestampsNow(io);
+}
+
+test "io: dir setFilePermissions" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_dir_set_file_permissions.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    file.close(io);
+
+    try dir.setFilePermissions(io, file_path, .fromMode(0o444), .{});
+    try dir.setFilePermissions(io, file_path, .fromMode(0o644), .{});
+}
+
+test "io: dir setTimestamps round-trip" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_dir_set_timestamps.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    file.close(io);
+
+    const atime: i96 = 1_700_000_000 * std.time.ns_per_s;
+    const mtime: i96 = 1_700_000_123 * std.time.ns_per_s;
+    try dir.setTimestamps(io, file_path, .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = atime } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = mtime } },
+    });
+
+    try dir.setTimestamps(io, file_path, .{
+        .access_timestamp = .now,
+        .modify_timestamp = .now,
+    });
+}
+
+test "io: dir realPath and realPathFile" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_dir_realpath.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    file.close(io);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try dir.realPath(io, &cwd_buf);
+    try std.testing.expect(cwd_len > 0);
+
+    var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const file_len = try dir.realPathFile(io, file_path, &file_buf);
+    try std.testing.expect(file_len > cwd_len);
+    try std.testing.expectEqualStrings(cwd_buf[0..cwd_len], file_buf[0..cwd_len]);
+    try std.testing.expect(std.mem.endsWith(u8, file_buf[0..file_len], file_path));
+}
+
+test "io: file realPath" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_realpath.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    defer file.close(io);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = file.realPath(io, &buf) catch |err| switch (err) {
+        error.OperationUnsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    try std.testing.expect(std.mem.endsWith(u8, buf[0..len], file_path));
+}
+
+test "io: file hardLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const original = "test_io_file_hardlink_original.txt";
+    const link = "test_io_file_hardlink_link.txt";
+    defer dir.deleteFile(io, original) catch {};
+    defer dir.deleteFile(io, link) catch {};
+
+    var file = try dir.createFile(io, original, .{});
+    defer file.close(io);
+    _ = try file.writePositional(io, &.{"linked"}, 0);
+
+    try file.hardLink(io, dir, link, .{});
+
+    var opened = try dir.openFile(io, link, .{});
+    defer opened.close(io);
+    var buf: [16]u8 = undefined;
+    const n = try opened.readPositional(io, &.{&buf}, 0);
+    try std.testing.expectEqualStrings("linked", buf[0..n]);
 }
 
 test "io: group runs spawned tasks to completion" {
