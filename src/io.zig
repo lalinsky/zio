@@ -34,6 +34,7 @@ const waitForIoUncancelable = common.waitForIoUncancelable;
 
 const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
+const os_fs = @import("os/fs.zig");
 const zio_net = @import("net.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
 
@@ -340,8 +341,10 @@ fn batchCancelImpl(_: ?*anyopaque, _: *Io.Batch) void {
     @panic("TODO: batchCancel");
 }
 
-fn dirCreateDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
-    @panic("TODO: dirCreateDir");
+fn dirCreateDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
+    var op = ev.DirCreateDir.init(stdIoHandleToZio(dir.handle), sub_path, permissions.toMode());
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn dirCreateDirPathImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
@@ -368,16 +371,73 @@ fn dirAccessImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptio
     @panic("TODO: dirAccess");
 }
 
-fn dirCreateFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
-    @panic("TODO: dirCreateFile");
+/// Map zio's file-open errno set onto std.Io.File.OpenError.
+///
+/// The extra options std.Io surfaces (lock, path_only, allow_directory, ...)
+/// are ignored for now — zio's FileOpenFlags don't model them yet. Callers
+/// that rely on the defaults get the expected behavior; callers that flip the
+/// knobs silently get best-effort results.
+fn openErrToFileErr(err: ev.FileOpen.Error) Io.File.OpenError {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.PermissionDenied => error.PermissionDenied,
+        error.SymLinkLoop => error.SymLinkLoop,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.NoDevice => error.NoDevice,
+        error.FileNotFound => error.FileNotFound,
+        error.NameTooLong => error.NameTooLong,
+        error.SystemResources => error.SystemResources,
+        error.FileTooBig => error.FileTooBig,
+        error.IsDir => error.IsDir,
+        error.NoSpaceLeft => error.NoSpaceLeft,
+        error.NotDir => error.NotDir,
+        error.PathAlreadyExists => error.PathAlreadyExists,
+        error.DeviceBusy => error.DeviceBusy,
+        error.FileLocksNotSupported => error.FileLocksUnsupported,
+        error.BadPathName => error.BadPathName,
+        error.NetworkNotFound => error.NetworkNotFound,
+        error.FileBusy => error.FileBusy,
+        error.Canceled => error.Canceled,
+        error.InvalidUtf8,
+        error.InvalidWtf8,
+        error.ProcessNotFound,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn stdIoModeToZio(mode: Io.Dir.OpenFileOptions.Mode) os_fs.FileOpenMode {
+    return switch (mode) {
+        .read_only => .read_only,
+        .write_only => .write_only,
+        .read_write => .read_write,
+    };
+}
+
+fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
+    var op = ev.FileCreate.init(stdIoHandleToZio(dir.handle), sub_path, .{
+        .read = options.read,
+        .truncate = options.truncate,
+        .exclusive = options.exclusive,
+        .mode = options.permissions.toMode(),
+    });
+    try waitForIo(&op.c);
+    const fd = op.getResult() catch |err| return openErrToFileErr(err);
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 fn dirCreateFileAtomicImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
     @panic("TODO: dirCreateFileAtomic");
 }
 
-fn dirOpenFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-    @panic("TODO: dirOpenFile");
+fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+    var op = ev.FileOpen.init(stdIoHandleToZio(dir.handle), sub_path, .{
+        .mode = stdIoModeToZio(options.mode),
+    });
+    try waitForIo(&op.c);
+    const fd = op.getResult() catch |err| return openErrToFileErr(err);
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 fn dirCloseImpl(_: ?*anyopaque, _: []const Io.Dir) void {
@@ -396,12 +456,16 @@ fn dirRealPathFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir
     @panic("TODO: dirRealPathFile");
 }
 
-fn dirDeleteFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8) Io.Dir.DeleteFileError!void {
-    @panic("TODO: dirDeleteFile");
+fn dirDeleteFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
+    var op = ev.DirDeleteFile.init(stdIoHandleToZio(dir.handle), sub_path);
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn dirDeleteDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8) Io.Dir.DeleteDirError!void {
-    @panic("TODO: dirDeleteDir");
+fn dirDeleteDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteDirError!void {
+    var op = ev.DirDeleteDir.init(stdIoHandleToZio(dir.handle), sub_path);
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn dirRenameImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8) Io.Dir.RenameError!void {
@@ -452,8 +516,19 @@ fn fileLengthImpl(_: ?*anyopaque, _: Io.File) Io.File.LengthError!u64 {
     @panic("TODO: fileLength");
 }
 
-fn fileCloseImpl(_: ?*anyopaque, _: []const Io.File) void {
-    @panic("TODO: fileClose");
+fn fileCloseImpl(_: ?*anyopaque, files: []const Io.File) void {
+    var i: usize = 0;
+    while (i < files.len) {
+        var ops: [8]ev.FileClose = undefined;
+        var group = ev.Group.init(.gather);
+        const n = @min(ops.len, files.len - i);
+        for (0..n) |j| {
+            ops[j] = ev.FileClose.init(stdIoHandleToZio(files[i + j].handle));
+            group.add(&ops[j].c);
+        }
+        waitForIoUncancelable(&group.c);
+        i += n;
+    }
 }
 
 fn fileWritePositionalImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) Io.File.WritePositionalError!usize {
@@ -965,9 +1040,17 @@ fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *
 }
 
 fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
-    for (handles) |handle| {
-        var op = ev.NetClose.init(stdIoHandleToZio(handle));
-        waitForIoUncancelable(&op.c);
+    var i: usize = 0;
+    while (i < handles.len) {
+        var ops: [8]ev.NetClose = undefined;
+        var group = ev.Group.init(.gather);
+        const n = @min(ops.len, handles.len - i);
+        for (0..n) |j| {
+            ops[j] = ev.NetClose.init(stdIoHandleToZio(handles[i + j]));
+            group.add(&ops[j].c);
+        }
+        waitForIoUncancelable(&group.c);
+        i += n;
     }
 }
 
@@ -1370,6 +1453,49 @@ test "io: net TCP read/write/shutdown round-trip" {
 
     var handle = try rt.spawn(Worker.run, .{rt.io()});
     try handle.join();
+}
+
+test "io: file create/open/close" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_create_open_close.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var created = try dir.createFile(io, file_path, .{});
+    created.close(io);
+
+    var opened = try dir.openFile(io, file_path, .{});
+    opened.close(io);
+}
+
+test "io: file open returns FileNotFound for missing file" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    try std.testing.expectError(
+        error.FileNotFound,
+        dir.openFile(io, "definitely-not-a-real-file-xyz123.txt", .{}),
+    );
+}
+
+test "io: dir create/delete" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dir_path = "test_io_dir_create_delete";
+    defer dir.deleteDir(io, dir_path) catch {};
+
+    try dir.createDir(io, dir_path, .default_dir);
+    try std.testing.expectError(error.PathAlreadyExists, dir.createDir(io, dir_path, .default_dir));
+    try dir.deleteDir(io, dir_path);
+    try std.testing.expectError(error.FileNotFound, dir.deleteDir(io, dir_path));
 }
 
 test "io: group runs spawned tasks to completion" {
