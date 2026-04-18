@@ -644,12 +644,14 @@ fn fileReadPositionalImpl(_: ?*anyopaque, file: Io.File, data: []const []u8, off
     };
 }
 
-fn fileSeekByImpl(_: ?*anyopaque, _: Io.File, _: i64) Io.File.SeekError!void {
-    @panic("TODO: fileSeekBy");
+fn fileSeekByImpl(_: ?*anyopaque, file: Io.File, offset: i64) Io.File.SeekError!void {
+    const io = globalIo();
+    return io.vtable.fileSeekBy(io.userdata, file, offset);
 }
 
-fn fileSeekToImpl(_: ?*anyopaque, _: Io.File, _: u64) Io.File.SeekError!void {
-    @panic("TODO: fileSeekTo");
+fn fileSeekToImpl(_: ?*anyopaque, file: Io.File, offset: u64) Io.File.SeekError!void {
+    const io = globalIo();
+    return io.vtable.fileSeekTo(io.userdata, file, offset);
 }
 
 fn fileSyncImpl(_: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
@@ -658,16 +660,19 @@ fn fileSyncImpl(_: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
     try op.getResult();
 }
 
-fn fileIsTtyImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!bool {
-    @panic("TODO: fileIsTty");
+fn fileIsTtyImpl(_: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
+    const io = globalIo();
+    return io.vtable.fileIsTty(io.userdata, file);
 }
 
-fn fileEnableAnsiEscapeCodesImpl(_: ?*anyopaque, _: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
-    @panic("TODO: fileEnableAnsiEscapeCodes");
+fn fileEnableAnsiEscapeCodesImpl(_: ?*anyopaque, file: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
+    const io = globalIo();
+    return io.vtable.fileEnableAnsiEscapeCodes(io.userdata, file);
 }
 
-fn fileSupportsAnsiEscapeCodesImpl(_: ?*anyopaque, _: Io.File) Io.Cancelable!bool {
-    @panic("TODO: fileSupportsAnsiEscapeCodes");
+fn fileSupportsAnsiEscapeCodesImpl(_: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
+    const io = globalIo();
+    return io.vtable.fileSupportsAnsiEscapeCodes(io.userdata, file);
 }
 
 fn fileSetLengthImpl(_: ?*anyopaque, file: Io.File, new_length: u64) Io.File.SetLengthError!void {
@@ -1281,12 +1286,14 @@ fn netShutdownImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, how: Io.net.Shu
     op.getResult() catch |err| return shutdownErrToStdErr(err);
 }
 
-fn netInterfaceNameResolveImpl(_: ?*anyopaque, _: *const Io.net.Interface.Name) Io.net.Interface.Name.ResolveError!Io.net.Interface {
-    @panic("TODO: netInterfaceNameResolve");
+fn netInterfaceNameResolveImpl(_: ?*anyopaque, name: *const Io.net.Interface.Name) Io.net.Interface.Name.ResolveError!Io.net.Interface {
+    const io = globalIo();
+    return io.vtable.netInterfaceNameResolve(io.userdata, name);
 }
 
-fn netInterfaceNameImpl(_: ?*anyopaque, _: Io.net.Interface) Io.net.Interface.NameError!Io.net.Interface.Name {
-    @panic("TODO: netInterfaceName");
+fn netInterfaceNameImpl(_: ?*anyopaque, interface: Io.net.Interface) Io.net.Interface.NameError!Io.net.Interface.Name {
+    const io = globalIo();
+    return io.vtable.netInterfaceName(io.userdata, interface);
 }
 
 fn netLookupImpl(_: ?*anyopaque, _: Io.net.HostName, _: *Io.Queue(Io.net.HostName.LookupResult), _: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
