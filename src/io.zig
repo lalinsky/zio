@@ -373,8 +373,15 @@ fn dirStatFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.StatFileO
     @panic("TODO: dirStatFile");
 }
 
-fn dirAccessImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
-    @panic("TODO: dirAccess");
+fn dirAccessImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
+    var op = ev.DirAccess.init(stdIoHandleToZio(dir.handle), sub_path, .{
+        .read = options.read,
+        .write = options.write,
+        .execute = options.execute,
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 /// Map zio's file-open errno set onto std.Io.File.OpenError.
@@ -474,20 +481,28 @@ fn dirDeleteDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8) Io.Dir.De
     try op.getResult();
 }
 
-fn dirRenameImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8) Io.Dir.RenameError!void {
-    @panic("TODO: dirRename");
+fn dirRenameImpl(_: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8) Io.Dir.RenameError!void {
+    var op = ev.DirRename.init(stdIoHandleToZio(old_dir.handle), old_sub_path, stdIoHandleToZio(new_dir.handle), new_sub_path);
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn dirRenamePreserveImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8) Io.Dir.RenamePreserveError!void {
     @panic("TODO: dirRenamePreserve");
 }
 
-fn dirSymLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []const u8, _: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
-    @panic("TODO: dirSymLink");
+fn dirSymLinkImpl(_: ?*anyopaque, dir: Io.Dir, target_path: []const u8, sym_link_path: []const u8, flags: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
+    var op = ev.DirSymLink.init(stdIoHandleToZio(dir.handle), target_path, sym_link_path, .{
+        .is_directory = flags.is_directory,
+    });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
-fn dirReadLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.ReadLinkError!usize {
-    @panic("TODO: dirReadLink");
+fn dirReadLinkImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, buffer: []u8) Io.Dir.ReadLinkError!usize {
+    var op = ev.DirReadLink.init(stdIoHandleToZio(dir.handle), sub_path, buffer);
+    try waitForIo(&op.c);
+    return try op.getResult();
 }
 
 fn dirSetOwnerImpl(_: ?*anyopaque, _: Io.Dir, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
@@ -510,8 +525,12 @@ fn dirSetTimestampsImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.SetT
     @panic("TODO: dirSetTimestamps");
 }
 
-fn dirHardLinkImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8, _: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
-    @panic("TODO: dirHardLink");
+fn dirHardLinkImpl(_: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
+    var op = ev.DirHardLink.init(stdIoHandleToZio(old_dir.handle), old_sub_path, stdIoHandleToZio(new_dir.handle), new_sub_path, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn fileStatImpl(_: ?*anyopaque, _: Io.File) Io.File.StatError!Io.File.Stat {
@@ -1551,6 +1570,94 @@ test "io: file length/sync/setLength" {
 
     try file.setLength(io, 20);
     try std.testing.expectEqual(20, try file.length(io));
+}
+
+test "io: dir symLink and readLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const target = "test_io_symlink_target.txt";
+    const link = "test_io_symlink_link";
+    defer dir.deleteFile(io, target) catch {};
+    defer dir.deleteFile(io, link) catch {};
+
+    var file = try dir.createFile(io, target, .{});
+    file.close(io);
+
+    try dir.symLink(io, target, link, .{});
+
+    var buffer: [256]u8 = undefined;
+    const n = try dir.readLink(io, link, &buffer);
+    try std.testing.expectEqualStrings(target, buffer[0..n]);
+}
+
+test "io: dir hardLink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const original = "test_io_hardlink_original.txt";
+    const link = "test_io_hardlink_link.txt";
+    defer dir.deleteFile(io, original) catch {};
+    defer dir.deleteFile(io, link) catch {};
+
+    var file = try dir.createFile(io, original, .{});
+    _ = try file.writePositional(io, &.{"linked"}, 0);
+    file.close(io);
+
+    try Io.Dir.hardLink(dir, original, dir, link, io, .{});
+
+    var opened = try dir.openFile(io, link, .{});
+    defer opened.close(io);
+    var buf: [16]u8 = undefined;
+    const n = try opened.readPositional(io, &.{&buf}, 0);
+    try std.testing.expectEqualStrings("linked", buf[0..n]);
+}
+
+test "io: dir access" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_access.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    file.close(io);
+
+    try dir.access(io, file_path, .{ .read = true });
+    try dir.access(io, file_path, .{ .write = true });
+    try std.testing.expectError(error.FileNotFound, dir.access(io, "nonexistent_io_access_xyz.txt", .{ .read = true }));
+}
+
+test "io: dir rename" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const old_path = "test_io_rename_old.txt";
+    const new_path = "test_io_rename_new.txt";
+    defer dir.deleteFile(io, old_path) catch {};
+    defer dir.deleteFile(io, new_path) catch {};
+
+    var file = try dir.createFile(io, old_path, .{});
+    file.close(io);
+
+    try dir.rename(old_path, dir, new_path, io);
+    try std.testing.expectError(error.FileNotFound, dir.openFile(io, old_path, .{}));
+    var moved = try dir.openFile(io, new_path, .{});
+    moved.close(io);
+
+    try std.testing.expectError(error.FileNotFound, dir.rename(old_path, dir, new_path, io));
 }
 
 test "io: dir create/delete" {
