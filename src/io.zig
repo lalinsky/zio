@@ -1234,34 +1234,22 @@ test "io: Io.Semaphore limits concurrent workers" {
 test "io: processExecutablePath returns a non-empty path" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
+    const io = rt.io();
 
-    const Worker = struct {
-        fn run(io: Io) !void {
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const len = try std.process.executablePath(io, &buf);
-            try std.testing.expect(len > 0);
-        }
-    };
-
-    var handle = try rt.spawn(Worker.run, .{rt.io()});
-    try handle.join();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.executablePath(io, &buf);
+    try std.testing.expect(len > 0);
 }
 
 test "io: now returns monotonically increasing awake timestamps" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
+    const io = rt.io();
 
-    const Worker = struct {
-        fn run(io: Io) !void {
-            const a = Io.Timestamp.now(io, .awake);
-            try io.sleep(.fromMilliseconds(5), .awake);
-            const b = Io.Timestamp.now(io, .awake);
-            try std.testing.expect(b.nanoseconds >= a.nanoseconds + 5 * std.time.ns_per_ms);
-        }
-    };
-
-    var handle = try rt.spawn(Worker.run, .{rt.io()});
-    try handle.join();
+    const a = Io.Timestamp.now(io, .awake);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    const b = Io.Timestamp.now(io, .awake);
+    try std.testing.expect(b.nanoseconds >= a.nanoseconds + 5 * std.time.ns_per_ms);
 }
 
 test "io: clockResolution reports availability per clock" {
@@ -1279,58 +1267,40 @@ test "io: clockResolution reports availability per clock" {
 test "io: random fills buffer with varying bytes" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
+    const io = rt.io();
 
-    const Worker = struct {
-        fn run(io: Io) !void {
-            var buf: [64]u8 = @splat(0);
-            io.random(&buf);
-            // Probabilistically asserts we actually filled the buffer.
-            var nonzero: usize = 0;
-            for (buf) |b| if (b != 0) {
-                nonzero += 1;
-            };
-            try std.testing.expect(nonzero > 32);
-        }
+    var buf: [64]u8 = @splat(0);
+    io.random(&buf);
+    // Probabilistically asserts we actually filled the buffer.
+    var nonzero: usize = 0;
+    for (buf) |b| if (b != 0) {
+        nonzero += 1;
     };
-
-    var handle = try rt.spawn(Worker.run, .{rt.io()});
-    try handle.join();
+    try std.testing.expect(nonzero > 32);
 }
 
 test "io: randomSecure fills buffer with varying bytes" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
+    const io = rt.io();
 
-    const Worker = struct {
-        fn run(io: Io) !void {
-            var buf: [64]u8 = @splat(0);
-            try io.randomSecure(&buf);
-            var nonzero: usize = 0;
-            for (buf) |b| if (b != 0) {
-                nonzero += 1;
-            };
-            try std.testing.expect(nonzero > 32);
-        }
+    var buf: [64]u8 = @splat(0);
+    try io.randomSecure(&buf);
+    var nonzero: usize = 0;
+    for (buf) |b| if (b != 0) {
+        nonzero += 1;
     };
-
-    var handle = try rt.spawn(Worker.run, .{rt.io()});
-    try handle.join();
+    try std.testing.expect(nonzero > 32);
 }
 
 test "io: sleep with duration returns after delay" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
+    const io = rt.io();
 
-    const Worker = struct {
-        fn run(io: Io) !void {
-            var sw = time.Stopwatch.start();
-            try io.sleep(.fromMilliseconds(20), .awake);
-            try std.testing.expect(sw.read().toMilliseconds() >= 20);
-        }
-    };
-
-    var handle = try rt.spawn(Worker.run, .{rt.io()});
-    try handle.join();
+    var sw = time.Stopwatch.start();
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try std.testing.expect(sw.read().toMilliseconds() >= 20);
 }
 
 test "io: sleep is cancelable" {
