@@ -376,12 +376,20 @@ fn dirOpenDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenOption
     @panic("TODO: dirOpenDir");
 }
 
-fn dirStatImpl(_: ?*anyopaque, _: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
-    @panic("TODO: dirStat");
+fn dirStatImpl(_: ?*anyopaque, dir: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
+    var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), null, .{});
+    try waitForIo(&op.c);
+    const info = op.getResult() catch |err| return fileStatErrToStdErr(err);
+    return statInfoToStdIo(info);
 }
 
-fn dirStatFileImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
-    @panic("TODO: dirStatFile");
+fn dirStatFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+    var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), sub_path, .{
+        .follow_symlinks = options.follow_symlinks,
+    });
+    try waitForIo(&op.c);
+    const info = op.getResult() catch |err| return statFileErrToStdErr(err);
+    return statInfoToStdIo(info);
 }
 
 fn dirAccessImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
@@ -565,26 +573,88 @@ fn dirHardLinkImpl(_: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, ne
     try op.getResult();
 }
 
-fn fileStatImpl(_: ?*anyopaque, _: Io.File) Io.File.StatError!Io.File.Stat {
-    @panic("TODO: fileStat");
+fn fileStatImpl(_: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
+    var op = ev.FileStat.init(stdIoHandleToZio(file.handle), null, .{});
+    try waitForIo(&op.c);
+    const info = op.getResult() catch |err| return fileStatErrToStdErr(err);
+    return statInfoToStdIo(info);
 }
 
 fn fileLengthImpl(_: ?*anyopaque, file: Io.File) Io.File.LengthError!u64 {
-    var op = ev.FileStat.init(stdIoHandleToZio(file.handle), null);
+    var op = ev.FileStat.init(stdIoHandleToZio(file.handle), null, .{});
     try waitForIo(&op.c);
-    const info = op.getResult() catch |err| switch (err) {
-        error.AccessDenied => return error.AccessDenied,
-        error.SystemResources => return error.SystemResources,
-        error.Canceled => return error.Canceled,
+    const info = op.getResult() catch |err| return fileStatErrToStdErr(err);
+    return info.size;
+}
+
+fn fileStatErrToStdErr(err: ev.FileStat.Error) Io.File.StatError {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        // Should not happen for an already-open fd or dir handle.
         error.InvalidFileDescriptor,
         error.FileNotFound,
         error.NameTooLong,
         error.NotDir,
         error.SymLinkLoop,
         error.Unexpected,
-        => return error.Unexpected,
+        => error.Unexpected,
     };
-    return info.size;
+}
+
+fn statFileErrToStdErr(err: ev.FileStat.Error) Io.Dir.StatFileError {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.FileNotFound => error.FileNotFound,
+        error.NameTooLong => error.NameTooLong,
+        error.NotDir => error.NotDir,
+        error.SymLinkLoop => error.SymLinkLoop,
+        error.InvalidFileDescriptor,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn statInfoToStdIo(info: os_fs.FileStatInfo) Io.File.Stat {
+    return .{
+        .inode = info.inode,
+        .nlink = @intCast(info.nlink),
+        .size = info.size,
+        .permissions = zioModeToPermissions(info.mode),
+        .kind = zioKindToStdIoKind(info.kind),
+        .block_size = info.block_size,
+        .atime = .{ .nanoseconds = info.atime },
+        .mtime = .{ .nanoseconds = info.mtime },
+        .ctime = .{ .nanoseconds = info.ctime },
+    };
+}
+
+fn zioModeToPermissions(mode: os_fs.mode_t) Io.File.Permissions {
+    return switch (builtin.os.tag) {
+        // Zio's FileStatInfo.mode is always 0 on Windows — attributes aren't
+        // captured, so fall back to the default.
+        .windows => .default_file,
+        else => .fromMode(mode),
+    };
+}
+
+fn zioKindToStdIoKind(kind: os_fs.FileKind) Io.File.Kind {
+    return switch (kind) {
+        .block_device => .block_device,
+        .character_device => .character_device,
+        .directory => .directory,
+        .named_pipe => .named_pipe,
+        .sym_link => .sym_link,
+        .file => .file,
+        .unix_domain_socket => .unix_domain_socket,
+        .whiteout => .whiteout,
+        .door => .door,
+        .event_port => .event_port,
+        .unknown => .unknown,
+    };
 }
 
 fn fileCloseImpl(_: ?*anyopaque, files: []const Io.File) void {
@@ -1852,6 +1922,33 @@ test "io: file length/sync/setLength" {
     try std.testing.expectEqual(20, try file.length(io));
 }
 
+test "io: file/dir stat and dir statFile" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_stat.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    _ = try file.writePositional(io, &.{"hello"}, 0);
+
+    const file_stat = try file.stat(io);
+    try std.testing.expectEqual(Io.File.Kind.file, file_stat.kind);
+    try std.testing.expectEqual(@as(u64, 5), file_stat.size);
+
+    const at_stat = try dir.statFile(io, file_path, .{});
+    try std.testing.expectEqual(Io.File.Kind.file, at_stat.kind);
+    try std.testing.expectEqual(@as(u64, 5), at_stat.size);
+    try std.testing.expectEqual(file_stat.inode, at_stat.inode);
+
+    const dir_stat = try dir.stat(io);
+    try std.testing.expectEqual(Io.File.Kind.directory, dir_stat.kind);
+}
+
 test "io: dir symLink and readLink" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
@@ -1873,6 +1970,31 @@ test "io: dir symLink and readLink" {
     var buffer: [256]u8 = undefined;
     const n = try dir.readLink(io, link, &buffer);
     try std.testing.expectEqualStrings(target, buffer[0..n]);
+}
+
+test "io: dir statFile follow_symlinks" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const target = "test_io_stat_symlink_target.txt";
+    const link = "test_io_stat_symlink_link";
+    defer dir.deleteFile(io, target) catch {};
+    defer dir.deleteFile(io, link) catch {};
+
+    var file = try dir.createFile(io, target, .{});
+    file.close(io);
+
+    try dir.symLink(io, target, link, .{});
+
+    const followed = try dir.statFile(io, link, .{ .follow_symlinks = true });
+    try std.testing.expectEqual(Io.File.Kind.file, followed.kind);
+
+    const not_followed = try dir.statFile(io, link, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.File.Kind.sym_link, not_followed.kind);
 }
 
 test "io: dir hardLink" {

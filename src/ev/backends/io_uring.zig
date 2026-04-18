@@ -654,6 +654,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .TYPE = true,
                 .MODE = true,
                 .INO = true,
+                .NLINK = true,
                 .SIZE = true,
                 .ATIME = true,
                 .MTIME = true,
@@ -676,7 +677,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     state.markCompletedFromBackend(c);
                     return;
                 };
-                sqe.prep_statx(@intCast(data.handle), data.internal.path.ptr, 0, mask, &data.internal.statx);
+                const statx_flags: u32 = if (data.flags.follow_symlinks) 0 else linux.AT.SYMLINK_NOFOLLOW;
+                sqe.prep_statx(@intCast(data.handle), data.internal.path.ptr, statx_flags, mask, &data.internal.statx);
                 sqe.user_data = @intFromPtr(c);
             } else {
                 // No path - use AT_EMPTY_PATH to stat the fd itself
@@ -1276,9 +1278,11 @@ fn statxToFileStat(statx: linux.Statx) fs.FileStatInfo {
 
     return .{
         .inode = statx.ino,
+        .nlink = statx.nlink,
         .size = statx.size,
         .mode = statx.mode,
         .kind = kind,
+        .block_size = statx.blksize,
         .atime = statxTimeToNanos(statx.atime),
         .mtime = statxTimeToNanos(statx.mtime),
         .ctime = statxTimeToNanos(statx.ctime),

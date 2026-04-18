@@ -1624,17 +1624,19 @@ pub const FileStat = struct {
     } = .{},
     handle: fs.fd_t,
     path: ?[]const u8,
+    flags: fs.FileStatFlags,
 
     pub const Error = fs.FileStatError || Cancelable;
 
     /// Initialize a file stat operation.
-    /// If path is null, stats the file descriptor directly (fstat).
+    /// If path is null, stats the file descriptor directly (fstat); `flags` is ignored.
     /// If path is provided, stats the file at path relative to handle (fstatat).
-    pub fn init(handle: fs.fd_t, path: ?[]const u8) FileStat {
+    pub fn init(handle: fs.fd_t, path: ?[]const u8, flags: fs.FileStatFlags) FileStat {
         return .{
             .c = .init(.file_stat),
             .handle = handle,
             .path = path,
+            .flags = flags,
         };
     }
 

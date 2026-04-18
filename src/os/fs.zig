@@ -80,9 +80,14 @@ pub const FileKind = enum {
 
 pub const FileStatInfo = struct {
     inode: ino_t,
+    /// Number of hard links.
+    nlink: u64,
     size: u64,
     mode: mode_t,
     kind: FileKind,
+    /// Preferred I/O block size in bytes. Set to 1 on platforms that don't
+    /// expose this (e.g. Windows).
+    block_size: u32,
     /// Access time in nanoseconds since Unix epoch
     atime: i64,
     /// Modification time in nanoseconds since Unix epoch
@@ -506,6 +511,12 @@ pub const FileStatError = error{
     SystemResources,
     Canceled,
     Unexpected,
+};
+
+pub const FileStatFlags = struct {
+    /// When stat'ing a path, whether to dereference a trailing symlink. Has no
+    /// effect when stat'ing a file descriptor directly.
+    follow_symlinks: bool = true,
 };
 
 pub const FileSetSizeError = error{
@@ -1427,9 +1438,11 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 
         return .{
             .inode = inode,
+            .nlink = info.nNumberOfLinks,
             .size = size,
             .mode = 0, // Windows doesn't have POSIX modes
             .kind = kind,
+            .block_size = 1,
             .atime = w.fileTimeToNanos(info.ftLastAccessTime),
             .mtime = w.fileTimeToNanos(info.ftLastWriteTime),
             .ctime = w.fileTimeToNanos(info.ftCreationTime),
@@ -1438,7 +1451,7 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
-        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
+        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
         var statx_buf: linux.Statx = undefined;
         while (true) {
             const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, mask, &statx_buf);
@@ -1462,10 +1475,13 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 }
 
 /// Get file metadata by path relative to directory
-pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileStatError!FileStatInfo {
+pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileStatFlags) FileStatError!FileStatInfo {
     if (builtin.os.tag == .windows) {
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
+
+        var create_flags: u32 = w.FILE_FLAG_BACKUP_SEMANTICS; // Required to open directories
+        if (!flags.follow_symlinks) create_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
 
         // Open with minimal access just to query attributes
         const handle = w.CreateFileW(
@@ -1474,7 +1490,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileSt
             w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE,
             null,
             w.OPEN_EXISTING,
-            w.FILE_FLAG_BACKUP_SEMANTICS, // Required to open directories
+            create_flags,
             null,
         );
 
@@ -1494,12 +1510,14 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileSt
     const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
+
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
-        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
+        const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
         var statx_buf: linux.Statx = undefined;
         while (true) {
-            const rc = linux.statx(dir, path_z.ptr, 0, mask, &statx_buf);
+            const rc = linux.statx(dir, path_z.ptr, at_flags, mask, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statxToFileStat(statx_buf),
                 .INTR => continue,
@@ -1510,7 +1528,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) FileSt
 
     while (true) {
         var stat_buf: posix.system.Stat = undefined;
-        const rc = posix.system.fstatat(dir, path_z.ptr, &stat_buf, 0);
+        const rc = posix.system.fstatat(dir, path_z.ptr, &stat_buf, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return statToFileStat(stat_buf),
             .INTR => continue,
@@ -1534,9 +1552,11 @@ fn statToFileStat(stat_buf: posix.system.Stat) FileStatInfo {
 
     return .{
         .inode = stat_buf.ino,
+        .nlink = @intCast(stat_buf.nlink),
         .size = @intCast(stat_buf.size),
         .mode = stat_buf.mode,
         .kind = kind,
+        .block_size = @intCast(stat_buf.blksize),
         .atime = timespecToNanos(stat_buf.atime()),
         .mtime = timespecToNanos(stat_buf.mtime()),
         .ctime = timespecToNanos(stat_buf.ctime()),
@@ -1562,9 +1582,11 @@ fn statxToFileStat(statx_buf: std.os.linux.Statx) FileStatInfo {
 
     return .{
         .inode = statx_buf.ino,
+        .nlink = statx_buf.nlink,
         .size = statx_buf.size,
         .mode = statx_buf.mode,
         .kind = kind,
+        .block_size = statx_buf.blksize,
         .atime = statxTimeToNanos(statx_buf.atime),
         .mtime = statxTimeToNanos(statx_buf.mtime),
         .ctime = statxTimeToNanos(statx_buf.ctime),
