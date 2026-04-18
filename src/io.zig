@@ -377,7 +377,9 @@ fn dirOpenDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenOption
 }
 
 fn dirStatImpl(_: ?*anyopaque, dir: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
-    var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), null, .{});
+    // Use fstatat(handle, ".") so this works for Io.Dir.cwd() too — fstat()
+    // does not accept AT_FDCWD.
+    var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), ".", .{});
     try waitForIo(&op.c);
     const info = op.getResult() catch |err| return fileStatErrToStdErr(err);
     return statInfoToStdIo(info);
