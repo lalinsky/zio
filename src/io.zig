@@ -1001,8 +1001,97 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
     };
 }
 
-fn netBindIpImpl(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
-    @panic("TODO: netBindIp");
+fn openErrToBindErr(err: OpenOrCancel) Io.net.IpAddress.BindError {
+    return switch (err) {
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.ProtocolNotSupported => error.ProtocolUnsupportedBySystem,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.SystemResources => error.SystemResources,
+        error.PermissionDenied => error.Unexpected,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+    };
+}
+
+fn bindErrToBindErr(err: BindOrCancel) Io.net.IpAddress.BindError {
+    return switch (err) {
+        error.AddressInUse => error.AddressInUse,
+        error.AddressUnavailable => error.AddressUnavailable,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.AccessDenied,
+        error.FileDescriptorNotASocket,
+        error.SymLinkLoop,
+        error.NameTooLong,
+        error.FileNotFound,
+        error.NotDir,
+        error.ReadOnlyFileSystem,
+        error.InputOutput,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn netBindIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
+    const zio_addr = stdIoIpToZio(address.*);
+    const domain = os_net.Domain.fromPosix(zio_addr.any.family);
+    const sock_type: os_net.Type = switch (options.mode) {
+        .stream => .stream,
+        .dgram => .dgram,
+        .seqpacket => .seqpacket,
+        .raw => .raw,
+        .rdm => return error.SocketModeUnsupported,
+    };
+    // When the caller leaves protocol unset, pass IPPROTO_IP (== 0) so the
+    // kernel chooses the default protocol for the requested socket type.
+    const protocol: os_net.Protocol = if (options.protocol) |p|
+        @enumFromInt(@intFromEnum(p))
+    else
+        .ip;
+
+    var open_op = ev.NetOpen.init(domain, sock_type, protocol, .{});
+    try waitForIo(&open_op.c);
+    const handle = open_op.getResult() catch |err| return openErrToBindErr(err);
+    errdefer {
+        var close_op = ev.NetClose.init(handle);
+        waitForIoUncancelable(&close_op.c);
+    }
+
+    if (options.ip6_only) {
+        if (domain != .ipv6) return error.OptionUnsupported;
+        const value: c_int = 1;
+        // IPV6_V6ONLY optname: 26 on Linux, 27 on BSD/macOS/Windows.
+        const v6only: u32 = switch (builtin.os.tag) {
+            .linux => 26,
+            else => 27,
+        };
+        os_net.setsockopt(handle, os_net.IPPROTO.IPV6, v6only, std.mem.asBytes(&value)) catch
+            return error.OptionUnsupported;
+    }
+
+    if (options.allow_broadcast) {
+        if (@hasDecl(os_net.SO, "BROADCAST")) {
+            const value: c_int = 1;
+            os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.BROADCAST, std.mem.asBytes(&value)) catch
+                return error.OptionUnsupported;
+        } else {
+            return error.OptionUnsupported;
+        }
+    }
+
+    var bind_addr = zio_addr;
+    var addr_len = sockAddrLen(&bind_addr.any);
+    var bind_op = ev.NetBind.init(handle, &bind_addr.any, &addr_len);
+    try waitForIo(&bind_op.c);
+    bind_op.getResult() catch |err| return bindErrToBindErr(err);
+
+    return .{
+        .handle = handle,
+        .address = zioIpToStdIo(bind_addr),
+    };
 }
 
 fn openErrToConnectErr(err: OpenOrCancel) Io.net.IpAddress.ConnectError {
@@ -1541,6 +1630,17 @@ test "io: net TCP read/write/shutdown round-trip" {
 
     var handle = try rt.spawn(Worker.run, .{rt.io()});
     try handle.join();
+}
+
+test "io: net UDP bind assigns ephemeral port" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var socket = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer socket.close(io);
+
+    try std.testing.expect(socket.address.ip4.port != 0);
 }
 
 test "io: file create/open/close" {
