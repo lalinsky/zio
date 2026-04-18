@@ -1933,7 +1933,9 @@ test "io: netLookup returns canonical name when buffer provided" {
     defer rt.deinit();
     const io = rt.io();
 
-    const host: Io.net.HostName = try .init("127.0.0.1");
+    // Use "localhost" rather than a numeric IP: macOS getaddrinfo skips
+    // AI_CANONNAME for numeric inputs.
+    const host: Io.net.HostName = try .init("localhost");
     var buf: [16]Io.net.HostName.LookupResult = undefined;
     var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buf);
     var canon_buf: [Io.net.HostName.max_len]u8 = undefined;
