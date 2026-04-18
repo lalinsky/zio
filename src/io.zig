@@ -35,6 +35,12 @@ const waitForIoUncancelable = common.waitForIoUncancelable;
 const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const zio_net = @import("net.zig");
+const fillBuf = @import("utils/writer.zig").fillBuf;
+
+/// Must match `net.Stream.max_iovecs_len` in std.Io. Used as the cap on
+/// scatter/gather vector counts for netRead/netWrite so we never promise
+/// the caller more than std.Io's reader/writer is prepared to handle.
+const max_iovecs_len = 8;
 
 /// Construct a `std.Io` instance backed by `rt`.
 pub fn fromRuntime(rt: *Runtime) Io {
@@ -886,12 +892,72 @@ fn netSendImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []Io.net.OutgoingMess
     @panic("TODO: netSend");
 }
 
-fn netReadImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: [][]u8) Io.net.Stream.Reader.Error!usize {
-    @panic("TODO: netRead");
+fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
+    return switch (err) {
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.Timeout => error.Timeout,
+        error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.WouldBlock,
+        error.ConnectionRefused,
+        error.ConnectionAborted,
+        error.FileDescriptorNotASocket,
+        error.OperationNotSupported,
+        error.Unexpected,
+        => error.Unexpected,
+    };
 }
 
-fn netWriteImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: []const []const u8, _: usize) Io.net.Stream.Writer.Error!usize {
-    @panic("TODO: netWrite");
+fn netReadImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, data: [][]u8) Io.net.Stream.Reader.Error!usize {
+    var iovecs: [max_iovecs_len]os_net.iovec = undefined;
+    var count: usize = 0;
+    for (data) |buf| {
+        if (count == iovecs.len) break;
+        if (buf.len != 0) {
+            iovecs[count] = os_net.iovecFromSlice(buf);
+            count += 1;
+        }
+    }
+    if (count == 0) return 0;
+
+    var op = ev.NetRecv.init(stdIoHandleToZio(handle), .{ .iovecs = iovecs[0..count] }, .{});
+    try waitForIo(&op.c);
+    return op.getResult() catch |err| return recvErrToReadErr(err);
+}
+
+fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
+    return switch (err) {
+        error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
+        error.SocketNotConnected, error.BrokenPipe => error.SocketUnconnected,
+        error.NetworkUnreachable => error.NetworkUnreachable,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.WouldBlock,
+        error.AccessDenied,
+        error.Timeout,
+        error.FileDescriptorNotASocket,
+        error.MessageTooBig,
+        error.OperationNotSupported,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn netWriteImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
+    var slices: [max_iovecs_len][]const u8 = undefined;
+    var splat_buf: [64]u8 = undefined;
+    const n = fillBuf(&slices, header, data, splat, &splat_buf);
+    if (n == 0) return 0;
+
+    var iovecs: [max_iovecs_len]os_net.iovec_const = undefined;
+    const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
+
+    var op = ev.NetSend.init(stdIoHandleToZio(handle), wbuf, .{});
+    try waitForIo(&op.c);
+    return op.getResult() catch |err| return sendErrToWriteErr(err);
 }
 
 fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.net.Stream.Writer.WriteFileError!usize {
@@ -905,8 +971,26 @@ fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
     }
 }
 
-fn netShutdownImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.ShutdownHow) Io.net.ShutdownError!void {
-    @panic("TODO: netShutdown");
+fn shutdownErrToStdErr(err: ev.NetShutdown.Error) Io.net.ShutdownError {
+    return switch (err) {
+        error.SocketUnconnected => error.SocketUnconnected,
+        error.ConnectionAborted => error.ConnectionAborted,
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.NetworkDown => error.NetworkDown,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+    };
+}
+
+fn netShutdownImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
+    const zio_how: os_net.ShutdownHow = switch (how) {
+        .recv => .receive,
+        .send => .send,
+        .both => .both,
+    };
+    var op = ev.NetShutdown.init(stdIoHandleToZio(handle), zio_how);
+    try waitForIo(&op.c);
+    op.getResult() catch |err| return shutdownErrToStdErr(err);
 }
 
 fn netInterfaceNameResolveImpl(_: ?*anyopaque, _: *const Io.net.Interface.Name) Io.net.Interface.Name.ResolveError!Io.net.Interface {
@@ -1214,6 +1298,73 @@ test "io: net TCP listen/connect/accept handshake" {
 
             const client = try connect_result;
             defer client.close(io);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net TCP read/write/shutdown round-trip" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn echoer(io: Io, server: *Io.net.Server) !void {
+            const peer = try server.accept(io);
+            defer peer.close(io);
+
+            var recv_buf: [256]u8 = undefined;
+            var reader = peer.reader(io, &recv_buf);
+
+            var send_buf: [256]u8 = undefined;
+            var writer = peer.writer(io, &send_buf);
+
+            // Echo until EOF.
+            while (true) {
+                const n = reader.interface.stream(&writer.interface, .limited(64)) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    else => return err,
+                };
+                if (n == 0) break;
+                try writer.interface.flush();
+            }
+            try peer.shutdown(io, .send);
+        }
+
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(
+                &.{ .ip4 = .loopback(0) },
+                io,
+                .{ .reuse_address = true },
+            );
+            defer server.deinit(io);
+
+            var echo_err: anyerror!void = {};
+            var future = io.async(struct {
+                fn call(io2: Io, s: *Io.net.Server, out: *anyerror!void) void {
+                    out.* = echoer(io2, s);
+                }
+            }.call, .{ io, &server, &echo_err });
+
+            const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer client.close(io);
+
+            var send_buf: [64]u8 = undefined;
+            var writer = client.writer(io, &send_buf);
+            try writer.interface.writeAll("hello ");
+            try writer.interface.writeAll("world");
+            try writer.interface.flush();
+            try client.shutdown(io, .send);
+
+            var recv_buf: [64]u8 = undefined;
+            var reader = client.reader(io, &recv_buf);
+            var out: [32]u8 = undefined;
+            const got = try reader.interface.readSliceShort(&out);
+            try std.testing.expectEqualStrings("hello world", out[0..got]);
+
+            future.await(io);
+            try echo_err;
         }
     };
 
