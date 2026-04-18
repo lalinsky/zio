@@ -977,8 +977,8 @@ fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io
 }
 
 fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
-    var peer_addr: zio_net.IpAddress = undefined;
-    var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.IpAddress);
+    var peer_addr: zio_net.Address = undefined;
+    var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.Address);
 
     var op = ev.NetAccept.init(stdIoHandleToZio(server), &peer_addr.any, &peer_addr_len);
     try waitForIo(&op.c);
@@ -1002,7 +1002,12 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
 
     return .{
         .handle = handle,
-        .address = zioIpToStdIo(peer_addr),
+        .address = switch (peer_addr.any.family) {
+            os_net.AF.INET, os_net.AF.INET6 => zioIpToStdIo(peer_addr.ip),
+            // std.Io.net.Socket.address is an IpAddress; use an IPv4 loopback
+            // placeholder for Unix peers, matching std.Io.UnixAddress.listen.
+            else => .{ .ip4 = .loopback(0) },
+        },
     };
 }
 
@@ -1161,12 +1166,85 @@ fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, _: Io.net.
     };
 }
 
-fn netListenUnixImpl(_: ?*anyopaque, _: *const Io.net.UnixAddress, _: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
-    @panic("TODO: netListenUnix");
+fn netListenUnixImpl(
+    _: ?*anyopaque,
+    address: *const Io.net.UnixAddress,
+    options: Io.net.UnixAddress.ListenOptions,
+) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
+    if (comptime !zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
+
+    const unix_addr = zio_net.UnixAddress.init(address.path) catch |err| switch (err) {
+        error.NameTooLong => return error.AddressUnavailable,
+    };
+
+    const server = zio_net.UnixAddress.listen(unix_addr, .{
+        .kernel_backlog = options.kernel_backlog,
+    }) catch |err| return switch (err) {
+        error.AddressFamilyUnsupported, error.ProtocolNotSupported => error.AddressFamilyUnsupported,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.SystemResources => error.SystemResources,
+        error.PermissionDenied => error.PermissionDenied,
+        error.AccessDenied => error.AccessDenied,
+        error.AddressInUse => error.AddressInUse,
+        error.AddressUnavailable => error.AddressUnavailable,
+        error.SymLinkLoop => error.SymLinkLoop,
+        error.FileNotFound => error.FileNotFound,
+        error.NotDir => error.NotDir,
+        error.ReadOnlyFileSystem => error.ReadOnlyFileSystem,
+        error.NetworkDown => error.NetworkDown,
+        error.Canceled => error.Canceled,
+        error.FileDescriptorNotASocket,
+        error.NameTooLong,
+        error.InputOutput,
+        error.AlreadyConnected,
+        error.OperationNotSupported,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+
+    return server.socket.handle;
 }
 
-fn netConnectUnixImpl(_: ?*anyopaque, _: *const Io.net.UnixAddress) Io.net.UnixAddress.ConnectError!Io.net.Socket.Handle {
-    @panic("TODO: netConnectUnix");
+fn netConnectUnixImpl(
+    _: ?*anyopaque,
+    address: *const Io.net.UnixAddress,
+) Io.net.UnixAddress.ConnectError!Io.net.Socket.Handle {
+    if (comptime !zio_net.has_unix_sockets) return error.AddressFamilyUnsupported;
+
+    const unix_addr = zio_net.UnixAddress.init(address.path) catch |err| switch (err) {
+        error.NameTooLong => return error.FileNotFound,
+    };
+
+    const stream = zio_net.UnixAddress.connect(unix_addr, .{}) catch |err| return switch (err) {
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.ProtocolNotSupported => error.ProtocolUnsupportedBySystem,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.SystemResources => error.SystemResources,
+        error.PermissionDenied => error.PermissionDenied,
+        error.AccessDenied => error.AccessDenied,
+        error.SymLinkLoop => error.SymLinkLoop,
+        error.FileNotFound => error.FileNotFound,
+        error.NotDir => error.NotDir,
+        error.WouldBlock => error.WouldBlock,
+        error.NetworkDown => error.NetworkDown,
+        error.Canceled => error.Canceled,
+        error.AddressInUse,
+        error.AddressUnavailable,
+        error.AlreadyConnected,
+        error.ConnectionPending,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.Timeout,
+        error.NetworkUnreachable,
+        error.FileDescriptorNotASocket,
+        error.NameTooLong,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+
+    return stream.socket.handle;
 }
 
 fn netSocketCreatePairImpl(_: ?*anyopaque, _: Io.net.Socket.CreatePairOptions) Io.net.Socket.CreatePairError![2]Io.net.Socket {
@@ -1632,6 +1710,54 @@ test "io: net TCP read/write/shutdown round-trip" {
 
             future.await(io);
             try echo_err;
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net Unix listen/connect/accept round-trip" {
+    if (!zio_net.has_unix_sockets) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn connector(io: Io, address: *const Io.net.UnixAddress, result: *Io.net.UnixAddress.ConnectError!Io.net.Stream) void {
+            result.* = Io.net.UnixAddress.connect(address, io);
+        }
+
+        fn run(io: Io) !void {
+            const path = "test_io_net_unix.sock";
+            (Io.Dir.cwd()).deleteFile(io, path) catch {};
+            defer (Io.Dir.cwd()).deleteFile(io, path) catch {};
+
+            const address = try Io.net.UnixAddress.init(path);
+            var server = try address.listen(io, .{});
+            defer server.deinit(io);
+
+            var connect_result: Io.net.UnixAddress.ConnectError!Io.net.Stream = undefined;
+            var future = io.async(connector, .{ io, &address, &connect_result });
+            defer future.cancel(io);
+
+            const accepted = try server.accept(io);
+            defer accepted.close(io);
+
+            const client = try connect_result;
+            defer client.close(io);
+
+            var send_buf: [32]u8 = undefined;
+            var writer = client.writer(io, &send_buf);
+            try writer.interface.writeAll("ping");
+            try writer.interface.flush();
+            try client.shutdown(io, .send);
+
+            var recv_buf: [32]u8 = undefined;
+            var reader = accepted.reader(io, &recv_buf);
+            var out: [8]u8 = undefined;
+            const got = try reader.interface.readSliceShort(&out);
+            try std.testing.expectEqualStrings("ping", out[0..got]);
         }
     };
 
