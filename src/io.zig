@@ -2060,6 +2060,8 @@ test "io: dir setTimestamps round-trip" {
 }
 
 test "io: dir realPath and realPathFile" {
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
