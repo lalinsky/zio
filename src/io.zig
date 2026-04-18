@@ -377,9 +377,13 @@ fn dirOpenDirImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenOption
 }
 
 fn dirStatImpl(_: ?*anyopaque, dir: Io.Dir) Io.Dir.StatError!Io.Dir.Stat {
-    // Use fstatat(handle, ".") so this works for Io.Dir.cwd() too — fstat()
-    // does not accept AT_FDCWD.
-    var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), ".", .{});
+    const handle = stdIoHandleToZio(dir.handle);
+    // On POSIX, Io.Dir.cwd().handle is AT_FDCWD — fstat() doesn't accept it, so
+    // route through fstatat(".") in that case. Real handles (including Windows
+    // cwd) go through fstat() directly, which avoids the \\?\ path pitfalls of
+    // resolving "." against a handle's canonicalized path.
+    const use_path: ?[]const u8 = if (builtin.os.tag != .windows and handle == os_fs.cwd()) "." else null;
+    var op = ev.FileStat.init(handle, use_path, .{});
     try waitForIo(&op.c);
     const info = op.getResult() catch |err| return fileStatErrToStdErr(err);
     return statInfoToStdIo(info);
