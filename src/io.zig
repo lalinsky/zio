@@ -9,6 +9,7 @@
 //! `*Runtime` via `Runtime.io()`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Alignment = std.mem.Alignment;
 
@@ -342,9 +343,14 @@ fn batchCancelImpl(_: ?*anyopaque, _: *Io.Batch) void {
 }
 
 fn dirCreateDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
-    var op = ev.DirCreateDir.init(stdIoHandleToZio(dir.handle), sub_path, permissions.toMode());
+    var op = ev.DirCreateDir.init(stdIoHandleToZio(dir.handle), sub_path, permissionsToZioMode(permissions));
     try waitForIo(&op.c);
     try op.getResult();
+}
+
+fn permissionsToZioMode(permissions: Io.File.Permissions) os_fs.mode_t {
+    if (builtin.os.tag == .windows) return 0;
+    return permissions.toMode();
 }
 
 fn dirCreateDirPathImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
@@ -420,7 +426,7 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
         .read = options.read,
         .truncate = options.truncate,
         .exclusive = options.exclusive,
-        .mode = options.permissions.toMode(),
+        .mode = permissionsToZioMode(options.permissions),
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
@@ -1306,6 +1312,8 @@ test "io: random fills buffer with varying bytes" {
 }
 
 test "io: randomSecure fills buffer with varying bytes" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
