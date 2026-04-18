@@ -196,13 +196,13 @@ pub const Dir = struct {
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: Dir) StatError!os.fs.FileStatInfo {
-        var op = ev.FileStat.init(self.fd, null);
+        var op = ev.FileStat.init(self.fd, null, .{});
         try waitForIo(&op.c);
         return try op.getResult();
     }
 
     pub fn statPath(self: Dir, path: []const u8) StatError!os.fs.FileStatInfo {
-        var op = ev.FileStat.init(self.fd, path);
+        var op = ev.FileStat.init(self.fd, path, .{});
         try waitForIo(&op.c);
         return try op.getResult();
     }
@@ -360,7 +360,7 @@ pub const File = struct {
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: File) StatError!os.fs.FileStatInfo {
-        var op = ev.FileStat.init(self.fd, null);
+        var op = ev.FileStat.init(self.fd, null, .{});
         try waitForIo(&op.c);
         return try op.getResult();
     }
