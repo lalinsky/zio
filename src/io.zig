@@ -39,6 +39,7 @@ const os_fs = @import("os/fs.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
 
 /// Must match `net.Stream.max_iovecs_len` in std.Io. Used as the cap on
 /// scatter/gather vector counts for netRead/netWrite so we never promise
@@ -331,16 +332,316 @@ fn operateImpl(_: ?*anyopaque, _: Io.Operation) Io.Cancelable!Io.Operation.Resul
     @panic("TODO: operate");
 }
 
-fn batchAwaitAsyncImpl(_: ?*anyopaque, _: *Io.Batch) Io.Cancelable!void {
-    @panic("TODO: batchAwaitAsync");
+// ---------------------------------------------------------------------------
+// std.Io.Batch implementation.
+//
+// Per-Batch state (CompletionQueue + parallel array of in-flight ev ops) is
+// allocated lazily on first await. If allocation fails, awaitAsync surfaces
+// SystemResources per-op (so the caller still observes results), while
+// awaitConcurrent returns ConcurrencyUnavailable (its spec-blessed escape).
+// ---------------------------------------------------------------------------
+
+const BatchOpStorage = union {
+    none: void,
+    file_read: ev.FileRead,
+    file_write: ev.FileWrite,
+};
+
+const BatchOpEntry = struct {
+    op: BatchOpStorage = .{ .none = {} },
+    iovecs_read: [max_iovecs_len]os_net.iovec = undefined,
+    iovecs_write: [max_iovecs_len]os_net.iovec_const = undefined,
+    write_slices: [max_iovecs_len][]const u8 = undefined,
+    splat_buf: [64]u8 = undefined,
+};
+
+const BatchState = struct {
+    cq: CompletionQueue,
+    entries: []BatchOpEntry,
+
+    fn alloc(allocator: std.mem.Allocator, n: usize) !*BatchState {
+        const self = try allocator.create(BatchState);
+        errdefer allocator.destroy(self);
+        const entries = try allocator.alloc(BatchOpEntry, n);
+        for (entries) |*e| e.* = .{};
+        self.* = .{ .cq = .init(), .entries = entries };
+        return self;
+    }
+
+    fn free(self: *BatchState, allocator: std.mem.Allocator) void {
+        allocator.free(self.entries);
+        allocator.destroy(self);
+    }
+};
+
+fn batchStateOf(batch: *Io.Batch) ?*BatchState {
+    return @ptrCast(@alignCast(batch.userdata));
 }
 
-fn batchAwaitConcurrentImpl(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
-    @panic("TODO: batchAwaitConcurrent");
+fn ensureBatchState(rt: *Runtime, batch: *Io.Batch) ?*BatchState {
+    if (batchStateOf(batch)) |s| return s;
+    const s = BatchState.alloc(rt.allocator, batch.storage.len) catch return null;
+    batch.userdata = @ptrCast(s);
+    return s;
 }
 
-fn batchCancelImpl(_: ?*anyopaque, _: *Io.Batch) void {
-    @panic("TODO: batchCancel");
+fn batchLinkCompleted(batch: *Io.Batch, idx: u32, result: Io.Operation.Result) void {
+    const oi = Io.Operation.OptionalIndex.fromIndex(idx);
+    batch.storage[idx] = .{ .completion = .{
+        .node = .{ .next = .none },
+        .result = result,
+    } };
+    switch (batch.completed.tail) {
+        .none => batch.completed.head = oi,
+        else => |t| batch.storage[t.toIndex()].completion.node.next = oi,
+    }
+    batch.completed.tail = oi;
+}
+
+fn batchLinkPending(batch: *Io.Batch, idx: u32, tag: Io.Operation.Tag) void {
+    const oi = Io.Operation.OptionalIndex.fromIndex(idx);
+    const tail = batch.pending.tail;
+    batch.storage[idx] = .{ .pending = .{
+        .node = .{ .prev = tail, .next = .none },
+        .tag = tag,
+        .userdata = undefined,
+    } };
+    switch (tail) {
+        .none => batch.pending.head = oi,
+        else => |t| batch.storage[t.toIndex()].pending.node.next = oi,
+    }
+    batch.pending.tail = oi;
+}
+
+fn batchUnlinkPending(batch: *Io.Batch, idx: u32) void {
+    const node = batch.storage[idx].pending.node;
+    switch (node.prev) {
+        .none => batch.pending.head = node.next,
+        else => |p| batch.storage[p.toIndex()].pending.node.next = node.next,
+    }
+    switch (node.next) {
+        .none => batch.pending.tail = node.prev,
+        else => |n| batch.storage[n.toIndex()].pending.node.prev = node.prev,
+    }
+}
+
+/// Synthesize a "system resources exhausted" result for any op tag.
+/// Used when allocation fails in awaitAsync — every op type's Result can
+/// encode this without lying about the kind of failure.
+fn batchSyntheticOomResult(tag: Io.Operation.Tag) Io.Operation.Result {
+    return switch (tag) {
+        .file_read_streaming => .{ .file_read_streaming = error.SystemResources },
+        .file_write_streaming => .{ .file_write_streaming = error.SystemResources },
+        .net_receive => .{ .net_receive = .{ error.SystemResources, 0 } },
+        .device_io_control => switch (builtin.os.tag) {
+            .wasi => unreachable,
+            .windows => blk: {
+                var iosb: std.os.windows.IO_STATUS_BLOCK = undefined;
+                // STATUS_INSUFFICIENT_RESOURCES
+                iosb.u.Status = @enumFromInt(@as(i32, @bitCast(@as(u32, 0xC000009A))));
+                iosb.Information = 0;
+                break :blk .{ .device_io_control = iosb };
+            },
+            else => .{ .device_io_control = -12 }, // -ENOMEM
+        },
+    };
+}
+
+/// Drain everything in `batch.submitted` directly to `batch.completed` with
+/// per-op SystemResources errors. Used on alloc failure in awaitAsync.
+fn batchDrainSubmittedAsErrors(batch: *Io.Batch) void {
+    while (batch.submitted.head != .none) {
+        const idx = batch.submitted.head.toIndex();
+        const sub = batch.storage[idx].submission;
+        const next = sub.node.next;
+        batch.submitted.head = next;
+        if (next == .none) batch.submitted.tail = .none;
+        batchLinkCompleted(batch, idx, batchSyntheticOomResult(sub.operation));
+    }
+}
+
+fn batchSetupRead(state: *BatchState, batch: *Io.Batch, idx: u32, op: Io.Operation.FileReadStreaming) void {
+    const entry = &state.entries[idx];
+    var count: usize = 0;
+    for (op.data) |buf| {
+        if (count == max_iovecs_len) break;
+        if (buf.len != 0) {
+            entry.iovecs_read[count] = os_net.iovecFromSlice(buf);
+            count += 1;
+        }
+    }
+    if (count == 0) {
+        batchLinkCompleted(batch, idx, .{ .file_read_streaming = 0 });
+        return;
+    }
+    entry.op = .{ .file_read = ev.FileRead.init(
+        stdIoHandleToZio(op.file.handle),
+        .{ .iovecs = entry.iovecs_read[0..count] },
+        @bitCast(@as(i64, -1)),
+    ) };
+    batchLinkPending(batch, idx, .file_read_streaming);
+    const c = &entry.op.file_read.c;
+    c.group.userdata = idx;
+    state.cq.submit(c);
+}
+
+fn batchSetupWrite(state: *BatchState, batch: *Io.Batch, idx: u32, op: Io.Operation.FileWriteStreaming) void {
+    const entry = &state.entries[idx];
+    const n = fillBuf(&entry.write_slices, op.header, op.data, op.splat, &entry.splat_buf);
+    if (n == 0) {
+        batchLinkCompleted(batch, idx, .{ .file_write_streaming = 0 });
+        return;
+    }
+    const wbuf = ev.WriteBuf.fromSlices(entry.write_slices[0..n], &entry.iovecs_write);
+    entry.op = .{ .file_write = ev.FileWrite.init(
+        stdIoHandleToZio(op.file.handle),
+        wbuf,
+        @bitCast(@as(i64, -1)),
+    ) };
+    batchLinkPending(batch, idx, .file_write_streaming);
+    const c = &entry.op.file_write.c;
+    c.group.userdata = idx;
+    state.cq.submit(c);
+}
+
+fn batchSubmitOne(state: *BatchState, batch: *Io.Batch, idx: u32, operation: Io.Operation) void {
+    switch (operation) {
+        .file_read_streaming => |o| batchSetupRead(state, batch, idx, o),
+        .file_write_streaming => |o| batchSetupWrite(state, batch, idx, o),
+        // TODO: net_receive, device_io_control. For now surface as
+        // SystemResources so callers see a coherent failure rather than panic.
+        .net_receive, .device_io_control => batchLinkCompleted(batch, idx, batchSyntheticOomResult(operation)),
+    }
+}
+
+fn batchDrainSubmitted(state: *BatchState, batch: *Io.Batch) void {
+    while (batch.submitted.head != .none) {
+        const idx = batch.submitted.head.toIndex();
+        const sub = batch.storage[idx].submission;
+        const next = sub.node.next;
+        batch.submitted.head = next;
+        if (next == .none) batch.submitted.tail = .none;
+        batchSubmitOne(state, batch, idx, sub.operation);
+    }
+}
+
+fn fileReadStreamingErrFromEv(err: ev.FileRead.Error) Io.Operation.FileReadStreaming.Error {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.InputOutput => error.InputOutput,
+        error.IsDir => error.IsDir,
+        error.SystemResources => error.SystemResources,
+        error.WouldBlock => error.WouldBlock,
+        error.NotOpenForReading => error.NotOpenForReading,
+        error.BrokenPipe, error.Canceled, error.Unexpected => error.Unexpected,
+    };
+}
+
+fn fileWriteStreamingErrFromEv(err: ev.FileWrite.Error) Io.Operation.FileWriteStreaming.Error {
+    return switch (err) {
+        error.DiskQuota => error.DiskQuota,
+        error.FileTooBig => error.FileTooBig,
+        error.InputOutput => error.InputOutput,
+        error.NoSpaceLeft => error.NoSpaceLeft,
+        error.AccessDenied => error.AccessDenied,
+        error.BrokenPipe => error.BrokenPipe,
+        error.SystemResources => error.SystemResources,
+        error.NotOpenForWriting => error.NotOpenForWriting,
+        error.LockViolation => error.LockViolation,
+        error.WouldBlock => error.WouldBlock,
+        error.Canceled, error.Unexpected => error.Unexpected,
+    };
+}
+
+fn batchExtractCompletion(state: *BatchState, batch: *Io.Batch, c: *ev.Completion) void {
+    const idx: u32 = @intCast(c.group.userdata);
+    const entry = &state.entries[idx];
+    const tag = batch.storage[idx].pending.tag;
+
+    const result: Io.Operation.Result = switch (tag) {
+        .file_read_streaming => blk: {
+            const r = entry.op.file_read.getResult() catch |err| {
+                break :blk .{ .file_read_streaming = fileReadStreamingErrFromEv(err) };
+            };
+            if (r == 0) break :blk .{ .file_read_streaming = error.EndOfStream };
+            break :blk .{ .file_read_streaming = r };
+        },
+        .file_write_streaming => blk: {
+            const r = entry.op.file_write.getResult() catch |err| {
+                break :blk .{ .file_write_streaming = fileWriteStreamingErrFromEv(err) };
+            };
+            break :blk .{ .file_write_streaming = r };
+        },
+        .net_receive, .device_io_control => unreachable, // never enters pending
+    };
+
+    batchUnlinkPending(batch, idx);
+    entry.op = .{ .none = {} };
+    batchLinkCompleted(batch, idx, result);
+}
+
+fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const state = ensureBatchState(rt, batch) orelse {
+        // OOM: surface every newly-submitted op as a SystemResources
+        // failure so the caller can iterate them via `next()`. Anything
+        // already in-flight from a prior call requires state, so in this
+        // (degenerate) path there is nothing else to wait for.
+        batchDrainSubmittedAsErrors(batch);
+        return;
+    };
+
+    batchDrainSubmitted(state, batch);
+
+    if (state.cq.isEmpty()) return;
+
+    const first = (try state.cq.wait()) orelse return;
+    batchExtractCompletion(state, batch, first);
+    while (state.cq.next()) |c| batchExtractCompletion(state, batch, c);
+}
+
+fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const state = ensureBatchState(rt, batch) orelse return error.ConcurrencyUnavailable;
+
+    batchDrainSubmitted(state, batch);
+
+    if (state.cq.isEmpty()) return;
+
+    const first = state.cq.timedWait(time.Timeout.fromStd(timeout)) catch |err| switch (err) {
+        error.Timeout => return error.Timeout,
+        error.Canceled => return error.Canceled,
+    };
+    if (first) |c| batchExtractCompletion(state, batch, c);
+    while (state.cq.next()) |c| batchExtractCompletion(state, batch, c);
+}
+
+fn batchCancelImpl(userdata: ?*anyopaque, batch: *Io.Batch) void {
+    const state = batchStateOf(batch) orelse return;
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Cancel every in-flight op and wait for them to drain. CompletionQueue
+    // discards completed entries during cancel, so we don't get to inspect
+    // per-op status — we drop everything in `batch.pending` regardless of
+    // whether it canceled cleanly or completed despite the cancel.
+    state.cq.cancel();
+
+    while (batch.pending.head != .none) {
+        const idx = batch.pending.head.toIndex();
+        const next = batch.storage[idx].pending.node.next;
+        batch.pending.head = next;
+        const tail = batch.unused.tail;
+        batch.storage[idx] = .{ .unused = .{ .prev = tail, .next = .none } };
+        switch (tail) {
+            .none => batch.unused.head = Io.Operation.OptionalIndex.fromIndex(idx),
+            else => |t| batch.storage[t.toIndex()].unused.next = Io.Operation.OptionalIndex.fromIndex(idx),
+        }
+        batch.unused.tail = Io.Operation.OptionalIndex.fromIndex(idx);
+    }
+    batch.pending.tail = .none;
+
+    state.free(rt.allocator);
+    batch.userdata = null;
 }
 
 fn dirCreateDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
@@ -2041,6 +2342,78 @@ test "io: file positional read/write round-trip" {
     try std.testing.expectEqualStrings("HELLO", &buf);
     try std.testing.expectEqual(5, try file.readPositional(io, &.{&buf}, 10));
     try std.testing.expectEqualStrings("WORLD", &buf);
+}
+
+test "io: Batch single file_read_streaming" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_batch_single_read.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var write_file = try dir.createFile(io, file_path, .{ .read = true });
+    _ = try write_file.writePositional(io, &.{"HELLO"}, 0);
+    write_file.close(io);
+
+    var file = try dir.openFile(io, file_path, .{});
+    defer file.close(io);
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch = Io.Batch.init(&storage);
+    defer batch.cancel(io);
+
+    var buf: [16]u8 = undefined;
+    const idx = batch.add(.{ .file_read_streaming = .{
+        .file = file,
+        .data = &.{&buf},
+    } });
+
+    try batch.awaitAsync(io);
+
+    const completion = batch.next() orelse return error.NoCompletion;
+    try std.testing.expectEqual(idx, completion.index);
+    const n = try completion.result.file_read_streaming;
+    try std.testing.expectEqual(5, n);
+    try std.testing.expectEqualStrings("HELLO", buf[0..5]);
+    try std.testing.expectEqual(null, batch.next());
+}
+
+test "io: Batch single file_read_streaming via awaitConcurrent" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_batch_single_read_concurrent.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var write_file = try dir.createFile(io, file_path, .{ .read = true });
+    _ = try write_file.writePositional(io, &.{"HELLO"}, 0);
+    write_file.close(io);
+
+    var file = try dir.openFile(io, file_path, .{});
+    defer file.close(io);
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch = Io.Batch.init(&storage);
+    defer batch.cancel(io);
+
+    var buf: [16]u8 = undefined;
+    const idx = batch.add(.{ .file_read_streaming = .{
+        .file = file,
+        .data = &.{&buf},
+    } });
+
+    try batch.awaitConcurrent(io, .none);
+
+    const completion = batch.next() orelse return error.NoCompletion;
+    try std.testing.expectEqual(idx, completion.index);
+    const n = try completion.result.file_read_streaming;
+    try std.testing.expectEqual(5, n);
+    try std.testing.expectEqualStrings("HELLO", buf[0..5]);
+    try std.testing.expectEqual(null, batch.next());
 }
 
 test "io: file length/sync/setLength" {
