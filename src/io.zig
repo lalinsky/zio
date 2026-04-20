@@ -447,12 +447,6 @@ fn dirAccessImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.
     try op.getResult();
 }
 
-/// Map zio's file-open errno set onto std.Io.File.OpenError.
-///
-/// The extra options std.Io surfaces (lock, path_only, allow_directory, ...)
-/// are ignored for now — zio's FileOpenFlags don't model them yet. Callers
-/// that rely on the defaults get the expected behavior; callers that flip the
-/// knobs silently get best-effort results.
 fn openErrToFileErr(err: ev.FileOpen.Error) Io.File.OpenError {
     return switch (err) {
         error.AccessDenied => error.AccessDenied,
@@ -492,6 +486,9 @@ fn stdIoModeToZio(mode: Io.Dir.OpenFileOptions.Mode) os_fs.FileOpenMode {
 }
 
 fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
+    if (options.lock != .none) @panic("TODO: createFile lock");
+    if (options.lock_nonblocking) @panic("TODO: createFile lock_nonblocking");
+    if (options.resolve_beneath) @panic("TODO: createFile resolve_beneath");
     var op = ev.FileCreate.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .read = options.read,
         .truncate = options.truncate,
@@ -508,6 +505,13 @@ fn dirCreateFileAtomicImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.C
 }
 
 fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+    if (!options.allow_directory) @panic("TODO: openFile allow_directory=false");
+    if (options.path_only) @panic("TODO: openFile path_only");
+    if (options.lock != .none) @panic("TODO: openFile lock");
+    if (options.lock_nonblocking) @panic("TODO: openFile lock_nonblocking");
+    if (options.allow_ctty) @panic("TODO: openFile allow_ctty");
+    if (!options.follow_symlinks) @panic("TODO: openFile follow_symlinks=false");
+    if (options.resolve_beneath) @panic("TODO: openFile resolve_beneath");
     var op = ev.FileOpen.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .mode = stdIoModeToZio(options.mode),
     });
@@ -1071,7 +1075,8 @@ fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io
 
     if (options.reuse_address) {
         const value: c_int = 1;
-        os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEADDR, std.mem.asBytes(&value)) catch {};
+        os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEADDR, std.mem.asBytes(&value)) catch
+            return error.OptionUnsupported;
         if (@hasDecl(os_net.SO, "REUSEPORT")) {
             os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEPORT, std.mem.asBytes(&value)) catch {};
         }

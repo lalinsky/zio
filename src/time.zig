@@ -426,6 +426,7 @@ pub const Timeout = union(enum) {
 
     fn fromSignedNanoseconds(ns: i96) Timeout {
         if (ns <= 0) return .{ .duration = Duration.zero };
+        if (ns > std.math.maxInt(u64)) return .{ .duration = Duration.max };
         return .{ .duration = Duration.fromNanoseconds(@intCast(ns)) };
     }
 
