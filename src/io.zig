@@ -1474,7 +1474,11 @@ fn netWriteImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8
 }
 
 fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.net.Stream.Writer.WriteFileError!usize {
-    @panic("TODO: netWriteFile");
+    // As of Zig 0.16, std.Io defines this vtable slot but never calls it — every
+    // std backend assigns it (Threaded panics, Dispatch/Uring return NetworkDown)
+    // and no code path dispatches through it. Leave unimplemented until std wires
+    // it up.
+    @panic("netWriteFile is unused by std.Io as of Zig 0.16");
 }
 
 fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
