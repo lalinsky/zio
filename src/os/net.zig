@@ -373,6 +373,74 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
     }
 }
 
+pub const SocketPairError = error{
+    OperationUnsupported,
+    AccessDenied,
+    AddressFamilyUnsupported,
+    ProtocolUnsupportedBySystem,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    SystemResources,
+    ProtocolUnsupportedByAddressFamily,
+    SocketModeUnsupported,
+    Unexpected,
+};
+
+pub fn socketpair(domain: Domain, socket_type: Type, protocol: Protocol, flags: OpenFlags) SocketPairError![2]fd_t {
+    switch (builtin.os.tag) {
+        .windows => return error.OperationUnsupported,
+        else => {
+            if (@TypeOf(posix.system.socketpair) == void) return error.OperationUnsupported;
+
+            var sock_flags: c_int = socket_type.toPosix();
+            if (builtin.os.tag == .linux) {
+                if (flags.nonblocking) sock_flags |= SOCK.NONBLOCK;
+                if (flags.cloexec) sock_flags |= SOCK.CLOEXEC;
+            }
+
+            var fds: [2]fd_t = undefined;
+            while (true) {
+                const rc = posix.system.socketpair(
+                    @intCast(domain.toPosix()),
+                    @intCast(sock_flags),
+                    @intCast(protocol.toPosix()),
+                    &fds,
+                );
+                switch (posix.errno(rc)) {
+                    .SUCCESS => {
+                        errdefer {
+                            close(fds[0]);
+                            close(fds[1]);
+                        }
+                        if (builtin.os.tag != .linux) {
+                            if (flags.nonblocking) {
+                                try posix.setNonblocking(fds[0]);
+                                try posix.setNonblocking(fds[1]);
+                            }
+                            if (flags.cloexec) {
+                                try posix.setCloexec(fds[0]);
+                                try posix.setCloexec(fds[1]);
+                            }
+                        }
+                        return fds;
+                    },
+                    .INTR => continue,
+                    .ACCES => return error.AccessDenied,
+                    .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+                    .INVAL => return error.ProtocolUnsupportedBySystem,
+                    .MFILE => return error.ProcessFdQuotaExceeded,
+                    .NFILE => return error.SystemFdQuotaExceeded,
+                    .NOBUFS, .NOMEM => return error.SystemResources,
+                    .PROTONOSUPPORT => return error.ProtocolUnsupportedByAddressFamily,
+                    .PROTOTYPE => return error.SocketModeUnsupported,
+                    .OPNOTSUPP => return error.OperationUnsupported,
+                    else => |err| return unexpectedError(err),
+                }
+            }
+        },
+    }
+}
+
 pub const BindError = error{
     AddressInUse,
     AddressUnavailable,
@@ -1646,4 +1714,22 @@ test "Domain, Type, and Protocol conversions" {
 
     const p_unknown = Protocol.fromPosix(999);
     try std.testing.expectEqual(999, p_unknown.toPosix());
+}
+
+test "socketpair AF_UNIX round-trip" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const fds = try socketpair(.unix, .stream, .ip, .{ .nonblocking = false });
+    defer close(fds[0]);
+    defer close(fds[1]);
+
+    const msg = "ping";
+    const send_iov = iovecConstFromSlice(msg);
+    const n_written = try send(fds[0], (&send_iov)[0..1], .{});
+    try std.testing.expectEqual(msg.len, n_written);
+
+    var buf: [16]u8 = undefined;
+    var recv_iov = iovecFromSlice(&buf);
+    const n_read = try recv(fds[1], (&recv_iov)[0..1], .{});
+    try std.testing.expectEqualStrings(msg, buf[0..n_read]);
 }

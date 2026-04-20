@@ -1338,8 +1338,24 @@ fn netConnectUnixImpl(
     return stream.socket.handle;
 }
 
-fn netSocketCreatePairImpl(_: ?*anyopaque, _: Io.net.Socket.CreatePairOptions) Io.net.Socket.CreatePairError![2]Io.net.Socket {
-    @panic("TODO: netSocketCreatePair");
+fn netSocketCreatePairImpl(_: ?*anyopaque, options: Io.net.Socket.CreatePairOptions) Io.net.Socket.CreatePairError![2]Io.net.Socket {
+    const domain: os_net.Domain = switch (options.family) {
+        .ip4 => .ipv4,
+        .ip6 => .ipv6,
+    };
+    const socket_type: os_net.Type = .fromStd(options.mode);
+    const protocol: os_net.Protocol = if (options.protocol) |p| .fromStd(p) else .ip;
+
+    const fds = try os_net.socketpair(domain, socket_type, protocol, .{ .nonblocking = true });
+
+    // socketpair sockets are AF_UNIX in practice (AF_INET/INET6 fail with
+    // PROTONOSUPPORT on Linux). The Socket.address field is an IpAddress, so
+    // there's no meaningful value for an unnamed Unix socket — use an IPv4
+    // loopback placeholder, matching the netAccept fallback.
+    return .{
+        .{ .handle = fds[0], .address = .{ .ip4 = .loopback(0) } },
+        .{ .handle = fds[1], .address = .{ .ip4 = .loopback(0) } },
+    };
 }
 
 fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
@@ -1959,6 +1975,17 @@ test "io: net UDP bind assigns ephemeral port" {
     defer socket.close(io);
 
     try std.testing.expect(socket.address.ip4.port != 0);
+}
+
+test "io: net createPair for AF_INET fails with OperationUnsupported" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // socketpair(2) only supports AF_UNIX on Linux/macOS; the std.Io API
+    // exposes AF_INET/INET6 via the family option. The kernel rejects it.
+    // This test pins down the error path so createPair stays wired correctly.
+    try std.testing.expectError(error.OperationUnsupported, Io.net.Socket.createPair(io, .{}));
 }
 
 test "io: net UDP send single datagram succeeds" {
