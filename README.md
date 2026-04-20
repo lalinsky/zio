@@ -63,7 +63,7 @@ exe.root_module.addImport("zio", zio.module("zio"));
 
 ## Usage
 
-Basic TCP echo server:
+A minimal TCP echo server, using zio's native API:
 
 ```zig
 const std = @import("std");
@@ -89,26 +89,68 @@ fn handleClient(stream: zio.net.Stream) !void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    const rt = try zio.Runtime.init(gpa.allocator(), .{});
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
     const server = try addr.listen(.{});
     defer server.close();
 
-    std.log.info("Listening on {f}", .{server.socket.address});
-
     var group: zio.Group = .init;
     defer group.cancel();
 
     while (true) {
-        const stream = try server.accept();
+        const stream = try server.accept(.{});
         errdefer stream.close();
-
         try group.spawn(handleClient, .{stream});
+    }
+}
+```
+
+The same server written against the standard library's [`std.Io`] interface:
+
+```zig
+const std = @import("std");
+const zio = @import("zio");
+
+const Io = std.Io;
+
+fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
+    defer stream.close(io);
+
+    var read_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buffer);
+
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+
+    while (true) {
+        const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return if (reader.err.? == error.Canceled) error.Canceled else {},
+            else => return,
+        };
+        writer.interface.writeAll(line) catch return if (writer.err.? == error.Canceled) error.Canceled else {};
+        writer.interface.flush() catch return if (writer.err.? == error.Canceled) error.Canceled else {};
+    }
+}
+
+pub fn main() !void {
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 8080);
+    var server = try addr.listen(io, .{});
+    defer server.deinit(io);
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+
+    while (true) {
+        const stream = try server.accept(io);
+        errdefer stream.close(io);
+        try group.concurrent(io, handleClient, .{ io, stream });
     }
 }
 ```
