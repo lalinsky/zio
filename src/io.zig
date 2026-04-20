@@ -1056,9 +1056,8 @@ fn listenErrToListenErr(err: ListenOrCancel) Io.net.IpAddress.ListenError {
 
 fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
     const zio_addr = stdIoIpToZio(address.*);
-    const domain = os_net.Domain.fromPosix(zio_addr.any.family);
 
-    var open_op = ev.NetOpen.init(domain, .stream, .ip, .{});
+    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), .fromStd(options.protocol), .{});
     try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| return openErrToListenErr(err);
     errdefer {
