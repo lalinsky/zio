@@ -597,10 +597,9 @@ pub const UnixAddress = extern union {
 
     pub fn init(path: []const u8) !UnixAddress {
         if (!has_unix_sockets) unreachable;
-        var un = os.net.sockaddr.un{ .family = os.net.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
+        var un: os.net.sockaddr.un = .{ .family = os.net.AF.UNIX, .path = @splat(0) };
         @memcpy(un.path[0..path.len], path);
-        un.path[path.len] = 0;
         return .{ .un = un };
     }
 
@@ -2017,7 +2016,7 @@ test "IpAddress: listen/accept/connect/read/write IPv6" {
     var write_buffer: [32]u8 = undefined;
     const addr = try IpAddress.parseIp6("::1", 0);
     checkListen(addr, IpAddress.ListenOptions{}, &write_buffer) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }
@@ -2040,7 +2039,7 @@ test "IpAddress: listen/accept/connect/read/write unbuffered IPv4" {
 test "IpAddress: listen/accept/connect/read/write unbuffered IPv6" {
     const addr = try IpAddress.parseIp6("::1", 0);
     checkListen(addr, IpAddress.ListenOptions{}, &.{}) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }
@@ -2053,7 +2052,7 @@ test "IpAddress: bind/sendTo/receiveFrom IPv4" {
 test "IpAddress: bind/sendTo/receiveFrom IPv6" {
     const addr = try IpAddress.parseIp6("::1", 0);
     checkBind(addr, addr) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }
@@ -2122,7 +2121,7 @@ test "IpAddress: listen/accept/connect/read/EOF IPv4" {
 test "IpAddress: listen/accept/connect/read/EOF IPv6" {
     const addr = try IpAddress.parseIp6("::1", 0);
     checkShutdown(addr, IpAddress.ListenOptions{}) catch |err| {
-        if (err == error.AddressNotAvailable) return error.SkipZigTest;
+        if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
 }

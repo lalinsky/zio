@@ -632,7 +632,7 @@ pub fn fileSizeWork(work: *Work) void {
 pub fn handleFileStat(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileStat);
     const result = if (data.path) |path|
-        fs.fstatat(allocator, data.handle, path)
+        fs.fstatat(allocator, data.handle, path, data.flags)
     else
         fs.fstat(data.handle);
 

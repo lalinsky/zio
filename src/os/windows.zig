@@ -149,6 +149,7 @@ pub const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x400;
 
 // File flags
 pub const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x02000000;
+pub const FILE_FLAG_OPEN_REPARSE_POINT: DWORD = 0x00200000;
 pub const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
 
 // MoveFileEx flags
@@ -867,6 +868,7 @@ pub const POLL = struct {
 
 // Message flags
 pub const MSG = struct {
+    pub const OOB: u32 = 1;
     pub const PEEK: u32 = 2;
     pub const WAITALL: u32 = 8;
 };
@@ -1079,6 +1081,7 @@ pub const SOCK = struct {
     pub const STREAM: i32 = 1;
     pub const DGRAM: i32 = 2;
     pub const RAW: i32 = 3;
+    pub const RDM: i32 = 4;
     pub const SEQPACKET: i32 = 5;
 };
 

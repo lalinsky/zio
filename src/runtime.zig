@@ -945,6 +945,16 @@ pub const Runtime = struct {
     pub fn now(_: *Runtime) Timestamp {
         return mod.now();
     }
+
+    /// Construct a `std.Io` instance backed by this runtime.
+    pub fn io(self: *Runtime) std.Io {
+        return @import("io.zig").fromRuntime(self);
+    }
+
+    /// Recover the `*Runtime` from a `std.Io` produced by `Runtime.io()`.
+    pub fn fromIo(value: std.Io) *Runtime {
+        return @import("io.zig").toRuntime(value);
+    }
 };
 
 test "runtime: spawnBlocking smoke test" {

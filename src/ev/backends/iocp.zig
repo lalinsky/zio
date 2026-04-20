@@ -567,6 +567,8 @@ fn recvFlagsToMsg(flags: net.RecvFlags) windows.DWORD {
     var msg_flags: windows.DWORD = 0;
     if (flags.peek) msg_flags |= windows.MSG.PEEK;
     if (flags.waitall) msg_flags |= windows.MSG.WAITALL;
+    if (flags.oob) msg_flags |= windows.MSG.OOB;
+    // flags.trunc has no Windows equivalent — silently dropped.
     return msg_flags;
 }
 
@@ -1628,6 +1630,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setResult(.net_recvmsg, .{
                     .len = @intCast(bytes_transferred),
                     .flags = data.internal.msg.dwFlags,
+                    .controllen = @intCast(data.internal.msg.Control.len),
                 });
             }
 

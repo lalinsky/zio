@@ -17,16 +17,16 @@ const spawnTask = @import("task.zig").spawnTask;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Futex = @import("sync/Futex.zig");
 
-/// Matches std.Io.Group layout exactly for future vtable compatibility.
-pub const IoGroup = extern struct {
-    token: std.atomic.Value(?*anyopaque) = .init(null),
-    state: u64 = 0,
-};
-
 pub const Group = struct {
-    inner: IoGroup = .{},
+    inner: std.Io.Group = .init,
 
     pub const init: Group = .{};
+
+    /// Reinterpret a `*std.Io.Group` as `*Group`. The two share layout via
+    /// `IoGroup`, so a pointer cast is sufficient.
+    pub fn fromStd(g: *std.Io.Group) *Group {
+        return @ptrCast(@alignCast(g));
+    }
 
     // Interpret inner.token as WaitQueue head
     //   null (0)  = sentinel0 = idle/done
@@ -52,8 +52,8 @@ pub const Group = struct {
     }
 
     fn getState(self: *Group) *u32 {
-        // Cast u64* to u32* - gets lower u32 on little-endian
-        return @ptrCast(&self.inner.state);
+        // Cast usize* to u32* - identity on 32-bit, gets lower u32 on 64-bit little-endian
+        return @ptrCast(@alignCast(&self.inner.state));
     }
 
     /// Set the failed flag. If fail_fast is set, also closes the group.
@@ -121,14 +121,13 @@ pub const Group = struct {
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
         const Context = struct { group: *Group, args: Args };
         const Wrapper = struct {
-            fn start(ctx: *const anyopaque) Cancelable!void {
+            fn start(ctx: *const anyopaque) void {
                 const context: *const Context = @ptrCast(@alignCast(ctx));
                 const group = context.group;
                 if (@typeInfo(ReturnType) == .error_union) {
                     @call(.auto, func, context.args) catch |err| {
                         if (err == error.Canceled) {
                             group.setCanceled();
-                            return error.Canceled;
                         } else {
                             log.err("Group task failed with error: {}", .{err});
                             group.setFailed();
@@ -227,7 +226,7 @@ pub fn groupSpawnTask(
     rt: *Runtime,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque) Cancelable!void,
+    start: *const fn (context: *const anyopaque) void,
 ) !void {
     _ = try spawnTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, group);
 }

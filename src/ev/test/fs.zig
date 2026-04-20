@@ -304,7 +304,7 @@ test "File: stat" {
     const fd = try file_create.getResult();
 
     // Stat empty file (by fd - path is null)
-    var file_stat1 = ev.FileStat.init(fd, null);
+    var file_stat1 = ev.FileStat.init(fd, null, .{});
     loop.add(&file_stat1.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_stat1.c.state);
@@ -323,7 +323,7 @@ test "File: stat" {
     try std.testing.expectEqual(write_data.len, try file_write.getResult());
 
     // Stat after write (by fd - path is null)
-    var file_stat2 = ev.FileStat.init(fd, null);
+    var file_stat2 = ev.FileStat.init(fd, null, .{});
     loop.add(&file_stat2.c);
     try loop.run(.until_done);
     const stat2 = try file_stat2.getResult();
@@ -376,7 +376,7 @@ test "File: stat_path" {
     try file_close.getResult();
 
     // Stat by path (using FileStat with non-null path)
-    var file_stat = ev.FileStat.init(cwd, "test-stat-path");
+    var file_stat = ev.FileStat.init(cwd, "test-stat-path", .{});
     loop.add(&file_stat.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_stat.c.state);

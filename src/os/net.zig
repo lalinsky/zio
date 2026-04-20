@@ -242,6 +242,7 @@ pub const Type = enum(c_int) {
     dgram = SOCK.DGRAM,
     raw = SOCK.RAW,
     seqpacket = SOCK.SEQPACKET,
+    rdm = SOCK.RDM,
     _,
 
     /// Convert from POSIX socket type constant
@@ -252,6 +253,17 @@ pub const Type = enum(c_int) {
     /// Convert to POSIX socket type constant
     pub fn toPosix(self: Type) c_int {
         return @intFromEnum(self);
+    }
+
+    /// Convert from std.Io socket mode
+    pub fn fromStd(mode: std.Io.net.Socket.Mode) Type {
+        return switch (mode) {
+            .stream => .stream,
+            .dgram => .dgram,
+            .seqpacket => .seqpacket,
+            .raw => .raw,
+            .rdm => .rdm,
+        };
     }
 };
 
@@ -274,6 +286,11 @@ pub const Protocol = enum(c_int) {
     pub fn toPosix(self: Protocol) c_int {
         return @intFromEnum(self);
     }
+
+    /// Convert from std.Io protocol
+    pub fn fromStd(protocol: std.Io.net.Protocol) Protocol {
+        return @enumFromInt(@intFromEnum(protocol));
+    }
 };
 
 pub const OpenFlags = packed struct {
@@ -282,7 +299,7 @@ pub const OpenFlags = packed struct {
 };
 
 pub const OpenError = error{
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     ProtocolNotSupported,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
@@ -356,10 +373,84 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
     }
 }
 
+pub const SocketPairError = error{
+    OperationUnsupported,
+    AccessDenied,
+    AddressFamilyUnsupported,
+    ProtocolUnsupportedBySystem,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    SystemResources,
+    ProtocolUnsupportedByAddressFamily,
+    SocketModeUnsupported,
+    Unexpected,
+};
+
+pub fn socketpair(domain: Domain, socket_type: Type, protocol: Protocol, flags: OpenFlags) SocketPairError![2]fd_t {
+    switch (builtin.os.tag) {
+        .windows => return error.OperationUnsupported,
+        else => {
+            if (@TypeOf(posix.system.socketpair) == void) return error.OperationUnsupported;
+
+            var sock_flags: c_int = socket_type.toPosix();
+            if (builtin.os.tag == .linux) {
+                if (flags.nonblocking) sock_flags |= SOCK.NONBLOCK;
+                if (flags.cloexec) sock_flags |= SOCK.CLOEXEC;
+            }
+
+            var fds: [2]fd_t = undefined;
+            while (true) {
+                const rc = posix.system.socketpair(
+                    @intCast(domain.toPosix()),
+                    @intCast(sock_flags),
+                    @intCast(protocol.toPosix()),
+                    &fds,
+                );
+                const err = posix.errno(rc);
+                // Darwin with __DARWIN_UNIX03 returns EOPNOTSUPP = 102, but Zig's
+                // darwin E enum defines OPNOTSUPP = 45 (the legacy ENOTSUP alias).
+                if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 102) {
+                    return error.OperationUnsupported;
+                }
+                switch (err) {
+                    .SUCCESS => {
+                        errdefer {
+                            close(fds[0]);
+                            close(fds[1]);
+                        }
+                        if (builtin.os.tag != .linux) {
+                            if (flags.nonblocking) {
+                                try posix.setNonblocking(fds[0]);
+                                try posix.setNonblocking(fds[1]);
+                            }
+                            if (flags.cloexec) {
+                                try posix.setCloexec(fds[0]);
+                                try posix.setCloexec(fds[1]);
+                            }
+                        }
+                        return fds;
+                    },
+                    .INTR => continue,
+                    .ACCES => return error.AccessDenied,
+                    .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+                    .INVAL => return error.ProtocolUnsupportedBySystem,
+                    .MFILE => return error.ProcessFdQuotaExceeded,
+                    .NFILE => return error.SystemFdQuotaExceeded,
+                    .NOBUFS, .NOMEM => return error.SystemResources,
+                    .PROTONOSUPPORT => return error.ProtocolUnsupportedByAddressFamily,
+                    .PROTOTYPE => return error.SocketModeUnsupported,
+                    .OPNOTSUPP => return error.OperationUnsupported,
+                    else => |e| return unexpectedError(e),
+                }
+            }
+        },
+    }
+}
+
 pub const BindError = error{
     AddressInUse,
-    AddressNotAvailable,
-    AddressFamilyNotSupported,
+    AddressUnavailable,
+    AddressFamilyUnsupported,
     AccessDenied,
     FileDescriptorNotASocket,
     SymLinkLoop,
@@ -378,8 +469,8 @@ pub fn errnoToBindError(err: E) BindError {
         .windows => {
             return switch (err) {
                 .EADDRINUSE => error.AddressInUse,
-                .EADDRNOTAVAIL => error.AddressNotAvailable,
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EADDRNOTAVAIL => error.AddressUnavailable,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EACCES => error.AccessDenied,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ENETDOWN => error.NetworkDown,
@@ -393,8 +484,8 @@ pub fn errnoToBindError(err: E) BindError {
                 .ACCES, .PERM => error.AccessDenied,
                 .ADDRINUSE => error.AddressInUse,
                 .NOTSOCK => error.FileDescriptorNotASocket,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
-                .ADDRNOTAVAIL => error.AddressNotAvailable,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
+                .ADDRNOTAVAIL => error.AddressUnavailable,
                 .LOOP => error.SymLinkLoop,
                 .NAMETOOLONG => error.NameTooLong,
                 .NOENT => error.FileNotFound,
@@ -493,14 +584,14 @@ pub fn listen(fd: fd_t, backlog: u31) ListenError!void {
 pub const ConnectError = error{
     AccessDenied,
     AddressInUse,
-    AddressNotAvailable,
-    AddressFamilyNotSupported,
+    AddressUnavailable,
+    AddressFamilyUnsupported,
     WouldBlock,
     AlreadyConnected,
     ConnectionPending,
     ConnectionRefused,
     ConnectionResetByPeer,
-    ConnectionTimedOut,
+    Timeout,
     NetworkUnreachable,
     FileDescriptorNotASocket,
     FileNotFound,
@@ -696,12 +787,12 @@ pub fn errnoToConnectError(err: E) ConnectError {
         .windows => {
             return switch (err) {
                 .ECONNREFUSED => error.ConnectionRefused,
-                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ETIMEDOUT => error.Timeout,
                 .EHOSTUNREACH, .ENETUNREACH => error.NetworkUnreachable,
                 .EACCES => error.AccessDenied,
                 .EADDRINUSE => error.AddressInUse,
-                .EADDRNOTAVAIL => error.AddressNotAvailable,
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EADDRNOTAVAIL => error.AddressUnavailable,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EISCONN => error.AlreadyConnected,
                 .EALREADY => error.ConnectionPending,
                 .EWOULDBLOCK => error.WouldBlock,
@@ -717,12 +808,12 @@ pub fn errnoToConnectError(err: E) ConnectError {
                 .SUCCESS => unreachable,
                 .CONNREFUSED => error.ConnectionRefused,
                 .CONNRESET => error.ConnectionResetByPeer,
-                .TIMEDOUT => error.ConnectionTimedOut,
+                .TIMEDOUT => error.Timeout,
                 .HOSTUNREACH, .NETUNREACH => error.NetworkUnreachable,
                 .ACCES, .PERM => error.AccessDenied,
                 .ADDRINUSE => error.AddressInUse,
-                .ADDRNOTAVAIL => error.AddressNotAvailable,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .ADDRNOTAVAIL => error.AddressUnavailable,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .ISCONN => error.AlreadyConnected,
                 .ALREADY, .INPROGRESS => error.ConnectionPending,
                 .AGAIN => error.WouldBlock, // Also: insufficient routing cache or no auto-assigned ports
@@ -786,13 +877,14 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .ECONNREFUSED => error.ConnectionRefused,
                 .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
                 .ECONNABORTED => error.ConnectionAborted,
-                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ETIMEDOUT => error.Timeout,
                 .ENOTCONN => error.SocketNotConnected,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ESHUTDOWN => error.SocketShutdown,
                 .EOPNOTSUPP => error.OperationNotSupported,
                 .ENETDOWN => error.NetworkDown,
-                .ENOBUFS, .EINVAL => error.SystemResources,
+                .EMSGSIZE => error.MessageOversize,
+                .ENOBUFS => error.SystemResources,
                 .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
@@ -805,7 +897,15 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .CONNRESET => error.ConnectionResetByPeer,
                 .NOTCONN => error.SocketNotConnected,
                 .NOTSOCK => error.FileDescriptorNotASocket,
-                .NOMEM => error.SystemResources,
+                .NETDOWN => error.NetworkDown,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .MSGSIZE => error.MessageOversize,
+                // recvmsg with SCM_RIGHTS passes fds from the sender; if the
+                // receiving process/system is at its fd quota, the kernel fails
+                // the call with these errnos. Plain recv/recvfrom cannot
+                // produce them.
+                .MFILE => error.ProcessFdQuotaExceeded,
+                .NFILE => error.SystemFdQuotaExceeded,
                 .CANCELED => error.Canceled,
                 else => |e| unexpectedError(e),
             };
@@ -821,7 +921,7 @@ pub fn errnoToSendError(err: E) SendError {
                 .EACCES => error.AccessDenied,
                 .ECONNRESET, .ENETRESET => error.ConnectionResetByPeer,
                 .ECONNABORTED => error.ConnectionAborted,
-                .ETIMEDOUT => error.ConnectionTimedOut,
+                .ETIMEDOUT => error.Timeout,
                 .ENOTCONN => error.SocketNotConnected,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .EMSGSIZE => error.MessageTooBig,
@@ -884,7 +984,7 @@ pub fn errnoToOpenError(err: E) OpenError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EPROTONOSUPPORT => error.ProtocolNotSupported,
                 .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS => error.SystemResources,
@@ -896,7 +996,7 @@ pub fn errnoToOpenError(err: E) OpenError {
             return switch (err) {
                 .SUCCESS => unreachable,
                 .ACCES => error.PermissionDenied,
-                .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
                 .MFILE => error.ProcessFdQuotaExceeded,
                 .NFILE => error.SystemFdQuotaExceeded,
                 .NOBUFS, .NOMEM => error.SystemResources,
@@ -911,20 +1011,42 @@ pub fn errnoToOpenError(err: E) OpenError {
 pub const RecvFlags = packed struct {
     peek: bool = false,
     waitall: bool = false,
+    oob: bool = false,
+    /// On Linux, asks the kernel to report the full datagram length even when
+    /// it's larger than the supplied buffer (so the caller can detect
+    /// truncation). Silently ignored on platforms without MSG_TRUNC input
+    /// semantics (e.g. Windows).
+    trunc: bool = false,
 };
+
+fn recvFlagsToSys(flags: RecvFlags) c_int {
+    var sys_flags: c_int = 0;
+    const MSG = if (builtin.os.tag == .windows) windows.MSG else posix.system.MSG;
+    if (flags.peek and @hasDecl(MSG, "PEEK")) sys_flags |= MSG.PEEK;
+    if (flags.waitall and @hasDecl(MSG, "WAITALL")) sys_flags |= MSG.WAITALL;
+    if (flags.oob and @hasDecl(MSG, "OOB")) sys_flags |= MSG.OOB;
+    // MSG_TRUNC as an *input* flag is Linux-specific; on other POSIX systems
+    // the constant exists only as an output flag. Restrict it to Linux to
+    // avoid corrupting platforms that repurpose the bit.
+    if (flags.trunc and builtin.os.tag == .linux) sys_flags |= MSG.TRUNC;
+    return sys_flags;
+}
 
 pub const RecvError = error{
     WouldBlock,
     ConnectionRefused,
     ConnectionResetByPeer,
     ConnectionAborted,
-    ConnectionTimedOut,
+    Timeout,
     SocketNotConnected,
     FileDescriptorNotASocket,
     SocketShutdown,
     OperationNotSupported,
     NetworkDown,
     SystemResources,
+    MessageOversize,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
     Canceled,
     Unexpected,
 };
@@ -932,9 +1054,7 @@ pub const RecvError = error{
 pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
-    if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
+    const sys_flags = recvFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1003,14 +1123,31 @@ pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
 
 pub const SendFlags = packed struct {
     no_signal: bool = true,
+    confirm: bool = false,
+    dont_route: bool = false,
+    eor: bool = false,
+    oob: bool = false,
+    fastopen: bool = false,
 };
+
+fn sendFlagsToSys(flags: SendFlags) c_int {
+    var sys_flags: c_int = 0;
+    const MSG = posix.system.MSG;
+    if (builtin.os.tag != .windows and flags.no_signal) sys_flags |= MSG.NOSIGNAL;
+    if (flags.confirm and @hasDecl(MSG, "CONFIRM")) sys_flags |= MSG.CONFIRM;
+    if (flags.dont_route and @hasDecl(MSG, "DONTROUTE")) sys_flags |= MSG.DONTROUTE;
+    if (flags.eor and @hasDecl(MSG, "EOR")) sys_flags |= MSG.EOR;
+    if (flags.oob and @hasDecl(MSG, "OOB")) sys_flags |= MSG.OOB;
+    if (flags.fastopen and @hasDecl(MSG, "FASTOPEN")) sys_flags |= MSG.FASTOPEN;
+    return sys_flags;
+}
 
 pub const SendError = error{
     WouldBlock,
     AccessDenied,
     ConnectionResetByPeer,
     ConnectionAborted,
-    ConnectionTimedOut,
+    Timeout,
     SocketNotConnected,
     FileDescriptorNotASocket,
     MessageTooBig,
@@ -1026,10 +1163,7 @@ pub const SendError = error{
 pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.no_signal and builtin.os.tag != .windows) {
-        sys_flags |= posix.system.MSG.NOSIGNAL;
-    }
+    const sys_flags = sendFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1104,19 +1238,7 @@ pub fn recvfrom(
 ) RecvError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.peek) {
-        sys_flags |= if (builtin.os.tag == .windows)
-            windows.MSG.PEEK
-        else
-            posix.system.MSG.PEEK;
-    }
-    if (flags.waitall) {
-        sys_flags |= if (builtin.os.tag == .windows)
-            windows.MSG.WAITALL
-        else
-            posix.system.MSG.WAITALL;
-    }
+    var sys_flags = recvFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1200,10 +1322,7 @@ pub fn sendto(
 ) SendError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.no_signal and builtin.os.tag != .windows) {
-        sys_flags |= posix.system.MSG.NOSIGNAL;
-    }
+    const sys_flags = sendFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1278,6 +1397,10 @@ pub fn sendto(
 pub const RecvMsgResult = struct {
     len: usize,
     flags: u32,
+    /// Actual control-data length written by the kernel into the caller's
+    /// control buffer. 0 when no control buffer was supplied, or on platforms
+    /// where control messages are not supported.
+    controllen: usize,
 };
 
 pub fn recvmsg(
@@ -1288,11 +1411,9 @@ pub fn recvmsg(
     addr_len: ?*socklen_t,
     control: ?[]u8,
 ) RecvError!RecvMsgResult {
-    if (buffers.len == 0) return .{ .len = 0, .flags = 0 };
+    if (buffers.len == 0) return .{ .len = 0, .flags = 0, .controllen = 0 };
 
-    var sys_flags: c_int = 0;
-    if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
-    if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
+    const sys_flags = recvFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1310,6 +1431,7 @@ pub fn recvmsg(
             return .{
                 .len = bytes_read,
                 .flags = 0,
+                .controllen = 0,
             };
         },
         else => {
@@ -1331,6 +1453,7 @@ pub fn recvmsg(
                     return .{
                         .len = @intCast(rc),
                         .flags = @intCast(msg.flags),
+                        .controllen = @intCast(msg.controllen),
                     };
                 }
                 switch (posix.errno(rc)) {
@@ -1352,10 +1475,7 @@ pub fn sendmsg(
 ) SendError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.no_signal and builtin.os.tag != .windows) {
-        sys_flags |= posix.system.MSG.NOSIGNAL;
-    }
+    const sys_flags = sendFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1455,7 +1575,7 @@ pub const AI = switch (builtin.os.tag) {
 };
 
 pub const GetAddrInfoError = error{
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
     TemporaryNameServerFailure,
     InvalidFlags,
     NameServerFailure,
@@ -1505,7 +1625,7 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
         .windows => {
             const wsa_err: windows.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
             return switch (wsa_err) {
-                .EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EINVAL => error.InvalidFlags,
                 .ESOCKTNOSUPPORT => error.SocketTypeNotSupported,
                 .NO_DATA => error.UnknownHostName,
@@ -1520,11 +1640,11 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
         else => {
             // EAI_* error codes - err is std.c.EAI
             return switch (err) {
-                .ADDRFAMILY => error.AddressFamilyNotSupported,
+                .ADDRFAMILY => error.AddressFamilyUnsupported,
                 .AGAIN => error.TemporaryNameServerFailure,
                 .BADFLAGS => error.InvalidFlags,
                 .FAIL => error.NameServerFailure,
-                .FAMILY => error.AddressFamilyNotSupported,
+                .FAMILY => error.AddressFamilyUnsupported,
                 .MEMORY => error.SystemResources,
                 .NODATA => error.UnknownHostName,
                 .NONAME => error.UnknownHostName,
@@ -1621,4 +1741,22 @@ test "Domain, Type, and Protocol conversions" {
 
     const p_unknown = Protocol.fromPosix(999);
     try std.testing.expectEqual(999, p_unknown.toPosix());
+}
+
+test "socketpair AF_UNIX round-trip" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const fds = try socketpair(.unix, .stream, .ip, .{ .nonblocking = false });
+    defer close(fds[0]);
+    defer close(fds[1]);
+
+    const msg = "ping";
+    const send_iov = iovecConstFromSlice(msg);
+    const n_written = try send(fds[0], (&send_iov)[0..1], .{});
+    try std.testing.expectEqual(msg.len, n_written);
+
+    var buf: [16]u8 = undefined;
+    var recv_iov = iovecFromSlice(&buf);
+    const n_read = try recv(fds[1], (&recv_iov)[0..1], .{});
+    try std.testing.expectEqualStrings(msg, buf[0..n_read]);
 }

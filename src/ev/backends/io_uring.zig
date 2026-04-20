@@ -654,6 +654,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .TYPE = true,
                 .MODE = true,
                 .INO = true,
+                .NLINK = true,
                 .SIZE = true,
                 .ATIME = true,
                 .MTIME = true,
@@ -676,7 +677,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     state.markCompletedFromBackend(c);
                     return;
                 };
-                sqe.prep_statx(@intCast(data.handle), data.internal.path.ptr, 0, mask, &data.internal.statx);
+                const statx_flags: u32 = if (data.flags.follow_symlinks) 0 else linux.AT.SYMLINK_NOFOLLOW;
+                sqe.prep_statx(@intCast(data.handle), data.internal.path.ptr, statx_flags, mask, &data.internal.statx);
                 sqe.user_data = @intFromPtr(c);
             } else {
                 // No path - use AT_EMPTY_PATH to stat the fd itself
@@ -1026,6 +1028,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setResult(.net_recvmsg, .{
                     .len = @as(usize, @intCast(res)),
                     .flags = data.internal.msg.flags,
+                    .controllen = @intCast(data.internal.msg.controllen),
                 });
                 // Propagate the peer address length filled in by the kernel
                 if (data.addr_len) |len_ptr| {
@@ -1276,9 +1279,11 @@ fn statxToFileStat(statx: linux.Statx) fs.FileStatInfo {
 
     return .{
         .inode = statx.ino,
+        .nlink = statx.nlink,
         .size = statx.size,
         .mode = statx.mode,
         .kind = kind,
+        .block_size = statx.blksize,
         .atime = statxTimeToNanos(statx.atime),
         .mtime = statxTimeToNanos(statx.mtime),
         .ctime = statxTimeToNanos(statx.ctime),
@@ -1293,6 +1298,8 @@ fn recvFlagsToMsg(flags: net.RecvFlags) u32 {
     var msg_flags: u32 = 0;
     if (flags.peek) msg_flags |= linux.MSG.PEEK;
     if (flags.waitall) msg_flags |= linux.MSG.WAITALL;
+    if (flags.oob) msg_flags |= linux.MSG.OOB;
+    if (flags.trunc) msg_flags |= linux.MSG.TRUNC;
     return msg_flags;
 }
 
