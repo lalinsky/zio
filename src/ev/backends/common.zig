@@ -149,6 +149,10 @@ pub fn handleFileWrite(c: *Completion) void {
 
 /// Helper to handle streaming file read operation (uses current file position)
 pub fn handleFileReadStreaming(c: *Completion) void {
+    if (builtin.os.tag == .windows) {
+        c.setError(error.Unexpected);
+        return;
+    }
     const data = c.cast(FileReadStreaming);
     if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
         c.setResult(.file_read_streaming, bytes_read);
@@ -159,6 +163,10 @@ pub fn handleFileReadStreaming(c: *Completion) void {
 
 /// Helper to handle streaming file write operation (uses current file position)
 pub fn handleFileWriteStreaming(c: *Completion) void {
+    if (builtin.os.tag == .windows) {
+        c.setError(error.Unexpected);
+        return;
+    }
     const data = c.cast(FileWriteStreaming);
     if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
         c.setResult(.file_write_streaming, bytes_written);
