@@ -15,6 +15,8 @@ const Timeout = @import("../time.zig").Timeout;
 pub const BackendCapabilities = struct {
     file_read: bool = false,
     file_write: bool = false,
+    file_read_streaming: bool = false,
+    file_write_streaming: bool = false,
     file_open: bool = false,
     file_create: bool = false,
     file_close: bool = false,
@@ -51,7 +53,7 @@ pub const BackendCapabilities = struct {
     is_multi_threaded: bool = false,
 
     pub fn supportsNonBlockingFileIo(comptime self: BackendCapabilities) bool {
-        return self.file_read or self.file_write;
+        return self.file_read or self.file_write or self.file_read_streaming or self.file_write_streaming;
     }
 };
 
@@ -79,6 +81,8 @@ pub const Op = enum {
     file_close,
     file_read,
     file_write,
+    file_read_streaming,
+    file_write_streaming,
     file_sync,
     file_set_size,
     file_set_permissions,
@@ -140,6 +144,8 @@ pub const Op = enum {
             .file_close => FileClose,
             .file_read => FileRead,
             .file_write => FileWrite,
+            .file_read_streaming => FileReadStreaming,
+            .file_write_streaming => FileWriteStreaming,
             .file_sync => FileSync,
             .file_set_size => FileSetSize,
             .file_set_permissions => FileSetPermissions,
@@ -203,6 +209,8 @@ pub const Op = enum {
             FileClose => .file_close,
             FileRead => .file_read,
             FileWrite => .file_write,
+            FileReadStreaming => .file_read_streaming,
+            FileWriteStreaming => .file_write_streaming,
             FileSync => .file_sync,
             FileSetSize => .file_set_size,
             FileSetPermissions => .file_set_permissions,
@@ -995,6 +1003,56 @@ pub const FileWrite = struct {
 
     pub fn getResult(self: *const FileWrite) Error!usize {
         return self.c.getResult(.file_write);
+    }
+};
+
+pub const FileReadStreaming = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: switch (Backend.capabilities.file_read_streaming) {
+        true => if (@hasDecl(Backend, "FileReadStreamingData")) Backend.FileReadStreamingData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    buffer: ReadBuf,
+
+    pub const Error = fs.FileReadError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, buffer: ReadBuf) FileReadStreaming {
+        return .{
+            .c = .init(.file_read_streaming),
+            .handle = handle,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const FileReadStreaming) Error!usize {
+        return self.c.getResult(.file_read_streaming);
+    }
+};
+
+pub const FileWriteStreaming = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+    internal: switch (Backend.capabilities.file_write_streaming) {
+        true => if (@hasDecl(Backend, "FileWriteStreamingData")) Backend.FileWriteStreamingData else struct {},
+        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+    } = .{},
+    handle: fs.fd_t,
+    buffer: WriteBuf,
+
+    pub const Error = fs.FileWriteError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, buffer: WriteBuf) FileWriteStreaming {
+        return .{
+            .c = .init(.file_write_streaming),
+            .handle = handle,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn getResult(self: *const FileWriteStreaming) Error!usize {
+        return self.c.getResult(.file_write_streaming);
     }
 };
 

@@ -477,6 +477,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_open,
         .file_create,
         .file_close,
+        .file_read_streaming,
+        .file_write_streaming,
         .file_sync,
         .file_set_size,
         .file_set_permissions,

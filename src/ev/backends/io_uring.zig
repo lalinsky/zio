@@ -39,6 +39,8 @@ const FileStat = @import("../completion.zig").FileStat;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
+const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
+const FileWriteStreaming = @import("../completion.zig").FileWriteStreaming;
 const FileSync = @import("../completion.zig").FileSync;
 const FileSetSize = @import("../completion.zig").FileSetSize;
 const DirOpen = @import("../completion.zig").DirOpen;
@@ -56,6 +58,8 @@ const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 pub const capabilities: BackendCapabilities = .{
     .file_read = true,
     .file_write = true,
+    .file_read_streaming = true,
+    .file_write_streaming = true,
     .file_open = true,
     .file_create = true,
     .file_close = true,
@@ -521,6 +525,28 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 return;
             };
             sqe.prep_writev(data.handle, data.buffer.iovecs, data.offset);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_read_streaming => {
+            const data = c.cast(FileReadStreaming);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_read_streaming", .{});
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            sqe.prep_readv(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_write_streaming => {
+            const data = c.cast(FileWriteStreaming);
+            const sqe = self.getSqe(state) catch {
+                log.err("Failed to get io_uring SQE for file_write_streaming", .{});
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            };
+            sqe.prep_writev(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
             sqe.user_data = @intFromPtr(c);
         },
         .file_sync => {
@@ -1105,6 +1131,22 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
             } else {
                 c.setResult(.file_write, @intCast(res));
+            }
+        },
+
+        .file_read_streaming => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_read_streaming, @intCast(res));
+            }
+        },
+
+        .file_write_streaming => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_write_streaming, @intCast(res));
             }
         },
 

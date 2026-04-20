@@ -372,7 +372,7 @@ fn fileReadStreamingImpl(
     }
     if (count == 0) return 0;
 
-    var op = ev.PipeRead.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
+    var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
     try waitForIo(&op.c);
     const n = op.getResult() catch |err| switch (err) {
         error.BrokenPipe => return error.Unexpected,
@@ -397,7 +397,7 @@ fn fileWriteStreamingImpl(
     var iovecs: [max_iovecs_len]os_fs.iovec_const = undefined;
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
-    var op = ev.PipeWrite.init(stdIoHandleToZio(file.handle), wbuf);
+    var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
     try waitForIo(&op.c);
     return try op.getResult();
 }
@@ -2296,9 +2296,10 @@ test "io: file positional read/write round-trip" {
 }
 
 test "io: file streaming read advances position and reports EOF" {
-    // Regular files on Windows can't do streaming reads through the
-    // OVERLAPPED/IOCP path — there's no "current file position" concept
-    // when an offset is required.
+    // On Windows, zio opens files with FILE_FLAG_OVERLAPPED (for IOCP). Such
+    // handles have no implicit file position, so ReadFile/WriteFile without an
+    // OVERLAPPED struct fails with INVALID_PARAMETER. Streaming requires
+    // per-handle position tracking which we don't implement.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const rt = try Runtime.init(std.testing.allocator, .{});
@@ -2327,9 +2328,7 @@ test "io: file streaming read advances position and reports EOF" {
 }
 
 test "io: file streaming write advances position and appends" {
-    // Regular files on Windows can't do streaming writes through the
-    // OVERLAPPED/IOCP path — there's no "current file position" concept
-    // when an offset is required.
+    // See note on Windows in the streaming-read test above.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const rt = try Runtime.init(std.testing.allocator, .{});
