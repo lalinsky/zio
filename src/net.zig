@@ -1036,12 +1036,16 @@ pub const Socket = struct {
 pub const Server = struct {
     socket: Socket,
 
-    pub fn accept(self: Server) !Stream {
+    pub const AcceptOptions = struct {
+        timeout: Timeout = .none,
+    };
+
+    pub fn accept(self: Server, options: AcceptOptions) !Stream {
         var peer_addr: Address = undefined;
         var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
 
         var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
-        try waitForIo(&op.c);
+        try timedWaitForIo(&op.c, options.timeout);
         const handle = try op.getResult();
         return .{ .socket = .{ .handle = handle, .address = peer_addr } };
     }
@@ -1462,7 +1466,7 @@ test "tcpConnectToAddress: basic" {
 
             try server_port.send(server.socket.address.ip.getPort());
 
-            var stream = try server.accept();
+            var stream = try server.accept(.{});
             defer stream.close();
 
             var read_buffer: [256]u8 = undefined;
@@ -1516,7 +1520,7 @@ test "tcpConnectToHost: basic" {
 
             try server_port.send(server.socket.address.ip.getPort());
 
-            var stream = try server.accept();
+            var stream = try server.accept(.{});
             defer stream.close();
 
             var read_buffer: [256]u8 = undefined;
@@ -1873,7 +1877,7 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
         }
 
         pub fn serverFn(server: Server) !void {
-            const client = try server.accept();
+            const client = try server.accept(.{});
             defer client.close();
 
             var buf: [32]u8 = undefined;
@@ -1967,7 +1971,7 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
         }
 
         pub fn serverFn(server: Server) !void {
-            const client = try server.accept();
+            const client = try server.accept(.{});
             defer client.close();
             client.shutdown(.send) catch {};
         }
@@ -2121,4 +2125,21 @@ test "IpAddress: listen/accept/connect/read/EOF IPv6" {
         if (err == error.AddressNotAvailable) return error.SkipZigTest;
         return err;
     };
+}
+
+test "Server: accept timeout" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var handle = try runtime.spawn(struct {
+        fn run() !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(.{});
+            defer server.close();
+
+            const result = server.accept(.{ .timeout = Timeout.fromMilliseconds(10) });
+            try std.testing.expectError(error.Timeout, result);
+        }
+    }.run, .{});
+    try handle.join();
 }
