@@ -406,7 +406,13 @@ pub fn socketpair(domain: Domain, socket_type: Type, protocol: Protocol, flags: 
                     @intCast(protocol.toPosix()),
                     &fds,
                 );
-                switch (posix.errno(rc)) {
+                const err = posix.errno(rc);
+                // Darwin with __DARWIN_UNIX03 returns EOPNOTSUPP = 102, but Zig's
+                // darwin E enum defines OPNOTSUPP = 45 (the legacy ENOTSUP alias).
+                if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 102) {
+                    return error.OperationUnsupported;
+                }
+                switch (err) {
                     .SUCCESS => {
                         errdefer {
                             close(fds[0]);
@@ -434,7 +440,7 @@ pub fn socketpair(domain: Domain, socket_type: Type, protocol: Protocol, flags: 
                     .PROTONOSUPPORT => return error.ProtocolUnsupportedByAddressFamily,
                     .PROTOTYPE => return error.SocketModeUnsupported,
                     .OPNOTSUPP => return error.OperationUnsupported,
-                    else => |err| return unexpectedError(err),
+                    else => |e| return unexpectedError(e),
                 }
             }
         },
