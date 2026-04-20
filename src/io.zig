@@ -31,6 +31,7 @@ const time = @import("time.zig");
 const common = @import("common.zig");
 const Waiter = common.Waiter;
 const waitForIo = common.waitForIo;
+const timedWaitForIo = common.timedWaitForIo;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 
 const ev = @import("ev/root.zig");
@@ -1160,22 +1161,8 @@ fn bindErrToBindErr(err: BindOrCancel) Io.net.IpAddress.BindError {
 
 fn netBindIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
     const zio_addr = stdIoIpToZio(address.*);
-    const domain = os_net.Domain.fromPosix(zio_addr.any.family);
-    const sock_type: os_net.Type = switch (options.mode) {
-        .stream => .stream,
-        .dgram => .dgram,
-        .seqpacket => .seqpacket,
-        .raw => .raw,
-        .rdm => return error.SocketModeUnsupported,
-    };
-    // When the caller leaves protocol unset, pass IPPROTO_IP (== 0) so the
-    // kernel chooses the default protocol for the requested socket type.
-    const protocol: os_net.Protocol = if (options.protocol) |p|
-        @enumFromInt(@intFromEnum(p))
-    else
-        .ip;
 
-    var open_op = ev.NetOpen.init(domain, sock_type, protocol, .{});
+    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), if (options.protocol) |p| .fromStd(p) else .ip, .{});
     try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| return openErrToBindErr(err);
     errdefer {
@@ -1184,7 +1171,7 @@ fn netBindIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.n
     }
 
     if (options.ip6_only) {
-        if (domain != .ipv6) return error.OptionUnsupported;
+        if (zio_addr.any.family != os_net.AF.INET6) return error.OptionUnsupported;
         const value: c_int = 1;
         // IPV6_V6ONLY optname: 26 on Linux, 27 on BSD/macOS/Windows.
         const v6only: u32 = switch (builtin.os.tag) {
@@ -1256,11 +1243,10 @@ fn connectErrToConnectErr(err: ConnectOrCancel) Io.net.IpAddress.ConnectError {
     };
 }
 
-fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
+fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
     const zio_addr = stdIoIpToZio(address.*);
-    const domain = os_net.Domain.fromPosix(zio_addr.any.family);
 
-    var open_op = ev.NetOpen.init(domain, .stream, .ip, .{});
+    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), if (options.protocol) |p| .fromStd(p) else .ip, .{});
     try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| return openErrToConnectErr(err);
     errdefer {
@@ -1270,7 +1256,7 @@ fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, _: Io.net.
 
     const addr_len = sockAddrLen(&zio_addr.any);
     var connect_op = ev.NetConnect.init(handle, &zio_addr.any, addr_len);
-    try waitForIo(&connect_op.c);
+    try timedWaitForIo(&connect_op.c, .fromStd(options.timeout));
     connect_op.getResult() catch |err| return connectErrToConnectErr(err);
 
     return .{

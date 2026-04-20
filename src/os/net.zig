@@ -242,6 +242,7 @@ pub const Type = enum(c_int) {
     dgram = SOCK.DGRAM,
     raw = SOCK.RAW,
     seqpacket = SOCK.SEQPACKET,
+    rdm = SOCK.RDM,
     _,
 
     /// Convert from POSIX socket type constant
@@ -252,6 +253,17 @@ pub const Type = enum(c_int) {
     /// Convert to POSIX socket type constant
     pub fn toPosix(self: Type) c_int {
         return @intFromEnum(self);
+    }
+
+    /// Convert from std.Io socket mode
+    pub fn fromStd(mode: std.Io.net.Socket.Mode) Type {
+        return switch (mode) {
+            .stream => .stream,
+            .dgram => .dgram,
+            .seqpacket => .seqpacket,
+            .raw => .raw,
+            .rdm => .rdm,
+        };
     }
 };
 
@@ -273,6 +285,11 @@ pub const Protocol = enum(c_int) {
     /// Convert to POSIX protocol constant
     pub fn toPosix(self: Protocol) c_int {
         return @intFromEnum(self);
+    }
+
+    /// Convert from std.Io protocol
+    pub fn fromStd(protocol: std.Io.net.Protocol) Protocol {
+        return @enumFromInt(@intFromEnum(protocol));
     }
 };
 
