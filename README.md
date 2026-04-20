@@ -2,21 +2,20 @@
 
 [![CI](https://github.com/lalinsky/zio/actions/workflows/test.yml/badge.svg)](https://github.com/lalinsky/zio/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Zig](https://img.shields.io/badge/zig-0.15.2-orange.svg)](https://ziglang.org/download/)
+[![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
 
 The project consists of a few high-level components:
 - Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
 - Asynchronous I/O layer that makes it look like operations are blocking for easy state management, but using event-driven OS APIs under the hood.
 - Synchronization primitives that cooperate with this runtime.
-- Integration with standard library interfaces, like [`std.Io.Reader`] and [`std.Io.Writer`].
+- Integration with standard library interfaces, like [`std.Io.Reader`] and [`std.Io.Writer`], and also [`std.Io`].
 
 It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
 
-[`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io
-[`std.Io.Reader`]: https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader
-[`std.Io.Writer`]: https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer
-[`std.Io`]: https://ziglang.org/documentation/master/std/#std.Io.Writer
+[`std.Io`]: https://ziglang.org/documentation/0.16.0/std/#std.Io
+[`std.Io.Reader`]: https://ziglang.org/documentation/0.16.0/std/#std.Io.Reader
+[`std.Io.Writer`]: https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer
 [goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
 
 ## Features
