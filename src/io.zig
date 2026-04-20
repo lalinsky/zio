@@ -949,6 +949,7 @@ fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError
 }
 
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
+    if (timeout == .none) return;
     var waiter: Waiter = .init();
     try waiter.timedWait(1, time.Timeout.fromStd(timeout), .allow_cancel);
 }
