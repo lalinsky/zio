@@ -55,7 +55,7 @@ pub fn main() !void {
 
     // --8<-- [start:accept]
     while (true) {
-        const stream = try server.accept();
+        const stream = try server.accept(.{});
         errdefer stream.close();
 
         try group.spawn(handleClient, .{stream});
