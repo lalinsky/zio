@@ -597,10 +597,9 @@ pub const UnixAddress = extern union {
 
     pub fn init(path: []const u8) !UnixAddress {
         if (!has_unix_sockets) unreachable;
-        var un = os.net.sockaddr.un{ .family = os.net.AF.UNIX, .path = undefined };
         if (path.len > max_len) return error.NameTooLong;
+        var un: os.net.sockaddr.un = .{ .family = os.net.AF.UNIX, .path = @splat(0) };
         @memcpy(un.path[0..path.len], path);
-        un.path[path.len] = 0;
         return .{ .un = un };
     }
 
