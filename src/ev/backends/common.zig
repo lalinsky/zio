@@ -12,6 +12,8 @@ const FileCreate = @import("../completion.zig").FileCreate;
 const FileClose = @import("../completion.zig").FileClose;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
+const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
+const FileWriteStreaming = @import("../completion.zig").FileWriteStreaming;
 const FileSync = @import("../completion.zig").FileSync;
 const FileSetSize = @import("../completion.zig").FileSetSize;
 const FileSetPermissions = @import("../completion.zig").FileSetPermissions;
@@ -145,6 +147,34 @@ pub fn handleFileWrite(c: *Completion) void {
     }
 }
 
+/// Helper to handle streaming file read operation (uses current file position)
+pub fn handleFileReadStreaming(c: *Completion) void {
+    if (builtin.os.tag == .windows) {
+        c.setError(error.Unexpected);
+        return;
+    }
+    const data = c.cast(FileReadStreaming);
+    if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
+        c.setResult(.file_read_streaming, bytes_read);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
+/// Helper to handle streaming file write operation (uses current file position)
+pub fn handleFileWriteStreaming(c: *Completion) void {
+    if (builtin.os.tag == .windows) {
+        c.setError(error.Unexpected);
+        return;
+    }
+    const data = c.cast(FileWriteStreaming);
+    if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
+        c.setResult(.file_write_streaming, bytes_written);
+    } else |err| {
+        c.setError(err);
+    }
+}
+
 /// Helper to handle file sync operation
 pub fn handleFileSync(c: *Completion) void {
     const data = c.cast(FileSync);
@@ -266,6 +296,20 @@ pub fn fileWriteWork(work: *Work) void {
     const internal: *@FieldType(FileWrite, "internal") = @fieldParentPtr("work", work);
     const file_write: *FileWrite = @alignCast(@fieldParentPtr("internal", internal));
     handleFileWrite(&file_write.c);
+}
+
+/// Work function for FileReadStreaming - performs blocking readv() syscall
+pub fn fileReadStreamingWork(work: *Work) void {
+    const internal: *@FieldType(FileReadStreaming, "internal") = @fieldParentPtr("work", work);
+    const file_read: *FileReadStreaming = @alignCast(@fieldParentPtr("internal", internal));
+    handleFileReadStreaming(&file_read.c);
+}
+
+/// Work function for FileWriteStreaming - performs blocking writev() syscall
+pub fn fileWriteStreamingWork(work: *Work) void {
+    const internal: *@FieldType(FileWriteStreaming, "internal") = @fieldParentPtr("work", work);
+    const file_write: *FileWriteStreaming = @alignCast(@fieldParentPtr("internal", internal));
+    handleFileWriteStreaming(&file_write.c);
 }
 
 /// Work function for FileSync - performs blocking fsync()/fdatasync() syscall

@@ -330,8 +330,20 @@ fn futexWakeImpl(_: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
 
 fn operateImpl(_: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
     switch (operation) {
-        .file_read_streaming => @panic("TODO: operate.file_read_streaming"),
-        .file_write_streaming => @panic("TODO: operate.file_write_streaming"),
+        .file_read_streaming => |*o| return .{ .file_read_streaming = result: {
+            const n = fileReadStreamingImpl(o.file, o.data) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                else => |e| break :result e,
+            };
+            break :result n;
+        } },
+        .file_write_streaming => |*o| return .{ .file_write_streaming = result: {
+            const n = fileWriteStreamingImpl(o.file, o.header, o.data, o.splat) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                else => |e| break :result e,
+            };
+            break :result n;
+        } },
         .device_io_control => @panic("TODO: operate.device_io_control"),
         .net_receive => |*o| return .{ .net_receive = result: {
             netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags) catch |err| switch (err) {
@@ -341,6 +353,53 @@ fn operateImpl(_: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operati
             break :result .{ null, 1 };
         } },
     }
+}
+
+/// Read from `file` at its current position into `data`, advancing the
+/// position. Returns `error.EndOfStream` on EOF (OS returned 0 bytes).
+fn fileReadStreamingImpl(
+    file: Io.File,
+    data: []const []u8,
+) (Io.Operation.FileReadStreaming.Error || Io.Cancelable)!usize {
+    var iovecs: [max_iovecs_len]os_fs.iovec = undefined;
+    var count: usize = 0;
+    for (data) |buf| {
+        if (count == iovecs.len) break;
+        if (buf.len != 0) {
+            iovecs[count] = os_net.iovecFromSlice(buf);
+            count += 1;
+        }
+    }
+    if (count == 0) return 0;
+
+    var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
+    try waitForIo(&op.c);
+    const n = op.getResult() catch |err| switch (err) {
+        error.BrokenPipe => return error.Unexpected,
+        else => |e| return e,
+    };
+    return if (n == 0) error.EndOfStream else n;
+}
+
+/// Write from `header` / `data` (with `splat` repetition of the last slice)
+/// to `file` at its current position, advancing the position.
+fn fileWriteStreamingImpl(
+    file: Io.File,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+) (Io.Operation.FileWriteStreaming.Error || Io.Cancelable)!usize {
+    var slices: [max_iovecs_len][]const u8 = undefined;
+    var splat_buf: [64]u8 = undefined;
+    const n = fillBuf(&slices, header, data, splat, &splat_buf);
+    if (n == 0) return 0;
+
+    var iovecs: [max_iovecs_len]os_fs.iovec_const = undefined;
+    const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
+
+    var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
+    try waitForIo(&op.c);
+    return try op.getResult();
 }
 
 fn batchAwaitAsyncImpl(_: ?*anyopaque, _: *Io.Batch) Io.Cancelable!void {
@@ -2234,6 +2293,64 @@ test "io: file positional read/write round-trip" {
     try std.testing.expectEqualStrings("HELLO", &buf);
     try std.testing.expectEqual(5, try file.readPositional(io, &.{&buf}, 10));
     try std.testing.expectEqualStrings("WORLD", &buf);
+}
+
+test "io: file streaming read advances position and reports EOF" {
+    // On Windows, zio opens files with FILE_FLAG_OVERLAPPED (for IOCP). Such
+    // handles have no implicit file position, so ReadFile/WriteFile without an
+    // OVERLAPPED struct fails with INVALID_PARAMETER. Streaming requires
+    // per-handle position tracking which we don't implement.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_read_streaming.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    try std.testing.expectEqual(10, try file.writePositional(io, &.{"HELLOWORLD"}, 0));
+
+    var buf1: [5]u8 = undefined;
+    try std.testing.expectEqual(5, try file.readStreaming(io, &.{&buf1}));
+    try std.testing.expectEqualStrings("HELLO", &buf1);
+
+    var buf2: [5]u8 = undefined;
+    try std.testing.expectEqual(5, try file.readStreaming(io, &.{&buf2}));
+    try std.testing.expectEqualStrings("WORLD", &buf2);
+
+    var buf3: [5]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, file.readStreaming(io, &.{&buf3}));
+}
+
+test "io: file streaming write advances position and appends" {
+    // See note on Windows in the streaming-read test above.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_write_streaming.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    try std.testing.expectEqual(5, try file.writeStreaming(io, "HELLO", &.{}, 1));
+    try std.testing.expectEqual(6, try file.writeStreaming(io, "", &.{ " ", "WORLD" }, 1));
+    try std.testing.expectEqual(3, try file.writeStreaming(io, "", &.{"!"}, 3));
+
+    try std.testing.expectEqual(14, try file.length(io));
+
+    var buf: [14]u8 = undefined;
+    try std.testing.expectEqual(14, try file.readPositional(io, &.{&buf}, 0));
+    try std.testing.expectEqualStrings("HELLO WORLD!!!", &buf);
 }
 
 test "io: file length/sync/setLength" {
