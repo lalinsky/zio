@@ -1060,7 +1060,8 @@ fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io
 
     if (options.reuse_address) {
         const value: c_int = 1;
-        os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEADDR, std.mem.asBytes(&value)) catch {};
+        os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEADDR, std.mem.asBytes(&value)) catch
+            return error.OptionUnsupported;
         if (@hasDecl(os_net.SO, "REUSEPORT")) {
             os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEPORT, std.mem.asBytes(&value)) catch {};
         }
