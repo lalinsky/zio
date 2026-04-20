@@ -5,6 +5,10 @@ const zio = @import("zio");
 fn handleClient(stream: zio.net.Stream) !void {
     defer stream.close();
 
+    defer stream.shutdown(.both) catch |err| {
+        std.log.err("Failed to shutdown client connection: {}", .{err});
+    };
+
     std.log.info("Client connected from {f}", .{stream.socket.address});
 
     var read_buffer: [1024]u8 = undefined;
