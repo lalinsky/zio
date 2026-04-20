@@ -1080,6 +1080,7 @@ pub const SOCK = struct {
     pub const STREAM: i32 = 1;
     pub const DGRAM: i32 = 2;
     pub const RAW: i32 = 3;
+    pub const RDM: i32 = 4;
     pub const SEQPACKET: i32 = 5;
 };
 
