@@ -120,8 +120,8 @@ pub const vtable: Io.VTable = .{
     .fileLength = fileLengthImpl,
     .fileClose = fileCloseImpl,
     .fileWritePositional = fileWritePositionalImpl,
-    .fileWriteFileStreaming = fileWriteFileStreamingImpl,
-    .fileWriteFilePositional = fileWriteFilePositionalImpl,
+    .fileWriteFileStreaming = Io.noFileWriteFileStreaming,
+    .fileWriteFilePositional = Io.noFileWriteFilePositional,
     .fileReadPositional = fileReadPositionalImpl,
     .fileSeekBy = fileSeekByImpl,
     .fileSeekTo = fileSeekToImpl,
@@ -728,14 +728,6 @@ fn fileWritePositionalImpl(_: ?*anyopaque, file: Io.File, header: []const u8, da
     var op = ev.FileWrite.init(stdIoHandleToZio(file.handle), wbuf, offset);
     try waitForIo(&op.c);
     return try op.getResult();
-}
-
-fn fileWriteFileStreamingImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.File.Writer.WriteFileError!usize {
-    @panic("TODO: fileWriteFileStreaming");
-}
-
-fn fileWriteFilePositionalImpl(_: ?*anyopaque, _: Io.File, _: []const u8, _: *Io.File.Reader, _: Io.Limit, _: u64) Io.File.WriteFilePositionalError!usize {
-    @panic("TODO: fileWriteFilePositional");
 }
 
 fn fileReadPositionalImpl(_: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
