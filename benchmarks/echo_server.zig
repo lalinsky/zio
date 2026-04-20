@@ -34,7 +34,7 @@ fn serverTask(ready: *zio.ResetEvent, done: *zio.ResetEvent) !void {
 
     var clients_handled: usize = 0;
     while (clients_handled < NUM_CLIENTS) : (clients_handled += 1) {
-        var stream = try server.accept();
+        var stream = try server.accept(.{});
         errdefer stream.close();
 
         try group.spawn(handleClient, .{stream});

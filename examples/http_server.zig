@@ -76,7 +76,7 @@ pub fn main() !void {
     defer group.cancel();
 
     while (true) {
-        const stream = try server.accept();
+        const stream = try server.accept(.{});
         errdefer stream.close();
 
         try group.spawn(handleClient, .{stream});
