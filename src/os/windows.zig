@@ -868,6 +868,7 @@ pub const POLL = struct {
 
 // Message flags
 pub const MSG = struct {
+    pub const OOB: u32 = 1;
     pub const PEEK: u32 = 2;
     pub const WAITALL: u32 = 8;
 };

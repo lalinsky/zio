@@ -1028,6 +1028,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setResult(.net_recvmsg, .{
                     .len = @as(usize, @intCast(res)),
                     .flags = data.internal.msg.flags,
+                    .controllen = @intCast(data.internal.msg.controllen),
                 });
                 // Propagate the peer address length filled in by the kernel
                 if (data.addr_len) |len_ptr| {
@@ -1297,6 +1298,8 @@ fn recvFlagsToMsg(flags: net.RecvFlags) u32 {
     var msg_flags: u32 = 0;
     if (flags.peek) msg_flags |= linux.MSG.PEEK;
     if (flags.waitall) msg_flags |= linux.MSG.WAITALL;
+    if (flags.oob) msg_flags |= linux.MSG.OOB;
+    if (flags.trunc) msg_flags |= linux.MSG.TRUNC;
     return msg_flags;
 }
 

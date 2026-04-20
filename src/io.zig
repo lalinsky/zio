@@ -1418,6 +1418,9 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
         error.ConnectionAborted,
         error.FileDescriptorNotASocket,
         error.OperationNotSupported,
+        error.MessageOversize,
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
         error.Unexpected,
         => error.Unexpected,
     };

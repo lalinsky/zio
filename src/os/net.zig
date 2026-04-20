@@ -883,6 +883,8 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .ESHUTDOWN => error.SocketShutdown,
                 .EOPNOTSUPP => error.OperationNotSupported,
                 .ENETDOWN => error.NetworkDown,
+                .EMSGSIZE => error.MessageOversize,
+                .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS, .EINVAL => error.SystemResources,
                 .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
@@ -894,9 +896,13 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .AGAIN => error.WouldBlock,
                 .CONNREFUSED => error.ConnectionRefused,
                 .CONNRESET => error.ConnectionResetByPeer,
-                .NOTCONN => error.SocketNotConnected,
+                .NOTCONN, .PIPE => error.SocketNotConnected,
                 .NOTSOCK => error.FileDescriptorNotASocket,
-                .NOMEM => error.SystemResources,
+                .NETDOWN => error.NetworkDown,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .MSGSIZE => error.MessageOversize,
+                .MFILE => error.ProcessFdQuotaExceeded,
+                .NFILE => error.SystemFdQuotaExceeded,
                 .CANCELED => error.Canceled,
                 else => |e| unexpectedError(e),
             };
@@ -1002,7 +1008,26 @@ pub fn errnoToOpenError(err: E) OpenError {
 pub const RecvFlags = packed struct {
     peek: bool = false,
     waitall: bool = false,
+    oob: bool = false,
+    /// On Linux, asks the kernel to report the full datagram length even when
+    /// it's larger than the supplied buffer (so the caller can detect
+    /// truncation). Silently ignored on platforms without MSG_TRUNC input
+    /// semantics (e.g. Windows).
+    trunc: bool = false,
 };
+
+fn recvFlagsToSys(flags: RecvFlags) c_int {
+    var sys_flags: c_int = 0;
+    const MSG = if (builtin.os.tag == .windows) windows.MSG else posix.system.MSG;
+    if (flags.peek and @hasDecl(MSG, "PEEK")) sys_flags |= MSG.PEEK;
+    if (flags.waitall and @hasDecl(MSG, "WAITALL")) sys_flags |= MSG.WAITALL;
+    if (flags.oob and @hasDecl(MSG, "OOB")) sys_flags |= MSG.OOB;
+    // MSG_TRUNC as an *input* flag is Linux-specific; on other POSIX systems
+    // the constant exists only as an output flag. Restrict it to Linux to
+    // avoid corrupting platforms that repurpose the bit.
+    if (flags.trunc and builtin.os.tag == .linux) sys_flags |= MSG.TRUNC;
+    return sys_flags;
+}
 
 pub const RecvError = error{
     WouldBlock,
@@ -1016,6 +1041,9 @@ pub const RecvError = error{
     OperationNotSupported,
     NetworkDown,
     SystemResources,
+    MessageOversize,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
     Canceled,
     Unexpected,
 };
@@ -1023,9 +1051,7 @@ pub const RecvError = error{
 pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
-    if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
+    const sys_flags = recvFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1209,19 +1235,7 @@ pub fn recvfrom(
 ) RecvError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.peek) {
-        sys_flags |= if (builtin.os.tag == .windows)
-            windows.MSG.PEEK
-        else
-            posix.system.MSG.PEEK;
-    }
-    if (flags.waitall) {
-        sys_flags |= if (builtin.os.tag == .windows)
-            windows.MSG.WAITALL
-        else
-            posix.system.MSG.WAITALL;
-    }
+    var sys_flags = recvFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1380,6 +1394,10 @@ pub fn sendto(
 pub const RecvMsgResult = struct {
     len: usize,
     flags: u32,
+    /// Actual control-data length written by the kernel into the caller's
+    /// control buffer. 0 when no control buffer was supplied, or on platforms
+    /// where control messages are not supported.
+    controllen: usize,
 };
 
 pub fn recvmsg(
@@ -1390,11 +1408,9 @@ pub fn recvmsg(
     addr_len: ?*socklen_t,
     control: ?[]u8,
 ) RecvError!RecvMsgResult {
-    if (buffers.len == 0) return .{ .len = 0, .flags = 0 };
+    if (buffers.len == 0) return .{ .len = 0, .flags = 0, .controllen = 0 };
 
-    var sys_flags: c_int = 0;
-    if (flags.peek) sys_flags |= posix.system.MSG.PEEK;
-    if (flags.waitall) sys_flags |= posix.system.MSG.WAITALL;
+    const sys_flags = recvFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1412,6 +1428,7 @@ pub fn recvmsg(
             return .{
                 .len = bytes_read,
                 .flags = 0,
+                .controllen = 0,
             };
         },
         else => {
@@ -1433,6 +1450,7 @@ pub fn recvmsg(
                     return .{
                         .len = @intCast(rc),
                         .flags = @intCast(msg.flags),
+                        .controllen = @intCast(msg.controllen),
                     };
                 }
                 switch (posix.errno(rc)) {
