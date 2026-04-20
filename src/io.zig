@@ -328,8 +328,19 @@ fn futexWakeImpl(_: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
     Futex.wake(ptr, max_waiters);
 }
 
-fn operateImpl(_: ?*anyopaque, _: Io.Operation) Io.Cancelable!Io.Operation.Result {
-    @panic("TODO: operate");
+fn operateImpl(_: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    switch (operation) {
+        .file_read_streaming => @panic("TODO: operate.file_read_streaming"),
+        .file_write_streaming => @panic("TODO: operate.file_write_streaming"),
+        .device_io_control => @panic("TODO: operate.device_io_control"),
+        .net_receive => |*o| return .{ .net_receive = result: {
+            netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                else => |e| break :result .{ e, 0 },
+            };
+            break :result .{ null, 1 };
+        } },
+    }
 }
 
 fn batchAwaitAsyncImpl(_: ?*anyopaque, _: *Io.Batch) Io.Cancelable!void {
@@ -1423,6 +1434,90 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
         error.SystemFdQuotaExceeded,
         error.Unexpected,
         => error.Unexpected,
+    };
+}
+
+fn recvMsgErrToReceiveErr(err: ev.NetRecvMsg.Error) Io.net.Socket.ReceiveError {
+    return switch (err) {
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.SocketNotConnected, error.SocketShutdown, error.ConnectionAborted => error.SocketUnconnected,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        error.MessageOversize => error.MessageOversize,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        // On datagram sockets, an ICMP "port unreachable" response to a prior
+        // send is surfaced as ECONNREFUSED on the next receive.
+        error.ConnectionRefused => error.PortUnreachable,
+        error.Canceled => error.Canceled,
+        error.WouldBlock,
+        error.Timeout,
+        error.FileDescriptorNotASocket,
+        error.OperationNotSupported,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn decodeIncomingFlags(raw: u32) Io.net.IncomingMessage.Flags {
+    switch (builtin.os.tag) {
+        .windows => {
+            // Windows WSAMSG.dwFlags uses a different bit layout than POSIX
+            // msghdr.flags and doesn't distinguish most of these. Match
+            // std.Io.Threaded's Windows behavior: report all-zero output flags.
+            return .{ .eor = false, .trunc = false, .ctrunc = false, .oob = false, .errqueue = false };
+        },
+        else => {
+            const MSG = std.posix.MSG;
+            return .{
+                .eor = (raw & MSG.EOR) != 0,
+                .trunc = (raw & MSG.TRUNC) != 0,
+                .ctrunc = (raw & MSG.CTRUNC) != 0,
+                .oob = (raw & MSG.OOB) != 0,
+                .errqueue = if (@hasDecl(MSG, "ERRQUEUE")) (raw & MSG.ERRQUEUE) != 0 else false,
+            };
+        },
+    }
+}
+
+/// Receive a single datagram, filling `message` with its metadata and returning
+/// the received bytes as a sub-slice of `data_buffer`. Mirrors the structure of
+/// std.Io.Threaded's netReceivePosix: one recvmsg per call, caller loops in the
+/// batch path if they want more.
+fn netReceiveImpl(
+    socket_handle: Io.net.Socket.Handle,
+    message: *Io.net.IncomingMessage,
+    data_buffer: []u8,
+    flags: Io.net.ReceiveFlags,
+) Io.net.Socket.ReceiveError!void {
+    const zio_flags: os_net.RecvFlags = .{
+        .peek = flags.peek,
+        .oob = flags.oob,
+        .trunc = flags.trunc,
+    };
+    var storage: zio_net.Address = undefined;
+    var addr_len: os_net.socklen_t = @sizeOf(zio_net.Address);
+    var iov = os_net.iovecFromSlice(data_buffer);
+    const has_control = message.control.len != 0;
+    var op = ev.NetRecvMsg.init(
+        stdIoHandleToZio(socket_handle),
+        .{ .iovecs = (&iov)[0..1] },
+        zio_flags,
+        &storage.any,
+        &addr_len,
+        if (has_control) message.control else null,
+    );
+    try waitForIo(&op.c);
+    const result = op.getResult() catch |err| return recvMsgErrToReceiveErr(err);
+    message.* = .{
+        .from = zioIpToStdIo(storage.ip),
+        // When flags.trunc is set on Linux, result.len is the full datagram
+        // length — which may exceed data_buffer.len. We slice verbatim to
+        // match std.Io.Threaded; callers that enable .trunc are responsible
+        // for sizing data_buffer appropriately.
+        .data = data_buffer[0..result.len],
+        .control = if (has_control) message.control[0..result.controllen] else message.control,
+        .flags = decodeIncomingFlags(result.flags),
     };
 }
 

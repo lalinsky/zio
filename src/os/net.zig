@@ -884,8 +884,7 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .EOPNOTSUPP => error.OperationNotSupported,
                 .ENETDOWN => error.NetworkDown,
                 .EMSGSIZE => error.MessageOversize,
-                .EMFILE => error.ProcessFdQuotaExceeded,
-                .ENOBUFS, .EINVAL => error.SystemResources,
+                .ENOBUFS => error.SystemResources,
                 .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
@@ -896,11 +895,15 @@ pub fn errnoToRecvError(err: E) RecvError {
                 .AGAIN => error.WouldBlock,
                 .CONNREFUSED => error.ConnectionRefused,
                 .CONNRESET => error.ConnectionResetByPeer,
-                .NOTCONN, .PIPE => error.SocketNotConnected,
+                .NOTCONN => error.SocketNotConnected,
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .NETDOWN => error.NetworkDown,
                 .NOBUFS, .NOMEM => error.SystemResources,
                 .MSGSIZE => error.MessageOversize,
+                // recvmsg with SCM_RIGHTS passes fds from the sender; if the
+                // receiving process/system is at its fd quota, the kernel fails
+                // the call with these errnos. Plain recv/recvfrom cannot
+                // produce them.
                 .MFILE => error.ProcessFdQuotaExceeded,
                 .NFILE => error.SystemFdQuotaExceeded,
                 .CANCELED => error.Canceled,
