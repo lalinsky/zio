@@ -1342,8 +1342,51 @@ fn netSocketCreatePairImpl(_: ?*anyopaque, _: Io.net.Socket.CreatePairOptions) I
     @panic("TODO: netSocketCreatePair");
 }
 
-fn netSendImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []Io.net.OutgoingMessage, _: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
-    @panic("TODO: netSend");
+fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
+    return switch (err) {
+        error.MessageTooBig => error.MessageOversize,
+        error.SystemResources => error.SystemResources,
+        error.NetworkUnreachable => error.NetworkUnreachable,
+        error.NetworkDown => error.NetworkDown,
+        error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
+        error.SocketNotConnected, error.BrokenPipe => error.SocketUnconnected,
+        error.AccessDenied => error.AccessDenied,
+        error.Canceled => error.Canceled,
+        error.WouldBlock,
+        error.Timeout,
+        error.FileDescriptorNotASocket,
+        error.OperationNotSupported,
+        error.Unexpected,
+        => error.Unexpected,
+    };
+}
+
+fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.OutgoingMessage, flags: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
+    const zio_flags: os_net.SendFlags = .{
+        .confirm = flags.confirm,
+        .dont_route = flags.dont_route,
+        .eor = flags.eor,
+        .oob = flags.oob,
+        .fastopen = flags.fastopen,
+    };
+
+    for (messages, 0..) |*msg, i| {
+        const zio_addr = stdIoIpToZio(msg.address.*);
+        const iovec = os_net.iovecConstFromSlice(msg.data_ptr[0..msg.data_len]);
+
+        var op = ev.NetSendMsg.init(
+            stdIoHandleToZio(handle),
+            .{ .iovecs = (&iovec)[0..1] },
+            zio_flags,
+            &zio_addr.any,
+            sockAddrLen(&zio_addr.any),
+            if (msg.control.len != 0) msg.control else null,
+        );
+        waitForIo(&op.c) catch |err| return .{ err, i };
+        const sent = op.getResult() catch |err| return .{ sendErrToSocketSendErr(err), i };
+        msg.data_len = sent;
+    }
+    return .{ null, messages.len };
 }
 
 fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
@@ -1916,6 +1959,44 @@ test "io: net UDP bind assigns ephemeral port" {
     defer socket.close(io);
 
     try std.testing.expect(socket.address.ip4.port != 0);
+}
+
+test "io: net UDP send single datagram succeeds" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    try sender.send(io, &receiver.address, "hello");
+}
+
+test "io: net UDP sendMany delivers multiple datagrams" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    const payloads = [_][]const u8{ "one", "two", "three" };
+    var messages: [payloads.len]Io.net.OutgoingMessage = undefined;
+    for (&messages, payloads) |*m, p| {
+        m.* = .{ .address = &receiver.address, .data_ptr = p.ptr, .data_len = p.len };
+    }
+
+    try sender.sendMany(io, &messages, .{});
+
+    for (&messages, payloads) |m, p| {
+        try std.testing.expectEqual(p.len, m.data_len);
+    }
 }
 
 test "io: netLookup resolves numeric IPv4" {

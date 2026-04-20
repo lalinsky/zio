@@ -1020,7 +1020,24 @@ pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
 
 pub const SendFlags = packed struct {
     no_signal: bool = true,
+    confirm: bool = false,
+    dont_route: bool = false,
+    eor: bool = false,
+    oob: bool = false,
+    fastopen: bool = false,
 };
+
+fn sendFlagsToSys(flags: SendFlags) c_int {
+    var sys_flags: c_int = 0;
+    const MSG = posix.system.MSG;
+    if (builtin.os.tag != .windows and flags.no_signal) sys_flags |= MSG.NOSIGNAL;
+    if (flags.confirm and @hasDecl(MSG, "CONFIRM")) sys_flags |= MSG.CONFIRM;
+    if (flags.dont_route and @hasDecl(MSG, "DONTROUTE")) sys_flags |= MSG.DONTROUTE;
+    if (flags.eor and @hasDecl(MSG, "EOR")) sys_flags |= MSG.EOR;
+    if (flags.oob and @hasDecl(MSG, "OOB")) sys_flags |= MSG.OOB;
+    if (flags.fastopen and @hasDecl(MSG, "FASTOPEN")) sys_flags |= MSG.FASTOPEN;
+    return sys_flags;
+}
 
 pub const SendError = error{
     WouldBlock,
@@ -1043,10 +1060,7 @@ pub const SendError = error{
 pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.no_signal and builtin.os.tag != .windows) {
-        sys_flags |= posix.system.MSG.NOSIGNAL;
-    }
+    const sys_flags = sendFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1217,10 +1231,7 @@ pub fn sendto(
 ) SendError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.no_signal and builtin.os.tag != .windows) {
-        sys_flags |= posix.system.MSG.NOSIGNAL;
-    }
+    const sys_flags = sendFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
@@ -1369,10 +1380,7 @@ pub fn sendmsg(
 ) SendError!usize {
     if (buffers.len == 0) return 0;
 
-    var sys_flags: c_int = 0;
-    if (flags.no_signal and builtin.os.tag != .windows) {
-        sys_flags |= posix.system.MSG.NOSIGNAL;
-    }
+    const sys_flags = sendFlagsToSys(flags);
 
     switch (builtin.os.tag) {
         .windows => {
