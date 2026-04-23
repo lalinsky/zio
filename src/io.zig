@@ -922,23 +922,23 @@ fn fileHardLinkImpl(_: ?*anyopaque, file: Io.File, new_dir: Io.Dir, new_sub_path
 }
 
 fn fileMemoryMapCreateImpl(_: ?*anyopaque, _: Io.File, _: Io.File.MemoryMap.CreateOptions) Io.File.MemoryMap.CreateError!Io.File.MemoryMap {
-    @panic("TODO: fileMemoryMapCreate");
+    @panic("fileMemoryMapCreate: not supported");
 }
 
 fn fileMemoryMapDestroyImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) void {
-    @panic("TODO: fileMemoryMapDestroy");
+    @panic("fileMemoryMapDestroy: not supported");
 }
 
 fn fileMemoryMapSetLengthImpl(_: ?*anyopaque, _: *Io.File.MemoryMap, _: usize) Io.File.MemoryMap.SetLengthError!void {
-    @panic("TODO: fileMemoryMapSetLength");
+    @panic("fileMemoryMapSetLength: not supported");
 }
 
 fn fileMemoryMapReadImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.ReadPositionalError!void {
-    @panic("TODO: fileMemoryMapRead");
+    @panic("fileMemoryMapRead: not supported");
 }
 
 fn fileMemoryMapWriteImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.WritePositionalError!void {
-    @panic("TODO: fileMemoryMapWrite");
+    @panic("fileMemoryMapWrite: not supported");
 }
 
 fn processExecutableOpenImpl(_: ?*anyopaque, _: Io.Dir.OpenFileOptions) std.process.OpenExecutableError!Io.File {
