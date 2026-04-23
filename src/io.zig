@@ -882,20 +882,29 @@ fn fileSetTimestampsImpl(_: ?*anyopaque, file: Io.File, options: Io.File.SetTime
     try op.getResult();
 }
 
-fn fileLockImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Lock) Io.File.LockError!void {
-    @panic("TODO: fileLock");
+fn fileLockBlocking(file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
+    const io = globalIo();
+    return io.vtable.fileLock(io.userdata, file, lock);
 }
 
-fn fileTryLockImpl(_: ?*anyopaque, _: Io.File, _: Io.File.Lock) Io.File.LockError!bool {
-    @panic("TODO: fileTryLock");
+fn fileLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
+    // TODO: cancellation not supported; to fix, retry flock(LOCK_NB) in a loop with zio.sleep between attempts
+    return common.blockInPlace(fileLockBlocking, .{ file, lock });
 }
 
-fn fileUnlockImpl(_: ?*anyopaque, _: Io.File) void {
-    @panic("TODO: fileUnlock");
+fn fileTryLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!bool {
+    const io = globalIo();
+    return io.vtable.fileTryLock(io.userdata, file, lock);
 }
 
-fn fileDowngradeLockImpl(_: ?*anyopaque, _: Io.File) Io.File.DowngradeLockError!void {
-    @panic("TODO: fileDowngradeLock");
+fn fileUnlockImpl(_: ?*anyopaque, file: Io.File) void {
+    const io = globalIo();
+    return io.vtable.fileUnlock(io.userdata, file);
+}
+
+fn fileDowngradeLockImpl(_: ?*anyopaque, file: Io.File) Io.File.DowngradeLockError!void {
+    const io = globalIo();
+    return io.vtable.fileDowngradeLock(io.userdata, file);
 }
 
 fn fileRealPathImpl(_: ?*anyopaque, file: Io.File, out_buffer: []u8) Io.File.RealPathError!usize {
