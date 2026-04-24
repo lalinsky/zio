@@ -14,11 +14,12 @@ BACKEND=""
 USE_WINE=false
 USE_QEMU=false
 NO_EXEC=false
+COVERAGE=false
 TIMEOUT=""
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--ci] [--full] [--release] [--verbose] [--timeout <seconds>]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--coverage] [--ci] [--full] [--release] [--verbose] [--timeout <seconds>]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-exec)
             NO_EXEC=true
+            shift
+            ;;
+        --coverage)
+            COVERAGE=true
             shift
             ;;
         --ci)
@@ -107,7 +112,7 @@ fi
 if [ "$USE_QEMU" = true ]; then
     BUILD_ARGS+=(-fqemu)
 fi
-if [ "$NO_EXEC" = true ]; then
+if [ "$NO_EXEC" = true ] || [ "$COVERAGE" = true ]; then
     BUILD_ARGS+=(-Demit-test-bin)
 fi
 if [ "$RELEASE_MODE" = true ]; then
@@ -126,6 +131,13 @@ fi
 if [ "$USE_WINE" = true ]; then
     echo "=== Running tests with Wine ==="
     wine zig-out/bin/test.exe
+fi
+
+if [ "$COVERAGE" = true ]; then
+    echo "=== Running coverage ==="
+    rm -rf zig-out/coverage
+    kcov --include-pattern=src/ zig-out/coverage/ zig-out/bin/test
+    echo "Coverage report: zig-out/coverage/index.html"
 fi
 
 if [ "$FULL_MODE" = true ]; then
