@@ -8,6 +8,7 @@
 
 Extra notes:
 - use `zig env` to get the path to the Zig standard library, if you need to check something
+- we are using zig 0.16, so modules like `std.posix`, `std.fs`, or `std.net` have either been removed or mostly empties, look at src/os/ for replacements
 
 Release process:
 1. Update docs/changelog.md - change [Unreleased] to [X.Y.Z] with current date

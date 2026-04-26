@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 26-04-26
+
+### Added
+
+- Support for Zig 0.16.
+- Implementation of the `std.Io` interface. Supports fiber-based futures/groups, file and network operations.
+  Still missing child process and batch operations. The rest of the codebase will be adjusted over time to align with `std.Io`
+  to avoid some unnecessary type conversions.
+
+### Changed
+
+- `server.accept()` now takes options argument with timeout.
+
+### Fixed
+
+- Internal refactoring to handle data races on weakly ordered architectures in some cases.
+
+
 ## [0.9.0] - 2026-03-02
 
 ### Added
