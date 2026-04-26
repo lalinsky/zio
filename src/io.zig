@@ -951,15 +951,15 @@ fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.Executabl
 }
 
 fn lockStderrImpl(_: ?*anyopaque, _: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
-    @panic("TODO: lockStderr");
+    @panic("lockStderr: not supported");
 }
 
 fn tryLockStderrImpl(_: ?*anyopaque, _: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
-    @panic("TODO: tryLockStderr");
+    @panic("tryLockStderr: not supported");
 }
 
 fn unlockStderrImpl(_: ?*anyopaque) void {
-    @panic("TODO: unlockStderr");
+    @panic("unlockStderr: not supported");
 }
 
 fn processCurrentPathImpl(_: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
