@@ -2553,3 +2553,20 @@ fn dirRealPathFileWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const
 
     return dirRealPathWindows(handle, buffer);
 }
+
+/// Call ioctl(2) on `fd`, retrying on EINTR. Returns the raw ioctl return
+/// value on success, or a negative errno value on failure, matching the
+/// `std.Io.Operation.DeviceIoControl.Result` contract.
+pub fn ioctl(fd: fd_t, code: u32, arg: ?*anyopaque) i32 {
+    while (true) {
+        const rc = posix.system.ioctl(fd, @bitCast(code), @intFromPtr(arg));
+        switch (posix.errno(rc)) {
+            .SUCCESS => return if (@TypeOf(rc) == usize)
+                @bitCast(@as(u32, @truncate(rc)))
+            else
+                rc,
+            .INTR => continue,
+            else => |err| return -@as(i32, @intFromEnum(err)),
+        }
+    }
+}
