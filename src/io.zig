@@ -37,6 +37,7 @@ const waitForIoUncancelable = common.waitForIoUncancelable;
 const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
+const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
@@ -998,12 +999,12 @@ fn processSpawnPathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.SpawnOptions) 
     @panic("TODO: processSpawnPath");
 }
 
-fn childWaitImpl(_: ?*anyopaque, _: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
-    @panic("TODO: childWait");
+fn childWaitImpl(_: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
+    return process_impl.childWait(child);
 }
 
-fn childKillImpl(_: ?*anyopaque, _: *std.process.Child) void {
-    @panic("TODO: childKill");
+fn childKillImpl(_: ?*anyopaque, child: *std.process.Child) void {
+    process_impl.childKill(child);
 }
 
 fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
@@ -1757,6 +1758,10 @@ fn dnsLookupErrToStdErr(err: zio_dns.LookupError) Io.net.HostName.LookupError {
         error.Unexpected, error.ServiceUnavailable, error.NoThreadPool, error.RuntimeShutdown => error.Unexpected,
         error.Closed => unreachable,
     };
+}
+
+test {
+    _ = process_impl;
 }
 
 test "Runtime.io / Runtime.fromIo round-trip" {
