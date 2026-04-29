@@ -54,6 +54,7 @@ fn childCleanup(child: *std.process.Child) void {
     if (builtin.os.tag == .windows) {
         std.os.windows.CloseHandle(child.id.?);
         std.os.windows.CloseHandle(child.thread_handle);
+        child.thread_handle = undefined;
     }
     child.id = null;
     if (child.stdin) |f| {
@@ -70,13 +71,27 @@ fn childCleanup(child: *std.process.Child) void {
     }
 }
 
+// POSIX: "true"/"false"/"sleep". Windows: cmd.exe equivalents.
+const argv_exit0: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{ "cmd.exe", "/c", "exit 0" }
+else
+    &.{"true"};
+
+const argv_exit1: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{ "cmd.exe", "/c", "exit 1" }
+else
+    &.{"false"};
+
+const argv_sleep: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{ "cmd.exe", "/c", "timeout /t 100 /nobreak" }
+else
+    &.{ "sleep", "100" };
+
 test "childWait: exit code 0" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var child = try std.process.spawn(std.testing.io, .{
-        .argv = &.{"/bin/true"},
-    });
+    var child = try std.process.spawn(std.testing.io, .{ .argv = argv_exit0 });
     const term = try childWait(&child);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
@@ -85,9 +100,7 @@ test "childWait: exit code 1" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var child = try std.process.spawn(std.testing.io, .{
-        .argv = &.{"/bin/false"},
-    });
+    var child = try std.process.spawn(std.testing.io, .{ .argv = argv_exit1 });
     const term = try childWait(&child);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, term);
 }
@@ -96,9 +109,7 @@ test "childKill: terminates process" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var child = try std.process.spawn(std.testing.io, .{
-        .argv = &.{ "/bin/sleep", "100" },
-    });
+    var child = try std.process.spawn(std.testing.io, .{ .argv = argv_sleep });
     childKill(&child);
     try std.testing.expect(child.id == null);
 }
