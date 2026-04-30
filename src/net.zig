@@ -1140,6 +1140,22 @@ pub const Stream = struct {
             };
         }
 
+        pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Reader {
+            _ = Runtime.fromIo(io);
+            return .{
+                .handle = stream.socket.handle,
+                .interface = .{
+                    .vtable = &.{
+                        .stream = streamImpl,
+                        .readVec = readVecImpl,
+                    },
+                    .buffer = buffer,
+                    .seek = 0,
+                    .end = 0,
+                },
+            };
+        }
+
         pub fn setTimeout(self: *Reader, timeout: Timeout) void {
             self.timeout = timeout;
         }
@@ -1184,6 +1200,19 @@ pub const Stream = struct {
         err: ?(ev.NetSend.Error || common.Timeoutable) = null,
 
         pub fn init(stream: Stream, buffer: []u8) Writer {
+            return .{
+                .handle = stream.socket.handle,
+                .interface = .{
+                    .vtable = &.{
+                        .drain = drainImpl,
+                    },
+                    .buffer = buffer,
+                },
+            };
+        }
+
+        pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Writer {
+            _ = Runtime.fromIo(io);
             return .{
                 .handle = stream.socket.handle,
                 .interface = .{
@@ -2129,6 +2158,11 @@ test "IpAddress: listen/accept/connect/read/EOF IPv6" {
         if (err == error.AddressUnavailable) return error.SkipZigTest;
         return err;
     };
+}
+
+test "Stream.Reader.fromStd / Stream.Writer.fromStd" {
+    _ = &Stream.Reader.fromStd;
+    _ = &Stream.Writer.fromStd;
 }
 
 test "Server: accept timeout" {
