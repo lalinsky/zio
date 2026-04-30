@@ -1127,7 +1127,7 @@ pub const Stream = struct {
 
         pub fn init(stream: Stream, buffer: []u8) Reader {
             return .{
-                .handle = stream.socket.handle,
+                .handle = handleFromStd(stream.socket.handle),
                 .interface = .{
                     .vtable = &.{
                         .stream = streamImpl,
@@ -1143,7 +1143,7 @@ pub const Stream = struct {
         pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Reader {
             _ = Runtime.fromIo(io);
             return .{
-                .handle = stream.socket.handle,
+                .handle = handleFromStd(stream.socket.handle),
                 .interface = .{
                     .vtable = &.{
                         .stream = streamImpl,
@@ -1201,7 +1201,7 @@ pub const Stream = struct {
 
         pub fn init(stream: Stream, buffer: []u8) Writer {
             return .{
-                .handle = stream.socket.handle,
+                .handle = handleFromStd(stream.socket.handle),
                 .interface = .{
                     .vtable = &.{
                         .drain = drainImpl,
@@ -1214,7 +1214,7 @@ pub const Stream = struct {
         pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Writer {
             _ = Runtime.fromIo(io);
             return .{
-                .handle = stream.socket.handle,
+                .handle = handleFromStd(stream.socket.handle),
                 .interface = .{
                     .vtable = &.{
                         .drain = drainImpl,
@@ -1249,6 +1249,10 @@ pub const Stream = struct {
         return .init(stream, buffer);
     }
 };
+
+pub fn handleFromStd(h: std.Io.net.Socket.Handle) Handle {
+    return if (@typeInfo(Handle) == .pointer) @ptrCast(h) else h;
+}
 
 fn sendSplatHeader(handle: Handle, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
     var splat_buf: [64]u8 = undefined;
