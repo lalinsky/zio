@@ -947,9 +947,7 @@ pub const Socket = struct {
 
     /// Low-level receive function that accepts ev.ReadBuf directly.
     pub fn receiveBuf(self: Socket, buf: ev.ReadBuf, timeout: Timeout) !usize {
-        var op = ev.NetRecv.init(self.handle, buf, .{});
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
+        return receiveBufImpl(self.handle, buf, timeout);
     }
 
     /// Sends data from the provided buffer to the socket.
@@ -961,9 +959,7 @@ pub const Socket = struct {
 
     /// Low-level send function that accepts ev.WriteBuf directly.
     pub fn sendBuf(self: Socket, buf: ev.WriteBuf, timeout: Timeout) !usize {
-        var op = ev.NetSend.init(self.handle, buf, .{});
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
+        return sendBufImpl(self.handle, buf, timeout);
     }
 
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
@@ -1108,17 +1104,6 @@ pub const Stream = struct {
         return self.writeBuf(.fromSlices(bufs, &storage), timeout);
     }
 
-    /// Writes header followed by data slices, with optional splat (repeat) of the last slice.
-    /// Used internally by the buffered Writer.
-    pub fn writeSplatHeader(self: Stream, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
-        var splat_buf: [64]u8 = undefined;
-        var slices: [max_vecs][]const u8 = undefined;
-        const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
-
-        var storage: [max_vecs]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlices(slices[0..buf_len], &storage), timeout);
-    }
-
     /// Low-level write function that accepts ev.WriteBuf directly.
     pub fn writeBuf(self: Stream, buf: ev.WriteBuf, timeout: Timeout) !usize {
         return self.socket.sendBuf(buf, timeout);
@@ -1135,14 +1120,14 @@ pub const Stream = struct {
     }
 
     pub const Reader = struct {
-        stream: Stream,
+        handle: Handle,
         interface: std.Io.Reader,
         timeout: Timeout = .none,
         err: ?(ev.NetRecv.Error || common.Timeoutable) = null,
 
         pub fn init(stream: Stream, buffer: []u8) Reader {
             return .{
-                .stream = stream,
+                .handle = stream.socket.handle,
                 .interface = .{
                     .vtable = &.{
                         .stream = streamImpl,
@@ -1176,7 +1161,7 @@ pub const Stream = struct {
                 try io_r.writableVectorPosix(&storage, data);
             if (dest_n == 0) return 0;
 
-            const n = r.stream.readBuf(.{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
+            const n = receiveBufImpl(r.handle, .{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -1193,14 +1178,14 @@ pub const Stream = struct {
     };
 
     pub const Writer = struct {
-        stream: Stream,
+        handle: Handle,
         interface: std.Io.Writer,
         timeout: Timeout = .none,
         err: ?(ev.NetSend.Error || common.Timeoutable) = null,
 
         pub fn init(stream: Stream, buffer: []u8) Writer {
             return .{
-                .stream = stream,
+                .handle = stream.socket.handle,
                 .interface = .{
                     .vtable = &.{
                         .drain = drainImpl,
@@ -1217,7 +1202,7 @@ pub const Stream = struct {
         fn drainImpl(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
             const buffered = io_w.buffered();
-            const n = w.stream.writeSplatHeader(buffered, data, splat, w.timeout) catch |err| {
+            const n = sendSplatHeader(w.handle, buffered, data, splat, w.timeout) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
@@ -1235,6 +1220,26 @@ pub const Stream = struct {
         return .init(stream, buffer);
     }
 };
+
+fn sendSplatHeader(handle: Handle, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
+    var splat_buf: [64]u8 = undefined;
+    var slices: [max_vecs][]const u8 = undefined;
+    const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
+    var storage: [max_vecs]os.iovec_const = undefined;
+    return sendBufImpl(handle, .fromSlices(slices[0..buf_len], &storage), timeout);
+}
+
+fn receiveBufImpl(handle: Handle, buf: ev.ReadBuf, timeout: Timeout) !usize {
+    var op = ev.NetRecv.init(handle, buf, .{});
+    try timedWaitForIo(&op.c, timeout);
+    return try op.getResult();
+}
+
+fn sendBufImpl(handle: Handle, buf: ev.WriteBuf, timeout: Timeout) !usize {
+    var op = ev.NetSend.init(handle, buf, .{});
+    try timedWaitForIo(&op.c, timeout);
+    return try op.getResult();
+}
 
 pub fn tcpConnectToHost(
     name: []const u8,
