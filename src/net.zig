@@ -32,6 +32,27 @@ pub const has_unix_sockets = switch (builtin.os.tag) {
 
 pub const default_kernel_backlog = 128;
 
+pub fn readBuf(handle: Handle, buf: ev.ReadBuf, timeout: Timeout) (ev.NetRecv.Error || common.Timeoutable)!usize {
+    var op = ev.NetRecv.init(handle, buf, .{});
+    try timedWaitForIo(&op.c, timeout);
+    return try op.getResult();
+}
+
+pub fn writeBuf(handle: Handle, buf: ev.WriteBuf, timeout: Timeout) (ev.NetSend.Error || common.Timeoutable)!usize {
+    var op = ev.NetSend.init(handle, buf, .{});
+    try timedWaitForIo(&op.c, timeout);
+    return try op.getResult();
+}
+
+pub fn writeSplatHeader(handle: Handle, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) (ev.NetSend.Error || common.Timeoutable)!usize {
+    var splat_buf: [64]u8 = undefined;
+    var slices: [max_vecs][]const u8 = undefined;
+    const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
+
+    var storage: [max_vecs]os.iovec_const = undefined;
+    return writeBuf(handle, .fromSlices(slices[0..buf_len], &storage), timeout);
+}
+
 /// A validated hostname according to RFC 1123.
 /// * Has length less than or equal to `max_len`.
 /// * Labels are 1-63 characters, separated by dots.
@@ -942,28 +963,14 @@ pub const Socket = struct {
     /// A return value of 0 indicates the socket has been shut down.
     pub fn receive(self: Socket, buf: []u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec = undefined;
-        return self.receiveBuf(.fromSlice(buf, &storage), timeout);
-    }
-
-    /// Low-level receive function that accepts ev.ReadBuf directly.
-    pub fn receiveBuf(self: Socket, buf: ev.ReadBuf, timeout: Timeout) !usize {
-        var op = ev.NetRecv.init(self.handle, buf, .{});
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
+        return readBuf(self.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Sends data from the provided buffer to the socket.
     /// Returns the number of bytes sent, which may be less than buf.len.
     pub fn send(self: Socket, buf: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
-        return self.sendBuf(.fromSlice(buf, &storage), timeout);
-    }
-
-    /// Low-level send function that accepts ev.WriteBuf directly.
-    pub fn sendBuf(self: Socket, buf: ev.WriteBuf, timeout: Timeout) !usize {
-        var op = ev.NetSend.init(self.handle, buf, .{});
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
+        return writeBuf(self.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
@@ -1066,7 +1073,7 @@ pub const Stream = struct {
     /// A return value of 0 indicates end-of-stream.
     pub fn read(self: Stream, buf: []u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec = undefined;
-        return self.readBuf(.fromSlice(buf, &storage), timeout);
+        return readBuf(self.socket.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Reads data from the stream into multiple buffers using vectored I/O.
@@ -1074,21 +1081,14 @@ pub const Stream = struct {
     /// A return value of 0 indicates end-of-stream.
     pub fn readVec(self: Stream, bufs: [][]u8, timeout: Timeout) !usize {
         var storage: [max_vecs]os.iovec = undefined;
-        return self.readBuf(.fromSlices(bufs, &storage), timeout);
-    }
-
-    /// Low-level read function that accepts ev.ReadBuf directly.
-    /// Returns the number of bytes read, which may be less than requested.
-    /// A return value of 0 indicates end-of-stream.
-    pub fn readBuf(self: Stream, buf: ev.ReadBuf, timeout: Timeout) !usize {
-        return self.socket.receiveBuf(buf, timeout);
+        return readBuf(self.socket.handle, .fromSlices(bufs, &storage), timeout);
     }
 
     /// Writes data from the provided buffer to the stream.
     /// Returns the number of bytes written, which may be less than buf.len.
     pub fn write(self: Stream, buf: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlice(buf, &storage), timeout);
+        return writeBuf(self.socket.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Writes data from the provided buffer to the stream until it is empty.
@@ -1105,23 +1105,7 @@ pub const Stream = struct {
     /// Returns the number of bytes written across all buffers, which may be less than the total.
     pub fn writeVec(self: Stream, bufs: []const []const u8, timeout: Timeout) !usize {
         var storage: [max_vecs]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlices(bufs, &storage), timeout);
-    }
-
-    /// Writes header followed by data slices, with optional splat (repeat) of the last slice.
-    /// Used internally by the buffered Writer.
-    pub fn writeSplatHeader(self: Stream, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
-        var splat_buf: [64]u8 = undefined;
-        var slices: [max_vecs][]const u8 = undefined;
-        const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
-
-        var storage: [max_vecs]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlices(slices[0..buf_len], &storage), timeout);
-    }
-
-    /// Low-level write function that accepts ev.WriteBuf directly.
-    pub fn writeBuf(self: Stream, buf: ev.WriteBuf, timeout: Timeout) !usize {
-        return self.socket.sendBuf(buf, timeout);
+        return writeBuf(self.socket.handle, .fromSlices(bufs, &storage), timeout);
     }
 
     /// Shuts down all or part of a full-duplex connection.
@@ -1135,14 +1119,14 @@ pub const Stream = struct {
     }
 
     pub const Reader = struct {
-        stream: Stream,
+        handle: Handle,
         interface: std.Io.Reader,
         timeout: Timeout = .none,
         err: ?(ev.NetRecv.Error || common.Timeoutable) = null,
 
-        pub fn init(stream: Stream, buffer: []u8) Reader {
+        pub fn init(handle: Handle, buffer: []u8) Reader {
             return .{
-                .stream = stream,
+                .handle = handle,
                 .interface = .{
                     .vtable = &.{
                         .stream = streamImpl,
@@ -1176,7 +1160,7 @@ pub const Stream = struct {
                 try io_r.writableVectorPosix(&storage, data);
             if (dest_n == 0) return 0;
 
-            const n = r.stream.readBuf(.{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
+            const n = readBuf(r.handle, .{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -1193,14 +1177,14 @@ pub const Stream = struct {
     };
 
     pub const Writer = struct {
-        stream: Stream,
+        handle: Handle,
         interface: std.Io.Writer,
         timeout: Timeout = .none,
         err: ?(ev.NetSend.Error || common.Timeoutable) = null,
 
-        pub fn init(stream: Stream, buffer: []u8) Writer {
+        pub fn init(handle: Handle, buffer: []u8) Writer {
             return .{
-                .stream = stream,
+                .handle = handle,
                 .interface = .{
                     .vtable = &.{
                         .drain = drainImpl,
@@ -1217,7 +1201,7 @@ pub const Stream = struct {
         fn drainImpl(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
             const buffered = io_w.buffered();
-            const n = w.stream.writeSplatHeader(buffered, data, splat, w.timeout) catch |err| {
+            const n = writeSplatHeader(w.handle, buffered, data, splat, w.timeout) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
@@ -1227,12 +1211,12 @@ pub const Stream = struct {
 
     /// Creates a buffered reader for the given stream.
     pub fn reader(stream: Stream, buffer: []u8) Reader {
-        return .init(stream, buffer);
+        return .init(stream.socket.handle, buffer);
     }
 
     /// Creates a buffered writer for the given stream.
     pub fn writer(stream: Stream, buffer: []u8) Writer {
-        return .init(stream, buffer);
+        return .init(stream.socket.handle, buffer);
     }
 };
 
