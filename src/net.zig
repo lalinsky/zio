@@ -1257,7 +1257,9 @@ pub fn handleFromStd(h: std.Io.net.Socket.Handle) Handle {
 fn sendSplatHeader(handle: Handle, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
     var splat_buf: [64]u8 = undefined;
     var slices: [max_vecs][]const u8 = undefined;
-    const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
+    const budget = if (header.len > 0) max_vecs - 1 else max_vecs;
+    const buf_len = fillBuf(slices[0..budget], header, data, splat, &splat_buf);
+    if (buf_len == 0) return 0;
     var storage: [max_vecs]os.iovec_const = undefined;
     return sendBufImpl(handle, .fromSlices(slices[0..buf_len], &storage), timeout);
 }
