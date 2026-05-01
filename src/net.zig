@@ -32,6 +32,10 @@ pub const has_unix_sockets = switch (builtin.os.tag) {
 
 pub const default_kernel_backlog = 128;
 
+fn stdIoHandleToZio(h: std.Io.net.Socket.Handle) Handle {
+    return if (@typeInfo(Handle) == .pointer) @ptrCast(h) else h;
+}
+
 pub fn readBuf(handle: Handle, buf: ev.ReadBuf, timeout: Timeout) (ev.NetRecv.Error || common.Timeoutable)!usize {
     var op = ev.NetRecv.init(handle, buf, .{});
     try timedWaitForIo(&op.c, timeout);
@@ -1139,6 +1143,11 @@ pub const Stream = struct {
             };
         }
 
+        pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Reader {
+            _ = Runtime.fromIo(io);
+            return init(stdIoHandleToZio(stream.socket.handle), buffer);
+        }
+
         pub fn setTimeout(self: *Reader, timeout: Timeout) void {
             self.timeout = timeout;
         }
@@ -1192,6 +1201,11 @@ pub const Stream = struct {
                     .buffer = buffer,
                 },
             };
+        }
+
+        pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Writer {
+            _ = Runtime.fromIo(io);
+            return init(stdIoHandleToZio(stream.socket.handle), buffer);
         }
 
         pub fn setTimeout(self: *Writer, timeout: Timeout) void {
@@ -2125,4 +2139,24 @@ test "Server: accept timeout" {
         }
     }.run, .{});
     try handle.join();
+}
+
+test "Stream.Reader/Writer.fromStd" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+    const io = runtime.io();
+
+    var server = try std.Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{});
+    defer server.deinit(io);
+
+    const stream = try std.Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var read_buf: [64]u8 = undefined;
+    var write_buf: [64]u8 = undefined;
+    const reader = Stream.Reader.fromStd(stream, io, &read_buf);
+    const writer = Stream.Writer.fromStd(stream, io, &write_buf);
+
+    try std.testing.expectEqual(stdIoHandleToZio(stream.socket.handle), reader.handle);
+    try std.testing.expectEqual(stdIoHandleToZio(stream.socket.handle), writer.handle);
 }
