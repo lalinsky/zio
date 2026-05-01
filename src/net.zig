@@ -1546,6 +1546,7 @@ test "tcpConnectToAddress: basic" {
 
 test "tcpConnectToHost: basic" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
 
     const ServerTask = struct {
         fn run(server_port: *Channel(u16)) !void {
