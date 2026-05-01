@@ -488,146 +488,143 @@ test "select: basic - first completes" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn slowTask(rt: *Runtime) !i32 {
+    const slowTask = struct {
+        fn call(rt: *Runtime) !i32 {
             try rt.sleep(.fromMilliseconds(100));
             return 42;
         }
+    }.call;
 
-        fn fastTask(rt: *Runtime) !i32 {
+    const fastTask = struct {
+        fn call(rt: *Runtime) !i32 {
             try rt.sleep(.fromMilliseconds(10));
             return 99;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel();
-            var fast = try rt.spawn(fastTask, .{rt});
-            defer fast.cancel();
+    var slow = try runtime.spawn(slowTask, .{runtime});
+    defer slow.cancel();
+    var fast = try runtime.spawn(fastTask, .{runtime});
+    defer fast.cancel();
 
-            const result = try select(.{ .fast = &fast, .slow = &slow });
-            switch (result) {
-                .slow => |val| try std.testing.expectEqual(42, val),
-                .fast => |val| try std.testing.expectEqual(99, val),
-            }
-            // Fast should win
-            try std.testing.expectEqual(std.meta.Tag(@TypeOf(result)).fast, std.meta.activeTag(result));
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    const result = try select(.{ .fast = &fast, .slow = &slow });
+    switch (result) {
+        .slow => |val| try std.testing.expectEqual(42, val),
+        .fast => |val| try std.testing.expectEqual(99, val),
+    }
+    // Fast should win
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(result)).fast, std.meta.activeTag(result));
 }
 
 test "select: already complete - fast path" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn immediateTask() i32 {
+    const immediateTask = struct {
+        fn call() i32 {
             return 123;
         }
+    }.call;
 
-        fn slowTask(rt: *Runtime) !i32 {
+    const slowTask = struct {
+        fn call(rt: *Runtime) !i32 {
             try rt.sleep(.fromMilliseconds(100));
             return 456;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var immediate = try rt.spawn(immediateTask, .{});
-            defer immediate.cancel();
+    var immediate = try runtime.spawn(immediateTask, .{});
+    defer immediate.cancel();
 
-            // Give immediate task a chance to complete
-            try yield();
-            try yield();
+    // Give immediate task a chance to complete
+    try yield();
+    try yield();
 
-            var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel();
+    var slow = try runtime.spawn(slowTask, .{runtime});
+    defer slow.cancel();
 
-            // immediate should already be complete, select should return immediately
-            const result = try select(.{ .immediate = &immediate, .slow = &slow });
-            switch (result) {
-                .immediate => |val| try std.testing.expectEqual(123, val),
-                .slow => return error.TestUnexpectedResult,
-            }
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    // immediate should already be complete, select should return immediately
+    const result = try select(.{ .immediate = &immediate, .slow = &slow });
+    switch (result) {
+        .immediate => |val| try std.testing.expectEqual(123, val),
+        .slow => return error.TestUnexpectedResult,
+    }
 }
 
 test "select: heterogeneous types" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn intTask(rt: *Runtime) Cancelable!i32 {
+    const intTask = struct {
+        fn call(rt: *Runtime) Cancelable!i32 {
             try rt.sleep(.fromMilliseconds(100));
             return 42;
         }
+    }.call;
 
-        fn stringTask(rt: *Runtime) Cancelable![]const u8 {
+    const stringTask = struct {
+        fn call(rt: *Runtime) Cancelable![]const u8 {
             try rt.sleep(.fromMilliseconds(10));
             return "hello";
         }
+    }.call;
 
-        fn boolTask(rt: *Runtime) Cancelable!bool {
+    const boolTask = struct {
+        fn call(rt: *Runtime) Cancelable!bool {
             try rt.sleep(.fromMilliseconds(150));
             return true;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var int_handle = try rt.spawn(intTask, .{rt});
-            defer int_handle.cancel();
-            var string_handle = try rt.spawn(stringTask, .{rt});
-            defer string_handle.cancel();
-            var bool_handle = try rt.spawn(boolTask, .{rt});
-            defer bool_handle.cancel();
+    var int_handle = try runtime.spawn(intTask, .{runtime});
+    defer int_handle.cancel();
+    var string_handle = try runtime.spawn(stringTask, .{runtime});
+    defer string_handle.cancel();
+    var bool_handle = try runtime.spawn(boolTask, .{runtime});
+    defer bool_handle.cancel();
 
-            const result = try select(.{
-                .string = &string_handle,
-                .int = &int_handle,
-                .bool = &bool_handle,
-            });
+    const result = try select(.{
+        .string = &string_handle,
+        .int = &int_handle,
+        .bool = &bool_handle,
+    });
 
-            switch (result) {
-                .int => |val| {
-                    try std.testing.expectEqual(42, try val);
-                    return error.TestUnexpectedResult; // Should not complete first
-                },
-                .string => |val| {
-                    try std.testing.expectEqualStrings("hello", try val);
-                    // This should win
-                },
-                .bool => |val| {
-                    try std.testing.expectEqual(true, try val);
-                    return error.TestUnexpectedResult; // Should not complete first
-                },
-            }
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    switch (result) {
+        .int => |val| {
+            try std.testing.expectEqual(42, try val);
+            return error.TestUnexpectedResult; // Should not complete first
+        },
+        .string => |val| {
+            try std.testing.expectEqualStrings("hello", try val);
+            // This should win
+        },
+        .bool => |val| {
+            try std.testing.expectEqual(true, try val);
+            return error.TestUnexpectedResult; // Should not complete first
+        },
+    }
 }
 
 test "select: with cancellation" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn slowTask1(rt: *Runtime) !i32 {
+    const slowTask1 = struct {
+        fn call(rt: *Runtime) !i32 {
             try rt.sleep(.fromMilliseconds(1000));
             return 1;
         }
+    }.call;
 
-        fn slowTask2(rt: *Runtime) !i32 {
+    const slowTask2 = struct {
+        fn call(rt: *Runtime) !i32 {
             try rt.sleep(.fromMilliseconds(1000));
             return 2;
         }
+    }.call;
 
-        fn selectTask(rt: *Runtime) !i32 {
+    const selectTask = struct {
+        fn call(rt: *Runtime) !i32 {
             var h1 = try rt.spawn(slowTask1, .{rt});
             defer h1.cancel();
             var h2 = try rt.spawn(slowTask2, .{rt});
@@ -639,191 +636,179 @@ test "select: with cancellation" {
                 .second => |v| v,
             };
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var select_handle = try rt.spawn(selectTask, .{rt});
-            defer select_handle.cancel();
+    var select_handle = try runtime.spawn(selectTask, .{runtime});
+    defer select_handle.cancel();
 
-            // Give it a chance to start waiting
-            try yield();
-            try yield();
+    // Give it a chance to start waiting
+    try yield();
+    try yield();
 
-            // Cancel the select operation
-            select_handle.cancel();
+    // Cancel the select operation
+    select_handle.cancel();
 
-            // Should return error.Canceled
-            const result = select_handle.join();
-            try std.testing.expectError(error.Canceled, result);
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    // Should return error.Canceled
+    const result = select_handle.join();
+    try std.testing.expectError(error.Canceled, result);
 }
 
 test "select: with error unions - success case" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        const ParseError = error{ InvalidFormat, OutOfRange };
-        const ValidationError = error{ TooShort, TooLong };
+    const ParseError = error{ InvalidFormat, OutOfRange };
+    const ValidationError = error{ TooShort, TooLong };
 
-        fn parseTask(rt: *Runtime) (ParseError || Cancelable)!i32 {
+    const parseTask = struct {
+        fn call(rt: *Runtime) (ParseError || Cancelable)!i32 {
             try rt.sleep(.fromMilliseconds(100));
             return 42;
         }
+    }.call;
 
-        fn validateTask(rt: *Runtime) (ValidationError || Cancelable)![]const u8 {
+    const validateTask = struct {
+        fn call(rt: *Runtime) (ValidationError || Cancelable)![]const u8 {
             try rt.sleep(.fromMilliseconds(10));
             return "valid";
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var parse_handle = try rt.spawn(parseTask, .{rt});
-            defer parse_handle.cancel();
-            var validate_handle = try rt.spawn(validateTask, .{rt});
-            defer validate_handle.cancel();
+    var parse_handle = try runtime.spawn(parseTask, .{runtime});
+    defer parse_handle.cancel();
+    var validate_handle = try runtime.spawn(validateTask, .{runtime});
+    defer validate_handle.cancel();
 
-            const result = try select(.{
-                .validate = &validate_handle,
-                .parse = &parse_handle,
-            });
+    const result = try select(.{
+        .validate = &validate_handle,
+        .parse = &parse_handle,
+    });
 
-            // Result is a union where each field has the original error type
-            switch (result) {
-                .parse => |val_or_err| {
-                    // val_or_err is ParseError!i32
-                    const val = val_or_err catch |err| {
-                        try std.testing.expect(false); // Should not error
-                        return err;
-                    };
-                    try std.testing.expectEqual(42, val);
-                    return error.TestUnexpectedResult; // validate should win
-                },
-                .validate => |val_or_err| {
-                    // val_or_err is ValidationError![]const u8
-                    const val = val_or_err catch |err| {
-                        try std.testing.expect(false); // Should not error
-                        return err;
-                    };
-                    try std.testing.expectEqualStrings("valid", val);
-                    // This should win
-                },
-            }
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    // Result is a union where each field has the original error type
+    switch (result) {
+        .parse => |val_or_err| {
+            // val_or_err is ParseError!i32
+            const val = val_or_err catch |err| {
+                try std.testing.expect(false); // Should not error
+                return err;
+            };
+            try std.testing.expectEqual(42, val);
+            return error.TestUnexpectedResult; // validate should win
+        },
+        .validate => |val_or_err| {
+            // val_or_err is ValidationError![]const u8
+            const val = val_or_err catch |err| {
+                try std.testing.expect(false); // Should not error
+                return err;
+            };
+            try std.testing.expectEqualStrings("valid", val);
+            // This should win
+        },
+    }
 }
 
 test "select: with error unions - error case" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        const ParseError = error{ InvalidFormat, OutOfRange };
+    const ParseError = error{ InvalidFormat, OutOfRange };
 
-        fn failingTask(rt: *Runtime) (ParseError || Cancelable)!i32 {
+    const failingTask = struct {
+        fn call(rt: *Runtime) (ParseError || Cancelable)!i32 {
             try rt.sleep(.fromMilliseconds(10));
             return error.OutOfRange;
         }
+    }.call;
 
-        fn slowTask(rt: *Runtime) !i32 {
+    const slowTask = struct {
+        fn call(rt: *Runtime) !i32 {
             try rt.sleep(.fromMilliseconds(100));
             return 99;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var failing = try rt.spawn(failingTask, .{rt});
-            defer failing.cancel();
-            var slow = try rt.spawn(slowTask, .{rt});
-            defer slow.cancel();
+    var failing = try runtime.spawn(failingTask, .{runtime});
+    defer failing.cancel();
+    var slow = try runtime.spawn(slowTask, .{runtime});
+    defer slow.cancel();
 
-            const result = try select(.{ .failing = &failing, .slow = &slow });
+    const result = try select(.{ .failing = &failing, .slow = &slow });
 
-            switch (result) {
-                .failing => |val_or_err| {
-                    // val_or_err is ParseError!i32
-                    _ = val_or_err catch |err| {
-                        // Should receive the original error
-                        try std.testing.expectEqual(ParseError.OutOfRange, err);
-                        return;
-                    };
-                    return error.TestUnexpectedResult; // Should have errored
-                },
-                .slow => |val| {
-                    try std.testing.expectEqual(99, val);
-                    return error.TestUnexpectedResult; // failing should win
-                },
-            }
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    switch (result) {
+        .failing => |val_or_err| {
+            // val_or_err is ParseError!i32
+            _ = val_or_err catch |err| {
+                // Should receive the original error
+                try std.testing.expectEqual(ParseError.OutOfRange, err);
+                return;
+            };
+            return error.TestUnexpectedResult; // Should have errored
+        },
+        .slow => |val| {
+            try std.testing.expectEqual(99, val);
+            return error.TestUnexpectedResult; // failing should win
+        },
+    }
 }
 
 test "select: with mixed error types" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        const ParseError = error{ InvalidFormat, OutOfRange };
-        const IOError = error{ FileNotFound, PermissionDenied };
+    const ParseError = error{ InvalidFormat, OutOfRange };
+    const IOError = error{ FileNotFound, PermissionDenied };
 
-        fn task1(rt: *Runtime) (ParseError || Cancelable)!i32 {
+    const task1 = struct {
+        fn call(rt: *Runtime) (ParseError || Cancelable)!i32 {
             try rt.sleep(.fromMilliseconds(100));
             return 100;
         }
+    }.call;
 
-        fn task2(rt: *Runtime) (IOError || Cancelable)![]const u8 {
+    const task2 = struct {
+        fn call(rt: *Runtime) (IOError || Cancelable)![]const u8 {
             try rt.sleep(.fromMilliseconds(10));
             return error.FileNotFound;
         }
+    }.call;
 
-        fn task3(rt: *Runtime) !bool {
+    const task3 = struct {
+        fn call(rt: *Runtime) !bool {
             try rt.sleep(.fromMilliseconds(150));
             return true;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var h1 = try rt.spawn(task1, .{rt});
-            defer h1.cancel();
-            var h2 = try rt.spawn(task2, .{rt});
-            defer h2.cancel();
-            var h3 = try rt.spawn(task3, .{rt});
-            defer h3.cancel();
+    var h1 = try runtime.spawn(task1, .{runtime});
+    defer h1.cancel();
+    var h2 = try runtime.spawn(task2, .{runtime});
+    defer h2.cancel();
+    var h3 = try runtime.spawn(task3, .{runtime});
+    defer h3.cancel();
 
-            // select returns Cancelable!SelectUnion(...)
-            // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
-            const result = try select(.{ .h2 = &h2, .h1 = &h1, .h3 = &h3 });
+    // select returns Cancelable!SelectUnion(...)
+    // SelectUnion has: { .h2: IOError![]const u8, .h1: ParseError!i32, .h3: bool }
+    const result = try select(.{ .h2 = &h2, .h1 = &h1, .h3 = &h3 });
 
-            switch (result) {
-                .h1 => |val_or_err| {
-                    _ = val_or_err catch return error.TestUnexpectedResult;
-                    return error.TestUnexpectedResult;
-                },
-                .h2 => |val_or_err| {
-                    // val_or_err is IOError![]const u8
-                    _ = val_or_err catch |err| {
-                        // Verify we got the original error type
-                        try std.testing.expectEqual(IOError.FileNotFound, err);
-                        return; // This is expected
-                    };
-                    return error.TestUnexpectedResult; // Should have errored
-                },
-                .h3 => |val| {
-                    try std.testing.expectEqual(true, val);
-                    return error.TestUnexpectedResult;
-                },
-            }
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    switch (result) {
+        .h1 => |val_or_err| {
+            _ = val_or_err catch return error.TestUnexpectedResult;
+            return error.TestUnexpectedResult;
+        },
+        .h2 => |val_or_err| {
+            // val_or_err is IOError![]const u8
+            _ = val_or_err catch |err| {
+                // Verify we got the original error type
+                try std.testing.expectEqual(IOError.FileNotFound, err);
+                return; // This is expected
+            };
+            return error.TestUnexpectedResult; // Should have errored
+        },
+        .h3 => |val| {
+            try std.testing.expectEqual(true, val);
+            return error.TestUnexpectedResult;
+        },
+    }
 }
 
 test "wait: plain type" {
@@ -832,87 +817,64 @@ test "wait: plain type" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
-            var future = Future(i32).init;
+    var future = Future(i32).init;
 
-            // Spawn task to set the future
-            var task = try rt.spawn(struct {
-                fn run(f: *Future(i32)) !void {
-                    f.set(42);
-                }
-            }.run, .{&future});
-            defer task.cancel();
-
-            // Wait for the future
-            const result = try wait(&future);
-            try std.testing.expectEqual(42, result.value);
+    // Spawn task to set the future
+    var task = try runtime.spawn(struct {
+        fn run(f: *Future(i32)) !void {
+            f.set(42);
         }
-    };
+    }.run, .{&future});
+    defer task.cancel();
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    // Wait for the future
+    const result = try wait(&future);
+    try std.testing.expectEqual(42, result.value);
 }
 
 test "wait: error union" {
     const Future = @import("sync/future.zig").Future;
+    const MyError = error{Foo};
 
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        const MyError = error{Foo};
+    var future = Future(MyError!i32).init;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var future = Future(MyError!i32).init;
-
-            // Spawn task to set the future with success
-            var task = try rt.spawn(struct {
-                fn run(f: *Future(MyError!i32)) !void {
-                    f.set(123);
-                }
-            }.run, .{&future});
-            defer task.cancel();
-
-            // Wait for the future
-            const result = try wait(&future);
-            const value = try result.value;
-            try std.testing.expectEqual(123, value);
+    // Spawn task to set the future with success
+    var task = try runtime.spawn(struct {
+        fn run(f: *Future(MyError!i32)) !void {
+            f.set(123);
         }
-    };
+    }.run, .{&future});
+    defer task.cancel();
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    // Wait for the future
+    const result = try wait(&future);
+    const value = try result.value;
+    try std.testing.expectEqual(123, value);
 }
 
 test "wait: error union with error" {
     const Future = @import("sync/future.zig").Future;
+    const MyError = error{Foo};
 
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        const MyError = error{Foo};
+    var future = Future(MyError!i32).init;
 
-        fn asyncTask(rt: *Runtime) !void {
-            var future = Future(MyError!i32).init;
-
-            // Spawn task to set the future with error
-            var task = try rt.spawn(struct {
-                fn run(f: *Future(MyError!i32)) !void {
-                    f.set(MyError.Foo);
-                }
-            }.run, .{&future});
-            defer task.cancel();
-
-            // Wait for the future
-            const result = try wait(&future);
-            try std.testing.expectError(MyError.Foo, result.value);
+    // Spawn task to set the future with error
+    var task = try runtime.spawn(struct {
+        fn run(f: *Future(MyError!i32)) !void {
+            f.set(MyError.Foo);
         }
-    };
+    }.run, .{&future});
+    defer task.cancel();
 
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    // Wait for the future
+    const result = try wait(&future);
+    try std.testing.expectError(MyError.Foo, result.value);
 }
 
 test "wait: already complete (fast path)" {
@@ -921,60 +883,48 @@ test "wait: already complete (fast path)" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn asyncTask() !void {
-            var future = Future(i32).init;
-            future.set(99);
+    var future = Future(i32).init;
+    future.set(99);
 
-            // Wait should return immediately since already set
-            const result = try wait(&future);
-            try std.testing.expectEqual(99, result.value);
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{});
-    try handle.join();
+    // Wait should return immediately since already set
+    const result = try wait(&future);
+    try std.testing.expectEqual(99, result.value);
 }
 
 test "select: wait on JoinHandle from spawned task" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn workerTask(rt: *Runtime, value: i32) !i32 {
+    const workerTask = struct {
+        fn call(rt: *Runtime, value: i32) !i32 {
             try rt.sleep(.fromMilliseconds(10));
             return value * 2;
         }
+    }.call;
 
-        fn asyncTask(rt: *Runtime) !void {
-            // Spawn a task and get a JoinHandle
-            var handle1 = try rt.spawn(workerTask, .{ rt, 21 });
-            defer handle1.cancel();
+    // Spawn a task and get a JoinHandle
+    var handle1 = try runtime.spawn(workerTask, .{ runtime, 21 });
+    defer handle1.cancel();
 
-            var handle2 = try rt.spawn(workerTask, .{ rt, 100 });
-            defer handle2.cancel();
+    var handle2 = try runtime.spawn(workerTask, .{ runtime, 100 });
+    defer handle2.cancel();
 
-            // Wait on JoinHandles using select
-            const result = try select(.{
-                .first = &handle1,
-                .second = &handle2,
-            });
+    // Wait on JoinHandles using select
+    const result = try select(.{
+        .first = &handle1,
+        .second = &handle2,
+    });
 
-            // Verify we got a result
-            switch (result) {
-                .first => |val| {
-                    try std.testing.expectEqual(42, val);
-                },
-                .second => |val| {
-                    try std.testing.expectEqual(200, val);
-                },
-            }
+    // Verify we got a result
+    switch (result) {
+        .first => |val| {
+            try std.testing.expectEqual(42, val);
+        },
+        .second => |val| {
+            try std.testing.expectEqual(200, val);
+        },
+    }
 
-            // Both should be valid results, though timing determines which completes first
-            try std.testing.expect(std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
-        }
-    };
-
-    var handle = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try handle.join();
+    // Both should be valid results, though timing determines which completes first
+    try std.testing.expect(std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
 }

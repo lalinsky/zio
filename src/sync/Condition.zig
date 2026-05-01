@@ -291,26 +291,12 @@ test "Condition timedWait timeout" {
 
     var mutex = Mutex.init;
     var condition = Condition.init;
-    var timed_out = false;
 
-    const TestFn = struct {
-        fn waiter(mtx: *Mutex, cond: *Condition, timeout_flag: *bool) !void {
-            try mtx.lock();
-            defer mtx.unlock();
+    try mutex.lock();
+    defer mutex.unlock();
 
-            // Should timeout after 10ms
-            cond.timedWait(mtx, .{ .duration = .fromMilliseconds(10) }) catch |err| {
-                if (err == error.Timeout) {
-                    timeout_flag.* = true;
-                }
-            };
-        }
-    };
-
-    var handle = try runtime.spawn(TestFn.waiter, .{ &mutex, &condition, &timed_out });
-    try handle.join();
-
-    try std.testing.expect(timed_out);
+    const result = condition.timedWait(&mutex, .{ .duration = .fromMilliseconds(10) });
+    try std.testing.expectError(error.Timeout, result);
 }
 
 test "Condition broadcast" {
