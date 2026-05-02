@@ -1776,53 +1776,60 @@ test "Runtime.io / Runtime.fromIo round-trip" {
 test "io: async/await returns task result" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
-    const doubleIt = struct {
-        fn call(x: i32) i32 {
+    const Worker = struct {
+        fn doubleIt(x: i32) i32 {
             return x * 2;
         }
-    }.call;
 
-    var future = io.async(doubleIt, .{21});
-    const value = future.await(io);
-    try std.testing.expectEqual(42, value);
+        fn run(io: Io) !void {
+            var future = io.async(doubleIt, .{21});
+            const value = future.await(io);
+            try std.testing.expectEqual(@as(i32, 42), value);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: Io.Mutex lock/unlock serializes tasks" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
     const State = struct {
         mutex: Io.Mutex = .init,
         counter: u32 = 0,
     };
 
-    const bump = struct {
-        fn call(io2: Io, s: *State) !void {
+    const Worker = struct {
+        fn bump(io: Io, s: *State) !void {
             var i: usize = 0;
             while (i < 100) : (i += 1) {
-                try s.mutex.lock(io2);
+                try s.mutex.lock(io);
                 s.counter += 1;
-                s.mutex.unlock(io2);
+                s.mutex.unlock(io);
             }
         }
-    }.call;
 
-    var s: State = .{};
-    var group: Io.Group = .init;
-    group.async(io, bump, .{ io, &s });
-    group.async(io, bump, .{ io, &s });
-    group.async(io, bump, .{ io, &s });
-    try group.await(io);
-    try std.testing.expectEqual(300, s.counter);
+        fn run(io: Io) !void {
+            var s: State = .{};
+            var group: Io.Group = .init;
+            group.async(io, bump, .{ io, &s });
+            group.async(io, bump, .{ io, &s });
+            group.async(io, bump, .{ io, &s });
+            try group.await(io);
+            try std.testing.expectEqual(@as(u32, 300), s.counter);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: Io.Condition wakes waiter after signal" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
     const State = struct {
         mutex: Io.Mutex = .init,
@@ -1830,37 +1837,39 @@ test "io: Io.Condition wakes waiter after signal" {
         ready: bool = false,
     };
 
-    const producer = struct {
-        fn call(io2: Io, s: *State) !void {
-            try s.mutex.lock(io2);
-            defer s.mutex.unlock(io2);
+    const Worker = struct {
+        fn producer(io: Io, s: *State) !void {
+            try s.mutex.lock(io);
+            defer s.mutex.unlock(io);
             s.ready = true;
-            s.cond.signal(io2);
+            s.cond.signal(io);
         }
-    }.call;
 
-    const consumer = struct {
-        fn call(io2: Io, s: *State, observed: *bool) !void {
-            try s.mutex.lock(io2);
-            defer s.mutex.unlock(io2);
-            while (!s.ready) try s.cond.wait(io2, &s.mutex);
+        fn consumer(io: Io, s: *State, observed: *bool) !void {
+            try s.mutex.lock(io);
+            defer s.mutex.unlock(io);
+            while (!s.ready) try s.cond.wait(io, &s.mutex);
             observed.* = true;
         }
-    }.call;
 
-    var s: State = .{};
-    var observed = false;
-    var group: Io.Group = .init;
-    group.async(io, consumer, .{ io, &s, &observed });
-    group.async(io, producer, .{ io, &s });
-    try group.await(io);
-    try std.testing.expect(observed);
+        fn run(io: Io) !void {
+            var s: State = .{};
+            var observed = false;
+            var group: Io.Group = .init;
+            group.async(io, consumer, .{ io, &s, &observed });
+            group.async(io, producer, .{ io, &s });
+            try group.await(io);
+            try std.testing.expect(observed);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: Io.Semaphore limits concurrent workers" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
     const Shared = struct {
         sem: Io.Semaphore = .{ .permits = 2 },
@@ -1868,10 +1877,10 @@ test "io: Io.Semaphore limits concurrent workers" {
         peak: std.atomic.Value(u32) = .init(0),
     };
 
-    const work = struct {
-        fn call(io2: Io, shared: *Shared) !void {
-            try shared.sem.wait(io2);
-            defer shared.sem.post(io2);
+    const Worker = struct {
+        fn work(io: Io, shared: *Shared) !void {
+            try shared.sem.wait(io);
+            defer shared.sem.post(io);
 
             const current = shared.active.fetchAdd(1, .acq_rel) + 1;
             // Track peak concurrency.
@@ -1881,16 +1890,21 @@ test "io: Io.Semaphore limits concurrent workers" {
             }
             _ = shared.active.fetchSub(1, .acq_rel);
         }
-    }.call;
 
-    var shared: Shared = .{};
-    var group: Io.Group = .init;
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        group.async(io, work, .{ io, &shared });
-    }
-    try group.await(io);
-    try std.testing.expect(shared.peak.load(.acquire) <= 2);
+        fn run(io: Io) !void {
+            var shared: Shared = .{};
+            var group: Io.Group = .init;
+            var i: usize = 0;
+            while (i < 8) : (i += 1) {
+                group.async(io, work, .{ io, &shared });
+            }
+            try group.await(io);
+            try std.testing.expect(shared.peak.load(.acquire) <= 2);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: processExecutablePath returns a non-empty path" {
@@ -1970,65 +1984,72 @@ test "io: sleep with duration returns after delay" {
 test "io: sleep is cancelable" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
-    const sleeper = struct {
-        fn call(io2: Io, observed: *Io.Cancelable!void) void {
-            observed.* = io2.sleep(.fromSeconds(60), .awake);
+    const Worker = struct {
+        fn sleeper(io: Io, observed: *Io.Cancelable!void) void {
+            observed.* = io.sleep(.fromSeconds(60), .awake);
         }
-    }.call;
 
-    var observed: Io.Cancelable!void = {};
-    var future = io.async(sleeper, .{ io, &observed });
-    try io.sleep(.fromMilliseconds(10), .awake);
-    future.cancel(io);
-    try std.testing.expectError(error.Canceled, observed);
+        fn run(io: Io) !void {
+            var observed: Io.Cancelable!void = {};
+            var future = io.async(sleeper, .{ io, &observed });
+            try io.sleep(.fromMilliseconds(10), .awake);
+            future.cancel(io);
+            try std.testing.expectError(error.Canceled, observed);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: net TCP listen/connect/accept handshake" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
-    const connector = struct {
-        fn call(io2: Io, address: *const Io.net.IpAddress, result: *Io.net.IpAddress.ConnectError!Io.net.Stream) void {
-            result.* = Io.net.IpAddress.connect(address, io2, .{ .mode = .stream });
+    const Worker = struct {
+        fn connector(io: Io, address: *const Io.net.IpAddress, result: *Io.net.IpAddress.ConnectError!Io.net.Stream) void {
+            result.* = Io.net.IpAddress.connect(address, io, .{ .mode = .stream });
         }
-    }.call;
 
-    var server = try Io.net.IpAddress.listen(
-        &.{ .ip4 = .loopback(0) },
-        io,
-        .{ .reuse_address = true },
-    );
-    defer server.deinit(io);
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(
+                &.{ .ip4 = .loopback(0) },
+                io,
+                .{ .reuse_address = true },
+            );
+            defer server.deinit(io);
 
-    var connect_result: Io.net.IpAddress.ConnectError!Io.net.Stream = undefined;
-    var future = io.async(connector, .{ io, &server.socket.address, &connect_result });
-    defer future.cancel(io);
+            var connect_result: Io.net.IpAddress.ConnectError!Io.net.Stream = undefined;
+            var future = io.async(connector, .{ io, &server.socket.address, &connect_result });
+            defer future.cancel(io);
 
-    const accepted = try server.accept(io);
-    defer accepted.close(io);
+            const accepted = try server.accept(io);
+            defer accepted.close(io);
 
-    const client = try connect_result;
-    defer client.close(io);
+            const client = try connect_result;
+            defer client.close(io);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: net TCP read/write/shutdown round-trip" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
-    const echoer = struct {
-        fn call(io2: Io, server: *Io.net.Server) !void {
-            const peer = try server.accept(io2);
-            defer peer.close(io2);
+    const Worker = struct {
+        fn echoer(io: Io, server: *Io.net.Server) !void {
+            const peer = try server.accept(io);
+            defer peer.close(io);
 
             var recv_buf: [256]u8 = undefined;
-            var reader = peer.reader(io2, &recv_buf);
+            var reader = peer.reader(io, &recv_buf);
 
             var send_buf: [256]u8 = undefined;
-            var writer = peer.writer(io2, &send_buf);
+            var writer = peer.writer(io, &send_buf);
 
             // Echo until EOF.
             while (true) {
@@ -2039,42 +2060,47 @@ test "io: net TCP read/write/shutdown round-trip" {
                 if (n == 0) break;
                 try writer.interface.flush();
             }
-            try peer.shutdown(io2, .send);
+            try peer.shutdown(io, .send);
         }
-    }.call;
 
-    var server = try Io.net.IpAddress.listen(
-        &.{ .ip4 = .loopback(0) },
-        io,
-        .{ .reuse_address = true },
-    );
-    defer server.deinit(io);
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(
+                &.{ .ip4 = .loopback(0) },
+                io,
+                .{ .reuse_address = true },
+            );
+            defer server.deinit(io);
 
-    var echo_err: anyerror!void = {};
-    var future = io.async(struct {
-        fn call(io2: Io, s: *Io.net.Server, out: *anyerror!void) void {
-            out.* = echoer(io2, s);
+            var echo_err: anyerror!void = {};
+            var future = io.async(struct {
+                fn call(io2: Io, s: *Io.net.Server, out: *anyerror!void) void {
+                    out.* = echoer(io2, s);
+                }
+            }.call, .{ io, &server, &echo_err });
+
+            const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer client.close(io);
+
+            var send_buf: [64]u8 = undefined;
+            var writer = client.writer(io, &send_buf);
+            try writer.interface.writeAll("hello ");
+            try writer.interface.writeAll("world");
+            try writer.interface.flush();
+            try client.shutdown(io, .send);
+
+            var recv_buf: [64]u8 = undefined;
+            var reader = client.reader(io, &recv_buf);
+            var out: [32]u8 = undefined;
+            const got = try reader.interface.readSliceShort(&out);
+            try std.testing.expectEqualStrings("hello world", out[0..got]);
+
+            future.await(io);
+            try echo_err;
         }
-    }.call, .{ io, &server, &echo_err });
+    };
 
-    const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
-    defer client.close(io);
-
-    var send_buf: [64]u8 = undefined;
-    var writer = client.writer(io, &send_buf);
-    try writer.interface.writeAll("hello ");
-    try writer.interface.writeAll("world");
-    try writer.interface.flush();
-    try client.shutdown(io, .send);
-
-    var recv_buf: [64]u8 = undefined;
-    var reader = client.reader(io, &recv_buf);
-    var out: [32]u8 = undefined;
-    const got = try reader.interface.readSliceShort(&out);
-    try std.testing.expectEqualStrings("hello world", out[0..got]);
-
-    future.await(io);
-    try echo_err;
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: net Unix listen/connect/accept round-trip" {
@@ -2082,43 +2108,47 @@ test "io: net Unix listen/connect/accept round-trip" {
 
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
-    const connector = struct {
-        fn call(io2: Io, address: *const Io.net.UnixAddress, result: *Io.net.UnixAddress.ConnectError!Io.net.Stream) void {
-            result.* = Io.net.UnixAddress.connect(address, io2);
+    const Worker = struct {
+        fn connector(io: Io, address: *const Io.net.UnixAddress, result: *Io.net.UnixAddress.ConnectError!Io.net.Stream) void {
+            result.* = Io.net.UnixAddress.connect(address, io);
         }
-    }.call;
 
-    const path = "test_io_net_unix.sock";
-    (Io.Dir.cwd()).deleteFile(io, path) catch {};
-    defer (Io.Dir.cwd()).deleteFile(io, path) catch {};
+        fn run(io: Io) !void {
+            const path = "test_io_net_unix.sock";
+            (Io.Dir.cwd()).deleteFile(io, path) catch {};
+            defer (Io.Dir.cwd()).deleteFile(io, path) catch {};
 
-    const address = try Io.net.UnixAddress.init(path);
-    var server = try address.listen(io, .{});
-    defer server.deinit(io);
+            const address = try Io.net.UnixAddress.init(path);
+            var server = try address.listen(io, .{});
+            defer server.deinit(io);
 
-    var connect_result: Io.net.UnixAddress.ConnectError!Io.net.Stream = undefined;
-    var future = io.async(connector, .{ io, &address, &connect_result });
-    defer future.cancel(io);
+            var connect_result: Io.net.UnixAddress.ConnectError!Io.net.Stream = undefined;
+            var future = io.async(connector, .{ io, &address, &connect_result });
+            defer future.cancel(io);
 
-    const accepted = try server.accept(io);
-    defer accepted.close(io);
+            const accepted = try server.accept(io);
+            defer accepted.close(io);
 
-    const client = try connect_result;
-    defer client.close(io);
+            const client = try connect_result;
+            defer client.close(io);
 
-    var send_buf: [32]u8 = undefined;
-    var writer = client.writer(io, &send_buf);
-    try writer.interface.writeAll("ping");
-    try writer.interface.flush();
-    try client.shutdown(io, .send);
+            var send_buf: [32]u8 = undefined;
+            var writer = client.writer(io, &send_buf);
+            try writer.interface.writeAll("ping");
+            try writer.interface.flush();
+            try client.shutdown(io, .send);
 
-    var recv_buf: [32]u8 = undefined;
-    var reader = accepted.reader(io, &recv_buf);
-    var out: [8]u8 = undefined;
-    const got = try reader.interface.readSliceShort(&out);
-    try std.testing.expectEqualStrings("ping", out[0..got]);
+            var recv_buf: [32]u8 = undefined;
+            var reader = accepted.reader(io, &recv_buf);
+            var out: [8]u8 = undefined;
+            const got = try reader.interface.readSliceShort(&out);
+            try std.testing.expectEqualStrings("ping", out[0..got]);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: net UDP bind assigns ephemeral port" {
@@ -2706,19 +2736,23 @@ test "io: file hardLink" {
 test "io: group runs spawned tasks to completion" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
 
-    const bump = struct {
-        fn call(counter: *std.atomic.Value(u32)) void {
+    const Worker = struct {
+        fn bump(counter: *std.atomic.Value(u32)) void {
             _ = counter.fetchAdd(1, .acq_rel);
         }
-    }.call;
 
-    var counter: std.atomic.Value(u32) = .init(0);
-    var group: Io.Group = .init;
-    group.async(io, bump, .{&counter});
-    group.async(io, bump, .{&counter});
-    group.async(io, bump, .{&counter});
-    try group.await(io);
-    try std.testing.expectEqual(3, counter.load(.acquire));
+        fn run(io: Io) !void {
+            var counter: std.atomic.Value(u32) = .init(0);
+            var group: Io.Group = .init;
+            group.async(io, bump, .{&counter});
+            group.async(io, bump, .{&counter});
+            group.async(io, bump, .{&counter});
+            try group.await(io);
+            try std.testing.expectEqual(@as(u32, 3), counter.load(.acquire));
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
