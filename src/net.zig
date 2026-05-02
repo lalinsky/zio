@@ -1361,27 +1361,19 @@ test "HostName: connect" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const Test = struct {
-        fn run() !void {
-            // Start a server
-            const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try server_addr.listen(.{});
-            defer server.close();
+    // Start a server
+    const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try server_addr.listen(.{});
+    defer server.close();
 
-            const port = server.socket.address.ip.getPort();
+    const port = server.socket.address.ip.getPort();
 
-            // Connect via HostName
-            const host = try HostName.init("localhost");
-            var stream = try host.connect(port, .{});
-            defer stream.close();
+    // Connect via HostName
+    const host = try HostName.init("localhost");
+    var stream = try host.connect(port, .{});
+    defer stream.close();
 
-            try stream.writeAll("hello", .none);
-        }
-    };
-
-    var task = try rt.spawn(Test.run, .{});
-    defer task.cancel();
-    try task.join();
+    try stream.writeAll("hello", .none);
 }
 
 test "IpAddress: getFamily" {
@@ -1860,19 +1852,6 @@ test "UnixAddress: init" {
 
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const Test = struct {
-        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
-            const server = try addr_inner.listen(options_inner);
-            defer server.close();
-
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(serverFn, .{server});
-            try group.spawn(clientFn, .{ server, write_buffer_inner });
-
-            try group.wait();
-        }
-
         pub fn serverFn(server: Server) !void {
             const client = try server.accept(.{});
             defer client.close();
@@ -1902,25 +1881,20 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ addr, options, write_buffer });
-    try handle.join();
+    const server = try addr.listen(options);
+    defer server.close();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.serverFn, .{server});
+    try group.spawn(Test.clientFn, .{ server, write_buffer });
+
+    try group.wait();
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const Test = struct {
-        pub fn mainFn(server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
-            const socket = try server_addr_inner.bind(.{});
-            defer socket.close();
-
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(serverFn, .{socket});
-            try group.spawn(clientFn, .{ socket, client_addr_inner });
-
-            try group.wait();
-        }
-
         pub fn serverFn(socket: Socket) !void {
             var buf: [1024]u8 = undefined;
             const result = try socket.receiveFrom(&buf, .none);
@@ -1948,25 +1922,20 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ server_addr, client_addr });
-    try handle.join();
+    const socket = try server_addr.bind(.{});
+    defer socket.close();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.serverFn, .{socket});
+    try group.spawn(Test.clientFn, .{ socket, client_addr });
+
+    try group.wait();
 }
 
 pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const Test = struct {
-        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
-            const server = try addr_inner.listen(options_inner);
-            defer server.close();
-
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(serverFn, .{server});
-            try group.spawn(clientFn, .{server});
-
-            try group.wait();
-        }
-
         pub fn serverFn(server: Server) !void {
             const client = try server.accept(.{});
             defer client.close();
@@ -1989,8 +1958,16 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ addr, options });
-    try handle.join();
+    const server = try addr.listen(options);
+    defer server.close();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.serverFn, .{server});
+    try group.spawn(Test.clientFn, .{server});
+
+    try group.wait();
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
@@ -2128,17 +2105,12 @@ test "Server: accept timeout" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(struct {
-        fn run() !void {
-            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try addr.listen(.{});
-            defer server.close();
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
 
-            const result = server.accept(.{ .timeout = Timeout.fromMilliseconds(10) });
-            try std.testing.expectError(error.Timeout, result);
-        }
-    }.run, .{});
-    try handle.join();
+    const result = server.accept(.{ .timeout = Timeout.fromMilliseconds(10) });
+    try std.testing.expectError(error.Timeout, result);
 }
 
 test "Stream.Reader/Writer.fromStd" {

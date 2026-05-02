@@ -578,38 +578,31 @@ test "BroadcastChannel: lagged consumer" {
 
     var buffer: [3]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_lag(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            // Send more items than buffer capacity without consuming
-            try ch.send(1);
-            try ch.send(2);
-            try ch.send(3);
-            try ch.send(4); // This overwrites item 1
-            try ch.send(5); // This overwrites item 2
-
-            // First receive should return Lagged since we missed items 1 and 2
-            const err = ch.receive(consumer);
-            try std.testing.expectError(error.Lagged, err);
-
-            // After lag, we should be positioned at the oldest available (3)
-            const val1 = try ch.receive(consumer);
-            try std.testing.expectEqual(3, val1);
-
-            const val2 = try ch.receive(consumer);
-            try std.testing.expectEqual(4, val2);
-
-            const val3 = try ch.receive(consumer);
-            try std.testing.expectEqual(5, val3);
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_lag, .{ &channel, &consumer });
-    try handle.join();
+
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    // Send more items than buffer capacity without consuming
+    try channel.send(1);
+    try channel.send(2);
+    try channel.send(3);
+    try channel.send(4); // This overwrites item 1
+    try channel.send(5); // This overwrites item 2
+
+    // First receive should return Lagged since we missed items 1 and 2
+    const err = channel.receive(&consumer);
+    try std.testing.expectError(error.Lagged, err);
+
+    // After lag, we should be positioned at the oldest available (3)
+    const val1 = try channel.receive(&consumer);
+    try std.testing.expectEqual(3, val1);
+
+    const val2 = try channel.receive(&consumer);
+    try std.testing.expectEqual(4, val2);
+
+    const val3 = try channel.receive(&consumer);
+    try std.testing.expectEqual(5, val3);
 }
 
 test "BroadcastChannel: tryReceive" {
@@ -618,36 +611,29 @@ test "BroadcastChannel: tryReceive" {
 
     var buffer: [5]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_try(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            // tryReceive on empty channel should return WouldBlock
-            const err1 = ch.tryReceive(consumer);
-            try std.testing.expectError(error.WouldBlock, err1);
-
-            // Send some items
-            try ch.send(42);
-            try ch.send(43);
-
-            // tryReceive should succeed
-            const val1 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(42, val1);
-
-            const val2 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(43, val2);
-
-            // tryReceive on caught-up consumer should return WouldBlock
-            const err2 = ch.tryReceive(consumer);
-            try std.testing.expectError(error.WouldBlock, err2);
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_try, .{ &channel, &consumer });
-    try handle.join();
+
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    // tryReceive on empty channel should return WouldBlock
+    const err1 = channel.tryReceive(&consumer);
+    try std.testing.expectError(error.WouldBlock, err1);
+
+    // Send some items
+    try channel.send(42);
+    try channel.send(43);
+
+    // tryReceive should succeed
+    const val1 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(42, val1);
+
+    const val2 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(43, val2);
+
+    // tryReceive on caught-up consumer should return WouldBlock
+    const err2 = channel.tryReceive(&consumer);
+    try std.testing.expectError(error.WouldBlock, err2);
 }
 
 test "BroadcastChannel: new subscriber doesn't receive old messages" {
@@ -656,34 +642,27 @@ test "BroadcastChannel: new subscriber doesn't receive old messages" {
 
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_new_subscriber(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            // Send messages before subscribing
-            try ch.send(1);
-            try ch.send(2);
-            try ch.send(3);
-
-            // Now subscribe
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            // Send new message
-            try ch.send(4);
-
-            // Should only receive message 4, not 1, 2, 3
-            const val = try ch.receive(consumer);
-            try std.testing.expectEqual(4, val);
-
-            // tryReceive should return WouldBlock (no more messages)
-            const err = ch.tryReceive(consumer);
-            try std.testing.expectError(error.WouldBlock, err);
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_new_subscriber, .{ &channel, &consumer });
-    try handle.join();
+
+    // Send messages before subscribing
+    try channel.send(1);
+    try channel.send(2);
+    try channel.send(3);
+
+    // Now subscribe
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    // Send new message
+    try channel.send(4);
+
+    // Should only receive message 4, not 1, 2, 3
+    const val = try channel.receive(&consumer);
+    try std.testing.expectEqual(4, val);
+
+    // tryReceive should return WouldBlock (no more messages)
+    const err = channel.tryReceive(&consumer);
+    try std.testing.expectError(error.WouldBlock, err);
 }
 
 test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
@@ -692,34 +671,27 @@ test "BroadcastChannel: unsubscribe doesn't affect other consumers" {
 
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_unsubscribe(ch: *BroadcastChannel(u32), c1: *BroadcastChannel(u32).Consumer, c2: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(c1);
-            ch.subscribe(c2);
-
-            try ch.send(1);
-            try ch.send(2);
-
-            // Both should receive
-            try std.testing.expectEqual(1, try ch.receive(c1));
-            try std.testing.expectEqual(1, try ch.receive(c2));
-
-            // Unsubscribe c1
-            ch.unsubscribe(c1);
-
-            try ch.send(3);
-
-            // c2 should still receive
-            try std.testing.expectEqual(2, try ch.receive(c2));
-            try std.testing.expectEqual(3, try ch.receive(c2));
-        }
-    };
-
     var consumer1 = BroadcastChannel(u32).Consumer{};
     var consumer2 = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_unsubscribe, .{ &channel, &consumer1, &consumer2 });
-    try handle.join();
+
+    channel.subscribe(&consumer1);
+    channel.subscribe(&consumer2);
+
+    try channel.send(1);
+    try channel.send(2);
+
+    // Both should receive
+    try std.testing.expectEqual(1, try channel.receive(&consumer1));
+    try std.testing.expectEqual(1, try channel.receive(&consumer2));
+
+    // Unsubscribe consumer1
+    channel.unsubscribe(&consumer1);
+
+    try channel.send(3);
+
+    // consumer2 should still receive
+    try std.testing.expectEqual(2, try channel.receive(&consumer2));
+    try std.testing.expectEqual(3, try channel.receive(&consumer2));
 }
 
 test "BroadcastChannel: close prevents new sends" {
@@ -729,22 +701,15 @@ test "BroadcastChannel: close prevents new sends" {
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
 
-    const TestFn = struct {
-        fn test_close(ch: *BroadcastChannel(u32)) !void {
-            // Send before closing
-            try ch.send(1);
+    // Send before closing
+    try channel.send(1);
 
-            // Close the channel
-            ch.close();
+    // Close the channel
+    channel.close();
 
-            // Try to send after closing should fail
-            const err = ch.send(2);
-            try std.testing.expectError(error.Closed, err);
-        }
-    };
-
-    var handle = try runtime.spawn(TestFn.test_close, .{&channel});
-    try handle.join();
+    // Try to send after closing should fail
+    const err = channel.send(2);
+    try std.testing.expectError(error.Closed, err);
 }
 
 test "BroadcastChannel: consumers can drain after close" {
@@ -848,24 +813,17 @@ test "BroadcastChannel: tryReceive returns Closed when channel closed and empty"
 
     var buffer: [10]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_try_closed(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            // Close the empty channel
-            ch.close();
-
-            // tryReceive should return Closed
-            const err = ch.tryReceive(consumer);
-            try std.testing.expectError(error.Closed, err);
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_try_closed, .{ &channel, &consumer });
-    try handle.join();
+
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    // Close the empty channel
+    channel.close();
+
+    // tryReceive should return Closed
+    const err = channel.tryReceive(&consumer);
+    try std.testing.expectError(error.Closed, err);
 }
 
 test "BroadcastChannel: asyncReceive with select - basic" {
@@ -915,28 +873,21 @@ test "BroadcastChannel: asyncReceive with select - already ready" {
 
     var buffer: [5]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_ready(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            // Send first, so receiver finds it ready
-            try ch.send(99);
-
-            var recv = ch.asyncReceive(consumer);
-            const result = try select(.{ .recv = &recv });
-            switch (result) {
-                .recv => |val| {
-                    try std.testing.expectEqual(99, try val);
-                },
-            }
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_ready, .{ &channel, &consumer });
-    try handle.join();
+
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    // Send first, so receiver finds it ready
+    try channel.send(99);
+
+    var recv = channel.asyncReceive(&consumer);
+    const result = try select(.{ .recv = &recv });
+    switch (result) {
+        .recv => |val| {
+            try std.testing.expectEqual(99, try val);
+        },
+    }
 }
 
 test "BroadcastChannel: asyncReceive with select - closed channel" {
@@ -945,27 +896,20 @@ test "BroadcastChannel: asyncReceive with select - closed channel" {
 
     var buffer: [5]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_closed(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            ch.close();
-
-            var recv = ch.asyncReceive(consumer);
-            const result = try select(.{ .recv = &recv });
-            switch (result) {
-                .recv => |val| {
-                    try std.testing.expectError(error.Closed, val);
-                },
-            }
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_closed, .{ &channel, &consumer });
-    try handle.join();
+
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    channel.close();
+
+    var recv = channel.asyncReceive(&consumer);
+    const result = try select(.{ .recv = &recv });
+    switch (result) {
+        .recv => |val| {
+            try std.testing.expectError(error.Closed, val);
+        },
+    }
 }
 
 test "BroadcastChannel: asyncReceive with select - lagged consumer" {
@@ -974,33 +918,26 @@ test "BroadcastChannel: asyncReceive with select - lagged consumer" {
 
     var buffer: [3]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_lagged(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            // Send more items than buffer capacity without consuming
-            try ch.send(1);
-            try ch.send(2);
-            try ch.send(3);
-            try ch.send(4); // This overwrites item 1
-            try ch.send(5); // This overwrites item 2
-
-            // asyncReceive should return Lagged immediately
-            var recv = ch.asyncReceive(consumer);
-            const result = try select(.{ .recv = &recv });
-            switch (result) {
-                .recv => |val| {
-                    try std.testing.expectError(error.Lagged, val);
-                },
-            }
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_lagged, .{ &channel, &consumer });
-    try handle.join();
+
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    // Send more items than buffer capacity without consuming
+    try channel.send(1);
+    try channel.send(2);
+    try channel.send(3);
+    try channel.send(4); // This overwrites item 1
+    try channel.send(5); // This overwrites item 2
+
+    // asyncReceive should return Lagged immediately
+    var recv = channel.asyncReceive(&consumer);
+    const result = try select(.{ .recv = &recv });
+    switch (result) {
+        .recv => |val| {
+            try std.testing.expectError(error.Lagged, val);
+        },
+    }
 }
 
 test "BroadcastChannel: select with multiple broadcast channels" {
@@ -1068,71 +1005,64 @@ test "BroadcastChannel: position counter overflow handling" {
 
     var buffer: [3]u32 = undefined;
     var channel = BroadcastChannel(u32).init(&buffer);
-
-    const TestFn = struct {
-        fn test_overflow(ch: *BroadcastChannel(u32), consumer: *BroadcastChannel(u32).Consumer) !void {
-            ch.subscribe(consumer);
-            defer ch.unsubscribe(consumer);
-
-            // Simulate near-overflow condition by setting positions close to usize max
-            // This tests that wrapping arithmetic works correctly
-            const near_max = std.math.maxInt(usize) - 5;
-
-            ch.impl.mutex.lockUncancelable();
-            ch.impl.write_pos = near_max;
-            consumer.read_pos = near_max;
-            ch.impl.mutex.unlock();
-
-            // Send items that will cause write_pos to wrap around
-            try ch.send(100);
-            try ch.send(101);
-            try ch.send(102);
-
-            // Verify we can receive correctly even after overflow
-            const val1 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(100, val1);
-
-            const val2 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(101, val2);
-
-            const val3 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(102, val3);
-
-            // At this point: write_pos has wrapped to (maxInt - 2),
-            // consumer.read_pos has wrapped to (maxInt - 2)
-            // Send more items - write_pos will continue wrapping
-            try ch.send(103);
-            try ch.send(104);
-            try ch.send(105);
-
-            // Receive them to verify wrapping arithmetic works
-            const val4 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(103, val4);
-
-            const val5 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(104, val5);
-
-            const val6 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(105, val6);
-
-            // Now test lag detection with wrapped counters
-            // Send more than buffer capacity without consuming
-            try ch.send(200);
-            try ch.send(201);
-            try ch.send(202);
-            try ch.send(203); // This overwrites oldest (200)
-
-            // Next receive should detect lag correctly even with wrapped positions
-            const err = ch.tryReceive(consumer);
-            try std.testing.expectError(error.Lagged, err);
-
-            // After lag, we should be at the oldest available message (201)
-            const val7 = try ch.tryReceive(consumer);
-            try std.testing.expectEqual(201, val7);
-        }
-    };
-
     var consumer = BroadcastChannel(u32).Consumer{};
-    var handle = try runtime.spawn(TestFn.test_overflow, .{ &channel, &consumer });
-    try handle.join();
+
+    channel.subscribe(&consumer);
+    defer channel.unsubscribe(&consumer);
+
+    // Simulate near-overflow condition by setting positions close to usize max
+    // This tests that wrapping arithmetic works correctly
+    const near_max = std.math.maxInt(usize) - 5;
+
+    channel.impl.mutex.lockUncancelable();
+    channel.impl.write_pos = near_max;
+    consumer.read_pos = near_max;
+    channel.impl.mutex.unlock();
+
+    // Send items that will cause write_pos to wrap around
+    try channel.send(100);
+    try channel.send(101);
+    try channel.send(102);
+
+    // Verify we can receive correctly even after overflow
+    const val1 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(100, val1);
+
+    const val2 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(101, val2);
+
+    const val3 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(102, val3);
+
+    // At this point: write_pos has wrapped to (maxInt - 2),
+    // consumer.read_pos has wrapped to (maxInt - 2)
+    // Send more items - write_pos will continue wrapping
+    try channel.send(103);
+    try channel.send(104);
+    try channel.send(105);
+
+    // Receive them to verify wrapping arithmetic works
+    const val4 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(103, val4);
+
+    const val5 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(104, val5);
+
+    const val6 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(105, val6);
+
+    // Now test lag detection with wrapped counters
+    // Send more than buffer capacity without consuming
+    try channel.send(200);
+    try channel.send(201);
+    try channel.send(202);
+    try channel.send(203); // This overwrites oldest (200)
+
+    // Next receive should detect lag correctly even with wrapped positions
+    const err = channel.tryReceive(&consumer);
+    try std.testing.expectError(error.Lagged, err);
+
+    // After lag, we should be at the oldest available message (201)
+    const val7 = try channel.tryReceive(&consumer);
+    try std.testing.expectEqual(201, val7);
 }

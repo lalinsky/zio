@@ -386,39 +386,33 @@ test "Signal: basic signal handling" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        signal_received: bool = false,
+    var signal_received = false;
 
-        fn mainTask(self: *@This(), r: *Runtime) !void {
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(waitForSignal, .{ self, r });
-            try group.spawn(sendSignal, .{r});
-
-            try group.wait();
-        }
-
-        fn waitForSignal(self: *@This(), r: *Runtime) !void {
-            _ = r;
+    const waitForSignal = struct {
+        fn call(flag: *bool) !void {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
-
             try sig.wait();
-            self.signal_received = true;
+            flag.* = true;
         }
+    }.call;
 
-        fn sendSignal(r: *Runtime) !void {
+    const sendSignal = struct {
+        fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
             try posix.raise(@intFromEnum(SignalKind.interrupt));
         }
-    };
+    }.call;
 
-    var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join();
+    var group: Group = .init;
+    defer group.cancel();
 
-    try std.testing.expect(ctx.signal_received);
+    try group.spawn(waitForSignal, .{&signal_received});
+    try group.spawn(sendSignal, .{rt});
+
+    try group.wait();
+
+    try std.testing.expect(signal_received);
 }
 
 test "Signal: multiple handlers for same signal" {
@@ -427,41 +421,35 @@ test "Signal: multiple handlers for same signal" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        count: std.atomic.Value(usize) = .init(0),
+    var count = std.atomic.Value(usize).init(0);
 
-        fn mainTask(self: *@This(), r: *Runtime) !void {
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(waitForSignal, .{ self, r });
-            try group.spawn(waitForSignal, .{ self, r });
-            try group.spawn(waitForSignal, .{ self, r });
-            try group.spawn(sendSignal, .{r});
-
-            try group.wait();
-        }
-
-        fn waitForSignal(self: *@This(), r: *Runtime) !void {
-            _ = r;
+    const waitForSignal = struct {
+        fn call(cnt: *std.atomic.Value(usize)) !void {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
-
             try sig.wait();
-            _ = self.count.fetchAdd(1, .monotonic);
+            _ = cnt.fetchAdd(1, .monotonic);
         }
+    }.call;
 
-        fn sendSignal(r: *Runtime) !void {
+    const sendSignal = struct {
+        fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
             try posix.raise(@intFromEnum(SignalKind.interrupt));
         }
-    };
+    }.call;
 
-    var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join();
+    var group: Group = .init;
+    defer group.cancel();
 
-    try std.testing.expectEqual(3, ctx.count.load(.monotonic));
+    try group.spawn(waitForSignal, .{&count});
+    try group.spawn(waitForSignal, .{&count});
+    try group.spawn(waitForSignal, .{&count});
+    try group.spawn(sendSignal, .{rt});
+
+    try group.wait();
+
+    try std.testing.expectEqual(3, count.load(.monotonic));
 }
 
 test "Signal: timedWait timeout" {
@@ -470,29 +458,11 @@ test "Signal: timedWait timeout" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        timed_out: bool = false,
+    var sig = try Signal.init(.interrupt);
+    defer sig.deinit();
 
-        fn mainTask(self: *@This(), r: *Runtime) !void {
-            _ = r;
-            var sig = try Signal.init(.interrupt);
-            defer sig.deinit();
-
-            sig.timedWait(.{ .duration = .fromMilliseconds(50) }) catch |err| {
-                if (err == error.Timeout) {
-                    self.timed_out = true;
-                    return;
-                }
-                return err;
-            };
-        }
-    };
-
-    var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join();
-
-    try std.testing.expect(ctx.timed_out);
+    const result = sig.timedWait(.{ .duration = .fromMilliseconds(50) });
+    try std.testing.expectError(error.Timeout, result);
 }
 
 test "Signal: timedWait receives signal before timeout" {
@@ -501,39 +471,33 @@ test "Signal: timedWait receives signal before timeout" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        signal_received: bool = false,
+    var signal_received = false;
 
-        fn mainTask(self: *@This(), r: *Runtime) !void {
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(waitForSignalTimed, .{ self, r });
-            try group.spawn(sendSignal, .{r});
-
-            try group.wait();
-        }
-
-        fn waitForSignalTimed(self: *@This(), r: *Runtime) !void {
-            _ = r;
+    const waitForSignalTimed = struct {
+        fn call(flag: *bool) !void {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
-
             try sig.timedWait(.{ .duration = .fromSeconds(1) });
-            self.signal_received = true;
+            flag.* = true;
         }
+    }.call;
 
-        fn sendSignal(r: *Runtime) !void {
+    const sendSignal = struct {
+        fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
             try posix.raise(@intFromEnum(SignalKind.interrupt));
         }
-    };
+    }.call;
 
-    var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join();
+    var group: Group = .init;
+    defer group.cancel();
 
-    try std.testing.expect(ctx.signal_received);
+    try group.spawn(waitForSignalTimed, .{&signal_received});
+    try group.spawn(sendSignal, .{rt});
+
+    try group.wait();
+
+    try std.testing.expect(signal_received);
 }
 
 test "Signal: select on multiple signals" {
@@ -544,21 +508,10 @@ test "Signal: select on multiple signals" {
 
     const select = @import("select.zig").select;
 
-    const TestContext = struct {
-        signal_received: std.atomic.Value(u8) = .init(0),
+    var signal_received = std.atomic.Value(u8).init(0);
 
-        fn mainTask(self: *@This(), r: *Runtime) !void {
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(waitForSignals, .{ self, r });
-            try group.spawn(sendSignal, .{r});
-
-            try group.wait();
-        }
-
-        fn waitForSignals(self: *@This(), r: *Runtime) !void {
-            _ = r;
+    const waitForSignals = struct {
+        fn call(flag: *std.atomic.Value(u8)) !void {
             var sig1 = try Signal.init(.user1);
             defer sig1.deinit();
             var sig2 = try Signal.init(.user2);
@@ -566,22 +519,28 @@ test "Signal: select on multiple signals" {
 
             const result = try select(.{ .sig1 = &sig1, .sig2 = &sig2 });
             switch (result) {
-                .sig1 => self.signal_received.store(@intFromEnum(SignalKind.user1), .monotonic),
-                .sig2 => self.signal_received.store(@intFromEnum(SignalKind.user2), .monotonic),
+                .sig1 => flag.store(@intFromEnum(SignalKind.user1), .monotonic),
+                .sig2 => flag.store(@intFromEnum(SignalKind.user2), .monotonic),
             }
         }
+    }.call;
 
-        fn sendSignal(r: *Runtime) !void {
+    const sendSignal = struct {
+        fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
             try posix.raise(@intFromEnum(SignalKind.user2));
         }
-    };
+    }.call;
 
-    var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join();
+    var group: Group = .init;
+    defer group.cancel();
 
-    try std.testing.expectEqual(@intFromEnum(SignalKind.user2), ctx.signal_received.load(.monotonic));
+    try group.spawn(waitForSignals, .{&signal_received});
+    try group.spawn(sendSignal, .{rt});
+
+    try group.wait();
+
+    try std.testing.expectEqual(@intFromEnum(SignalKind.user2), signal_received.load(.monotonic));
 }
 
 test "Signal: select with signal already received (fast path)" {
@@ -592,32 +551,23 @@ test "Signal: select with signal already received (fast path)" {
 
     const select = @import("select.zig").select;
 
-    const TestContext = struct {
-        signal_received: bool = false,
+    var sig = try Signal.init(.user1);
+    defer sig.deinit();
 
-        fn mainTask(self: *@This(), r: *Runtime) !void {
-            var sig = try Signal.init(.user1);
-            defer sig.deinit();
+    // Send signal first
+    try posix.raise(@intFromEnum(SignalKind.user1));
 
-            // Send signal first
-            try posix.raise(@intFromEnum(SignalKind.user1));
+    // Small delay to ensure signal is processed
+    try rt.sleep(.fromMilliseconds(10));
 
-            // Small delay to ensure signal is processed
-            try r.sleep(.fromMilliseconds(10));
+    // Now select should return immediately (fast path)
+    const result = try select(.{ .sig = &sig });
+    var signal_received = false;
+    switch (result) {
+        .sig => signal_received = true,
+    }
 
-            // Now select should return immediately (fast path)
-            const result = try select(.{ .sig = &sig });
-            switch (result) {
-                .sig => self.signal_received = true,
-            }
-        }
-    };
-
-    var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join();
-
-    try std.testing.expect(ctx.signal_received);
+    try std.testing.expect(signal_received);
 }
 
 test "Signal: select with signal and task" {
@@ -628,46 +578,41 @@ test "Signal: select with signal and task" {
 
     const select = @import("select.zig").select;
 
-    const TestContext = struct {
-        winner: enum { signal, task } = .task,
-
-        fn slowTask(r: *Runtime) !u32 {
+    const slowTask = struct {
+        fn call(r: *Runtime) !u32 {
             try r.sleep(.fromMilliseconds(100));
             return 42;
         }
+    }.call;
 
-        fn mainTask(self: *@This(), r: *Runtime) !void {
-            var sig = try Signal.init(.user1);
-            defer sig.deinit();
-
-            var task = try r.spawn(slowTask, .{r});
-            defer task.cancel();
-
-            var sender = try r.spawn(sendSignal, .{r});
-            defer sender.cancel();
-
-            // Signal should win (arrives much sooner)
-            const result = try select(.{ .sig = &sig, .task = &task });
-            switch (result) {
-                .sig => self.winner = .signal,
-                .task => |val| {
-                    _ = try val;
-                    self.winner = .task;
-                },
-            }
-
-            try sender.join();
-        }
-
-        fn sendSignal(r: *Runtime) !void {
+    const sendSignal = struct {
+        fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
             try posix.raise(@intFromEnum(SignalKind.user1));
         }
-    };
+    }.call;
 
-    var ctx = TestContext{};
-    var handle = try rt.spawn(TestContext.mainTask, .{ &ctx, rt });
-    try handle.join();
+    var sig = try Signal.init(.user1);
+    defer sig.deinit();
 
-    try std.testing.expectEqual(.signal, ctx.winner);
+    var task = try rt.spawn(slowTask, .{rt});
+    defer task.cancel();
+
+    var sender = try rt.spawn(sendSignal, .{rt});
+    defer sender.cancel();
+
+    // Signal should win (arrives much sooner)
+    const result = try select(.{ .sig = &sig, .task = &task });
+    var winner: enum { signal, task } = .task;
+    switch (result) {
+        .sig => winner = .signal,
+        .task => |val| {
+            _ = try val;
+            winner = .task;
+        },
+    }
+
+    try sender.join();
+
+    try std.testing.expectEqual(.signal, winner);
 }

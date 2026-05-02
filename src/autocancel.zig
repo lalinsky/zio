@@ -153,8 +153,8 @@ test "AutoCancel: cleared before firing" {
 }
 
 test "AutoCancel: user cancel has priority over timeout" {
-    const Test = struct {
-        fn worker(rt: *Runtime) !void {
+    const worker = struct {
+        fn call(rt: *Runtime) !void {
             var timeout = AutoCancel.init;
             defer timeout.clear();
 
@@ -169,25 +169,20 @@ test "AutoCancel: user cancel has priority over timeout" {
 
             return error.TestUnexpectedResult;
         }
-
-        fn main(rt: *Runtime) !void {
-            var handle = try rt.spawn(worker, .{rt});
-
-            // Let worker start and set timeout
-            try rt.sleep(.fromMilliseconds(5));
-
-            // User cancel before timeout fires
-            handle.cancel();
-
-            // Worker handles the cancellation gracefully, so join succeeds
-            try handle.join();
-        }
-    };
+    }.call;
 
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var handle = try rt.spawn(Test.main, .{rt});
+    var handle = try rt.spawn(worker, .{rt});
+
+    // Let worker start and set timeout
+    try rt.sleep(.fromMilliseconds(5));
+
+    // User cancel before timeout fires
+    handle.cancel();
+
+    // Worker handles the cancellation gracefully, so join succeeds
     try handle.join();
 }
 
@@ -266,33 +261,28 @@ test "AutoCancel: set with Duration.max clears prior timer" {
 }
 
 test "AutoCancel: cancels spawned task via join" {
-    const Test = struct {
-        fn blocker(rt: *Runtime) !void {
+    const blocker = struct {
+        fn call(rt: *Runtime) !void {
             // Block forever
             try rt.sleep(.fromMilliseconds(1000000));
         }
-
-        fn main(rt: *Runtime) !void {
-            var handle = try rt.spawn(blocker, .{rt});
-            defer handle.cancel();
-
-            var timeout = AutoCancel.init;
-            defer timeout.clear();
-            timeout.set(.fromMilliseconds(10));
-
-            // Join should be canceled by timeout
-            handle.join() catch |err| {
-                try std.testing.expect(timeout.check(err));
-                return; // Expected
-            };
-
-            return error.TestUnexpectedResult;
-        }
-    };
+    }.call;
 
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var handle = try rt.spawn(Test.main, .{rt});
-    try handle.join();
+    var handle = try rt.spawn(blocker, .{rt});
+    defer handle.cancel();
+
+    var timeout = AutoCancel.init;
+    defer timeout.clear();
+    timeout.set(.fromMilliseconds(10));
+
+    // Join should be canceled by timeout
+    handle.join() catch |err| {
+        try std.testing.expect(timeout.check(err));
+        return; // Expected
+    };
+
+    return error.TestUnexpectedResult;
 }

@@ -196,22 +196,9 @@ test "Semaphore: timedWait timeout" {
     defer runtime.deinit();
 
     var sem = Semaphore{};
-    var timed_out = false;
 
-    const TestFn = struct {
-        fn waiter(s: *Semaphore, timeout_flag: *bool) void {
-            s.timedWait(.{ .duration = .fromMilliseconds(10) }) catch |err| {
-                if (err == error.Timeout) {
-                    timeout_flag.* = true;
-                }
-            };
-        }
-    };
-
-    var handle = try runtime.spawn(TestFn.waiter, .{ &sem, &timed_out });
-    handle.join();
-
-    try std.testing.expect(timed_out);
+    const result = sem.timedWait(.{ .duration = .fromMilliseconds(10) });
+    try std.testing.expectError(error.Timeout, result);
     try std.testing.expectEqual(0, sem.permits);
 }
 
