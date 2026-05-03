@@ -601,6 +601,8 @@ fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {
 
 fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
     var entry_index: usize = 0;
+    // Create iterator once and reuse it to preserve name_index across entries.
+    var it = os_fs.DirEntryIterator.init(r.buffer, r.index, r.end);
 
     while (entry_index < entries.len) {
         if (r.end - r.index == 0) {
@@ -622,15 +624,17 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
             }
             r.index = 0;
             r.end = n;
+            // Re-init iterator after refilling buffer to reset name_index.
+            it = os_fs.DirEntryIterator.init(r.buffer, r.index, r.end);
         }
 
-        // Re-init iterator every iteration: DirEntryIterator can't survive
-        // across dirReadImpl calls (it's a local).
-        var it = os_fs.DirEntryIterator.init(r.buffer, r.index, r.end);
         const entry = it.next() orelse {
+            // Update reader position. If next() returned null due to buffer
+            // overflow on Windows, we've backtracked and can't make progress.
             r.index = it.index;
             r.end = it.end;
-            continue;
+            // Break to avoid infinite loop when buffer space exhausted.
+            break;
         };
         r.index = it.index;
 
