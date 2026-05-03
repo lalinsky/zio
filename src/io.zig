@@ -3,10 +3,9 @@
 
 //! Implementation of the `std.Io` interface backed by zio's runtime.
 //!
-//! Every vtable method is currently stubbed with `@panic("TODO: ...")`. They
-//! will be filled in incrementally; the goal of this initial skeleton is to
-//! get the wiring right so callers can already obtain a `std.Io` from a
-//! `*Runtime` via `Runtime.io()`.
+//! Many vtable methods are implemented; stubs remain for batches, some
+//! process operations, file locking (delegates to std), memory maps,
+//! and partial directory operations.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -600,8 +599,49 @@ fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {
     }
 }
 
-fn dirReadImpl(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
-    @panic("TODO: dirRead");
+fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+    var entry_index: usize = 0;
+
+    while (entry_index < entries.len) {
+        if (r.end - r.index == 0) {
+            if (entry_index > 0) break;
+            if (r.state == .finished) return 0;
+
+            const restart = r.state == .reset;
+            r.state = .reading;
+
+            var op = ev.DirRead.init(stdIoHandleToZio(r.dir.handle), r.buffer, restart);
+            try waitForIo(&op.c);
+            const n = op.getResult() catch |err| {
+                r.state = .reset;
+                return err;
+            };
+            if (n == 0) {
+                r.state = .finished;
+                return 0;
+            }
+            r.index = 0;
+            r.end = n;
+        }
+
+        // Re-init iterator every iteration: DirEntryIterator can't survive
+        // across dirReadImpl calls (it's a local).
+        var it = os_fs.DirEntryIterator.init(r.buffer, r.index, r.end);
+        const entry = it.next() orelse {
+            r.index = it.index;
+            r.end = it.end;
+            continue;
+        };
+        r.index = it.index;
+
+        entries[entry_index] = .{
+            .name = entry.name,
+            .kind = zioKindToStdIoKind(entry.kind),
+            .inode = entry.inode,
+        };
+        entry_index += 1;
+    }
+    return entry_index;
 }
 
 fn dirRealPathImpl(_: ?*anyopaque, dir: Io.Dir, out_buffer: []u8) Io.Dir.RealPathError!usize {
@@ -2556,6 +2596,65 @@ test "io: dir create/delete" {
     try std.testing.expectError(error.PathAlreadyExists, dir.createDir(io, dir_path, .default_dir));
     try dir.deleteDir(io, dir_path);
     try std.testing.expectError(error.FileNotFound, dir.deleteDir(io, dir_path));
+}
+
+test "io: dir iterate over files" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dir_path = "test_io_dir_iterate";
+    // Clean up from previous failed runs.
+    dir.deleteDir(io, dir_path) catch {};
+
+    try dir.createDir(io, dir_path, .default_dir);
+    errdefer dir.deleteDir(io, dir_path) catch {};
+
+    // Create a few files in the directory.
+    var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
+    defer sub.close(io);
+
+    const file_names = [_][]const u8{ "a.txt", "b.txt", "c.txt" };
+    for (file_names) |name| {
+        var f = try sub.createFile(io, name, .{});
+        f.close(io);
+    }
+    defer for (file_names) |name| sub.deleteFile(io, name) catch {};
+
+    var it = sub.iterate();
+    var found: usize = 0;
+    while (try it.next(io)) |entry| {
+        try std.testing.expect(entry.kind == .file);
+        try std.testing.expect(std.mem.eql(u8, entry.name, "a.txt") or
+            std.mem.eql(u8, entry.name, "b.txt") or
+            std.mem.eql(u8, entry.name, "c.txt"));
+        found += 1;
+    }
+    try std.testing.expectEqual(3, found);
+
+    // Clean up files before deleting directory.
+    for (file_names) |name| sub.deleteFile(io, name) catch {};
+    sub.close(io);
+    try dir.deleteDir(io, dir_path);
+}
+
+test "io: dir iterate empty directory" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dir_path = "test_io_dir_iterate_empty";
+    defer dir.deleteDir(io, dir_path) catch {};
+
+    try dir.createDir(io, dir_path, .default_dir);
+
+    var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
+    defer sub.close(io);
+
+    var it = sub.iterate();
+    try std.testing.expect((try it.next(io)) == null);
 }
 
 test "io: file setPermissions" {
