@@ -2632,17 +2632,19 @@ test "io: dir iterate over files" {
         defer for (file_names) |name| sub.deleteFile(io, name) catch {};
 
         var it = sub.iterate();
-        var all_entries = std.ArrayList(Io.Dir.Entry).init(std.testing.allocator);
-        defer all_entries.deinit();
+        var all_entries: [64]Io.Dir.Entry = undefined;
+        var found: usize = 0;
         while (try it.next(io)) |entry| {
-            try all_entries.append(entry);
+            if (found >= all_entries.len) break;
+            all_entries[found] = entry;
+            found += 1;
         }
-        std.debug.print("\ndir iterate over files: got {} entries\n", .{all_entries.items.len});
-        for (all_entries.items, 0..) |entry, i| {
+        std.debug.print("\ndir iterate over files: got {} entries\n", .{found});
+        for (all_entries[0..found], 0..) |entry, i| {
             std.debug.print("  [{}] name='{s}' kind={s} inode={}\n", .{ i, entry.name, @tagName(entry.kind), entry.inode });
         }
-        try std.testing.expectEqual(3, all_entries.items.len);
-        for (all_entries.items) |entry| {
+        try std.testing.expectEqual(3, found);
+        for (all_entries[0..found]) |entry| {
             try std.testing.expect(entry.kind == .file);
             try std.testing.expect(std.mem.eql(u8, entry.name, "a.txt") or
                 std.mem.eql(u8, entry.name, "b.txt") or
@@ -2668,16 +2670,18 @@ test "io: dir iterate empty directory" {
     defer sub.close(io);
 
     var it = sub.iterate();
-    var all_entries2 = std.ArrayList(Io.Dir.Entry).init(std.testing.allocator);
-    defer all_entries2.deinit();
+    var all_entries2: [64]Io.Dir.Entry = undefined;
+    var found2: usize = 0;
     while (try it.next(io)) |entry| {
-        try all_entries2.append(entry);
+        if (found2 >= all_entries2.len) break;
+        all_entries2[found2] = entry;
+        found2 += 1;
     }
-    std.debug.print("\ndir iterate empty: got {} entries\n", .{all_entries2.items.len});
-    for (all_entries2.items, 0..) |entry, i| {
+    std.debug.print("\ndir iterate empty: got {} entries\n", .{found2});
+    for (all_entries2[0..found2], 0..) |entry, i| {
         std.debug.print("  [{}] name='{s}' kind={s} inode={}\n", .{ i, entry.name, @tagName(entry.kind), entry.inode });
     }
-    try std.testing.expectEqual(0, all_entries2.items.len);
+    try std.testing.expectEqual(0, found2);
 }
 
 test "io: file setPermissions" {
