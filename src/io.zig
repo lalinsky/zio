@@ -601,6 +601,9 @@ fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {
 
 fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
     var entry_index: usize = 0;
+    // Create iterator once to preserve name_index across entries (Windows).
+    // Fields are updated in the loop as r.index/r.end change.
+    var it = os_fs.DirEntryIterator.init(r.buffer, r.index, r.end);
 
     while (entry_index < entries.len) {
         if (r.end - r.index == 0) {
@@ -611,7 +614,10 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
             r.state = .reading;
 
             var op = ev.DirRead.init(stdIoHandleToZio(r.dir.handle), r.buffer, restart);
-            try waitForIo(&op.c);
+            waitForIo(&op.c) catch |err| {
+                r.state = .reset;
+                return err;
+            };
             const n = op.getResult() catch |err| {
                 r.state = .reset;
                 return err;
@@ -622,11 +628,13 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
             }
             r.index = 0;
             r.end = n;
+            it.index = 0;
+            it.end = n;
+        } else {
+            it.index = r.index;
+            it.end = r.end;
         }
 
-        // Re-init iterator every iteration: DirEntryIterator can't survive
-        // across dirReadImpl calls (it's a local).
-        var it = os_fs.DirEntryIterator.init(r.buffer, r.index, r.end);
         const entry = it.next() orelse {
             r.index = it.index;
             r.end = it.end;
@@ -2612,30 +2620,29 @@ test "io: dir iterate over files" {
     errdefer dir.deleteDir(io, dir_path) catch {};
 
     // Create a few files in the directory.
-    var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
-    defer sub.close(io);
+    {
+        var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
+        defer sub.close(io);
 
-    const file_names = [_][]const u8{ "a.txt", "b.txt", "c.txt" };
-    for (file_names) |name| {
-        var f = try sub.createFile(io, name, .{});
-        f.close(io);
+        const file_names = [_][]const u8{ "a.txt", "b.txt", "c.txt" };
+        for (file_names) |name| {
+            var f = try sub.createFile(io, name, .{});
+            f.close(io);
+        }
+        defer for (file_names) |name| sub.deleteFile(io, name) catch {};
+
+        var it = sub.iterate();
+        var found: usize = 0;
+        while (try it.next(io)) |entry| {
+            try std.testing.expect(entry.kind == .file);
+            try std.testing.expect(std.mem.eql(u8, entry.name, "a.txt") or
+                std.mem.eql(u8, entry.name, "b.txt") or
+                std.mem.eql(u8, entry.name, "c.txt"));
+            found += 1;
+        }
+        try std.testing.expectEqual(3, found);
     }
-    defer for (file_names) |name| sub.deleteFile(io, name) catch {};
-
-    var it = sub.iterate();
-    var found: usize = 0;
-    while (try it.next(io)) |entry| {
-        try std.testing.expect(entry.kind == .file);
-        try std.testing.expect(std.mem.eql(u8, entry.name, "a.txt") or
-            std.mem.eql(u8, entry.name, "b.txt") or
-            std.mem.eql(u8, entry.name, "c.txt"));
-        found += 1;
-    }
-    try std.testing.expectEqual(3, found);
-
-    // Clean up files before deleting directory.
-    for (file_names) |name| sub.deleteFile(io, name) catch {};
-    sub.close(io);
+    // sub's deferred cleanup (file deletion + close) has now run.
     try dir.deleteDir(io, dir_path);
 }
 
