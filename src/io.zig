@@ -622,6 +622,7 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
                 r.state = .reset;
                 return err;
             };
+            std.debug.print("[dirReadImpl] refill: restart={} n={} buflen={}\n", .{ restart, n, r.buffer.len });
             if (n == 0) {
                 r.state = .finished;
                 return 0;
