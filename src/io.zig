@@ -622,7 +622,6 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
                 r.state = .reset;
                 return err;
             };
-            std.debug.print("[dirReadImpl] refill: restart={} n={} buflen={}\n", .{ restart, n, r.buffer.len });
             if (n == 0) {
                 r.state = .finished;
                 return 0;
@@ -2633,16 +2632,12 @@ test "io: dir iterate over files" {
         defer for (file_names) |name| sub.deleteFile(io, name) catch {};
 
         var it = sub.iterate();
-        var all_entries: [64]Io.Dir.Entry = undefined;
         var found: usize = 0;
+        var all_entries: [64]Io.Dir.Entry = undefined;
         while (try it.next(io)) |entry| {
             if (found >= all_entries.len) break;
             all_entries[found] = entry;
             found += 1;
-        }
-        std.debug.print("\ndir iterate over files: got {} entries\n", .{found});
-        for (all_entries[0..found], 0..) |entry, i| {
-            std.debug.print("  [{}] name='{s}' kind={s} inode={}\n", .{ i, entry.name, @tagName(entry.kind), entry.inode });
         }
         try std.testing.expectEqual(3, found);
         for (all_entries[0..found]) |entry| {
@@ -2671,16 +2666,12 @@ test "io: dir iterate empty directory" {
     defer sub.close(io);
 
     var it = sub.iterate();
-    var all_entries2: [64]Io.Dir.Entry = undefined;
     var found2: usize = 0;
+    var all_entries2: [64]Io.Dir.Entry = undefined;
     while (try it.next(io)) |entry| {
         if (found2 >= all_entries2.len) break;
         all_entries2[found2] = entry;
         found2 += 1;
-    }
-    std.debug.print("\ndir iterate empty: got {} entries\n", .{found2});
-    for (all_entries2[0..found2], 0..) |entry, i| {
-        std.debug.print("  [{}] name='{s}' kind={s} inode={}\n", .{ i, entry.name, @tagName(entry.kind), entry.inode });
     }
     try std.testing.expectEqual(0, found2);
 }

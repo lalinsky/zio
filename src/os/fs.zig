@@ -395,14 +395,7 @@ pub const DirEntryIterator = struct {
 
     fn nextRaw(self: *DirEntryIterator) ?*align(1) const RawEntry {
         if (self.index >= self.end) return null;
-        const raw_idx = self.rawIndex();
-        const entry: *align(1) const RawEntry = @ptrCast(&self.buffer[raw_idx]);
-
-        if (builtin.os.tag == .netbsd) {
-            std.debug.print("[nextRaw] index={} end={} rawIdx={} fileno={} reclen={} namlen={} type={}\n", .{
-                self.index, self.end, raw_idx, entry.fileno, entry.reclen, entry.namlen, entry.type,
-            });
-        }
+        const entry: *align(1) const RawEntry = @ptrCast(&self.buffer[self.rawIndex()]);
 
         // Advance to next entry
         self.index += switch (builtin.os.tag) {
@@ -505,9 +498,6 @@ pub const DirEntryIterator = struct {
                 break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
             },
             .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => blk: {
-                if (builtin.os.tag == .netbsd) {
-                    std.debug.print("[isDotOrDotDot] namlen={} name[0..@min(namlen,8)]='{s}'\n", .{ entry.namlen, entry.name[0..@min(entry.namlen, @as(u8, 8))] });
-                }
                 const name = entry.name[0..entry.namlen];
                 break :blk std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..");
             },
@@ -2266,15 +2256,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
             },
             .freebsd, .netbsd, .openbsd, .dragonfly => blk: {
                 var basep: c_long = 0;
-                const result = posix.system.getdirentries(handle, buffer.ptr, buffer.len, &basep);
-                if (builtin.os.tag == .netbsd) {
-                    const n = @as(usize, @intCast(result));
-                    std.debug.print("\n[dirReadPosix] handle={} buflen={} restart={} basep={} result={}\n", .{ handle, buffer.len, restart, basep, n });
-                    std.debug.print("[dirReadPosix] buffer[0..{}] = ", .{@min(n, @as(usize, 64))});
-                    for (buffer[0..@min(n, @as(usize, 64))]) |b| std.debug.print("{x:0>2} ", .{b});
-                    std.debug.print("\n", .{});
-                }
-                break :blk result;
+                break :blk posix.system.getdirentries(handle, buffer.ptr, buffer.len, &basep);
             },
             else => @compileError("dirRead not implemented for this OS"),
         };
