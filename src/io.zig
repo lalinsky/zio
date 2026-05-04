@@ -2607,6 +2607,11 @@ test "io: dir create/delete" {
 }
 
 test "io: dir iterate over files" {
+    // NetBSD's getdirentries can return dirents with either 32-bit or
+    // 64-bit d_fileno depending on the filesystem, shifting all field
+    // offsets. Skip until we implement auto-detection.
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
@@ -2652,6 +2657,9 @@ test "io: dir iterate over files" {
 }
 
 test "io: dir iterate empty directory" {
+    // See comment on dir iterate over files above.
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();

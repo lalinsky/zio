@@ -303,22 +303,11 @@ pub const DirEntryIterator = struct {
     /// Position for writing UTF-8 names (Windows only).
     name_index: usize,
 
-    /// NetBSD dirent as actually returned by getdirentries.
-    /// Zig's std.c.dirent assumes 8-byte fileno but this NetBSD uses 4-byte fileno.
-    pub const NetbsdDirent = extern struct {
-        fileno: u32,
-        reclen: u16,
-        type: u8,
-        namlen: u8,
-        name: [std.c.MAXNAMLEN]u8,
-    };
-
     pub const RawEntry = switch (builtin.os.tag) {
         .linux => std.os.linux.dirent64,
         .windows => w.FILE_BOTH_DIR_INFORMATION,
         .macos, .ios, .tvos, .watchos, .visionos => std.c.dirent,
-        .freebsd, .openbsd, .dragonfly => std.c.dirent,
-        .netbsd => NetbsdDirent,
+        .freebsd, .netbsd, .openbsd, .dragonfly => std.c.dirent,
         else => @compileError("DirEntryIterator not supported on this OS"),
     };
 
@@ -475,8 +464,7 @@ pub const DirEntryIterator = struct {
     fn extractInode(_: *DirEntryIterator, entry: *align(1) const RawEntry) ino_t {
         return switch (builtin.os.tag) {
             .linux, .macos, .ios, .tvos, .watchos, .visionos => entry.ino,
-            .freebsd, .openbsd, .dragonfly => entry.fileno,
-            .netbsd => @as(ino_t, entry.fileno),
+            .freebsd, .netbsd, .openbsd, .dragonfly => entry.fileno,
             .windows => entry.FileIndex,
             else => @compileError("unsupported OS"),
         };
