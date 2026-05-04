@@ -2632,15 +2632,22 @@ test "io: dir iterate over files" {
         defer for (file_names) |name| sub.deleteFile(io, name) catch {};
 
         var it = sub.iterate();
-        var found: usize = 0;
+        var all_entries = std.ArrayList(Io.Dir.Entry).init(std.testing.allocator);
+        defer all_entries.deinit();
         while (try it.next(io)) |entry| {
+            try all_entries.append(entry);
+        }
+        std.debug.print("\ndir iterate over files: got {} entries\n", .{all_entries.items.len});
+        for (all_entries.items, 0..) |entry, i| {
+            std.debug.print("  [{}] name='{s}' kind={s} inode={}\n", .{ i, entry.name, @tagName(entry.kind), entry.inode });
+        }
+        try std.testing.expectEqual(3, all_entries.items.len);
+        for (all_entries.items) |entry| {
             try std.testing.expect(entry.kind == .file);
             try std.testing.expect(std.mem.eql(u8, entry.name, "a.txt") or
                 std.mem.eql(u8, entry.name, "b.txt") or
                 std.mem.eql(u8, entry.name, "c.txt"));
-            found += 1;
         }
-        try std.testing.expectEqual(3, found);
     }
     // sub's deferred cleanup (file deletion + close) has now run.
     try dir.deleteDir(io, dir_path);
@@ -2661,7 +2668,16 @@ test "io: dir iterate empty directory" {
     defer sub.close(io);
 
     var it = sub.iterate();
-    try std.testing.expect((try it.next(io)) == null);
+    var all_entries2 = std.ArrayList(Io.Dir.Entry).init(std.testing.allocator);
+    defer all_entries2.deinit();
+    while (try it.next(io)) |entry| {
+        try all_entries2.append(entry);
+    }
+    std.debug.print("\ndir iterate empty: got {} entries\n", .{all_entries2.items.len});
+    for (all_entries2.items, 0..) |entry, i| {
+        std.debug.print("  [{}] name='{s}' kind={s} inode={}\n", .{ i, entry.name, @tagName(entry.kind), entry.inode });
+    }
+    try std.testing.expectEqual(0, all_entries2.items.len);
 }
 
 test "io: file setPermissions" {
