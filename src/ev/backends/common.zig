@@ -503,7 +503,8 @@ pub fn dirAccessWork(work: *Work) void {
 /// Helper to handle dir read operation
 pub fn handleDirRead(c: *Completion) void {
     const data = c.cast(DirRead);
-    if (fs.dirRead(data.handle, data.buffer, data.restart)) |bytes| {
+    const buffer = fs.DirEntryIterator.getUnreservedBuffer(data.buffer);
+    if (fs.dirRead(data.handle, buffer, data.restart)) |bytes| {
         c.setResult(.dir_read, bytes);
     } else |err| {
         c.setError(err);
