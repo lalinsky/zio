@@ -1085,10 +1085,8 @@ pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
                     else
                         posix.system.recv(fd, buffer.base, buffer.len, @intCast(sys_flags));
 
-                    if (rc >= 0) {
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => return @intCast(rc),
                         .INTR => continue,
                         else => |err| return errnoToRecvError(err),
                     }
@@ -1108,10 +1106,8 @@ pub fn recv(fd: fd_t, buffers: []iovec, flags: RecvFlags) RecvError!usize {
                 while (true) {
                     const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
 
-                    if (rc >= 0) {
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => return @intCast(rc),
                         .INTR => continue,
                         else => |err| return errnoToRecvError(err),
                     }
@@ -1193,10 +1189,8 @@ pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!
                     else
                         posix.system.send(fd, buffer.base, buffer.len, @intCast(sys_flags));
 
-                    if (rc >= 0) {
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => return @intCast(rc),
                         .INTR => continue,
                         else => |err| return errnoToSendError(err),
                     }
@@ -1216,10 +1210,8 @@ pub fn send(fd: fd_t, buffers: []const iovec_const, flags: SendFlags) SendError!
                 while (true) {
                     const rc = posix.system.sendmsg(fd, &msg, @intCast(sys_flags));
 
-                    if (rc >= 0) {
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => return @intCast(rc),
                         .INTR => continue,
                         else => |err| return errnoToSendError(err),
                     }
@@ -1276,10 +1268,8 @@ pub fn recvfrom(
                         addr_len,
                     );
 
-                    if (rc >= 0) {
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => return @intCast(rc),
                         .INTR => continue,
                         else => |err| return errnoToRecvError(err),
                     }
@@ -1299,11 +1289,11 @@ pub fn recvfrom(
                 while (true) {
                     const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
 
-                    if (rc >= 0) {
-                        if (addr_len) |len| len.* = msg.namelen;
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => {
+                            if (addr_len) |len| len.* = msg.namelen;
+                            return @intCast(rc);
+                        },
                         .INTR => continue,
                         else => |err| return errnoToRecvError(err),
                     }
@@ -1358,10 +1348,8 @@ pub fn sendto(
                         addr_len,
                     );
 
-                    if (rc >= 0) {
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => return @intCast(rc),
                         .INTR => continue,
                         else => |err| return errnoToSendError(err),
                     }
@@ -1381,10 +1369,8 @@ pub fn sendto(
                 while (true) {
                     const rc = posix.system.sendmsg(fd, &msg, @intCast(sys_flags));
 
-                    if (rc >= 0) {
-                        return @intCast(rc);
-                    }
                     switch (posix.errno(rc)) {
+                        .SUCCESS => return @intCast(rc),
                         .INTR => continue,
                         else => |err| return errnoToSendError(err),
                     }
@@ -1448,15 +1434,15 @@ pub fn recvmsg(
             while (true) {
                 const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
 
-                if (rc >= 0) {
-                    if (addr_len) |len| len.* = msg.namelen;
-                    return .{
-                        .len = @intCast(rc),
-                        .flags = @intCast(msg.flags),
-                        .controllen = @intCast(msg.controllen),
-                    };
-                }
                 switch (posix.errno(rc)) {
+                    .SUCCESS => {
+                        if (addr_len) |len| len.* = msg.namelen;
+                        return .{
+                            .len = @intCast(rc),
+                            .flags = @intCast(msg.flags),
+                            .controllen = @intCast(msg.controllen),
+                        };
+                    },
                     .INTR => continue,
                     else => |err| return errnoToRecvError(err),
                 }
@@ -1504,10 +1490,8 @@ pub fn sendmsg(
             while (true) {
                 const rc = posix.system.sendmsg(fd, &msg, @intCast(sys_flags));
 
-                if (rc >= 0) {
-                    return @intCast(rc);
-                }
                 switch (posix.errno(rc)) {
+                    .SUCCESS => return @intCast(rc),
                     .INTR => continue,
                     else => |err| return errnoToSendError(err),
                 }
@@ -1759,4 +1743,18 @@ test "socketpair AF_UNIX round-trip" {
     var recv_iov = iovecFromSlice(&buf);
     const n_read = try recv(fds[1], (&recv_iov)[0..1], .{});
     try std.testing.expectEqualStrings(msg, buf[0..n_read]);
+}
+
+test "recv on non-blocking socket without data returns WouldBlock" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const fds = try socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer close(fds[0]);
+    defer close(fds[1]);
+
+    var buf: [16]u8 = undefined;
+    var recv_iov = iovecFromSlice(&buf);
+    const result = recv(fds[0], (&recv_iov)[0..1], .{});
+
+    try std.testing.expectError(error.WouldBlock, result);
 }
