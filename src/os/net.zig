@@ -1744,3 +1744,17 @@ test "socketpair AF_UNIX round-trip" {
     const n_read = try recv(fds[1], (&recv_iov)[0..1], .{});
     try std.testing.expectEqualStrings(msg, buf[0..n_read]);
 }
+
+test "recv on non-blocking socket without data returns WouldBlock" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const fds = try socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer close(fds[0]);
+    defer close(fds[1]);
+
+    var buf: [16]u8 = undefined;
+    var recv_iov = iovecFromSlice(&buf);
+    const result = recv(fds[0], (&recv_iov)[0..1], .{});
+
+    try std.testing.expectError(error.WouldBlock, result);
+}
