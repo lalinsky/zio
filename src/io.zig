@@ -36,6 +36,7 @@ const waitForIoUncancelable = common.waitForIoUncancelable;
 const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
+const os_posix = @import("os/posix.zig");
 const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
@@ -1031,20 +1032,45 @@ fn processSetCurrentPathImpl(_: ?*anyopaque, path: []const u8) std.process.SetCu
     return io.vtable.processSetCurrentPath(io.userdata, path);
 }
 
-fn processReplaceImpl(_: ?*anyopaque, _: std.process.ReplaceOptions) std.process.ReplaceError {
-    @panic("TODO: processReplace");
+// TODO: implement using our own execve wrapper
+fn processReplaceImpl(_: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
+    const io = globalIo();
+    return io.vtable.processReplace(io.userdata, options);
 }
 
-fn processReplacePathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.ReplaceOptions) std.process.ReplaceError {
-    @panic("TODO: processReplacePath");
+// TODO: implement using our own execve wrapper
+fn processReplacePathImpl(_: ?*anyopaque, dir: Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
+    const io = globalIo();
+    return io.vtable.processReplacePath(io.userdata, dir, options);
 }
 
-fn processSpawnImpl(_: ?*anyopaque, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    @panic("TODO: processSpawn");
+// TODO: implement using our own posix_spawn/fork+exec wrapper
+fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var threaded: Io.Threaded = .init(rt.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try io.vtable.processSpawn(io.userdata, options);
+    setChildPipesNonblocking(&child);
+    return child;
 }
 
-fn processSpawnPathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    @panic("TODO: processSpawnPath");
+// TODO: implement using our own posix_spawn/fork+exec wrapper
+fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var threaded: Io.Threaded = .init(rt.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try io.vtable.processSpawnPath(io.userdata, dir, options);
+    setChildPipesNonblocking(&child);
+    return child;
+}
+
+fn setChildPipesNonblocking(child: *std.process.Child) void {
+    if (builtin.os.tag == .windows) return;
+    if (child.stdin) |f| os_posix.setNonblocking(f.handle) catch {};
+    if (child.stdout) |f| os_posix.setNonblocking(f.handle) catch {};
+    if (child.stderr) |f| os_posix.setNonblocking(f.handle) catch {};
 }
 
 fn childWaitImpl(_: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {

@@ -91,7 +91,7 @@ test "childWait: exit code 0" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var child = try std.process.spawn(std.testing.io, .{ .argv = argv_exit0 });
+    var child = try std.process.spawn(rt.io(), .{ .argv = argv_exit0 });
     const term = try childWait(&child);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
@@ -100,7 +100,7 @@ test "childWait: exit code 1" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var child = try std.process.spawn(std.testing.io, .{ .argv = argv_exit1 });
+    var child = try std.process.spawn(rt.io(), .{ .argv = argv_exit1 });
     const term = try childWait(&child);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, term);
 }
@@ -109,7 +109,7 @@ test "childKill: terminates process" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var child = try std.process.spawn(std.testing.io, .{ .argv = argv_sleep });
+    var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
     childKill(&child);
     try std.testing.expect(child.id == null);
 }
