@@ -1021,7 +1021,7 @@ fn fileMemoryMapWriteImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.WritePo
 }
 
 fn processExecutableOpenImpl(_: ?*anyopaque, _: Io.Dir.OpenFileOptions) std.process.OpenExecutableError!Io.File {
-    @panic("TODO: processExecutableOpen");
+    @panic("processExecutableOpen: not supported");
 }
 
 fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
@@ -1106,7 +1106,7 @@ fn childKillImpl(_: ?*anyopaque, child: *std.process.Child) void {
 }
 
 fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
-    @panic("TODO: progressParentFile");
+    @panic("progressParentFile: not supported");
 }
 
 fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
