@@ -2934,6 +2934,9 @@ test "io: group runs spawned tasks to completion" {
 }
 
 test "io: batch awaitAsync executes operations linearly" {
+    // file_read_streaming uses iovec which doesn't work on Windows regular files
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
