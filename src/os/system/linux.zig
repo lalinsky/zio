@@ -397,7 +397,18 @@ pub fn unlinkat(dirfd: fd_t, path: [*:0]const u8, flags: u32) usize {
     );
 }
 
+pub const RENAME = packed struct(u32) {
+    NOREPLACE: bool = false,
+    EXCHANGE: bool = false,
+    WHITEOUT: bool = false,
+    _: u29 = 0,
+};
+
 pub fn renameat(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0]const u8) usize {
+    return renameat2(oldfd, oldpath, newfd, newpath, .{});
+}
+
+pub fn renameat2(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0]const u8, flags: RENAME) usize {
     if (@hasField(linux.SYS, "renameat2")) {
         return linux.syscall5(
             .renameat2,
@@ -405,7 +416,7 @@ pub fn renameat(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0]
             @intFromPtr(oldpath),
             @as(usize, @bitCast(@as(isize, newfd))),
             @intFromPtr(newpath),
-            0,
+            @as(u32, @bitCast(flags)),
         );
     } else {
         return linux.syscall4(

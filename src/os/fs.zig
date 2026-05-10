@@ -232,6 +232,8 @@ pub const DirRenameError = error{
     Unexpected,
 };
 
+pub const DirRenamePreserveError = DirRenameError || HardLinkError || error{PathAlreadyExists};
+
 pub const DirDeleteFileError = error{
     AccessDenied,
     FileBusy,
@@ -1044,6 +1046,37 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
             else => |err| return errnoToDirRenameError(err),
         }
     }
+}
+
+/// Rename a file without replacing if the destination exists.
+/// On Linux, uses renameat2() with RENAME_NOREPLACE.
+/// On other POSIX systems, falls back to hardlink + delete.
+/// TODO: Windows needs NtSetInformationFile with FileRenameInformationEx
+pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
+    if (builtin.os.tag == .windows) {
+        @panic("renameatPreserve: not implemented on Windows");
+    }
+
+    const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+    defer allocator.free(old_path_z);
+    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    defer allocator.free(new_path_z);
+
+    if (builtin.os.tag == .linux) {
+        while (true) {
+            const rc = posix.system.renameat2(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, .{ .NOREPLACE = true });
+            switch (posix.errno(rc)) {
+                .SUCCESS => return,
+                .INTR => continue,
+                .EXIST => return error.PathAlreadyExists,
+                else => |err| return errnoToDirRenameError(err),
+            }
+        }
+    }
+
+    // Fallback for macOS and other POSIX: hardlink + delete
+    try dirHardLink(allocator, old_dir, old_path, new_dir, new_path, .{});
+    dirDeleteFile(allocator, old_dir, old_path) catch {};
 }
 
 /// Delete a file using unlinkat() syscall
