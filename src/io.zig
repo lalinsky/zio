@@ -410,31 +410,25 @@ fn fileWriteStreamingImpl(
 
 // TODO: implement true concurrent batch operations
 fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
-    // Execute submitted operations linearly, moving each to completed list
-    while (batch.submitted.head != .none) {
-        const index = batch.submitted.head;
+    var tail_index = batch.completed.tail;
+    defer batch.completed.tail = tail_index;
+    var index = batch.submitted.head;
+    errdefer batch.submitted.head = index;
+    while (index != .none) {
         const storage = &batch.storage[index.toIndex()];
-        const submission = storage.submission;
+        const submission = &storage.submission;
+        const next_index = submission.node.next;
+        const result = try operateImpl(userdata, submission.operation);
 
-        // Remove from submitted list
-        batch.submitted.head = submission.node.next;
-        if (submission.node.next == .none) {
-            batch.submitted.tail = .none;
-        }
-
-        // Execute the operation
-        const result = operateImpl(userdata, submission.operation) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-        };
-
-        // Add to completed list
-        storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
-        switch (batch.completed.tail) {
+        switch (tail_index) {
             .none => batch.completed.head = index,
-            else => |tail_index| batch.storage[tail_index.toIndex()].completion.node.next = index,
+            else => |ti| batch.storage[ti.toIndex()].completion.node.next = index,
         }
-        batch.completed.tail = index;
+        storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+        tail_index = index;
+        index = next_index;
     }
+    batch.submitted = .{ .head = .none, .tail = .none };
 }
 
 fn batchAwaitConcurrentImpl(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
