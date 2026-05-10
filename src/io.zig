@@ -408,16 +408,44 @@ fn fileWriteStreamingImpl(
     return try op.getResult();
 }
 
-fn batchAwaitAsyncImpl(_: ?*anyopaque, _: *Io.Batch) Io.Cancelable!void {
-    @panic("TODO: batchAwaitAsync");
+// TODO: implement true concurrent batch operations
+fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
+    // Execute submitted operations linearly, moving each to completed list
+    while (batch.submitted.head != .none) {
+        const index = batch.submitted.head;
+        const storage = &batch.storage[index.toIndex()];
+        const submission = storage.submission;
+
+        // Remove from submitted list
+        batch.submitted.head = submission.node.next;
+        if (submission.node.next == .none) {
+            batch.submitted.tail = .none;
+        }
+
+        // Execute the operation
+        const result = operateImpl(userdata, submission.operation) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
+
+        // Add to completed list
+        storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+        switch (batch.completed.tail) {
+            .none => batch.completed.head = index,
+            else => |tail_index| batch.storage[tail_index.toIndex()].completion.node.next = index,
+        }
+        batch.completed.tail = index;
+    }
 }
 
 fn batchAwaitConcurrentImpl(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
-    @panic("TODO: batchAwaitConcurrent");
+    // TODO: implement true concurrent batch operations
+    return error.ConcurrencyUnavailable;
 }
 
-fn batchCancelImpl(_: ?*anyopaque, _: *Io.Batch) void {
-    @panic("TODO: batchCancel");
+fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
+    // TODO: implement proper cancellation for pending operations
+    // For now, just ensure pending list is empty (nothing is actually pending in our linear impl)
+    batch.pending = .{ .head = .none, .tail = .none };
 }
 
 fn dirCreateDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
@@ -2909,4 +2937,46 @@ test "io: group runs spawned tasks to completion" {
 
     var handle = try rt.spawn(Worker.run, .{rt.io()});
     try handle.join();
+}
+
+test "io: batch awaitAsync executes operations linearly" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_batch.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    // Write some data
+    const data = "hello batch";
+    _ = try file.writePositional(io, &.{data}, 0);
+
+    // Use batch to read it back
+    var read_buf: [32]u8 = undefined;
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch = Io.Batch.init(&storage);
+    _ = batch.add(.{ .file_read_streaming = .{ .file = file, .data = &.{&read_buf} } });
+
+    try batch.awaitAsync(io);
+
+    const completion = batch.next().?;
+    try std.testing.expectEqual(@as(u32, 0), completion.index);
+    const n = try completion.result.file_read_streaming;
+    try std.testing.expectEqualStrings(data, read_buf[0..n]);
+}
+
+test "io: batch awaitConcurrent returns ConcurrencyUnavailable" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch = Io.Batch.init(&storage);
+
+    const err = batch.awaitConcurrent(io, .{ .none = {} });
+    try std.testing.expectError(error.ConcurrencyUnavailable, err);
 }
