@@ -620,12 +620,61 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
     return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
-fn dirCreateFileAtomicImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
-    @panic("TODO: dirCreateFileAtomic");
+fn dirCreateFileAtomicImpl(_: ?*anyopaque, dir: Io.Dir, dest_path: []const u8, options: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
+    if (Io.Dir.path.dirname(dest_path)) |dirname| {
+        const new_dir = if (options.make_path)
+            dirCreateDirPathOpenImpl(null, dir, dirname, .default_dir, .{}) catch |err| switch (err) {
+                error.IsDir,
+                error.Streaming,
+                error.DiskQuota,
+                error.PathAlreadyExists,
+                error.LinkQuotaExceeded,
+                error.PipeBusy,
+                error.FileTooBig,
+                error.FileLocksUnsupported,
+                error.DeviceBusy,
+                => return error.Unexpected,
+                else => |e| return e,
+            }
+        else
+            try dirOpenDirImpl(null, dir, dirname, .{});
+        errdefer dirCloseImpl(null, &.{new_dir});
+        return atomicFileInit(Io.Dir.path.basename(dest_path), options.permissions, new_dir, true);
+    }
+    return atomicFileInit(dest_path, options.permissions, dir, false);
+}
+
+fn atomicFileInit(
+    dest_basename: []const u8,
+    permissions: Io.File.Permissions,
+    dir: Io.Dir,
+    close_dir_on_deinit: bool,
+) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
+    while (true) {
+        var random_integer: u64 = undefined;
+        randomImpl(null, std.mem.asBytes(&random_integer));
+        const tmp_sub_path = std.fmt.hex(random_integer);
+        const file = dirCreateFileImpl(null, dir, &tmp_sub_path, .{
+            .permissions = permissions,
+            .exclusive = true,
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists, error.DeviceBusy, error.FileBusy => continue,
+            error.IsDir, error.FileTooBig, error.FileLocksUnsupported, error.PipeBusy => return error.Unexpected,
+            else => |e| return e,
+        };
+        return .{
+            .file = file,
+            .file_basename_hex = random_integer,
+            .dest_sub_path = dest_basename,
+            .file_open = true,
+            .file_exists = true,
+            .close_dir_on_deinit = close_dir_on_deinit,
+            .dir = dir,
+        };
+    }
 }
 
 fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-    if (!options.allow_directory) @panic("TODO: openFile allow_directory=false");
     if (options.path_only) @panic("TODO: openFile path_only");
     if (options.lock != .none) @panic("TODO: openFile lock");
     if (options.lock_nonblocking) @panic("TODO: openFile lock_nonblocking");
@@ -634,6 +683,7 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     if (options.resolve_beneath) @panic("TODO: openFile resolve_beneath");
     var op = ev.FileOpen.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .mode = stdIoModeToZio(options.mode),
+        .allow_directory = options.allow_directory,
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
@@ -3075,4 +3125,82 @@ test "io: batch awaitConcurrent returns ConcurrencyUnavailable" {
 
     const err = batch.awaitConcurrent(io, .{ .none = {} });
     try std.testing.expectError(error.ConcurrencyUnavailable, err);
+}
+
+test "io: createFileAtomic link" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dest_path = "test_io_atomic_file.txt";
+    defer dir.deleteFile(io, dest_path) catch {};
+
+    var af = try dir.createFileAtomic(io, dest_path, .{});
+    defer af.deinit(io);
+
+    _ = try af.file.writePositional(io, &.{"hello atomic"}, 0);
+
+    try af.link(io);
+
+    const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("hello atomic", content);
+}
+
+test "io: createFileAtomic replace" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dest_path = "test_io_atomic_replace.txt";
+    defer dir.deleteFile(io, dest_path) catch {};
+
+    // Create initial file.
+    var f = try dir.createFile(io, dest_path, .{});
+    _ = try f.writePositional(io, &.{"original"}, 0);
+    f.close(io);
+
+    // Replace atomically.
+    var af = try dir.createFileAtomic(io, dest_path, .{ .replace = true });
+    defer af.deinit(io);
+
+    _ = try af.file.writePositional(io, &.{"replaced"}, 0);
+
+    try af.replace(io);
+
+    const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("replaced", content);
+}
+
+test "io: createFileAtomic with make_path" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dest_path = "test_io_atomic_nested/subdir/file.txt";
+    defer {
+        dir.deleteFile(io, dest_path) catch {};
+        dir.deleteDir(io, "test_io_atomic_nested/subdir") catch {};
+        dir.deleteDir(io, "test_io_atomic_nested") catch {};
+    }
+
+    // Clean up from previous runs.
+    dir.deleteFile(io, dest_path) catch {};
+    dir.deleteDir(io, "test_io_atomic_nested/subdir") catch {};
+    dir.deleteDir(io, "test_io_atomic_nested") catch {};
+
+    var af = try dir.createFileAtomic(io, dest_path, .{ .make_path = true });
+    defer af.deinit(io);
+
+    _ = try af.file.writePositional(io, &.{"nested atomic"}, 0);
+
+    try af.link(io);
+
+    const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("nested atomic", content);
 }
