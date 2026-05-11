@@ -45,15 +45,10 @@ pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) 
 }
 
 fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
+    // Round maximum_size up to page boundary, then add guard page
+    const aligned_max = std.mem.alignForward(usize, maximum_size, page_size);
     // Ensure we allocate at least 2 pages (guard + usable space)
-    const min_pages = 2;
-    // Add guard page to maximum_size to get total allocation size
-    const adjusted_size = @max(maximum_size + page_size, page_size * min_pages);
-
-    const size = std.math.ceilPowerOfTwo(usize, adjusted_size) catch |err| {
-        log.err("Failed to calculate stack size: {}", .{err});
-        return error.OutOfMemory;
-    };
+    const size = @max(aligned_max + page_size, page_size * 2);
 
     // Reserve address space with PROT_NONE
     // On NetBSD/FreeBSD, we must declare future permissions upfront for security policies
@@ -74,7 +69,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
         -1, // File descriptor (not applicable)
         0, // Offset within the file (not applicable)
     ) catch |err| {
-        log.err("Failed to allocate stack memory: {}", .{err});
+        log.err("Failed to mmap stack memory (size={d}): {}", .{ size, err });
         return error.OutOfMemory;
     };
     errdefer posix.munmap(allocation) catch {};
@@ -101,7 +96,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     const initial_commit_start = stack_top - commit_size;
     const initial_region: [*]align(page_size) u8 = @ptrFromInt(initial_commit_start);
     posix.mprotect(initial_region[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
-        log.err("Failed to commit initial stack region: {}", .{err});
+        log.err("Failed to mprotect stack region (commit_size={d}): {}", .{ commit_size, err });
         return error.OutOfMemory;
     };
 
