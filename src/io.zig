@@ -470,7 +470,7 @@ fn dirCreateDirPathImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permi
     var component = it.last() orelse return error.BadPathName;
     while (true) {
         var op = ev.DirCreateDir.init(stdIoHandleToZio(dir.handle), component.path, permissionsToZioMode(permissions));
-        waitForIo(&op.c) catch |err| return err;
+        try waitForIo(&op.c);
         if (op.getResult()) |_| {
             status = .created;
         } else |err| switch (err) {
@@ -490,7 +490,7 @@ fn dirCreateDirPathImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permi
 
 fn filePathKind(dir: Io.Dir, sub_path: []const u8) Io.Dir.StatFileError!Io.File.Kind {
     var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), sub_path, .{ .follow_symlinks = false });
-    waitForIo(&op.c) catch |err| return err;
+    try waitForIo(&op.c);
     const info = op.getResult() catch |err| return statFileErrToStdErr(err);
     return zioKindToStdIoKind(info.kind);
 }
