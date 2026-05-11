@@ -464,12 +464,45 @@ fn resolveSetTimestamp(t: Io.File.SetTimestamp) ?i96 {
     };
 }
 
-fn dirCreateDirPathImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
-    @panic("TODO: dirCreateDirPath");
+fn dirCreateDirPathImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
+    var it = Io.Dir.path.componentIterator(sub_path);
+    var status: Io.Dir.CreatePathStatus = .existed;
+    var component = it.last() orelse return error.BadPathName;
+    while (true) {
+        var op = ev.DirCreateDir.init(stdIoHandleToZio(dir.handle), component.path, permissionsToZioMode(permissions));
+        try waitForIo(&op.c);
+        if (op.getResult()) |_| {
+            status = .created;
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {
+                const kind = try filePathKind(dir, component.path);
+                if (kind != .directory) return error.NotDir;
+            },
+            error.FileNotFound => {
+                component = it.previous() orelse return error.FileNotFound;
+                continue;
+            },
+            else => |e| return e,
+        }
+        component = it.next() orelse return status;
+    }
 }
 
-fn dirCreateDirPathOpenImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions, _: Io.Dir.OpenOptions) Io.Dir.CreateDirPathOpenError!Io.Dir {
-    @panic("TODO: dirCreateDirPathOpen");
+fn filePathKind(dir: Io.Dir, sub_path: []const u8) Io.Dir.StatFileError!Io.File.Kind {
+    var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), sub_path, .{ .follow_symlinks = false });
+    try waitForIo(&op.c);
+    const info = op.getResult() catch |err| return statFileErrToStdErr(err);
+    return zioKindToStdIoKind(info.kind);
+}
+
+fn dirCreateDirPathOpenImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions, options: Io.Dir.OpenOptions) Io.Dir.CreateDirPathOpenError!Io.Dir {
+    return dirOpenDirImpl(null, dir, sub_path, options) catch |err| switch (err) {
+        error.FileNotFound => {
+            _ = try dirCreateDirPathImpl(null, dir, sub_path, permissions);
+            return dirOpenDirImpl(null, dir, sub_path, options);
+        },
+        else => |e| return e,
+    };
 }
 
 fn dirOpenDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
@@ -2703,6 +2736,72 @@ test "io: dir create/delete" {
     try std.testing.expectError(error.PathAlreadyExists, dir.createDir(io, dir_path, .default_dir));
     try dir.deleteDir(io, dir_path);
     try std.testing.expectError(error.FileNotFound, dir.deleteDir(io, dir_path));
+}
+
+test "io: dir createDirPath creates nested directories" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const sep = Io.Dir.path.sep_str;
+    const nested_path = "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c";
+    const base_path = "test_io_createDirPath";
+
+    // Clean up from previous failed runs.
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b") catch {};
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a") catch {};
+    dir.deleteDir(io, base_path) catch {};
+
+    defer {
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b") catch {};
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a") catch {};
+        dir.deleteDir(io, base_path) catch {};
+    }
+
+    // Create nested path from scratch.
+    const status = try dir.createDirPathStatus(io, nested_path, .default_dir);
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.created, status);
+
+    // Verify it exists.
+    var sub = try dir.openDir(io, nested_path, .{});
+    sub.close(io);
+
+    // Creating again should return .existed.
+    const status2 = try dir.createDirPathStatus(io, nested_path, .default_dir);
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.existed, status2);
+}
+
+test "io: dir createDirPathOpen creates and opens" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const sep = Io.Dir.path.sep_str;
+    const nested_path = "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y";
+    const base_path = "test_io_createDirPathOpen";
+
+    // Clean up from previous failed runs.
+    dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y") catch {};
+    dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x") catch {};
+    dir.deleteDir(io, base_path) catch {};
+
+    defer {
+        dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y") catch {};
+        dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x") catch {};
+        dir.deleteDir(io, base_path) catch {};
+    }
+
+    // Create and open nested path.
+    var sub = try dir.createDirPathOpen(io, nested_path, .{});
+    sub.close(io);
+
+    // Should be able to open it again.
+    var sub2 = try dir.openDir(io, nested_path, .{});
+    sub2.close(io);
 }
 
 test "io: dir iterate over files" {
