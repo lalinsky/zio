@@ -1443,8 +1443,6 @@ test "Coroutine: stack trace" {
         coro.step();
     }
 
-    std.debug.dumpStackTrace(&test_data.trace);
-
     const trace_len = test_data.trace.return_addresses.len;
     std.testing.expect(trace_len > 1 and trace_len < 7) catch |err| {
         std.debug.dumpStackTrace(&test_data.trace);
