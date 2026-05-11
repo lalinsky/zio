@@ -674,7 +674,6 @@ fn atomicFileInit(
 }
 
 fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-    if (!options.allow_directory) @panic("TODO: openFile allow_directory=false");
     if (options.path_only) @panic("TODO: openFile path_only");
     if (options.lock != .none) @panic("TODO: openFile lock");
     if (options.lock_nonblocking) @panic("TODO: openFile lock_nonblocking");
@@ -683,6 +682,7 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     if (options.resolve_beneath) @panic("TODO: openFile resolve_beneath");
     var op = ev.FileOpen.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .mode = stdIoModeToZio(options.mode),
+        .allow_directory = options.allow_directory,
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);

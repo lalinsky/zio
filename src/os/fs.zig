@@ -105,6 +105,10 @@ pub const FileOpenMode = enum {
 pub const FileOpenFlags = struct {
     mode: FileOpenMode = .read_only,
     nonblocking: bool = false,
+    /// When false, opening a directory path returns error.IsDir.
+    /// On Windows this is enforced without extra syscalls (no FILE_FLAG_BACKUP_SEMANTICS).
+    /// On POSIX an extra fstat is required; defaults to true to avoid the overhead.
+    allow_directory: bool = true,
 };
 
 pub const DirOpenFlags = struct {
@@ -567,10 +571,14 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             .read_write => w.GENERIC_READ | w.GENERIC_WRITE,
         };
 
-        const file_flags: w.DWORD = if (flags.nonblocking)
+        var file_flags: w.DWORD = if (flags.nonblocking)
             w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_OVERLAPPED
         else
             w.FILE_ATTRIBUTE_NORMAL;
+        // FILE_FLAG_BACKUP_SEMANTICS is required to open directory handles.
+        // Without it, opening a directory path fails with ACCESS_DENIED, which
+        // gives us allow_directory=false semantics for free.
+        if (flags.allow_directory) file_flags |= w.FILE_FLAG_BACKUP_SEMANTICS;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -1051,10 +1059,32 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
 /// Rename a file without replacing if the destination exists.
 /// On Linux, uses renameat2() with RENAME_NOREPLACE.
 /// On other POSIX systems, falls back to hardlink + delete.
-/// TODO: Windows needs NtSetInformationFile with FileRenameInformationEx
+/// On Windows, uses MoveFileExW without MOVEFILE_REPLACE_EXISTING.
 pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
     if (builtin.os.tag == .windows) {
-        @panic("renameatPreserve: not implemented on Windows");
+        const old_path_w = try w.pathToWide(allocator, old_dir, old_path);
+        defer allocator.free(old_path_w);
+        const new_path_w = try w.pathToWide(allocator, new_dir, new_path);
+        defer allocator.free(new_path_w);
+
+        const success = w.MoveFileExW(
+            old_path_w.ptr,
+            new_path_w.ptr,
+            0, // No MOVEFILE_REPLACE_EXISTING: fails if destination exists.
+        );
+
+        if (success == w.FALSE) {
+            switch (w.GetLastError()) {
+                .FILE_NOT_FOUND => return error.FileNotFound,
+                .PATH_NOT_FOUND => return error.FileNotFound,
+                .ACCESS_DENIED => return error.AccessDenied,
+                .ALREADY_EXISTS, .FILE_EXISTS => return error.PathAlreadyExists,
+                .SHARING_VIOLATION => return error.FileBusy,
+                else => |err| return unexpectedError(err),
+            }
+        }
+
+        return;
     }
 
     const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;

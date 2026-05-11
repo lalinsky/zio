@@ -1217,5 +1217,10 @@ fn utf8ToWide(allocator: std.mem.Allocator, utf8: []const u8) PathToWideError![:
         };
     }
 
+    // Normalize forward slashes to backslashes.
+    for (wide) |*c| {
+        if (c.* == '/') c.* = '\\';
+    }
+
     return wide;
 }
