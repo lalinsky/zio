@@ -638,6 +638,7 @@ fn dirCreateFileAtomicImpl(_: ?*anyopaque, dir: Io.Dir, dest_path: []const u8, o
             }
         else
             try dirOpenDirImpl(null, dir, dirname, .{});
+        errdefer dirCloseImpl(null, &.{new_dir});
         return atomicFileInit(Io.Dir.path.basename(dest_path), options.permissions, new_dir, true);
     }
     return atomicFileInit(dest_path, options.permissions, dir, false);
