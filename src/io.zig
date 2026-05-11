@@ -2695,19 +2695,20 @@ test "io: dir createDirPath creates nested directories" {
     const io = rt.io();
 
     const dir: Io.Dir = .cwd();
-    const nested_path = "test_io_createDirPath/a/b/c";
+    const sep = Io.Dir.path.sep_str;
+    const nested_path = "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c";
     const base_path = "test_io_createDirPath";
 
     // Clean up from previous failed runs.
-    dir.deleteDir(io, "test_io_createDirPath/a/b/c") catch {};
-    dir.deleteDir(io, "test_io_createDirPath/a/b") catch {};
-    dir.deleteDir(io, "test_io_createDirPath/a") catch {};
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b") catch {};
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a") catch {};
     dir.deleteDir(io, base_path) catch {};
 
     defer {
-        dir.deleteDir(io, "test_io_createDirPath/a/b/c") catch {};
-        dir.deleteDir(io, "test_io_createDirPath/a/b") catch {};
-        dir.deleteDir(io, "test_io_createDirPath/a") catch {};
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b") catch {};
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a") catch {};
         dir.deleteDir(io, base_path) catch {};
     }
 
@@ -2730,17 +2731,18 @@ test "io: dir createDirPathOpen creates and opens" {
     const io = rt.io();
 
     const dir: Io.Dir = .cwd();
-    const nested_path = "test_io_createDirPathOpen/x/y";
+    const sep = Io.Dir.path.sep_str;
+    const nested_path = "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y";
     const base_path = "test_io_createDirPathOpen";
 
     // Clean up from previous failed runs.
-    dir.deleteDir(io, "test_io_createDirPathOpen/x/y") catch {};
-    dir.deleteDir(io, "test_io_createDirPathOpen/x") catch {};
+    dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y") catch {};
+    dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x") catch {};
     dir.deleteDir(io, base_path) catch {};
 
     defer {
-        dir.deleteDir(io, "test_io_createDirPathOpen/x/y") catch {};
-        dir.deleteDir(io, "test_io_createDirPathOpen/x") catch {};
+        dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y") catch {};
+        dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x") catch {};
         dir.deleteDir(io, base_path) catch {};
     }
 
