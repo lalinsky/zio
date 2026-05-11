@@ -2,7 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.10.0] - 2026-04-26
+## [0.11.0] - 2026-05-11
+
+### Added
+
+- `std.Io` interface is now essentially complete. All major operations are implemented:
+  - Spawn and wait on child processes, with non-blocking pipe I/O on POSIX.
+  - Iterate over directory entries.
+  - Create nested directory paths.
+  - Create files atomically (write to temp file, then rename into place), with optional `make_path`
+    and `replace` support.
+  - Rename files without overwriting existing destinations.
+  - Batch multiple file I/O operations for linear execution (concurrent execution is deferred).
+- `Stream.Reader.fromStd` and `Stream.Writer.fromStd` convert `std.Io.net.Stream` to zio's buffered
+  reader/writer, enabling seamless interop between zio and std networking in the same program.
+
+### Changed
+
+- `net.Stream.Reader` and `net.Stream.Writer` are now lighter, storing only the socket handle instead of
+  the full stream.
+
+### Fixed
+
+- Fixed a critical bug on Linux with the epoll backend where non-blocking network reads and writes could
+  silently succeed with garbage data instead of returning `error.WouldBlock`.
 
 ### Added
 
