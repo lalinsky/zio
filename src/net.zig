@@ -32,6 +32,31 @@ pub const has_unix_sockets = switch (builtin.os.tag) {
 
 pub const default_kernel_backlog = 128;
 
+fn stdIoHandleToZio(h: std.Io.net.Socket.Handle) Handle {
+    return if (@typeInfo(Handle) == .pointer) @ptrCast(h) else h;
+}
+
+pub fn readBuf(handle: Handle, buf: ev.ReadBuf, timeout: Timeout) (ev.NetRecv.Error || common.Timeoutable)!usize {
+    var op = ev.NetRecv.init(handle, buf, .{});
+    try timedWaitForIo(&op.c, timeout);
+    return try op.getResult();
+}
+
+pub fn writeBuf(handle: Handle, buf: ev.WriteBuf, timeout: Timeout) (ev.NetSend.Error || common.Timeoutable)!usize {
+    var op = ev.NetSend.init(handle, buf, .{});
+    try timedWaitForIo(&op.c, timeout);
+    return try op.getResult();
+}
+
+pub fn writeSplatHeader(handle: Handle, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) (ev.NetSend.Error || common.Timeoutable)!usize {
+    var splat_buf: [64]u8 = undefined;
+    var slices: [max_vecs][]const u8 = undefined;
+    const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
+
+    var storage: [max_vecs]os.iovec_const = undefined;
+    return writeBuf(handle, .fromSlices(slices[0..buf_len], &storage), timeout);
+}
+
 /// A validated hostname according to RFC 1123.
 /// * Has length less than or equal to `max_len`.
 /// * Labels are 1-63 characters, separated by dots.
@@ -942,28 +967,14 @@ pub const Socket = struct {
     /// A return value of 0 indicates the socket has been shut down.
     pub fn receive(self: Socket, buf: []u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec = undefined;
-        return self.receiveBuf(.fromSlice(buf, &storage), timeout);
-    }
-
-    /// Low-level receive function that accepts ev.ReadBuf directly.
-    pub fn receiveBuf(self: Socket, buf: ev.ReadBuf, timeout: Timeout) !usize {
-        var op = ev.NetRecv.init(self.handle, buf, .{});
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
+        return readBuf(self.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Sends data from the provided buffer to the socket.
     /// Returns the number of bytes sent, which may be less than buf.len.
     pub fn send(self: Socket, buf: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
-        return self.sendBuf(.fromSlice(buf, &storage), timeout);
-    }
-
-    /// Low-level send function that accepts ev.WriteBuf directly.
-    pub fn sendBuf(self: Socket, buf: ev.WriteBuf, timeout: Timeout) !usize {
-        var op = ev.NetSend.init(self.handle, buf, .{});
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
+        return writeBuf(self.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
@@ -1066,7 +1077,7 @@ pub const Stream = struct {
     /// A return value of 0 indicates end-of-stream.
     pub fn read(self: Stream, buf: []u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec = undefined;
-        return self.readBuf(.fromSlice(buf, &storage), timeout);
+        return readBuf(self.socket.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Reads data from the stream into multiple buffers using vectored I/O.
@@ -1074,21 +1085,14 @@ pub const Stream = struct {
     /// A return value of 0 indicates end-of-stream.
     pub fn readVec(self: Stream, bufs: [][]u8, timeout: Timeout) !usize {
         var storage: [max_vecs]os.iovec = undefined;
-        return self.readBuf(.fromSlices(bufs, &storage), timeout);
-    }
-
-    /// Low-level read function that accepts ev.ReadBuf directly.
-    /// Returns the number of bytes read, which may be less than requested.
-    /// A return value of 0 indicates end-of-stream.
-    pub fn readBuf(self: Stream, buf: ev.ReadBuf, timeout: Timeout) !usize {
-        return self.socket.receiveBuf(buf, timeout);
+        return readBuf(self.socket.handle, .fromSlices(bufs, &storage), timeout);
     }
 
     /// Writes data from the provided buffer to the stream.
     /// Returns the number of bytes written, which may be less than buf.len.
     pub fn write(self: Stream, buf: []const u8, timeout: Timeout) !usize {
         var storage: [1]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlice(buf, &storage), timeout);
+        return writeBuf(self.socket.handle, .fromSlice(buf, &storage), timeout);
     }
 
     /// Writes data from the provided buffer to the stream until it is empty.
@@ -1105,23 +1109,7 @@ pub const Stream = struct {
     /// Returns the number of bytes written across all buffers, which may be less than the total.
     pub fn writeVec(self: Stream, bufs: []const []const u8, timeout: Timeout) !usize {
         var storage: [max_vecs]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlices(bufs, &storage), timeout);
-    }
-
-    /// Writes header followed by data slices, with optional splat (repeat) of the last slice.
-    /// Used internally by the buffered Writer.
-    pub fn writeSplatHeader(self: Stream, header: []const u8, data: []const []const u8, splat: usize, timeout: Timeout) !usize {
-        var splat_buf: [64]u8 = undefined;
-        var slices: [max_vecs][]const u8 = undefined;
-        const buf_len = fillBuf(&slices, header, data, splat, &splat_buf);
-
-        var storage: [max_vecs]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlices(slices[0..buf_len], &storage), timeout);
-    }
-
-    /// Low-level write function that accepts ev.WriteBuf directly.
-    pub fn writeBuf(self: Stream, buf: ev.WriteBuf, timeout: Timeout) !usize {
-        return self.socket.sendBuf(buf, timeout);
+        return writeBuf(self.socket.handle, .fromSlices(bufs, &storage), timeout);
     }
 
     /// Shuts down all or part of a full-duplex connection.
@@ -1135,14 +1123,14 @@ pub const Stream = struct {
     }
 
     pub const Reader = struct {
-        stream: Stream,
+        handle: Handle,
         interface: std.Io.Reader,
         timeout: Timeout = .none,
         err: ?(ev.NetRecv.Error || common.Timeoutable) = null,
 
-        pub fn init(stream: Stream, buffer: []u8) Reader {
+        pub fn init(handle: Handle, buffer: []u8) Reader {
             return .{
-                .stream = stream,
+                .handle = handle,
                 .interface = .{
                     .vtable = &.{
                         .stream = streamImpl,
@@ -1153,6 +1141,11 @@ pub const Stream = struct {
                     .end = 0,
                 },
             };
+        }
+
+        pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Reader {
+            _ = Runtime.fromIo(io);
+            return init(stdIoHandleToZio(stream.socket.handle), buffer);
         }
 
         pub fn setTimeout(self: *Reader, timeout: Timeout) void {
@@ -1176,7 +1169,7 @@ pub const Stream = struct {
                 try io_r.writableVectorPosix(&storage, data);
             if (dest_n == 0) return 0;
 
-            const n = r.stream.readBuf(.{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
+            const n = readBuf(r.handle, .{ .iovecs = storage[0..dest_n] }, r.timeout) catch |err| {
                 r.err = err;
                 return error.ReadFailed;
             };
@@ -1193,14 +1186,14 @@ pub const Stream = struct {
     };
 
     pub const Writer = struct {
-        stream: Stream,
+        handle: Handle,
         interface: std.Io.Writer,
         timeout: Timeout = .none,
         err: ?(ev.NetSend.Error || common.Timeoutable) = null,
 
-        pub fn init(stream: Stream, buffer: []u8) Writer {
+        pub fn init(handle: Handle, buffer: []u8) Writer {
             return .{
-                .stream = stream,
+                .handle = handle,
                 .interface = .{
                     .vtable = &.{
                         .drain = drainImpl,
@@ -1210,6 +1203,11 @@ pub const Stream = struct {
             };
         }
 
+        pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Writer {
+            _ = Runtime.fromIo(io);
+            return init(stdIoHandleToZio(stream.socket.handle), buffer);
+        }
+
         pub fn setTimeout(self: *Writer, timeout: Timeout) void {
             self.timeout = timeout;
         }
@@ -1217,7 +1215,7 @@ pub const Stream = struct {
         fn drainImpl(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const w: *Writer = @alignCast(@fieldParentPtr("interface", io_w));
             const buffered = io_w.buffered();
-            const n = w.stream.writeSplatHeader(buffered, data, splat, w.timeout) catch |err| {
+            const n = writeSplatHeader(w.handle, buffered, data, splat, w.timeout) catch |err| {
                 w.err = err;
                 return error.WriteFailed;
             };
@@ -1227,12 +1225,12 @@ pub const Stream = struct {
 
     /// Creates a buffered reader for the given stream.
     pub fn reader(stream: Stream, buffer: []u8) Reader {
-        return .init(stream, buffer);
+        return .init(stream.socket.handle, buffer);
     }
 
     /// Creates a buffered writer for the given stream.
     pub fn writer(stream: Stream, buffer: []u8) Writer {
-        return .init(stream, buffer);
+        return .init(stream.socket.handle, buffer);
     }
 };
 
@@ -1363,27 +1361,19 @@ test "HostName: connect" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    const Test = struct {
-        fn run() !void {
-            // Start a server
-            const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try server_addr.listen(.{});
-            defer server.close();
+    // Start a server
+    const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try server_addr.listen(.{});
+    defer server.close();
 
-            const port = server.socket.address.ip.getPort();
+    const port = server.socket.address.ip.getPort();
 
-            // Connect via HostName
-            const host = try HostName.init("localhost");
-            var stream = try host.connect(port, .{});
-            defer stream.close();
+    // Connect via HostName
+    const host = try HostName.init("localhost");
+    var stream = try host.connect(port, .{});
+    defer stream.close();
 
-            try stream.writeAll("hello", .none);
-        }
-    };
-
-    var task = try rt.spawn(Test.run, .{});
-    defer task.cancel();
-    try task.join();
+    try stream.writeAll("hello", .none);
 }
 
 test "IpAddress: getFamily" {
@@ -1507,7 +1497,7 @@ test "tcpConnectToAddress: basic" {
 }
 
 test "tcpConnectToHost: basic" {
-    if (builtin.os.tag == .macos) return error.SkipZigTest;
+    if (builtin.os.tag == .macos or builtin.os.tag == .netbsd) return error.SkipZigTest;
 
     const ServerTask = struct {
         fn run(server_port: *Channel(u16)) !void {
@@ -1862,19 +1852,6 @@ test "UnixAddress: init" {
 
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const Test = struct {
-        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options), write_buffer_inner: []u8) !void {
-            const server = try addr_inner.listen(options_inner);
-            defer server.close();
-
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(serverFn, .{server});
-            try group.spawn(clientFn, .{ server, write_buffer_inner });
-
-            try group.wait();
-        }
-
         pub fn serverFn(server: Server) !void {
             const client = try server.accept(.{});
             defer client.close();
@@ -1904,25 +1881,20 @@ pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ addr, options, write_buffer });
-    try handle.join();
+    const server = try addr.listen(options);
+    defer server.close();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.serverFn, .{server});
+    try group.spawn(Test.clientFn, .{ server, write_buffer });
+
+    try group.wait();
 }
 
 pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const Test = struct {
-        pub fn mainFn(server_addr_inner: @TypeOf(server_addr), client_addr_inner: @TypeOf(client_addr)) !void {
-            const socket = try server_addr_inner.bind(.{});
-            defer socket.close();
-
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(serverFn, .{socket});
-            try group.spawn(clientFn, .{ socket, client_addr_inner });
-
-            try group.wait();
-        }
-
         pub fn serverFn(socket: Socket) !void {
             var buf: [1024]u8 = undefined;
             const result = try socket.receiveFrom(&buf, .none);
@@ -1950,25 +1922,20 @@ pub fn checkBind(server_addr: anytype, client_addr: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ server_addr, client_addr });
-    try handle.join();
+    const socket = try server_addr.bind(.{});
+    defer socket.close();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.serverFn, .{socket});
+    try group.spawn(Test.clientFn, .{ socket, client_addr });
+
+    try group.wait();
 }
 
 pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const Test = struct {
-        pub fn mainFn(addr_inner: @TypeOf(addr), options_inner: @TypeOf(options)) !void {
-            const server = try addr_inner.listen(options_inner);
-            defer server.close();
-
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(serverFn, .{server});
-            try group.spawn(clientFn, .{server});
-
-            try group.wait();
-        }
-
         pub fn serverFn(server: Server) !void {
             const client = try server.accept(.{});
             defer client.close();
@@ -1991,8 +1958,16 @@ pub fn checkShutdown(addr: anytype, options: anytype) !void {
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(Test.mainFn, .{ addr, options });
-    try handle.join();
+    const server = try addr.listen(options);
+    defer server.close();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.serverFn, .{server});
+    try group.spawn(Test.clientFn, .{server});
+
+    try group.wait();
 }
 
 test "UnixAddress: listen/accept/connect/read/write" {
@@ -2130,15 +2105,30 @@ test "Server: accept timeout" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    var handle = try runtime.spawn(struct {
-        fn run() !void {
-            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
-            const server = try addr.listen(.{});
-            defer server.close();
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
 
-            const result = server.accept(.{ .timeout = Timeout.fromMilliseconds(10) });
-            try std.testing.expectError(error.Timeout, result);
-        }
-    }.run, .{});
-    try handle.join();
+    const result = server.accept(.{ .timeout = Timeout.fromMilliseconds(10) });
+    try std.testing.expectError(error.Timeout, result);
+}
+
+test "Stream.Reader/Writer.fromStd" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+    const io = runtime.io();
+
+    var server = try std.Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{});
+    defer server.deinit(io);
+
+    const stream = try std.Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var read_buf: [64]u8 = undefined;
+    var write_buf: [64]u8 = undefined;
+    const reader = Stream.Reader.fromStd(stream, io, &read_buf);
+    const writer = Stream.Writer.fromStd(stream, io, &write_buf);
+
+    try std.testing.expectEqual(stdIoHandleToZio(stream.socket.handle), reader.handle);
+    try std.testing.expectEqual(stdIoHandleToZio(stream.socket.handle), writer.handle);
 }

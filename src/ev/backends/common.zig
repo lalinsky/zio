@@ -21,6 +21,7 @@ const FileSetOwner = @import("../completion.zig").FileSetOwner;
 const FileSetTimestamps = @import("../completion.zig").FileSetTimestamps;
 const DirCreateDir = @import("../completion.zig").DirCreateDir;
 const DirRename = @import("../completion.zig").DirRename;
+const DirRenamePreserve = @import("../completion.zig").DirRenamePreserve;
 const DirDeleteFile = @import("../completion.zig").DirDeleteFile;
 const DirDeleteDir = @import("../completion.zig").DirDeleteDir;
 const FileSize = @import("../completion.zig").FileSize;
@@ -503,7 +504,8 @@ pub fn dirAccessWork(work: *Work) void {
 /// Helper to handle dir read operation
 pub fn handleDirRead(c: *Completion) void {
     const data = c.cast(DirRead);
-    if (fs.dirRead(data.handle, data.buffer, data.restart)) |bytes| {
+    const buffer = fs.DirEntryIterator.getUnreservedBuffer(data.buffer);
+    if (fs.dirRead(data.handle, buffer, data.restart)) |bytes| {
         c.setResult(.dir_read, bytes);
     } else |err| {
         c.setError(err);
@@ -605,6 +607,16 @@ pub fn handleDirRename(c: *Completion, allocator: std.mem.Allocator) void {
     }
 }
 
+/// Helper to handle dir rename preserve operation
+pub fn handleDirRenamePreserve(c: *Completion, allocator: std.mem.Allocator) void {
+    const data = c.cast(DirRenamePreserve);
+    if (fs.renameatPreserve(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
+        c.setResult(.dir_rename_preserve, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
 /// Helper to handle dir delete file operation
 pub fn handleDirDeleteFile(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(DirDeleteFile);
@@ -637,6 +649,13 @@ pub fn dirRenameWork(work: *Work) void {
     const internal: *@FieldType(DirRename, "internal") = @fieldParentPtr("work", work);
     const dir_rename: *DirRename = @fieldParentPtr("internal", internal);
     handleDirRename(&dir_rename.c, dir_rename.internal.allocator);
+}
+
+/// Work function for DirRenamePreserve - performs blocking renameat2() syscall with NOREPLACE
+pub fn dirRenamePreserveWork(work: *Work) void {
+    const internal: *@FieldType(DirRenamePreserve, "internal") = @fieldParentPtr("work", work);
+    const dir_rename_preserve: *DirRenamePreserve = @fieldParentPtr("internal", internal);
+    handleDirRenamePreserve(&dir_rename_preserve.c, dir_rename_preserve.internal.allocator);
 }
 
 /// Work function for DirDeleteFile - performs blocking unlinkat() syscall

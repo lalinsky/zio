@@ -238,19 +238,9 @@ test "Barrier: single coroutine barrier" {
     defer runtime.deinit();
 
     var barrier = Barrier.init(1);
-    var is_leader_result = false;
 
-    const TestFn = struct {
-        fn worker(b: *Barrier, leader: *bool) !void {
-            const is_leader = try b.wait();
-            leader.* = is_leader;
-        }
-    };
-
-    var handle = try runtime.spawn(TestFn.worker, .{ &barrier, &is_leader_result });
-    try handle.join();
-
-    try std.testing.expect(is_leader_result);
+    const is_leader = try barrier.wait();
+    try std.testing.expect(is_leader);
 }
 
 test "Barrier: ordering test" {

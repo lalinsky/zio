@@ -299,57 +299,45 @@ test "Group: spawn" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        fn asyncTask() !void {
-            var group: Group = .init;
-            defer group.cancel();
+    var group: Group = .init;
+    defer group.cancel();
 
-            try group.spawn(testFn, .{0});
+    try group.spawn(testFn, .{0});
 
-            try group.wait();
-        }
-    };
-
-    var handle = try rt.spawn(TestContext.asyncTask, .{});
-    try handle.join();
+    try group.wait();
 }
 
 test "Group: wait for multiple tasks" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
-        var completed: usize = 0;
+    const completed = struct {
+        var value: usize = 0;
 
         fn task() void {
-            _ = @atomicRmw(usize, &completed, .Add, 1, .monotonic);
-        }
-
-        fn asyncTask() !void {
-            completed = 0;
-
-            var group: Group = .init;
-            defer group.cancel();
-
-            try group.spawn(task, .{});
-            try group.spawn(task, .{});
-            try group.spawn(task, .{});
-
-            try group.wait();
-
-            try std.testing.expectEqual(3, completed);
+            _ = @atomicRmw(usize, &value, .Add, 1, .monotonic);
         }
     };
 
-    var handle = try rt.spawn(TestContext.asyncTask, .{});
-    try handle.join();
+    completed.value = 0;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(completed.task, .{});
+    try group.spawn(completed.task, .{});
+    try group.spawn(completed.task, .{});
+
+    try group.wait();
+
+    try std.testing.expectEqual(3, completed.value);
 }
 
 test "Group: cancellation while waiting" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const TestContext = struct {
+    const counts = struct {
         var started: usize = 0;
         var canceled: usize = 0;
 
@@ -359,49 +347,48 @@ test "Group: cancellation while waiting" {
                 _ = @atomicRmw(usize, &canceled, .Add, 1, .monotonic);
             };
         }
+    };
 
-        fn cancellerTask(runtime: *Runtime, group_handle: *JoinHandle(anyerror!void)) !void {
+    const cancellerTask = struct {
+        fn call(runtime: *Runtime, group_handle: *JoinHandle(anyerror!void)) !void {
             // Wait a bit for tasks to start
             try runtime.sleep(.fromMilliseconds(10));
             // Cancel the group waiter
             group_handle.awaitable.?.cancel();
         }
+    }.call;
 
-        fn groupTask() anyerror!void {
+    const groupTask = struct {
+        fn call() anyerror!void {
             var group: Group = .init;
             defer group.cancel();
 
             // Spawn multiple slow tasks
-            try group.spawn(slowTask, .{});
-            try group.spawn(slowTask, .{});
-            try group.spawn(slowTask, .{});
+            try group.spawn(counts.slowTask, .{});
+            try group.spawn(counts.slowTask, .{});
+            try group.spawn(counts.slowTask, .{});
 
             // This wait should be interrupted by cancellation
             group.wait() catch {};
         }
+    }.call;
 
-        fn asyncTask(runtime: *Runtime) !void {
-            started = 0;
-            canceled = 0;
+    counts.started = 0;
+    counts.canceled = 0;
 
-            // Spawn the group task
-            var group_handle = try runtime.spawn(groupTask, .{});
+    // Spawn the group task
+    var group_handle = try rt.spawn(groupTask, .{});
 
-            // Spawn a task that will cancel the group task
-            var canceller = try runtime.spawn(cancellerTask, .{ runtime, &group_handle });
-            defer canceller.cancel();
+    // Spawn a task that will cancel the group task
+    var canceller = try rt.spawn(cancellerTask, .{ rt, &group_handle });
+    defer canceller.cancel();
 
-            // Wait for group task to complete (should be canceled)
-            try group_handle.join();
+    // Wait for group task to complete (should be canceled)
+    try group_handle.join();
 
-            // All tasks should have been canceled
-            try std.testing.expectEqual(3, started);
-            try std.testing.expectEqual(3, canceled);
-        }
-    };
-
-    var handle = try rt.spawn(TestContext.asyncTask, .{rt});
-    try handle.join();
+    // All tasks should have been canceled
+    try std.testing.expectEqual(3, counts.started);
+    try std.testing.expectEqual(3, counts.canceled);
 }
 
 test "Group: failed task does not close group" {

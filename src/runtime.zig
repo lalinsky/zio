@@ -980,22 +980,14 @@ test "Runtime: implicit run" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const TestContext = struct {
-        fn asyncTask(rt: *Runtime) !void {
-            const start = rt.now();
-            try std.testing.expect(start.value > 0);
+    const start = runtime.now();
+    try std.testing.expect(start.value > 0);
 
-            // Sleep to ensure time advances
-            try rt.sleep(.fromMilliseconds(10));
+    try runtime.sleep(.fromMilliseconds(10));
 
-            const end = rt.now();
-            try std.testing.expect(end.value > start.value);
-            try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
-        }
-    };
-
-    var task = try runtime.spawn(TestContext.asyncTask, .{runtime});
-    try task.join();
+    const end = runtime.now();
+    try std.testing.expect(end.value > start.value);
+    try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 
 test "Runtime: sleep from main" {
@@ -1015,14 +1007,7 @@ test "runtime: basic sleep" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const Sleeper = struct {
-        fn run(rt: *Runtime) !void {
-            try rt.sleep(.fromMilliseconds(1));
-        }
-    };
-
-    var task = try runtime.spawn(Sleeper.run, .{runtime});
-    try task.join();
+    try runtime.sleep(.fromMilliseconds(1));
 }
 
 test "runtime: now() returns monotonic time" {

@@ -3,10 +3,9 @@
 
 //! Implementation of the `std.Io` interface backed by zio's runtime.
 //!
-//! Every vtable method is currently stubbed with `@panic("TODO: ...")`. They
-//! will be filled in incrementally; the goal of this initial skeleton is to
-//! get the wiring right so callers can already obtain a `std.Io` from a
-//! `*Runtime` via `Runtime.io()`.
+//! Many vtable methods are implemented; stubs remain for batches, some
+//! process operations, file locking (delegates to std), memory maps,
+//! and partial directory operations.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,6 +36,7 @@ const waitForIoUncancelable = common.waitForIoUncancelable;
 const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
+const os_posix = @import("os/posix.zig");
 const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
@@ -420,8 +420,27 @@ fn fileWriteStreamingImpl(
     return try op.getResult();
 }
 
-fn batchAwaitAsyncImpl(_: ?*anyopaque, _: *Io.Batch) Io.Cancelable!void {
-    @panic("TODO: batchAwaitAsync");
+// TODO: implement true concurrent batch operations
+fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
+    var tail_index = batch.completed.tail;
+    defer batch.completed.tail = tail_index;
+    var index = batch.submitted.head;
+    errdefer batch.submitted.head = index;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const submission = &storage.submission;
+        const next_index = submission.node.next;
+        const result = try operateImpl(userdata, submission.operation);
+
+        switch (tail_index) {
+            .none => batch.completed.head = index,
+            else => |ti| batch.storage[ti.toIndex()].completion.node.next = index,
+        }
+        storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+        tail_index = index;
+        index = next_index;
+    }
+    batch.submitted = .{ .head = .none, .tail = .none };
 }
 
 fn batchAwaitConcurrentImpl(_: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
@@ -444,11 +463,14 @@ fn batchAwaitConcurrentImpl(_: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeou
         return;
     }
 
-    @panic("TODO: batchAwaitConcurrent (multiple ops)");
+    // TODO: implement true concurrent batch operations
+    return error.ConcurrencyUnavailable;
 }
 
-fn batchCancelImpl(_: ?*anyopaque, _: *Io.Batch) void {
-    @panic("TODO: batchCancel");
+fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
+    // TODO: implement proper cancellation for pending operations
+    // For now, just ensure pending list is empty (nothing is actually pending in our linear impl)
+    batch.pending = .{ .head = .none, .tail = .none };
 }
 
 fn dirCreateDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
@@ -473,12 +495,45 @@ fn resolveSetTimestamp(t: Io.File.SetTimestamp) ?i96 {
     };
 }
 
-fn dirCreateDirPathImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
-    @panic("TODO: dirCreateDirPath");
+fn dirCreateDirPathImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
+    var it = Io.Dir.path.componentIterator(sub_path);
+    var status: Io.Dir.CreatePathStatus = .existed;
+    var component = it.last() orelse return error.BadPathName;
+    while (true) {
+        var op = ev.DirCreateDir.init(stdIoHandleToZio(dir.handle), component.path, permissionsToZioMode(permissions));
+        try waitForIo(&op.c);
+        if (op.getResult()) |_| {
+            status = .created;
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {
+                const kind = try filePathKind(dir, component.path);
+                if (kind != .directory) return error.NotDir;
+            },
+            error.FileNotFound => {
+                component = it.previous() orelse return error.FileNotFound;
+                continue;
+            },
+            else => |e| return e,
+        }
+        component = it.next() orelse return status;
+    }
 }
 
-fn dirCreateDirPathOpenImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.Permissions, _: Io.Dir.OpenOptions) Io.Dir.CreateDirPathOpenError!Io.Dir {
-    @panic("TODO: dirCreateDirPathOpen");
+fn filePathKind(dir: Io.Dir, sub_path: []const u8) Io.Dir.StatFileError!Io.File.Kind {
+    var op = ev.FileStat.init(stdIoHandleToZio(dir.handle), sub_path, .{ .follow_symlinks = false });
+    try waitForIo(&op.c);
+    const info = op.getResult() catch |err| return statFileErrToStdErr(err);
+    return zioKindToStdIoKind(info.kind);
+}
+
+fn dirCreateDirPathOpenImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, permissions: Io.Dir.Permissions, options: Io.Dir.OpenOptions) Io.Dir.CreateDirPathOpenError!Io.Dir {
+    return dirOpenDirImpl(null, dir, sub_path, options) catch |err| switch (err) {
+        error.FileNotFound => {
+            _ = try dirCreateDirPathImpl(null, dir, sub_path, permissions);
+            return dirOpenDirImpl(null, dir, sub_path, options);
+        },
+        else => |e| return e,
+    };
 }
 
 fn dirOpenDirImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
@@ -596,12 +651,61 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
     return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
-fn dirCreateFileAtomicImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
-    @panic("TODO: dirCreateFileAtomic");
+fn dirCreateFileAtomicImpl(_: ?*anyopaque, dir: Io.Dir, dest_path: []const u8, options: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
+    if (Io.Dir.path.dirname(dest_path)) |dirname| {
+        const new_dir = if (options.make_path)
+            dirCreateDirPathOpenImpl(null, dir, dirname, .default_dir, .{}) catch |err| switch (err) {
+                error.IsDir,
+                error.Streaming,
+                error.DiskQuota,
+                error.PathAlreadyExists,
+                error.LinkQuotaExceeded,
+                error.PipeBusy,
+                error.FileTooBig,
+                error.FileLocksUnsupported,
+                error.DeviceBusy,
+                => return error.Unexpected,
+                else => |e| return e,
+            }
+        else
+            try dirOpenDirImpl(null, dir, dirname, .{});
+        errdefer dirCloseImpl(null, &.{new_dir});
+        return atomicFileInit(Io.Dir.path.basename(dest_path), options.permissions, new_dir, true);
+    }
+    return atomicFileInit(dest_path, options.permissions, dir, false);
+}
+
+fn atomicFileInit(
+    dest_basename: []const u8,
+    permissions: Io.File.Permissions,
+    dir: Io.Dir,
+    close_dir_on_deinit: bool,
+) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
+    while (true) {
+        var random_integer: u64 = undefined;
+        randomImpl(null, std.mem.asBytes(&random_integer));
+        const tmp_sub_path = std.fmt.hex(random_integer);
+        const file = dirCreateFileImpl(null, dir, &tmp_sub_path, .{
+            .permissions = permissions,
+            .exclusive = true,
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists, error.DeviceBusy, error.FileBusy => continue,
+            error.IsDir, error.FileTooBig, error.FileLocksUnsupported, error.PipeBusy => return error.Unexpected,
+            else => |e| return e,
+        };
+        return .{
+            .file = file,
+            .file_basename_hex = random_integer,
+            .dest_sub_path = dest_basename,
+            .file_open = true,
+            .file_exists = true,
+            .close_dir_on_deinit = close_dir_on_deinit,
+            .dir = dir,
+        };
+    }
 }
 
 fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-    if (!options.allow_directory) @panic("TODO: openFile allow_directory=false");
     if (options.path_only) @panic("TODO: openFile path_only");
     if (options.lock != .none) @panic("TODO: openFile lock");
     if (options.lock_nonblocking) @panic("TODO: openFile lock_nonblocking");
@@ -610,6 +714,7 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     if (options.resolve_beneath) @panic("TODO: openFile resolve_beneath");
     var op = ev.FileOpen.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .mode = stdIoModeToZio(options.mode),
+        .allow_directory = options.allow_directory,
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
@@ -631,8 +736,57 @@ fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {
     }
 }
 
-fn dirReadImpl(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
-    @panic("TODO: dirRead");
+fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+    var entry_index: usize = 0;
+    // Create iterator once to preserve name_index across entries (Windows).
+    // Fields are updated in the loop as r.index/r.end change.
+    var it = os_fs.DirEntryIterator.init(r.buffer, r.index, r.end);
+
+    while (entry_index < entries.len) {
+        if (r.end - r.index == 0) {
+            if (entry_index > 0) break;
+            if (r.state == .finished) return 0;
+
+            const restart = r.state == .reset;
+            r.state = .reading;
+
+            var op = ev.DirRead.init(stdIoHandleToZio(r.dir.handle), r.buffer, restart);
+            waitForIo(&op.c) catch |err| {
+                r.state = .reset;
+                return err;
+            };
+            const n = op.getResult() catch |err| {
+                r.state = .reset;
+                return err;
+            };
+            if (n == 0) {
+                r.state = .finished;
+                return 0;
+            }
+            r.index = 0;
+            r.end = n;
+            it.index = 0;
+            it.end = n;
+        } else {
+            it.index = r.index;
+            it.end = r.end;
+        }
+
+        const entry = it.next() orelse {
+            r.index = it.index;
+            r.end = it.end;
+            continue;
+        };
+        r.index = it.index;
+
+        entries[entry_index] = .{
+            .name = entry.name,
+            .kind = zioKindToStdIoKind(entry.kind),
+            .inode = entry.inode,
+        };
+        entry_index += 1;
+    }
+    return entry_index;
 }
 
 fn dirRealPathImpl(_: ?*anyopaque, dir: Io.Dir, out_buffer: []u8) Io.Dir.RealPathError!usize {
@@ -665,8 +819,10 @@ fn dirRenameImpl(_: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_
     try op.getResult();
 }
 
-fn dirRenamePreserveImpl(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8) Io.Dir.RenamePreserveError!void {
-    @panic("TODO: dirRenamePreserve");
+fn dirRenamePreserveImpl(_: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8) Io.Dir.RenamePreserveError!void {
+    var op = ev.DirRenamePreserve.init(stdIoHandleToZio(old_dir.handle), old_sub_path, stdIoHandleToZio(new_dir.handle), new_sub_path);
+    try waitForIo(&op.c);
+    try op.getResult();
 }
 
 fn dirSymLinkImpl(_: ?*anyopaque, dir: Io.Dir, target_path: []const u8, sym_link_path: []const u8, flags: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
@@ -979,7 +1135,7 @@ fn fileMemoryMapWriteImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.WritePo
 }
 
 fn processExecutableOpenImpl(_: ?*anyopaque, _: Io.Dir.OpenFileOptions) std.process.OpenExecutableError!Io.File {
-    @panic("TODO: processExecutableOpen");
+    @panic("processExecutableOpen: not supported");
 }
 
 fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
@@ -1014,20 +1170,45 @@ fn processSetCurrentPathImpl(_: ?*anyopaque, path: []const u8) std.process.SetCu
     return io.vtable.processSetCurrentPath(io.userdata, path);
 }
 
-fn processReplaceImpl(_: ?*anyopaque, _: std.process.ReplaceOptions) std.process.ReplaceError {
-    @panic("TODO: processReplace");
+// TODO: implement using our own execve wrapper
+fn processReplaceImpl(_: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
+    const io = globalIo();
+    return io.vtable.processReplace(io.userdata, options);
 }
 
-fn processReplacePathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.ReplaceOptions) std.process.ReplaceError {
-    @panic("TODO: processReplacePath");
+// TODO: implement using our own execve wrapper
+fn processReplacePathImpl(_: ?*anyopaque, dir: Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
+    const io = globalIo();
+    return io.vtable.processReplacePath(io.userdata, dir, options);
 }
 
-fn processSpawnImpl(_: ?*anyopaque, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    @panic("TODO: processSpawn");
+// TODO: implement using our own posix_spawn/fork+exec wrapper
+fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var threaded: Io.Threaded = .init(rt.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try io.vtable.processSpawn(io.userdata, options);
+    setChildPipesNonblocking(&child);
+    return child;
 }
 
-fn processSpawnPathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    @panic("TODO: processSpawnPath");
+// TODO: implement using our own posix_spawn/fork+exec wrapper
+fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    var threaded: Io.Threaded = .init(rt.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try io.vtable.processSpawnPath(io.userdata, dir, options);
+    setChildPipesNonblocking(&child);
+    return child;
+}
+
+fn setChildPipesNonblocking(child: *std.process.Child) void {
+    if (builtin.os.tag == .windows) return;
+    if (child.stdin) |f| os_posix.setNonblocking(f.handle) catch {};
+    if (child.stdout) |f| os_posix.setNonblocking(f.handle) catch {};
+    if (child.stderr) |f| os_posix.setNonblocking(f.handle) catch {};
 }
 
 fn childWaitImpl(_: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
@@ -1039,7 +1220,7 @@ fn childKillImpl(_: ?*anyopaque, child: *std.process.Child) void {
 }
 
 fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
-    @panic("TODO: progressParentFile");
+    @panic("progressParentFile: not supported");
 }
 
 fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
@@ -2590,6 +2771,150 @@ test "io: dir create/delete" {
     try std.testing.expectError(error.FileNotFound, dir.deleteDir(io, dir_path));
 }
 
+test "io: dir createDirPath creates nested directories" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const sep = Io.Dir.path.sep_str;
+    const nested_path = "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c";
+    const base_path = "test_io_createDirPath";
+
+    // Clean up from previous failed runs.
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b") catch {};
+    dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a") catch {};
+    dir.deleteDir(io, base_path) catch {};
+
+    defer {
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b" ++ sep ++ "c") catch {};
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a" ++ sep ++ "b") catch {};
+        dir.deleteDir(io, "test_io_createDirPath" ++ sep ++ "a") catch {};
+        dir.deleteDir(io, base_path) catch {};
+    }
+
+    // Create nested path from scratch.
+    const status = try dir.createDirPathStatus(io, nested_path, .default_dir);
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.created, status);
+
+    // Verify it exists.
+    var sub = try dir.openDir(io, nested_path, .{});
+    sub.close(io);
+
+    // Creating again should return .existed.
+    const status2 = try dir.createDirPathStatus(io, nested_path, .default_dir);
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.existed, status2);
+}
+
+test "io: dir createDirPathOpen creates and opens" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const sep = Io.Dir.path.sep_str;
+    const nested_path = "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y";
+    const base_path = "test_io_createDirPathOpen";
+
+    // Clean up from previous failed runs.
+    dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y") catch {};
+    dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x") catch {};
+    dir.deleteDir(io, base_path) catch {};
+
+    defer {
+        dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x" ++ sep ++ "y") catch {};
+        dir.deleteDir(io, "test_io_createDirPathOpen" ++ sep ++ "x") catch {};
+        dir.deleteDir(io, base_path) catch {};
+    }
+
+    // Create and open nested path.
+    var sub = try dir.createDirPathOpen(io, nested_path, .{});
+    sub.close(io);
+
+    // Should be able to open it again.
+    var sub2 = try dir.openDir(io, nested_path, .{});
+    sub2.close(io);
+}
+
+test "io: dir iterate over files" {
+    // NetBSD's getdirentries can return dirents with either 32-bit or
+    // 64-bit d_fileno depending on the filesystem, shifting all field
+    // offsets. Skip until we implement auto-detection.
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dir_path = "test_io_dir_iterate";
+    // Clean up from previous failed runs.
+    dir.deleteDir(io, dir_path) catch {};
+
+    try dir.createDir(io, dir_path, .default_dir);
+    errdefer dir.deleteDir(io, dir_path) catch {};
+
+    // Create a few files in the directory.
+    {
+        var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
+        defer sub.close(io);
+
+        const file_names = [_][]const u8{ "a.txt", "b.txt", "c.txt" };
+        for (file_names) |name| {
+            var f = try sub.createFile(io, name, .{});
+            f.close(io);
+        }
+        defer for (file_names) |name| sub.deleteFile(io, name) catch {};
+
+        var it = sub.iterate();
+        var found: usize = 0;
+        var all_entries: [64]Io.Dir.Entry = undefined;
+        while (try it.next(io)) |entry| {
+            if (found >= all_entries.len) break;
+            all_entries[found] = entry;
+            found += 1;
+        }
+        try std.testing.expectEqual(3, found);
+        for (all_entries[0..found]) |entry| {
+            try std.testing.expect(entry.kind == .file);
+            try std.testing.expect(std.mem.eql(u8, entry.name, "a.txt") or
+                std.mem.eql(u8, entry.name, "b.txt") or
+                std.mem.eql(u8, entry.name, "c.txt"));
+        }
+    }
+    // sub's deferred cleanup (file deletion + close) has now run.
+    try dir.deleteDir(io, dir_path);
+}
+
+test "io: dir iterate empty directory" {
+    // See comment on dir iterate over files above.
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dir_path = "test_io_dir_iterate_empty";
+    defer dir.deleteDir(io, dir_path) catch {};
+
+    try dir.createDir(io, dir_path, .default_dir);
+
+    var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
+    defer sub.close(io);
+
+    var it = sub.iterate();
+    var found2: usize = 0;
+    var all_entries2: [64]Io.Dir.Entry = undefined;
+    while (try it.next(io)) |entry| {
+        if (found2 >= all_entries2.len) break;
+        all_entries2[found2] = entry;
+        found2 += 1;
+    }
+    try std.testing.expectEqual(0, found2);
+}
+
 test "io: file setPermissions" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
@@ -2831,4 +3156,127 @@ test "io: operateTimeout net_receive times out when no data arrives" {
         .data_buffer = &buf,
         .flags = .{},
     } }, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }));
+}
+
+test "io: batch awaitAsync executes operations linearly" {
+    // file_read_streaming uses iovec which doesn't work on Windows regular files
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_batch.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    // Write some data
+    const data = "hello batch";
+    _ = try file.writePositional(io, &.{data}, 0);
+
+    // Use batch to read it back
+    var read_buf: [32]u8 = undefined;
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch = Io.Batch.init(&storage);
+    _ = batch.add(.{ .file_read_streaming = .{ .file = file, .data = &.{&read_buf} } });
+
+    try batch.awaitAsync(io);
+
+    const completion = batch.next().?;
+    try std.testing.expectEqual(@as(u32, 0), completion.index);
+    const n = try completion.result.file_read_streaming;
+    try std.testing.expectEqualStrings(data, read_buf[0..n]);
+}
+
+test "io: batch awaitConcurrent returns ConcurrencyUnavailable" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch = Io.Batch.init(&storage);
+
+    const err = batch.awaitConcurrent(io, .{ .none = {} });
+    try std.testing.expectError(error.ConcurrencyUnavailable, err);
+}
+
+test "io: createFileAtomic link" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dest_path = "test_io_atomic_file.txt";
+    defer dir.deleteFile(io, dest_path) catch {};
+
+    var af = try dir.createFileAtomic(io, dest_path, .{});
+    defer af.deinit(io);
+
+    _ = try af.file.writePositional(io, &.{"hello atomic"}, 0);
+
+    try af.link(io);
+
+    const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("hello atomic", content);
+}
+
+test "io: createFileAtomic replace" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dest_path = "test_io_atomic_replace.txt";
+    defer dir.deleteFile(io, dest_path) catch {};
+
+    // Create initial file.
+    var f = try dir.createFile(io, dest_path, .{});
+    _ = try f.writePositional(io, &.{"original"}, 0);
+    f.close(io);
+
+    // Replace atomically.
+    var af = try dir.createFileAtomic(io, dest_path, .{ .replace = true });
+    defer af.deinit(io);
+
+    _ = try af.file.writePositional(io, &.{"replaced"}, 0);
+
+    try af.replace(io);
+
+    const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("replaced", content);
+}
+
+test "io: createFileAtomic with make_path" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dest_path = "test_io_atomic_nested/subdir/file.txt";
+    defer {
+        dir.deleteFile(io, dest_path) catch {};
+        dir.deleteDir(io, "test_io_atomic_nested/subdir") catch {};
+        dir.deleteDir(io, "test_io_atomic_nested") catch {};
+    }
+
+    // Clean up from previous runs.
+    dir.deleteFile(io, dest_path) catch {};
+    dir.deleteDir(io, "test_io_atomic_nested/subdir") catch {};
+    dir.deleteDir(io, "test_io_atomic_nested") catch {};
+
+    var af = try dir.createFileAtomic(io, dest_path, .{ .make_path = true });
+    defer af.deinit(io);
+
+    _ = try af.file.writePositional(io, &.{"nested atomic"}, 0);
+
+    try af.link(io);
+
+    const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("nested atomic", content);
 }
