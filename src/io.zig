@@ -330,25 +330,35 @@ fn futexWakeImpl(_: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
 }
 
 fn operateImpl(_: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    return operateInner(operation, .none) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        error.Timeout => unreachable,
+    };
+}
+
+fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable || common.Timeoutable)!Io.Operation.Result {
     switch (operation) {
         .file_read_streaming => |*o| return .{ .file_read_streaming = result: {
-            const n = fileReadStreamingImpl(o.file, o.data) catch |err| switch (err) {
+            const n = fileReadStreamingImpl(o.file, o.data, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
                 else => |e| break :result e,
             };
             break :result n;
         } },
         .file_write_streaming => |*o| return .{ .file_write_streaming = result: {
-            const n = fileWriteStreamingImpl(o.file, o.header, o.data, o.splat) catch |err| switch (err) {
+            const n = fileWriteStreamingImpl(o.file, o.header, o.data, o.splat, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
                 else => |e| break :result e,
             };
             break :result n;
         } },
         .device_io_control => |*o| return .{ .device_io_control = common.blockInPlace(deviceIoControlBlocking, .{o}) },
         .net_receive => |*o| return .{ .net_receive = result: {
-            netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags) catch |err| switch (err) {
+            netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
                 else => |e| break :result .{ e, 0 },
             };
             break :result .{ null, 1 };
@@ -366,7 +376,8 @@ fn deviceIoControlBlocking(o: *const Io.Operation.DeviceIoControl) Io.Operation.
 fn fileReadStreamingImpl(
     file: Io.File,
     data: []const []u8,
-) (Io.Operation.FileReadStreaming.Error || Io.Cancelable)!usize {
+    timeout: time.Timeout,
+) (Io.Operation.FileReadStreaming.Error || Io.Cancelable || common.Timeoutable)!usize {
     var iovecs: [max_iovecs_len]os_fs.iovec = undefined;
     var count: usize = 0;
     for (data) |buf| {
@@ -379,7 +390,7 @@ fn fileReadStreamingImpl(
     if (count == 0) return 0;
 
     var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
-    try waitForIo(&op.c);
+    try timedWaitForIo(&op.c, timeout);
     const n = op.getResult() catch |err| switch (err) {
         error.BrokenPipe => return error.Unexpected,
         else => |e| return e,
@@ -394,7 +405,8 @@ fn fileWriteStreamingImpl(
     header: []const u8,
     data: []const []const u8,
     splat: usize,
-) (Io.Operation.FileWriteStreaming.Error || Io.Cancelable)!usize {
+    timeout: time.Timeout,
+) (Io.Operation.FileWriteStreaming.Error || Io.Cancelable || common.Timeoutable)!usize {
     var slices: [max_iovecs_len][]const u8 = undefined;
     var splat_buf: [64]u8 = undefined;
     const n = fillBuf(&slices, header, data, splat, &splat_buf);
@@ -404,7 +416,7 @@ fn fileWriteStreamingImpl(
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
     var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
-    try waitForIo(&op.c);
+    try timedWaitForIo(&op.c, timeout);
     return try op.getResult();
 }
 
@@ -431,7 +443,26 @@ fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!vo
     batch.submitted = .{ .head = .none, .tail = .none };
 }
 
-fn batchAwaitConcurrentImpl(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+fn batchAwaitConcurrentImpl(_: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+    // Specialized path: exactly one submitted operation, none in flight.
+    const only = batch.submitted.head;
+    if (only != .none and only == batch.submitted.tail and batch.pending.head == .none) {
+        const storage = &batch.storage[only.toIndex()];
+        const operation = storage.submission.operation;
+
+        const result = try operateInner(operation, time.Timeout.fromStd(timeout));
+
+        batch.submitted = .empty;
+        storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+        if (batch.completed.tail != .none) {
+            batch.storage[batch.completed.tail.toIndex()].completion.node.next = only;
+        } else {
+            batch.completed.head = only;
+        }
+        batch.completed.tail = only;
+        return;
+    }
+
     // TODO: implement true concurrent batch operations
     return error.ConcurrencyUnavailable;
 }
@@ -1749,7 +1780,8 @@ fn netReceiveImpl(
     message: *Io.net.IncomingMessage,
     data_buffer: []u8,
     flags: Io.net.ReceiveFlags,
-) Io.net.Socket.ReceiveError!void {
+    timeout: time.Timeout,
+) (Io.net.Socket.ReceiveError || common.Timeoutable)!void {
     const zio_flags: os_net.RecvFlags = .{
         .peek = flags.peek,
         .oob = flags.oob,
@@ -1767,7 +1799,7 @@ fn netReceiveImpl(
         &addr_len,
         if (has_control) message.control else null,
     );
-    try waitForIo(&op.c);
+    try timedWaitForIo(&op.c, timeout);
     const result = op.getResult() catch |err| return recvMsgErrToReceiveErr(err);
     message.* = .{
         .from = zioIpToStdIo(storage.ip),
@@ -3080,6 +3112,50 @@ test "io: group runs spawned tasks to completion" {
 
     var handle = try rt.spawn(Worker.run, .{rt.io()});
     try handle.join();
+}
+
+test "io: operateTimeout net_receive succeeds when data is ready" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    try sender.send(io, &receiver.address, "hello");
+
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [16]u8 = undefined;
+    const result = try io.operateTimeout(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{},
+    } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const err, const n = result.net_receive;
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualStrings("hello", msg.data);
+}
+
+test "io: operateTimeout net_receive times out when no data arrives" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [16]u8 = undefined;
+    try std.testing.expectError(error.Timeout, io.operateTimeout(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{},
+    } }, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }));
 }
 
 test "io: batch awaitAsync executes operations linearly" {
