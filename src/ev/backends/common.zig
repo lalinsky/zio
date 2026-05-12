@@ -42,6 +42,7 @@ const DirRealPath = @import("../completion.zig").DirRealPath;
 const DirRealPathFile = @import("../completion.zig").DirRealPathFile;
 const FileRealPath = @import("../completion.zig").FileRealPath;
 const FileHardLink = @import("../completion.zig").FileHardLink;
+const DeviceIoControl = @import("../completion.zig").DeviceIoControl;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
@@ -815,4 +816,16 @@ pub fn processWaitWork(work: *Work) void {
     const internal: *@FieldType(ProcessWait, "internal") = @fieldParentPtr("work", work);
     const process_wait: *ProcessWait = @fieldParentPtr("internal", internal);
     handleProcessWait(&process_wait.c);
+}
+
+/// Work function for DeviceIoControl - performs blocking ioctl
+pub fn deviceIoControlWork(work: *Work) void {
+    const internal: *@FieldType(DeviceIoControl, "internal") = @fieldParentPtr("work", work);
+    const device_io_control: *DeviceIoControl = @fieldParentPtr("internal", internal);
+    handleDeviceIoControl(&device_io_control.c);
+}
+
+pub fn handleDeviceIoControl(c: *Completion) void {
+    const data = c.cast(DeviceIoControl);
+    c.setResult(.device_io_control, fs.ioctl(data.handle, data.code, data.arg));
 }

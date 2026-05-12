@@ -877,6 +877,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.prep_waitid(linux.P.PID, data.handle, &data.internal.siginfo, linux.W.EXITED, 0);
             sqe.user_data = @intFromPtr(c);
         },
+        .device_io_control => unreachable, // Handled via thread pool
         .mach_port => unreachable,
     }
 }
@@ -1351,6 +1352,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 });
             }
         },
+        .device_io_control => unreachable, // Handled via thread pool
         .mach_port => unreachable,
     }
 }

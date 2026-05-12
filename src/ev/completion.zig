@@ -48,6 +48,7 @@ pub const BackendCapabilities = struct {
     dir_real_path_file: bool = false,
     file_real_path: bool = false,
     file_hard_link: bool = false,
+    device_io_control: bool = false,
     process_wait: bool = false,
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
@@ -117,6 +118,7 @@ pub const Op = enum {
     pipe_read,
     pipe_write,
     pipe_close,
+    device_io_control,
     mach_port,
     process_wait,
 
@@ -181,6 +183,7 @@ pub const Op = enum {
             .pipe_read => PipeRead,
             .pipe_write => PipeWrite,
             .pipe_close => PipeClose,
+            .device_io_control => DeviceIoControl,
             .mach_port => MachPort,
             .process_wait => ProcessWait,
         };
@@ -247,6 +250,7 @@ pub const Op = enum {
             PipeRead => .pipe_read,
             PipeWrite => .pipe_write,
             PipeClose => .pipe_close,
+            DeviceIoControl => .device_io_control,
             MachPort => .mach_port,
             ProcessWait => .process_wait,
             else => @compileError("unknown completion type"),
@@ -1942,6 +1946,30 @@ pub const PipeClose = struct {
 
     pub fn getResult(self: *const PipeClose) Error!void {
         return self.c.getResult(.pipe_close);
+    }
+};
+
+pub const DeviceIoControl = struct {
+    c: Completion,
+    result_private_do_not_touch: i32 = undefined,
+    internal: struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined } = .{},
+    handle: fs.fd_t,
+    code: u32,
+    arg: ?*anyopaque,
+
+    pub const Error = Cancelable;
+
+    pub fn init(handle: fs.fd_t, code: u32, arg: ?*anyopaque) DeviceIoControl {
+        return .{
+            .c = .init(.device_io_control),
+            .handle = handle,
+            .code = code,
+            .arg = arg,
+        };
+    }
+
+    pub fn getResult(self: *const DeviceIoControl) Error!i32 {
+        return self.c.getResult(.device_io_control);
     }
 };
 

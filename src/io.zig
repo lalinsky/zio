@@ -354,7 +354,14 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             };
             break :result n;
         } },
-        .device_io_control => |*o| return .{ .device_io_control = common.blockInPlace(deviceIoControlBlocking, .{o}) },
+        .device_io_control => |*o| return .{ .device_io_control = result: {
+            var op = ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.arg);
+            timedWaitForIo(&op.c, timeout) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
+            };
+            break :result try op.getResult();
+        } },
         .net_receive => |*o| return .{ .net_receive = result: {
             netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
@@ -364,11 +371,6 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             break :result .{ null, 1 };
         } },
     }
-}
-
-fn deviceIoControlBlocking(o: *const Io.Operation.DeviceIoControl) Io.Operation.DeviceIoControl.Result {
-    if (builtin.os.tag == .windows) @panic("device_io_control: not supported on Windows");
-    return os_fs.ioctl(stdIoHandleToZio(o.file.handle), o.code, o.arg);
 }
 
 /// Read from `file` at its current position into `data`, advancing the
