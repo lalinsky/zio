@@ -454,18 +454,20 @@ const BatchCompletionData = union(Io.Operation.Tag) {
 };
 
 /// State for concurrent batch operations, stored in batch.userdata.
+/// Pool is only accessed from await thread (no mutex needed).
+/// Callback signals completion via ready flag in pending.userdata and futex wake.
 const BatchState = struct {
     pool: MemoryPool(BatchCompletionData),
     allocator: std.mem.Allocator,
     batch: *Io.Batch,
-    in_flight: std.atomic.Value(u32),
+    ready_count: std.atomic.Value(u32),
 
     fn init(allocator: std.mem.Allocator, batch: *Io.Batch) BatchState {
         return .{
             .pool = MemoryPool(BatchCompletionData).init(allocator),
             .allocator = allocator,
             .batch = batch,
-            .in_flight = std.atomic.Value(u32).init(0),
+            .ready_count = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -522,13 +524,13 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
 
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
-    // Initialize batch state on first use
+    // Get or create batch state (stored in batch.userdata)
     const state: *BatchState = if (batch.userdata) |ptr|
         @ptrCast(@alignCast(ptr))
     else blk: {
         const s = rt.allocator.create(BatchState) catch return error.ConcurrencyUnavailable;
         s.* = BatchState.init(rt.allocator, batch);
-        batch.userdata = @ptrCast(s);
+        batch.userdata = s;
         break :blk s;
     };
 
@@ -549,18 +551,21 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         // Initialize the ev operation based on operation type
         const completion = initBatchOperation(data, submission.operation);
 
-        // Set up callback
+        // Set up callback - store state pointer in completion userdata
         completion.userdata = state;
         completion.callback = batchCompletionCallback;
         completion.group.userdata = index.toIndex(); // Store batch index
 
-        // Move from submitted to pending, store data pointer in userdata
+        // Move from submitted to pending
+        // userdata layout:
+        //   [0]: data pointer (BatchCompletionData*) with low bit as ready flag
+        //   [1..]: result (Io.Operation.Result)
         storage.* = .{ .pending = .{
             .node = .{ .prev = batch.pending.tail, .next = .none },
             .tag = submission.operation,
             .userdata = undefined,
         } };
-        @as(*usize, @ptrCast(&storage.pending.userdata[0])).* = @intFromPtr(data);
+        @as(*usize, @ptrCast(&storage.pending.userdata[0])).* = @intFromPtr(data); // low bit 0 = not ready
 
         if (batch.pending.tail != .none) {
             batch.storage[batch.pending.tail.toIndex()].pending.node.next = index;
@@ -570,24 +575,35 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         batch.pending.tail = index;
 
         // Submit to loop
-        _ = state.in_flight.fetchAdd(1, .release);
         loop.add(completion);
 
         index = next_index;
     }
     batch.submitted = .{ .head = .none, .tail = .none };
 
-    // Wait for at least one completion
-    const in_flight_after_submit = state.in_flight.load(.acquire);
-    if (in_flight_after_submit == 0) return; // All already completed
+    // Wait loop: drain ready items, check for completions, wait if needed
+    while (true) {
+        batchDrainReady(batch, state);
 
-    Futex.timedWait(&state.in_flight.raw, in_flight_after_submit, .fromStd(timeout)) catch |err| switch (err) {
-        error.Timeout => return error.Timeout,
-        error.Canceled => {
-            batchCancelPending(batch, &task.getExecutor().loop);
-            return error.Canceled;
-        },
-    };
+        // Return if we have completions or nothing pending
+        if (batch.completed.head != .none or batch.pending.head == .none) return;
+
+        // Wait for ready_count to become non-zero
+        Futex.timedWait(&state.ready_count.raw, 0, .fromStd(timeout)) catch |err| switch (err) {
+            error.Timeout => {
+                // Drain one more time before returning timeout
+                batchDrainReady(batch, state);
+                if (batch.completed.head != .none) return;
+                return error.Timeout;
+            },
+            error.Canceled => {
+                batchCancelPending(batch, state, loop);
+                return error.Canceled;
+            },
+        };
+        // Reset count after waking
+        _ = state.ready_count.swap(0, .acquire);
+    }
 }
 
 /// Initialize a BatchCompletionData from an Io.Operation
@@ -665,47 +681,31 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
     }
 }
 
-/// Callback when a batch operation completes
+/// Callback when a batch operation completes.
+/// Stores result in userdata, sets ready flag (low bit of data pointer), signals waiter via futex.
 fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
     const state: *BatchState = @ptrCast(@alignCast(completion.userdata.?));
     const batch = state.batch;
-    const batch_index: Io.Operation.OptionalIndex = @enumFromInt(@as(u32, @intCast(completion.group.userdata)));
+    const batch_index: u32 = @intCast(completion.group.userdata);
 
-    // Get the pending storage and data pointer
-    const storage = &batch.storage[batch_index.toIndex()];
-    const data: *BatchCompletionData = @ptrFromInt(@as(*const usize, @ptrCast(&storage.pending.userdata[0])).*);
+    // Get the pending storage and userdata
+    const storage = &batch.storage[batch_index];
+    const userdata = &storage.pending.userdata;
 
-    // Extract result from ev operation
+    // Get completion data and extract result
+    const data_ptr = @as(*const usize, @ptrCast(&userdata[0])).*;
+    const data: *BatchCompletionData = @ptrFromInt(data_ptr);
     const result = extractBatchResult(data, storage.pending.tag);
 
-    // Remove from pending list
-    const pending = storage.pending;
-    if (pending.node.prev != .none) {
-        batch.storage[pending.node.prev.toIndex()].pending.node.next = pending.node.next;
-    } else {
-        batch.pending.head = pending.node.next;
-    }
-    if (pending.node.next != .none) {
-        batch.storage[pending.node.next.toIndex()].pending.node.prev = pending.node.prev;
-    } else {
-        batch.pending.tail = pending.node.prev;
-    }
+    // Store result in userdata[1..] (after data pointer)
+    @as(*Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).* = result;
 
-    // Add to completed list
-    storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
-    if (batch.completed.tail != .none) {
-        batch.storage[batch.completed.tail.toIndex()].completion.node.next = batch_index;
-    } else {
-        batch.completed.head = batch_index;
-    }
-    batch.completed.tail = batch_index;
-
-    // Free the completion data
-    state.pool.destroy(data);
+    // Set ready flag by setting low bit of data pointer (release to ensure result is visible)
+    @atomicStore(usize, @as(*usize, @ptrCast(&userdata[0])), data_ptr | 1, .release);
 
     // Signal waiter
-    _ = state.in_flight.fetchSub(1, .release);
-    Futex.wake(&state.in_flight.raw, 1);
+    _ = state.ready_count.fetchAdd(1, .release);
+    Futex.wake(&state.ready_count.raw, 1);
 }
 
 /// Extract result from completed BatchCompletionData
@@ -741,38 +741,100 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
     };
 }
 
-/// Cancel all pending batch operations
-fn batchCancelPending(batch: *Io.Batch, loop: *ev.Loop) void {
+/// Drain ready items: scan pending list, move ready items to completed.
+/// Called only from the await thread, so no lock needed for list manipulation.
+fn batchDrainReady(batch: *Io.Batch, state: *BatchState) void {
     var index = batch.pending.head;
     while (index != .none) {
         const storage = &batch.storage[index.toIndex()];
-        const data: *BatchCompletionData = @ptrFromInt(@as(*const usize, @ptrCast(&storage.pending.userdata[0])).*);
-        const completion = data.getCompletion();
-        loop.cancel(completion);
+        const userdata = &storage.pending.userdata;
+        const next_index = storage.pending.node.next;
+
+        // Check ready flag (low bit of data pointer, acquire to see result)
+        const data_ptr = @atomicLoad(usize, @as(*usize, @ptrCast(&userdata[0])), .acquire);
+        if (data_ptr & 1 == 0) {
+            index = next_index;
+            continue;
+        }
+
+        // Get data pointer (mask off ready bit) and free it
+        const data: *BatchCompletionData = @ptrFromInt(data_ptr & ~@as(usize, 1));
+        state.pool.destroy(data);
+
+        // Get result from userdata[1..]
+        const result = @as(*const Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).*;
+
+        // Remove from pending list
+        const pending = &storage.pending;
+        if (pending.node.prev != .none) {
+            batch.storage[pending.node.prev.toIndex()].pending.node.next = pending.node.next;
+        } else {
+            batch.pending.head = pending.node.next;
+        }
+        if (pending.node.next != .none) {
+            batch.storage[pending.node.next.toIndex()].pending.node.prev = pending.node.prev;
+        } else {
+            batch.pending.tail = pending.node.prev;
+        }
+
+        // Add to completed list
+        storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+        if (batch.completed.tail != .none) {
+            batch.storage[batch.completed.tail.toIndex()].completion.node.next = index;
+        } else {
+            batch.completed.head = index;
+        }
+        batch.completed.tail = index;
+
+        index = next_index;
+    }
+}
+
+/// Cancel all pending batch operations and wait for them to complete
+fn batchCancelPending(batch: *Io.Batch, state: *BatchState, loop: *ev.Loop) void {
+    // First drain any ready items
+    batchDrainReady(batch, state);
+
+    // Cancel all pending operations (only those not yet ready)
+    var index = batch.pending.head;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const userdata = &storage.pending.userdata;
+        // Only cancel if not already ready (check low bit)
+        const data_ptr = @atomicLoad(usize, @as(*usize, @ptrCast(&userdata[0])), .acquire);
+        if (data_ptr & 1 == 0) {
+            const data: *BatchCompletionData = @ptrFromInt(data_ptr);
+            const completion = data.getCompletion();
+            loop.cancel(completion);
+        }
         index = storage.pending.node.next;
     }
-    // Wait for all cancellations to complete - they'll move to completed list via callback
-    // The waiter will be signaled for each
+
+    // Wait for all cancellations to complete
+    while (batch.pending.head != .none) {
+        Futex.waitUncancelable(&state.ready_count.raw, 0);
+        _ = state.ready_count.swap(0, .acquire);
+        batchDrainReady(batch, state);
+    }
 }
 
 fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
-    // Clean up batch state if it exists
-    if (batch.userdata) |ptr| {
-        const state: *BatchState = @ptrCast(@alignCast(ptr));
+    // Get state if it exists
+    const state: *BatchState = @ptrCast(@alignCast(batch.userdata orelse return));
 
-        // If there are pending operations, we need to cancel them
-        if (batch.pending.head != .none) {
-            const loop = &getCurrentTask().getExecutor().loop;
-            batchCancelPending(batch, loop);
-            // TODO: wait for cancellations to complete
-        }
+    // Drain any ready items first
+    batchDrainReady(batch, state);
 
-        state.deinit();
-        const allocator = state.allocator;
-        allocator.destroy(state);
-        batch.userdata = null;
+    // If there are pending operations, cancel them and wait
+    if (batch.pending.head != .none) {
+        const loop = &getCurrentTask().getExecutor().loop;
+        batchCancelPending(batch, state, loop);
     }
 
+    state.deinit();
+    const allocator = state.allocator;
+    allocator.destroy(state);
+    batch.userdata = null;
     batch.pending = .{ .head = .none, .tail = .none };
 }
 
