@@ -356,7 +356,10 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             break :result n;
         } },
         .device_io_control => |*o| return .{ .device_io_control = result: {
-            var op = ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.arg);
+            var op = if (builtin.os.tag == .windows)
+                ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.in, o.out)
+            else
+                ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.arg);
             try timedWaitForIo(&op.c, timeout);
             break :result try op.getResult();
         } },
@@ -431,7 +434,10 @@ const BatchCompletionData = union(Io.Operation.Tag) {
         op: ev.FileWriteStreaming,
         iovecs: [max_iovecs_len]os_fs.iovec_const,
     },
-    device_io_control: struct {
+    device_io_control: if (builtin.os.tag == .windows) struct {
+        op: ev.DeviceIoControl,
+        out: []u8,
+    } else struct {
         op: ev.DeviceIoControl,
     },
     net_receive: struct {
@@ -643,13 +649,25 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             return &data.file_write_streaming.op.c;
         },
         .device_io_control => |*o| {
-            data.* = .{ .device_io_control = .{
-                .op = ev.DeviceIoControl.init(
-                    stdIoHandleToZio(o.file.handle),
-                    o.code,
-                    o.arg,
-                ),
-            } };
+            if (builtin.os.tag == .windows) {
+                data.* = .{ .device_io_control = .{
+                    .op = ev.DeviceIoControl.init(
+                        stdIoHandleToZio(o.file.handle),
+                        o.code,
+                        o.in,
+                        o.out,
+                    ),
+                    .out = o.out,
+                } };
+            } else {
+                data.* = .{ .device_io_control = .{
+                    .op = ev.DeviceIoControl.init(
+                        stdIoHandleToZio(o.file.handle),
+                        o.code,
+                        o.arg,
+                    ),
+                } };
+            }
             return &data.device_io_control.op.c;
         },
         .net_receive => |*o| {
@@ -723,7 +741,16 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 else => |e| e,
             };
         } },
-        .device_io_control => .{ .device_io_control = data.device_io_control.op.getResult() catch 0 },
+        .device_io_control => .{ .device_io_control = blk: {
+            if (builtin.os.tag == .windows) {
+                break :blk data.device_io_control.op.getResult() catch .{
+                    .u = .{ .Status = .CANCELLED },
+                    .Information = 0,
+                };
+            } else {
+                break :blk data.device_io_control.op.getResult() catch 0;
+            }
+        } },
         .net_receive => .{
             .net_receive = blk: {
                 const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };

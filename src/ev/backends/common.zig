@@ -827,5 +827,9 @@ pub fn deviceIoControlWork(work: *Work) void {
 
 pub fn handleDeviceIoControl(c: *Completion) void {
     const data = c.cast(DeviceIoControl);
-    c.setResult(.device_io_control, fs.ioctl(data.handle, data.code, data.arg));
+    if (builtin.os.tag == .windows) {
+        c.setResult(.device_io_control, fs.ioctl(data.handle, data.code, data.in, data.out));
+    } else {
+        c.setResult(.device_io_control, fs.ioctl(data.handle, data.code, data.arg));
+    }
 }

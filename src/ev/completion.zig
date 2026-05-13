@@ -1949,7 +1949,32 @@ pub const PipeClose = struct {
     }
 };
 
-pub const DeviceIoControl = struct {
+pub const DeviceIoControl = if (builtin.os.tag == .windows) struct {
+    c: Completion,
+    result_private_do_not_touch: std.os.windows.IO_STATUS_BLOCK = undefined,
+    internal: struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined } = .{},
+    handle: fs.fd_t,
+    code: std.os.windows.CTL_CODE,
+    in: []const u8,
+    out: []u8,
+
+    pub const Result = std.os.windows.IO_STATUS_BLOCK;
+    pub const Error = Cancelable;
+
+    pub fn init(handle: fs.fd_t, code: std.os.windows.CTL_CODE, in: []const u8, out: []u8) DeviceIoControl {
+        return .{
+            .c = .init(.device_io_control),
+            .handle = handle,
+            .code = code,
+            .in = in,
+            .out = out,
+        };
+    }
+
+    pub fn getResult(self: *const DeviceIoControl) Error!Result {
+        return self.c.getResult(.device_io_control);
+    }
+} else struct {
     c: Completion,
     result_private_do_not_touch: i32 = undefined,
     internal: struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined } = .{},
@@ -1957,6 +1982,7 @@ pub const DeviceIoControl = struct {
     code: u32,
     arg: ?*anyopaque,
 
+    pub const Result = i32;
     pub const Error = Cancelable;
 
     pub fn init(handle: fs.fd_t, code: u32, arg: ?*anyopaque) DeviceIoControl {
@@ -1968,7 +1994,7 @@ pub const DeviceIoControl = struct {
         };
     }
 
-    pub fn getResult(self: *const DeviceIoControl) Error!i32 {
+    pub fn getResult(self: *const DeviceIoControl) Error!Result {
         return self.c.getResult(.device_io_control);
     }
 };
