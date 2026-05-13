@@ -457,11 +457,15 @@ const BatchCompletionData = union(Io.Operation.Tag) {
 const BatchState = struct {
     pool: MemoryPool(BatchCompletionData),
     allocator: std.mem.Allocator,
+    batch: *Io.Batch,
+    in_flight: std.atomic.Value(u32),
 
-    fn init(allocator: std.mem.Allocator) BatchState {
+    fn init(allocator: std.mem.Allocator, batch: *Io.Batch) BatchState {
         return .{
             .pool = MemoryPool(BatchCompletionData).init(allocator),
             .allocator = allocator,
+            .batch = batch,
+            .in_flight = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -513,8 +517,8 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         return;
     }
 
-    // Nothing to do if no submissions
-    if (batch.submitted.head == .none) return;
+    // Nothing to do if no submissions and nothing pending
+    if (batch.submitted.head == .none and batch.pending.head == .none) return;
 
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
@@ -523,16 +527,9 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         @ptrCast(@alignCast(ptr))
     else blk: {
         const s = rt.allocator.create(BatchState) catch return error.ConcurrencyUnavailable;
-        s.* = BatchState.init(rt.allocator);
+        s.* = BatchState.init(rt.allocator, batch);
         batch.userdata = @ptrCast(s);
         break :blk s;
-    };
-
-    // Context for completion callbacks - lives on stack for this await call
-    var await_ctx = BatchAwaitContext{
-        .batch = batch,
-        .state = state,
-        .waiter = Waiter.init(),
     };
 
     // Get the event loop
@@ -553,7 +550,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         const completion = initBatchOperation(data, submission.operation);
 
         // Set up callback
-        completion.userdata = &await_ctx;
+        completion.userdata = state;
         completion.callback = batchCompletionCallback;
         completion.group.userdata = index.toIndex(); // Store batch index
 
@@ -573,30 +570,25 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         batch.pending.tail = index;
 
         // Submit to loop
+        _ = state.in_flight.fetchAdd(1, .release);
         loop.add(completion);
 
         index = next_index;
     }
     batch.submitted = .{ .head = .none, .tail = .none };
 
-    // Wait for at least one completion (or timeout)
-    await_ctx.waiter.timedWait(1, .fromStd(timeout), .allow_cancel) catch |err| {
-        batchCancelPending(batch, &task.getExecutor().loop);
-        return err;
+    // Wait for at least one completion
+    const in_flight_after_submit = state.in_flight.load(.acquire);
+    if (in_flight_after_submit == 0) return; // All already completed
+
+    Futex.timedWait(&state.in_flight.raw, in_flight_after_submit, .fromStd(timeout)) catch |err| switch (err) {
+        error.Timeout => return error.Timeout,
+        error.Canceled => {
+            batchCancelPending(batch, &task.getExecutor().loop);
+            return error.Canceled;
+        },
     };
-
-    // Check if we timed out with no completions
-    if (batch.completed.head == .none) {
-        return error.Timeout;
-    }
 }
-
-/// Context passed to batch completion callbacks
-const BatchAwaitContext = struct {
-    batch: *Io.Batch,
-    state: *BatchState,
-    waiter: Waiter,
-};
 
 /// Initialize a BatchCompletionData from an Io.Operation
 fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.Completion {
@@ -675,9 +667,8 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
 
 /// Callback when a batch operation completes
 fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
-    const ctx: *BatchAwaitContext = @ptrCast(@alignCast(completion.userdata.?));
-    const batch = ctx.batch;
-    const state = ctx.state;
+    const state: *BatchState = @ptrCast(@alignCast(completion.userdata.?));
+    const batch = state.batch;
     const batch_index: Io.Operation.OptionalIndex = @enumFromInt(@as(u32, @intCast(completion.group.userdata)));
 
     // Get the pending storage and data pointer
@@ -713,7 +704,8 @@ fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
     state.pool.destroy(data);
 
     // Signal waiter
-    ctx.waiter.signal();
+    _ = state.in_flight.fetchSub(1, .release);
+    Futex.wake(&state.in_flight.raw, 1);
 }
 
 /// Extract result from completed BatchCompletionData
