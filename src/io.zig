@@ -41,6 +41,7 @@ const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const MemoryPool = @import("utils/memory_pool.zig").MemoryPool;
 
 /// Must match `net.Stream.max_iovecs_len` in std.Io. Used as the cap on
 /// scatter/gather vector counts for netRead/netWrite so we never promise
@@ -422,6 +423,56 @@ fn fileWriteStreamingImpl(
     return try op.getResult();
 }
 
+/// Data for a single concurrent batch operation.
+/// Tagged union matching Io.Operation, holding the ev completion struct and any auxiliary data.
+const BatchCompletionData = union(Io.Operation.Tag) {
+    file_read_streaming: struct {
+        op: ev.FileReadStreaming,
+        iovecs: [max_iovecs_len]os_fs.iovec,
+    },
+    file_write_streaming: struct {
+        op: ev.FileWriteStreaming,
+        iovecs: [max_iovecs_len]os_fs.iovec_const,
+    },
+    device_io_control: struct {
+        op: ev.DeviceIoControl,
+    },
+    net_receive: struct {
+        op: ev.NetRecvMsg,
+        iov: os_net.iovec,
+        addr_storage: zio_net.Address,
+        addr_len: os_net.socklen_t,
+        message_buffer: *Io.net.IncomingMessage,
+        data_buffer: []u8,
+    },
+
+    fn getCompletion(self: *BatchCompletionData) *ev.Completion {
+        return switch (self.*) {
+            .file_read_streaming => |*d| &d.op.c,
+            .file_write_streaming => |*d| &d.op.c,
+            .device_io_control => |*d| &d.op.c,
+            .net_receive => |*d| &d.op.c,
+        };
+    }
+};
+
+/// State for concurrent batch operations, stored in batch.userdata.
+const BatchState = struct {
+    pool: MemoryPool(BatchCompletionData),
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) BatchState {
+        return .{
+            .pool = MemoryPool(BatchCompletionData).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *BatchState) void {
+        self.pool.deinit();
+    }
+};
+
 // TODO: implement true concurrent batch operations
 fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
     var tail_index = batch.completed.tail;
@@ -445,7 +496,7 @@ fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!vo
     batch.submitted = .{ .head = .none, .tail = .none };
 }
 
-fn batchAwaitConcurrentImpl(_: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
     // Specialized path: exactly one submitted operation, none in flight.
     const only = batch.submitted.head;
     if (only != .none and only == batch.submitted.tail and batch.pending.head == .none) {
@@ -465,13 +516,303 @@ fn batchAwaitConcurrentImpl(_: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeou
         return;
     }
 
-    // TODO: implement true concurrent batch operations
-    return error.ConcurrencyUnavailable;
+    // Nothing to do if no submissions
+    if (batch.submitted.head == .none) return;
+
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Initialize batch state on first use
+    const state: *BatchState = if (batch.userdata) |ptr|
+        @ptrCast(@alignCast(ptr))
+    else blk: {
+        const s = rt.allocator.create(BatchState) catch return error.ConcurrencyUnavailable;
+        s.* = BatchState.init(rt.allocator);
+        batch.userdata = @ptrCast(s);
+        break :blk s;
+    };
+
+    // Context for completion callbacks - lives on stack for this await call
+    var await_ctx = BatchAwaitContext{
+        .batch = batch,
+        .state = state,
+        .waiter = Waiter.init(),
+    };
+
+    // Get the event loop
+    const task = runtime_mod.getCurrentTaskOrNull() orelse return error.ConcurrencyUnavailable;
+    const loop = &task.getExecutor().loop;
+
+    // Submit all pending operations
+    var index = batch.submitted.head;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const submission = storage.submission;
+        const next_index = submission.node.next;
+
+        // Allocate completion data from pool
+        const data = state.pool.create() catch return error.ConcurrencyUnavailable;
+
+        // Initialize the ev operation based on operation type
+        const completion = initBatchOperation(data, submission.operation);
+
+        // Set up callback
+        completion.userdata = &await_ctx;
+        completion.callback = batchCompletionCallback;
+        completion.group.userdata = index.toIndex(); // Store batch index
+
+        // Move from submitted to pending, store data pointer in userdata
+        storage.* = .{ .pending = .{
+            .node = .{ .prev = batch.pending.tail, .next = .none },
+            .tag = submission.operation,
+            .userdata = undefined,
+        } };
+        @as(*usize, @ptrCast(&storage.pending.userdata[0])).* = @intFromPtr(data);
+
+        if (batch.pending.tail != .none) {
+            batch.storage[batch.pending.tail.toIndex()].pending.node.next = index;
+        } else {
+            batch.pending.head = index;
+        }
+        batch.pending.tail = index;
+
+        // Submit to loop
+        loop.add(completion);
+
+        index = next_index;
+    }
+    batch.submitted = .{ .head = .none, .tail = .none };
+
+    // Set up timeout if specified
+    var timer: ev.Timer = undefined;
+    const zio_timeout = time.Timeout.fromStd(timeout);
+    if (zio_timeout != .none) {
+        timer = ev.Timer.init(zio_timeout);
+        timer.c.userdata = &await_ctx;
+        timer.c.callback = batchTimeoutCallback;
+        loop.add(&timer.c);
+    }
+
+    // Wait for at least one completion
+    await_ctx.waiter.wait(1, .allow_cancel) catch |err| {
+        // On cancel, cancel all pending operations
+        batchCancelPending(batch, loop);
+        if (zio_timeout != .none) {
+            loop.cancel(&timer.c);
+        }
+        return err;
+    };
+
+    // Cancel timer if it didn't fire
+    if (zio_timeout != .none and !await_ctx.timed_out) {
+        loop.cancel(&timer.c);
+    }
+
+    // Check if we timed out with no completions
+    if (await_ctx.timed_out and batch.completed.head == .none) {
+        return error.Timeout;
+    }
+}
+
+/// Context passed to batch completion callbacks
+const BatchAwaitContext = struct {
+    batch: *Io.Batch,
+    state: *BatchState,
+    waiter: Waiter,
+    timed_out: bool = false,
+};
+
+/// Initialize a BatchCompletionData from an Io.Operation
+fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.Completion {
+    switch (operation) {
+        .file_read_streaming => |*o| {
+            data.* = .{ .file_read_streaming = .{
+                .op = undefined,
+                .iovecs = undefined,
+            } };
+            var count: usize = 0;
+            for (o.data) |buf| {
+                if (count == max_iovecs_len) break;
+                if (buf.len != 0) {
+                    data.file_read_streaming.iovecs[count] = os_net.iovecFromSlice(buf);
+                    count += 1;
+                }
+            }
+            data.file_read_streaming.op = ev.FileReadStreaming.init(
+                stdIoHandleToZio(o.file.handle),
+                .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
+            );
+            return &data.file_read_streaming.op.c;
+        },
+        .file_write_streaming => |*o| {
+            data.* = .{ .file_write_streaming = .{
+                .op = undefined,
+                .iovecs = undefined,
+            } };
+            var slices: [max_iovecs_len][]const u8 = undefined;
+            var splat_buf: [64]u8 = undefined;
+            const n = fillBuf(&slices, o.header, o.data, o.splat, &splat_buf);
+            const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &data.file_write_streaming.iovecs);
+            data.file_write_streaming.op = ev.FileWriteStreaming.init(
+                stdIoHandleToZio(o.file.handle),
+                wbuf,
+            );
+            return &data.file_write_streaming.op.c;
+        },
+        .device_io_control => |*o| {
+            data.* = .{ .device_io_control = .{
+                .op = ev.DeviceIoControl.init(
+                    stdIoHandleToZio(o.file.handle),
+                    o.code,
+                    o.arg,
+                ),
+            } };
+            return &data.device_io_control.op.c;
+        },
+        .net_receive => |*o| {
+            const zio_flags: os_net.RecvFlags = .{
+                .peek = o.flags.peek,
+                .oob = o.flags.oob,
+                .trunc = o.flags.trunc,
+            };
+            const has_control = o.message_buffer[0].control.len != 0;
+            data.* = .{ .net_receive = .{
+                .op = undefined,
+                .iov = os_net.iovecFromSlice(o.data_buffer),
+                .addr_storage = undefined,
+                .addr_len = @sizeOf(zio_net.Address),
+                .message_buffer = &o.message_buffer[0],
+                .data_buffer = o.data_buffer,
+            } };
+            data.net_receive.op = ev.NetRecvMsg.init(
+                stdIoHandleToZio(o.socket_handle),
+                .{ .iovecs = (&data.net_receive.iov)[0..1] },
+                zio_flags,
+                &data.net_receive.addr_storage.any,
+                &data.net_receive.addr_len,
+                if (has_control) o.message_buffer[0].control else null,
+            );
+            return &data.net_receive.op.c;
+        },
+    }
+}
+
+/// Callback when a batch operation completes
+fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
+    const ctx: *BatchAwaitContext = @ptrCast(@alignCast(completion.userdata.?));
+    const batch = ctx.batch;
+    const state = ctx.state;
+    const batch_index: Io.Operation.OptionalIndex = @enumFromInt(@as(u32, @intCast(completion.group.userdata)));
+
+    // Get the pending storage and data pointer
+    const storage = &batch.storage[batch_index.toIndex()];
+    const data: *BatchCompletionData = @ptrFromInt(@as(*const usize, @ptrCast(&storage.pending.userdata[0])).*);
+
+    // Extract result from ev operation
+    const result = extractBatchResult(data, storage.pending.tag);
+
+    // Remove from pending list
+    const pending = storage.pending;
+    if (pending.node.prev != .none) {
+        batch.storage[pending.node.prev.toIndex()].pending.node.next = pending.node.next;
+    } else {
+        batch.pending.head = pending.node.next;
+    }
+    if (pending.node.next != .none) {
+        batch.storage[pending.node.next.toIndex()].pending.node.prev = pending.node.prev;
+    } else {
+        batch.pending.tail = pending.node.prev;
+    }
+
+    // Add to completed list
+    storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+    if (batch.completed.tail != .none) {
+        batch.storage[batch.completed.tail.toIndex()].completion.node.next = batch_index;
+    } else {
+        batch.completed.head = batch_index;
+    }
+    batch.completed.tail = batch_index;
+
+    // Free the completion data
+    state.pool.destroy(data);
+
+    // Signal waiter
+    ctx.waiter.signal();
+}
+
+/// Extract result from completed BatchCompletionData
+fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Operation.Result {
+    return switch (tag) {
+        .file_read_streaming => .{ .file_read_streaming = blk: {
+            const n = data.file_read_streaming.op.getResult() catch |err| switch (err) {
+                error.BrokenPipe, error.Canceled => break :blk error.Unexpected,
+                else => |e| break :blk e,
+            };
+            break :blk if (n == 0) error.EndOfStream else n;
+        } },
+        .file_write_streaming => .{ .file_write_streaming = blk: {
+            break :blk data.file_write_streaming.op.getResult() catch |err| switch (err) {
+                error.Canceled => error.Unexpected,
+                else => |e| e,
+            };
+        } },
+        .device_io_control => .{ .device_io_control = data.device_io_control.op.getResult() catch 0 },
+        .net_receive => .{
+            .net_receive = blk: {
+                const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };
+                // Populate the message buffer with received data
+                data.net_receive.message_buffer.* = .{
+                    .from = zioIpToStdIo(data.net_receive.addr_storage.ip),
+                    .data = data.net_receive.data_buffer[0..result.len],
+                    .control = data.net_receive.message_buffer.control,
+                    .flags = decodeIncomingFlags(result.flags),
+                };
+                break :blk .{ null, 1 };
+            },
+        },
+    };
+}
+
+/// Timeout callback for batch await
+fn batchTimeoutCallback(_: *ev.Loop, completion: *ev.Completion) void {
+    const ctx: *BatchAwaitContext = @ptrCast(@alignCast(completion.userdata.?));
+    ctx.timed_out = true;
+    ctx.waiter.signal();
+}
+
+/// Cancel all pending batch operations
+fn batchCancelPending(batch: *Io.Batch, loop: *ev.Loop) void {
+    var index = batch.pending.head;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const data: *BatchCompletionData = @ptrFromInt(@as(*const usize, @ptrCast(&storage.pending.userdata[0])).*);
+        const completion = data.getCompletion();
+        loop.cancel(completion);
+        index = storage.pending.node.next;
+    }
+    // Wait for all cancellations to complete - they'll move to completed list via callback
+    // The waiter will be signaled for each
 }
 
 fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
-    // TODO: implement proper cancellation for pending operations
-    // For now, just ensure pending list is empty (nothing is actually pending in our linear impl)
+    // Clean up batch state if it exists
+    if (batch.userdata) |ptr| {
+        const state: *BatchState = @ptrCast(@alignCast(ptr));
+
+        // If there are pending operations, we need to cancel them
+        if (batch.pending.head != .none) {
+            if (runtime_mod.getCurrentTaskOrNull()) |task| {
+                const loop = &task.getExecutor().loop;
+                batchCancelPending(batch, loop);
+                // TODO: wait for cancellations to complete
+            }
+        }
+
+        state.deinit();
+        const allocator = state.allocator;
+        allocator.destroy(state);
+        batch.userdata = null;
+    }
+
     batch.pending = .{ .head = .none, .tail = .none };
 }
 
@@ -3193,7 +3534,7 @@ test "io: batch awaitAsync executes operations linearly" {
     try std.testing.expectEqualStrings(data, read_buf[0..n]);
 }
 
-test "io: batch awaitConcurrent returns ConcurrencyUnavailable" {
+test "io: batch awaitConcurrent with empty batch returns immediately" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
@@ -3201,8 +3542,8 @@ test "io: batch awaitConcurrent returns ConcurrencyUnavailable" {
     var storage: [1]Io.Operation.Storage = undefined;
     var batch = Io.Batch.init(&storage);
 
-    const err = batch.awaitConcurrent(io, .{ .none = {} });
-    try std.testing.expectError(error.ConcurrencyUnavailable, err);
+    // Empty batch should return immediately without error
+    try batch.awaitConcurrent(io, .{ .none = {} });
 }
 
 test "io: createFileAtomic link" {
@@ -3281,4 +3622,77 @@ test "io: createFileAtomic with make_path" {
     const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("nested atomic", content);
+}
+
+test "io: batch awaitConcurrent with two net_receive operations" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Create two UDP sockets
+    var sock1 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock1.close(io);
+    var sock2 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock2.close(io);
+
+    // Create a sender socket
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    // Send data to both sockets
+    try sender.send(io, &sock1.address, "hello1");
+    try sender.send(io, &sock2.address, "hello2");
+
+    // Set up batch with receive operations for both sockets
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+
+    var msg1: Io.net.IncomingMessage = .init;
+    var buf1: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = sock1.handle,
+        .message_buffer = (&msg1)[0..1],
+        .data_buffer = &buf1,
+        .flags = .{},
+    } });
+
+    var msg2: Io.net.IncomingMessage = .init;
+    var buf2: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = sock2.handle,
+        .message_buffer = (&msg2)[0..1],
+        .data_buffer = &buf2,
+        .flags = .{},
+    } });
+
+    // Wait for at least one completion
+    try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+    // Get first completion
+    const completion1 = batch.next();
+    try std.testing.expect(completion1 != null);
+    const err1, const n1 = completion1.?.result.net_receive;
+    try std.testing.expectEqual(null, err1);
+    try std.testing.expectEqual(1, n1);
+
+    // Wait for second completion
+    try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+    // Get second completion
+    const completion2 = batch.next();
+    try std.testing.expect(completion2 != null);
+    const err2, const n2 = completion2.?.result.net_receive;
+    try std.testing.expectEqual(null, err2);
+    try std.testing.expectEqual(1, n2);
+
+    // Verify both messages received (order may vary)
+    const received1 = msg1.data;
+    const received2 = msg2.data;
+    try std.testing.expect(
+        (std.mem.eql(u8, received1, "hello1") and std.mem.eql(u8, received2, "hello2")) or
+            (std.mem.eql(u8, received1, "hello2") and std.mem.eql(u8, received2, "hello1")),
+    );
+
+    // Clean up
+    batch.cancel(io);
 }
