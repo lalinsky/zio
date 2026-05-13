@@ -476,7 +476,6 @@ const BatchState = struct {
     }
 };
 
-// TODO: implement true concurrent batch operations
 fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
     var tail_index = batch.completed.tail;
     defer batch.completed.tail = tail_index;
@@ -3717,4 +3716,29 @@ test "io: batch awaitConcurrent with two net_receive operations" {
 
     // Clean up
     batch.cancel(io);
+}
+
+test "io: batch awaitConcurrent times out when no data arrives" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{},
+    } });
+
+    // Should timeout since no data arrives
+    try std.testing.expectError(error.Timeout, batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }));
 }
