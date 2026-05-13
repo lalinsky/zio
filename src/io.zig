@@ -357,10 +357,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
         } },
         .device_io_control => |*o| return .{ .device_io_control = result: {
             var op = ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.arg);
-            timedWaitForIo(&op.c, timeout) catch |err| switch (err) {
-                error.Canceled => |e| return e,
-                error.Timeout => |e| return e,
-            };
+            try timedWaitForIo(&op.c, timeout);
             break :result try op.getResult();
         } },
         .net_receive => |*o| return .{ .net_receive = result: {
@@ -539,7 +536,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
     };
 
     // Get the event loop
-    const task = runtime_mod.getCurrentTaskOrNull() orelse return error.ConcurrencyUnavailable;
+    const task = getCurrentTask();
     const loop = &task.getExecutor().loop;
 
     // Submit all pending operations
@@ -582,33 +579,14 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
     }
     batch.submitted = .{ .head = .none, .tail = .none };
 
-    // Set up timeout if specified
-    var timer: ev.Timer = undefined;
-    const zio_timeout = time.Timeout.fromStd(timeout);
-    if (zio_timeout != .none) {
-        timer = ev.Timer.init(zio_timeout);
-        timer.c.userdata = &await_ctx;
-        timer.c.callback = batchTimeoutCallback;
-        loop.add(&timer.c);
-    }
-
-    // Wait for at least one completion
-    await_ctx.waiter.wait(1, .allow_cancel) catch |err| {
-        // On cancel, cancel all pending operations
-        batchCancelPending(batch, loop);
-        if (zio_timeout != .none) {
-            loop.cancel(&timer.c);
-        }
+    // Wait for at least one completion (or timeout)
+    await_ctx.waiter.timedWait(1, .fromStd(timeout), .allow_cancel) catch |err| {
+        batchCancelPending(batch, &task.getExecutor().loop);
         return err;
     };
 
-    // Cancel timer if it didn't fire
-    if (zio_timeout != .none and !await_ctx.timed_out) {
-        loop.cancel(&timer.c);
-    }
-
     // Check if we timed out with no completions
-    if (await_ctx.timed_out and batch.completed.head == .none) {
+    if (batch.completed.head == .none) {
         return error.Timeout;
     }
 }
@@ -618,7 +596,6 @@ const BatchAwaitContext = struct {
     batch: *Io.Batch,
     state: *BatchState,
     waiter: Waiter,
-    timed_out: bool = false,
 };
 
 /// Initialize a BatchCompletionData from an Io.Operation
@@ -772,13 +749,6 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
     };
 }
 
-/// Timeout callback for batch await
-fn batchTimeoutCallback(_: *ev.Loop, completion: *ev.Completion) void {
-    const ctx: *BatchAwaitContext = @ptrCast(@alignCast(completion.userdata.?));
-    ctx.timed_out = true;
-    ctx.waiter.signal();
-}
-
 /// Cancel all pending batch operations
 fn batchCancelPending(batch: *Io.Batch, loop: *ev.Loop) void {
     var index = batch.pending.head;
@@ -800,11 +770,9 @@ fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
 
         // If there are pending operations, we need to cancel them
         if (batch.pending.head != .none) {
-            if (runtime_mod.getCurrentTaskOrNull()) |task| {
-                const loop = &task.getExecutor().loop;
-                batchCancelPending(batch, loop);
-                // TODO: wait for cancellations to complete
-            }
+            const loop = &getCurrentTask().getExecutor().loop;
+            batchCancelPending(batch, loop);
+            // TODO: wait for cancellations to complete
         }
 
         state.deinit();
