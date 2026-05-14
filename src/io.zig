@@ -459,6 +459,13 @@ const BatchCompletionData = union(Io.Operation.Tag) {
     }
 };
 
+comptime {
+    const Userdata = Io.Operation.Storage.Pending.Userdata;
+    const Result = Io.Operation.Result;
+    std.debug.assert(@sizeOf(Result) <= @sizeOf(Userdata) - @sizeOf(usize));
+    std.debug.assert(@alignOf(Result) <= @alignOf(usize));
+}
+
 /// State for concurrent batch operations, stored in batch.userdata.
 /// Pool is only accessed from await thread (no mutex needed).
 /// Callback signals completion via ready flag in pending.userdata and futex wake.
