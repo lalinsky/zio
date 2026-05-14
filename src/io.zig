@@ -41,6 +41,7 @@ const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const MemoryPool = @import("utils/memory_pool.zig").MemoryPool;
 
 /// Must match `net.Stream.max_iovecs_len` in std.Io. Used as the cap on
 /// scatter/gather vector counts for netRead/netWrite so we never promise
@@ -354,7 +355,14 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             };
             break :result n;
         } },
-        .device_io_control => |*o| return .{ .device_io_control = common.blockInPlace(deviceIoControlBlocking, .{o}) },
+        .device_io_control => |*o| return .{ .device_io_control = result: {
+            var op = if (builtin.os.tag == .windows)
+                ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.in, o.out)
+            else
+                ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.arg);
+            try timedWaitForIo(&op.c, timeout);
+            break :result try op.getResult();
+        } },
         .net_receive => |*o| return .{ .net_receive = result: {
             netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
@@ -364,11 +372,6 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             break :result .{ null, 1 };
         } },
     }
-}
-
-fn deviceIoControlBlocking(o: *const Io.Operation.DeviceIoControl) Io.Operation.DeviceIoControl.Result {
-    if (builtin.os.tag == .windows) @panic("device_io_control: not supported on Windows");
-    return os_fs.ioctl(stdIoHandleToZio(o.file.handle), o.code, o.arg);
 }
 
 /// Read from `file` at its current position into `data`, advancing the
@@ -420,7 +423,73 @@ fn fileWriteStreamingImpl(
     return try op.getResult();
 }
 
-// TODO: implement true concurrent batch operations
+/// Data for a single concurrent batch operation.
+/// Tagged union matching Io.Operation, holding the ev completion struct and any auxiliary data.
+const BatchCompletionData = union(Io.Operation.Tag) {
+    file_read_streaming: struct {
+        op: ev.FileReadStreaming,
+        iovecs: [max_iovecs_len]os_fs.iovec,
+    },
+    file_write_streaming: struct {
+        op: ev.FileWriteStreaming,
+        iovecs: [max_iovecs_len]os_fs.iovec_const,
+        splat_buf: [8]u8,
+    },
+    device_io_control: if (builtin.os.tag == .windows) struct {
+        op: ev.DeviceIoControl,
+        out: []u8,
+    } else struct {
+        op: ev.DeviceIoControl,
+    },
+    net_receive: struct {
+        op: ev.NetRecvMsg,
+        iov: os_net.iovec,
+        addr_storage: zio_net.Address,
+        addr_len: os_net.socklen_t,
+        message_buffer: *Io.net.IncomingMessage,
+        data_buffer: []u8,
+    },
+
+    fn getCompletion(self: *BatchCompletionData) *ev.Completion {
+        return switch (self.*) {
+            .file_read_streaming => |*d| &d.op.c,
+            .file_write_streaming => |*d| &d.op.c,
+            .device_io_control => |*d| &d.op.c,
+            .net_receive => |*d| &d.op.c,
+        };
+    }
+};
+
+comptime {
+    const Userdata = Io.Operation.Storage.Pending.Userdata;
+    const Result = Io.Operation.Result;
+    std.debug.assert(@sizeOf(Result) <= @sizeOf(Userdata) - @sizeOf(usize));
+    std.debug.assert(@alignOf(Result) <= @alignOf(usize));
+}
+
+/// State for concurrent batch operations, stored in batch.userdata.
+/// Pool is only accessed from await thread (no mutex needed).
+/// Callback signals completion via ready flag in pending.userdata and futex wake.
+const BatchState = struct {
+    pool: MemoryPool(BatchCompletionData),
+    allocator: std.mem.Allocator,
+    batch: *Io.Batch,
+    ready_count: std.atomic.Value(u32),
+
+    fn init(allocator: std.mem.Allocator, batch: *Io.Batch) BatchState {
+        return .{
+            .pool = MemoryPool(BatchCompletionData).init(allocator),
+            .allocator = allocator,
+            .batch = batch,
+            .ready_count = std.atomic.Value(u32).init(0),
+        };
+    }
+
+    fn deinit(self: *BatchState) void {
+        self.pool.deinit();
+    }
+};
+
 fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
     var tail_index = batch.completed.tail;
     defer batch.completed.tail = tail_index;
@@ -443,7 +512,7 @@ fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!vo
     batch.submitted = .{ .head = .none, .tail = .none };
 }
 
-fn batchAwaitConcurrentImpl(_: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
     // Specialized path: exactly one submitted operation, none in flight.
     const only = batch.submitted.head;
     if (only != .none and only == batch.submitted.tail and batch.pending.head == .none) {
@@ -463,13 +532,344 @@ fn batchAwaitConcurrentImpl(_: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeou
         return;
     }
 
-    // TODO: implement true concurrent batch operations
-    return error.ConcurrencyUnavailable;
+    // Nothing to do if no submissions and nothing pending
+    if (batch.submitted.head == .none and batch.pending.head == .none) return;
+
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
+    // Get or create batch state (stored in batch.userdata)
+    const state: *BatchState = if (batch.userdata) |ptr|
+        @ptrCast(@alignCast(ptr))
+    else blk: {
+        const s = rt.allocator.create(BatchState) catch return error.ConcurrencyUnavailable;
+        s.* = BatchState.init(rt.allocator, batch);
+        batch.userdata = s;
+        break :blk s;
+    };
+
+    // Get the event loop
+    const task = getCurrentTask();
+    const loop = &task.getExecutor().loop;
+
+    // Submit all pending operations
+    var index = batch.submitted.head;
+    errdefer batch.submitted.head = index;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const submission = storage.submission;
+        const next_index = submission.node.next;
+
+        // Allocate completion data from pool
+        const data = state.pool.create() catch return error.ConcurrencyUnavailable;
+
+        // Initialize the ev operation based on operation type
+        const completion = initBatchOperation(data, submission.operation);
+
+        // Set up callback - store state pointer in completion userdata
+        completion.userdata = state;
+        completion.callback = batchCompletionCallback;
+        completion.group.userdata = index.toIndex(); // Store batch index
+
+        // Move from submitted to pending
+        // userdata layout:
+        //   [0]: data pointer (BatchCompletionData*) with low bit as ready flag
+        //   [1..]: result (Io.Operation.Result)
+        storage.* = .{ .pending = .{
+            .node = .{ .prev = batch.pending.tail, .next = .none },
+            .tag = submission.operation,
+            .userdata = undefined,
+        } };
+        @as(*usize, @ptrCast(&storage.pending.userdata[0])).* = @intFromPtr(data); // low bit 0 = not ready
+
+        if (batch.pending.tail != .none) {
+            batch.storage[batch.pending.tail.toIndex()].pending.node.next = index;
+        } else {
+            batch.pending.head = index;
+        }
+        batch.pending.tail = index;
+
+        // Submit to loop
+        loop.add(completion);
+
+        index = next_index;
+    }
+    batch.submitted = .{ .head = .none, .tail = .none };
+
+    // Wait loop: drain ready items, check for completions, wait if needed
+    while (true) {
+        batchDrainReady(batch, state);
+
+        // Return if we have completions or nothing pending
+        if (batch.completed.head != .none or batch.pending.head == .none) return;
+
+        // Wait for ready_count to become non-zero
+        Futex.timedWait(&state.ready_count.raw, 0, .fromStd(timeout)) catch |err| switch (err) {
+            error.Timeout => {
+                // Drain one more time before returning timeout
+                batchDrainReady(batch, state);
+                if (batch.completed.head != .none) return;
+                return error.Timeout;
+            },
+            error.Canceled => {
+                batchCancelPending(batch, state, loop);
+                return error.Canceled;
+            },
+        };
+        // Reset count after waking
+        _ = state.ready_count.swap(0, .acq_rel);
+    }
+}
+
+/// Initialize a BatchCompletionData from an Io.Operation
+fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.Completion {
+    switch (operation) {
+        .file_read_streaming => |*o| {
+            data.* = .{ .file_read_streaming = .{
+                .op = undefined,
+                .iovecs = undefined,
+            } };
+            var count: usize = 0;
+            for (o.data) |buf| {
+                if (count == max_iovecs_len) break;
+                if (buf.len != 0) {
+                    data.file_read_streaming.iovecs[count] = os_net.iovecFromSlice(buf);
+                    count += 1;
+                }
+            }
+            data.file_read_streaming.op = ev.FileReadStreaming.init(
+                stdIoHandleToZio(o.file.handle),
+                .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
+            );
+            return &data.file_read_streaming.op.c;
+        },
+        .file_write_streaming => |*o| {
+            data.* = .{ .file_write_streaming = .{
+                .op = undefined,
+                .iovecs = undefined,
+                .splat_buf = undefined,
+            } };
+            var slices: [max_iovecs_len][]const u8 = undefined;
+            const n = fillBuf(&slices, o.header, o.data, o.splat, &data.file_write_streaming.splat_buf);
+            const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &data.file_write_streaming.iovecs);
+            data.file_write_streaming.op = ev.FileWriteStreaming.init(
+                stdIoHandleToZio(o.file.handle),
+                wbuf,
+            );
+            return &data.file_write_streaming.op.c;
+        },
+        .device_io_control => |*o| {
+            if (builtin.os.tag == .windows) {
+                data.* = .{ .device_io_control = .{
+                    .op = ev.DeviceIoControl.init(
+                        stdIoHandleToZio(o.file.handle),
+                        o.code,
+                        o.in,
+                        o.out,
+                    ),
+                    .out = o.out,
+                } };
+            } else {
+                data.* = .{ .device_io_control = .{
+                    .op = ev.DeviceIoControl.init(
+                        stdIoHandleToZio(o.file.handle),
+                        o.code,
+                        o.arg,
+                    ),
+                } };
+            }
+            return &data.device_io_control.op.c;
+        },
+        .net_receive => |*o| {
+            const zio_flags: os_net.RecvFlags = .{
+                .peek = o.flags.peek,
+                .oob = o.flags.oob,
+                .trunc = o.flags.trunc,
+            };
+            const has_control = o.message_buffer[0].control.len != 0;
+            data.* = .{ .net_receive = .{
+                .op = undefined,
+                .iov = os_net.iovecFromSlice(o.data_buffer),
+                .addr_storage = undefined,
+                .addr_len = @sizeOf(zio_net.Address),
+                .message_buffer = &o.message_buffer[0],
+                .data_buffer = o.data_buffer,
+            } };
+            data.net_receive.op = ev.NetRecvMsg.init(
+                stdIoHandleToZio(o.socket_handle),
+                .{ .iovecs = (&data.net_receive.iov)[0..1] },
+                zio_flags,
+                &data.net_receive.addr_storage.any,
+                &data.net_receive.addr_len,
+                if (has_control) o.message_buffer[0].control else null,
+            );
+            return &data.net_receive.op.c;
+        },
+    }
+}
+
+/// Callback when a batch operation completes.
+/// Stores result in userdata, sets ready flag (low bit of data pointer), signals waiter via futex.
+fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
+    const state: *BatchState = @ptrCast(@alignCast(completion.userdata.?));
+    const batch = state.batch;
+    const batch_index: u32 = @intCast(completion.group.userdata);
+
+    // Get the pending storage and userdata
+    const storage = &batch.storage[batch_index];
+    const userdata = &storage.pending.userdata;
+
+    // Get completion data and extract result
+    const data_ptr = @as(*const usize, @ptrCast(&userdata[0])).*;
+    const data: *BatchCompletionData = @ptrFromInt(data_ptr);
+    const result = extractBatchResult(data, storage.pending.tag);
+
+    // Store result in userdata[1..] (after data pointer)
+    @as(*Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).* = result;
+
+    // Set ready flag by setting low bit of data pointer (release to ensure result is visible)
+    @atomicStore(usize, @as(*usize, @ptrCast(&userdata[0])), data_ptr | 1, .release);
+
+    // Signal waiter
+    _ = state.ready_count.fetchAdd(1, .release);
+    Futex.wake(&state.ready_count.raw, 1);
+}
+
+/// Extract result from completed BatchCompletionData
+fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Operation.Result {
+    return switch (tag) {
+        .file_read_streaming => .{ .file_read_streaming = blk: {
+            const n = data.file_read_streaming.op.getResult() catch |err| switch (err) {
+                error.BrokenPipe, error.Canceled => break :blk error.Unexpected,
+                else => |e| break :blk e,
+            };
+            break :blk if (n == 0) error.EndOfStream else n;
+        } },
+        .file_write_streaming => .{ .file_write_streaming = blk: {
+            break :blk data.file_write_streaming.op.getResult() catch |err| switch (err) {
+                error.Canceled => error.Unexpected,
+                else => |e| e,
+            };
+        } },
+        .device_io_control => .{ .device_io_control = blk: {
+            if (builtin.os.tag == .windows) {
+                break :blk data.device_io_control.op.getResult() catch .{
+                    .u = .{ .Status = .CANCELLED },
+                    .Information = 0,
+                };
+            } else {
+                break :blk data.device_io_control.op.getResult() catch 0;
+            }
+        } },
+        .net_receive => .{
+            .net_receive = blk: {
+                const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };
+                // Populate the message buffer with received data
+                data.net_receive.message_buffer.* = .{
+                    .from = zioIpToStdIo(data.net_receive.addr_storage.ip),
+                    .data = data.net_receive.data_buffer[0..result.len],
+                    .control = data.net_receive.message_buffer.control[0..result.controllen],
+                    .flags = decodeIncomingFlags(result.flags),
+                };
+                break :blk .{ null, 1 };
+            },
+        },
+    };
+}
+
+/// Drain ready items: scan pending list, move ready items to completed.
+/// Called only from the await thread, so no lock needed for list manipulation.
+fn batchDrainReady(batch: *Io.Batch, state: *BatchState) void {
+    var index = batch.pending.head;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const userdata = &storage.pending.userdata;
+        const next_index = storage.pending.node.next;
+
+        // Check ready flag (low bit of data pointer, acquire to see result)
+        const data_ptr = @atomicLoad(usize, @as(*usize, @ptrCast(&userdata[0])), .acquire);
+        if (data_ptr & 1 == 0) {
+            index = next_index;
+            continue;
+        }
+
+        // Get data pointer (mask off ready bit) and free it
+        const data: *BatchCompletionData = @ptrFromInt(data_ptr & ~@as(usize, 1));
+        state.pool.destroy(data);
+
+        // Get result from userdata[1..]
+        const result = @as(*const Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).*;
+
+        // Remove from pending list
+        const pending = &storage.pending;
+        if (pending.node.prev != .none) {
+            batch.storage[pending.node.prev.toIndex()].pending.node.next = pending.node.next;
+        } else {
+            batch.pending.head = pending.node.next;
+        }
+        if (pending.node.next != .none) {
+            batch.storage[pending.node.next.toIndex()].pending.node.prev = pending.node.prev;
+        } else {
+            batch.pending.tail = pending.node.prev;
+        }
+
+        // Add to completed list
+        storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+        if (batch.completed.tail != .none) {
+            batch.storage[batch.completed.tail.toIndex()].completion.node.next = index;
+        } else {
+            batch.completed.head = index;
+        }
+        batch.completed.tail = index;
+
+        index = next_index;
+    }
+}
+
+/// Cancel all pending batch operations and wait for them to complete
+fn batchCancelPending(batch: *Io.Batch, state: *BatchState, loop: *ev.Loop) void {
+    // First drain any ready items
+    batchDrainReady(batch, state);
+
+    // Cancel all pending operations (only those not yet ready)
+    var index = batch.pending.head;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const userdata = &storage.pending.userdata;
+        // Only cancel if not already ready (check low bit)
+        const data_ptr = @atomicLoad(usize, @as(*usize, @ptrCast(&userdata[0])), .acquire);
+        if (data_ptr & 1 == 0) {
+            const data: *BatchCompletionData = @ptrFromInt(data_ptr);
+            const completion = data.getCompletion();
+            loop.cancel(completion);
+        }
+        index = storage.pending.node.next;
+    }
+
+    // Wait for all cancellations to complete
+    while (batch.pending.head != .none) {
+        Futex.waitUncancelable(&state.ready_count.raw, 0);
+        _ = state.ready_count.swap(0, .acq_rel);
+        batchDrainReady(batch, state);
+    }
 }
 
 fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
-    // TODO: implement proper cancellation for pending operations
-    // For now, just ensure pending list is empty (nothing is actually pending in our linear impl)
+    // Get state if it exists
+    const state: *BatchState = @ptrCast(@alignCast(batch.userdata orelse return));
+
+    // Drain any ready items first
+    batchDrainReady(batch, state);
+
+    // If there are pending operations, cancel them and wait
+    if (batch.pending.head != .none) {
+        const loop = &getCurrentTask().getExecutor().loop;
+        batchCancelPending(batch, state, loop);
+    }
+
+    state.deinit();
+    const allocator = state.allocator;
+    allocator.destroy(state);
+    batch.userdata = null;
     batch.pending = .{ .head = .none, .tail = .none };
 }
 
@@ -3191,7 +3591,7 @@ test "io: batch awaitAsync executes operations linearly" {
     try std.testing.expectEqualStrings(data, read_buf[0..n]);
 }
 
-test "io: batch awaitConcurrent returns ConcurrencyUnavailable" {
+test "io: batch awaitConcurrent with empty batch returns immediately" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
@@ -3199,8 +3599,8 @@ test "io: batch awaitConcurrent returns ConcurrencyUnavailable" {
     var storage: [1]Io.Operation.Storage = undefined;
     var batch = Io.Batch.init(&storage);
 
-    const err = batch.awaitConcurrent(io, .{ .none = {} });
-    try std.testing.expectError(error.ConcurrencyUnavailable, err);
+    // Empty batch should return immediately without error
+    try batch.awaitConcurrent(io, .{ .none = {} });
 }
 
 test "io: createFileAtomic link" {
@@ -3279,4 +3679,102 @@ test "io: createFileAtomic with make_path" {
     const content = try dir.readFileAlloc(io, dest_path, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("nested atomic", content);
+}
+
+test "io: batch awaitConcurrent with two net_receive operations" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Create two UDP sockets
+    var sock1 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock1.close(io);
+    var sock2 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock2.close(io);
+
+    // Create a sender socket
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    // Send data to both sockets
+    try sender.send(io, &sock1.address, "hello1");
+    try sender.send(io, &sock2.address, "hello2");
+
+    // Set up batch with receive operations for both sockets
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+
+    var msg1: Io.net.IncomingMessage = .init;
+    var buf1: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = sock1.handle,
+        .message_buffer = (&msg1)[0..1],
+        .data_buffer = &buf1,
+        .flags = .{},
+    } });
+
+    var msg2: Io.net.IncomingMessage = .init;
+    var buf2: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = sock2.handle,
+        .message_buffer = (&msg2)[0..1],
+        .data_buffer = &buf2,
+        .flags = .{},
+    } });
+
+    // Wait for at least one completion
+    try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+    // Get first completion
+    const completion1 = batch.next();
+    try std.testing.expect(completion1 != null);
+    const err1, const n1 = completion1.?.result.net_receive;
+    try std.testing.expectEqual(null, err1);
+    try std.testing.expectEqual(1, n1);
+
+    // Wait for second completion
+    try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+    // Get second completion
+    const completion2 = batch.next();
+    try std.testing.expect(completion2 != null);
+    const err2, const n2 = completion2.?.result.net_receive;
+    try std.testing.expectEqual(null, err2);
+    try std.testing.expectEqual(1, n2);
+
+    // Verify both messages received (order may vary)
+    const received1 = msg1.data;
+    const received2 = msg2.data;
+    try std.testing.expect(
+        (std.mem.eql(u8, received1, "hello1") and std.mem.eql(u8, received2, "hello2")) or
+            (std.mem.eql(u8, received1, "hello2") and std.mem.eql(u8, received2, "hello1")),
+    );
+
+    // Clean up
+    batch.cancel(io);
+}
+
+test "io: batch awaitConcurrent times out when no data arrives" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{},
+    } });
+
+    // Should timeout since no data arrives
+    try std.testing.expectError(error.Timeout, batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }));
 }

@@ -2620,7 +2620,9 @@ fn dirRealPathFileWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const
 /// Call ioctl(2) on `fd`, retrying on EINTR. Returns the raw ioctl return
 /// value on success, or a negative errno value on failure, matching the
 /// `std.Io.Operation.DeviceIoControl.Result` contract.
-pub fn ioctl(fd: fd_t, code: u32, arg: ?*anyopaque) i32 {
+pub const ioctl = if (builtin.os.tag == .windows) ioctlWindows else ioctlPosix;
+
+fn ioctlPosix(fd: fd_t, code: u32, arg: ?*anyopaque) i32 {
     while (true) {
         const rc = posix.system.ioctl(fd, @bitCast(code), @intFromPtr(arg));
         switch (posix.errno(rc)) {
@@ -2632,4 +2634,25 @@ pub fn ioctl(fd: fd_t, code: u32, arg: ?*anyopaque) i32 {
             else => |err| return -@as(i32, @intFromEnum(err)),
         }
     }
+}
+
+fn ioctlWindows(handle: fd_t, code: std.os.windows.CTL_CODE, in: []const u8, out: []u8) std.os.windows.IO_STATUS_BLOCK {
+    var io_status: std.os.windows.IO_STATUS_BLOCK = undefined;
+    const status = std.os.windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        null,
+        null,
+        null,
+        &io_status,
+        @bitCast(code),
+        in.ptr,
+        @intCast(in.len),
+        out.ptr,
+        @intCast(out.len),
+    );
+    if (status != .SUCCESS) {
+        io_status.u = .{ .Status = status };
+        io_status.Information = 0;
+    }
+    return io_status;
 }

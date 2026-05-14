@@ -30,6 +30,8 @@ const builtin = @import("builtin");
 
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
+const beginShield = @import("../runtime.zig").beginShield;
+const endShield = @import("../runtime.zig").endShield;
 const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Waiter = @import("../common.zig").Waiter;
@@ -104,6 +106,14 @@ pub fn wait(ptr: *const u32, expect: u32) Cancelable!void {
         }
         return err;
     };
+}
+
+/// Like `wait`, but ignores cancellation requests.
+/// Useful in cleanup paths where we must wait for completion regardless of cancellation.
+pub fn waitUncancelable(ptr: *const u32, expect: u32) void {
+    beginShield();
+    defer endShield();
+    wait(ptr, expect) catch unreachable;
 }
 
 /// Stack-allocated waiter for futex operations.

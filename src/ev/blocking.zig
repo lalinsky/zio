@@ -30,6 +30,7 @@ const PipePoll = @import("completion.zig").PipePoll;
 const Timer = @import("completion.zig").Timer;
 const Work = @import("completion.zig").Work;
 const ProcessWait = @import("completion.zig").ProcessWait;
+const DeviceIoControl = @import("completion.zig").DeviceIoControl;
 const common = @import("backends/common.zig");
 const os = @import("../os/root.zig");
 const time = @import("../time.zig");
@@ -111,6 +112,9 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
 
         // Process wait - blocking wait
         .process_wait => common.handleProcessWait(c),
+
+        // Device I/O control - blocking ioctl
+        .device_io_control => handleDeviceIoControl(c),
 
         // Async operations require the event loop
         .async,
@@ -574,4 +578,14 @@ fn handleWork(c: *Completion) void {
     data.func(data);
     data.state.store(.completed, .monotonic);
     c.setResult(.work, {});
+}
+
+/// Helper to handle device I/O control (ioctl) operation
+fn handleDeviceIoControl(c: *Completion) void {
+    const data = c.cast(DeviceIoControl);
+    if (builtin.os.tag == .windows) {
+        c.setResult(.device_io_control, os.fs.ioctl(data.handle, data.code, data.in, data.out));
+    } else {
+        c.setResult(.device_io_control, os.fs.ioctl(data.handle, data.code, data.arg));
+    }
 }
