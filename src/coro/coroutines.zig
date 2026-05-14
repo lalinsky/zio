@@ -1194,11 +1194,14 @@ pub fn Closure(func: anytype) type {
 
     // Build a new tuple type without the first argument (Coroutine)
     const args_fields = std.meta.fields(FullArgs);
-    comptime var user_types: [args_fields.len - 1]type = undefined;
-    inline for (args_fields[1..], 0..) |field, i| {
-        user_types[i] = field.type;
-    }
-    const UserArgs = std.meta.Tuple(&user_types);
+    const user_types: [args_fields.len - 1]type = blk: {
+        var types: [args_fields.len - 1]type = undefined;
+        inline for (args_fields[1..], 0..) |field, i| {
+            types[i] = field.type;
+        }
+        break :blk types;
+    };
+    const UserArgs = @Tuple(&user_types);
 
     return struct {
         args: UserArgs,

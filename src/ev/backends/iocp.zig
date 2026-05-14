@@ -584,7 +584,7 @@ fn sendFlagsToMsg(flags: net.SendFlags) windows.DWORD {
 
 fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     // Get socket address to determine address family
-    var addr_buf align(@alignOf(windows.sockaddr.in6)) = [_]u8{0} ** 128;
+    var addr_buf: [128]u8 align(@alignOf(windows.sockaddr.in6)) = @splat(0);
     var addr_len: i32 = addr_buf.len;
     if (windows.getsockname(
         data.handle,
@@ -972,7 +972,7 @@ fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
 
     // ConnectEx requires the socket to be bound first (even to wildcard address)
     // Create a wildcard bind address
-    var bind_addr_buf align(@alignOf(windows.sockaddr.in6)) = [_]u8{0} ** 128;
+    var bind_addr_buf: [128]u8 align(@alignOf(windows.sockaddr.in6)) = @splat(0);
     var bind_addr_len: net.socklen_t = 0;
 
     if (family == windows.AF.INET) {
@@ -985,12 +985,12 @@ fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
         const addr: *windows.sockaddr.in6 = @ptrCast(&bind_addr_buf);
         addr.family = windows.AF.INET6;
         addr.port = 0;
-        addr.addr = [_]u8{0} ** 16; // IN6ADDR_ANY
+        addr.addr = @splat(0); // IN6ADDR_ANY
         bind_addr_len = @sizeOf(windows.sockaddr.in6);
     } else if (family == windows.AF.UNIX) {
         const addr: *windows.sockaddr.un = @ptrCast(&bind_addr_buf);
         addr.family = windows.AF.UNIX;
-        addr.path = [_]u8{0} ** 108; // Empty path for wildcard bind
+        addr.path = @splat(0); // Empty path for wildcard bind
         bind_addr_len = @sizeOf(windows.sockaddr.un);
     } else {
         return error.Unexpected;

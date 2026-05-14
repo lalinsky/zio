@@ -17,7 +17,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-const BORDER = "=" ** 80;
+const BORDER: [80]u8 = @splat('=');
 
 // Log capture for suppressing logs in passing tests.
 // The Io is stashed at startup so the global log callback can perform mutex

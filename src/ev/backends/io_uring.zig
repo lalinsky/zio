@@ -451,7 +451,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_open => {
             const data = c.cast(FileOpen);
             if (is_new) {
-                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                data.internal.path = self.allocator.dupeSentinel(u8, data.path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;
@@ -478,7 +478,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_create => {
             const data = c.cast(FileCreate);
             if (is_new) {
-                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                data.internal.path = self.allocator.dupeSentinel(u8, data.path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;
@@ -585,7 +585,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_create_dir => {
             const data = c.cast(DirCreateDir);
             if (is_new) {
-                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                data.internal.path = self.allocator.dupeSentinel(u8, data.path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;
@@ -604,12 +604,12 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_rename => {
             const data = c.cast(DirRename);
             if (is_new) {
-                data.internal.old_path = self.allocator.dupeZ(u8, data.old_path) catch {
+                data.internal.old_path = self.allocator.dupeSentinel(u8, data.old_path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;
                 };
-                data.internal.new_path = self.allocator.dupeZ(u8, data.new_path) catch {
+                data.internal.new_path = self.allocator.dupeSentinel(u8, data.new_path, 0) catch {
                     self.allocator.free(data.internal.old_path);
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
@@ -630,12 +630,12 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_rename_preserve => {
             const data = c.cast(DirRenamePreserve);
             if (is_new) {
-                data.internal.old_path = self.allocator.dupeZ(u8, data.old_path) catch {
+                data.internal.old_path = self.allocator.dupeSentinel(u8, data.old_path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;
                 };
-                data.internal.new_path = self.allocator.dupeZ(u8, data.new_path) catch {
+                data.internal.new_path = self.allocator.dupeSentinel(u8, data.new_path, 0) catch {
                     self.allocator.free(data.internal.old_path);
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
@@ -656,7 +656,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_delete_file => {
             const data = c.cast(DirDeleteFile);
             if (is_new) {
-                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                data.internal.path = self.allocator.dupeSentinel(u8, data.path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;
@@ -675,7 +675,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_delete_dir => {
             const data = c.cast(DirDeleteDir);
             if (is_new) {
-                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                data.internal.path = self.allocator.dupeSentinel(u8, data.path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;
@@ -723,7 +723,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             if (data.path) |user_path| {
                 // Path provided - stat relative to handle
                 if (is_new) {
-                    data.internal.path = self.allocator.dupeZ(u8, user_path) catch {
+                    data.internal.path = self.allocator.dupeSentinel(u8, user_path, 0) catch {
                         c.setError(error.SystemResources);
                         state.markCompletedFromBackend(c);
                         return;
@@ -755,7 +755,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .dir_open => {
             const data = c.cast(DirOpen);
             if (is_new) {
-                data.internal.path = self.allocator.dupeZ(u8, data.path) catch {
+                data.internal.path = self.allocator.dupeSentinel(u8, data.path, 0) catch {
                     c.setError(error.SystemResources);
                     state.markCompletedFromBackend(c);
                     return;

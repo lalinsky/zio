@@ -54,7 +54,7 @@ fn lookupBlocking(options: dns.LookupOptions) dns.LookupError!?*os_net.addrinfo 
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
 
-    const name_c = try allocator.dupeZ(u8, options.name);
+    const name_c = try allocator.dupeSentinel(u8, options.name, 0);
     const port_c = try std.fmt.allocPrintSentinel(allocator, "{d}", .{options.port}, 0);
 
     var hints: os_net.addrinfo = std.mem.zeroes(os_net.addrinfo);

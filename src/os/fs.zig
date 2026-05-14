@@ -611,7 +611,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         .CLOEXEC = true,
     };
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
@@ -670,7 +670,7 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         open_flags.PATH = true;
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
@@ -740,7 +740,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     if (flags.truncate) open_flags.TRUNC = true;
     if (flags.exclusive) open_flags.EXCL = true;
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
@@ -1041,9 +1041,9 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
         return;
     }
 
-    const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+    const old_path_z = allocator.dupeSentinel(u8, old_path, 0) catch return error.SystemResources;
     defer allocator.free(old_path_z);
-    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
     defer allocator.free(new_path_z);
 
     while (true) {
@@ -1087,9 +1087,9 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
         return;
     }
 
-    const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+    const old_path_z = allocator.dupeSentinel(u8, old_path, 0) catch return error.SystemResources;
     defer allocator.free(old_path_z);
-    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
     defer allocator.free(new_path_z);
 
     if (builtin.os.tag == .linux) {
@@ -1127,7 +1127,7 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
         return;
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
@@ -1159,7 +1159,7 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
         return;
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
@@ -1192,7 +1192,7 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
         return;
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
@@ -1570,7 +1570,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         return fstat(handle);
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
@@ -1873,7 +1873,7 @@ pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []co
     // Windows doesn't have POSIX-style permissions
     if (builtin.os.tag == .windows) return;
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.Unexpected;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
     defer allocator.free(path_z);
 
     // Note: AT_SYMLINK_NOFOLLOW for fchmodat requires Linux 6.6+ (fchmodat2)
@@ -1894,7 +1894,7 @@ pub fn dirSetFileOwner(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
     // Windows doesn't have POSIX-style ownership
     if (builtin.os.tag == .windows) return;
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.Unexpected;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
     defer allocator.free(path_z);
 
     // -1 means "don't change"
@@ -1921,7 +1921,7 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
         return;
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.Unexpected;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
     defer allocator.free(path_z);
 
     const UTIME_OMIT = 0x3ffffffe;
@@ -1978,10 +1978,10 @@ pub fn dirSymLink(allocator: std.mem.Allocator, dir: fd_t, target: []const u8, l
         return error.Unexpected;
     }
 
-    const target_z = allocator.dupeZ(u8, target) catch return error.SystemResources;
+    const target_z = allocator.dupeSentinel(u8, target, 0) catch return error.SystemResources;
     defer allocator.free(target_z);
 
-    const link_path_z = allocator.dupeZ(u8, link_path) catch return error.SystemResources;
+    const link_path_z = allocator.dupeSentinel(u8, link_path, 0) catch return error.SystemResources;
     defer allocator.free(link_path_z);
 
     while (true) {
@@ -2033,7 +2033,7 @@ pub fn dirReadLink(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, bu
         return error.Unexpected;
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     while (true) {
@@ -2090,10 +2090,10 @@ pub fn dirHardLink(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []cons
         return error.Unexpected;
     }
 
-    const old_path_z = allocator.dupeZ(u8, old_path) catch return error.SystemResources;
+    const old_path_z = allocator.dupeSentinel(u8, old_path, 0) catch return error.SystemResources;
     defer allocator.free(old_path_z);
 
-    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
     defer allocator.free(new_path_z);
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
@@ -2138,7 +2138,7 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
         return error.OperationUnsupported;
     }
 
-    const new_path_z = allocator.dupeZ(u8, new_path) catch return error.SystemResources;
+    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
     defer allocator.free(new_path_z);
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
@@ -2154,7 +2154,7 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
                 .NOENT => {
                     // AT_EMPTY_PATH requires CAP_DAC_READ_SEARCH, fall back to /proc/self/fd
                     var proc_buf: ["/proc/self/fd/-2147483648\x00".len]u8 = undefined;
-                    const proc_path = std.fmt.bufPrintZ(&proc_buf, "/proc/self/fd/{d}", .{fd}) catch unreachable;
+                    const proc_path = std.fmt.bufPrintSentinel(&proc_buf, "/proc/self/fd/{d}", .{fd}, 0) catch unreachable;
                     while (true) {
                         const rc2 = posix.linkat(posix.AT.FDCWD, proc_path.ptr, new_dir, new_path_z.ptr, posix.AT.SYMLINK_FOLLOW);
                         switch (posix.errno(rc2)) {
@@ -2172,7 +2172,7 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
         var path_buf: [posix.PATH_MAX]u8 = undefined;
         const len = dirRealPath(fd, &path_buf) catch return error.OperationUnsupported;
 
-        const old_path_z = allocator.dupeZ(u8, path_buf[0..len]) catch return error.SystemResources;
+        const old_path_z = allocator.dupeSentinel(u8, path_buf[0..len], 0) catch return error.SystemResources;
         defer allocator.free(old_path_z);
 
         while (true) {
@@ -2215,7 +2215,7 @@ pub fn dirAccess(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flag
         return dirAccessWindows(allocator, dir, path, flags);
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     var mode: u32 = posix.system.F_OK;
@@ -2300,7 +2300,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
     // Call getdents64 (Linux) or getdirentries (BSD)
     while (true) {
         const rc = switch (builtin.os.tag) {
-            .linux => std.os.linux.getdents64(handle, buffer.ptr, buffer.len),
+            .linux => std.os.linux.getdents64(handle, buffer.ptr, @intCast(buffer.len)),
             .macos, .ios, .tvos, .watchos, .visionos => blk: {
                 var basep: i64 = 0;
                 break :blk @as(usize, @bitCast(std.c.__getdirentries64(handle, buffer.ptr, buffer.len, &basep)));
@@ -2399,7 +2399,7 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
     if (builtin.os.tag == .linux) {
         // Use /proc/self/fd/{fd} with readlink
         var proc_path_buf: [32:0]u8 = undefined;
-        const proc_path = std.fmt.bufPrintZ(&proc_path_buf, "/proc/self/fd/{d}", .{actual_fd}) catch unreachable;
+        const proc_path = std.fmt.bufPrintSentinel(&proc_path_buf, "/proc/self/fd/{d}", .{actual_fd}, 0) catch unreachable;
 
         while (true) {
             const rc = posix.system.readlink(proc_path, buffer.ptr, buffer.len);
@@ -2458,7 +2458,7 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
         return dirRealPathFileWindows(allocator, dir, path, buffer);
     }
 
-    const path_z = allocator.dupeZ(u8, path) catch return error.SystemResources;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
     // On non-Linux with libc, we can use realpath() directly for AT_FDCWD

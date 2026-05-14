@@ -521,7 +521,7 @@ pub const IpAddress = extern union {
             os.net.AF.INET => self.in.addr == 0,
             os.net.AF.INET6 => blk: {
                 const addr = self.in6.addr;
-                const zeros = [_]u8{0} ** 16;
+                const zeros: [16]u8 = @splat(0);
                 break :blk std.mem.eql(u8, &addr, &zeros);
             },
             else => unreachable,
@@ -1251,7 +1251,18 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+fn repeat(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
+    var result: [s.len * n]u8 = undefined;
+    for (0..n) |i| @memcpy(result[i * s.len ..][0..s.len], s);
+    return result;
+}
+
 test "HostName: validate" {
+    const label63 = repeat("a", 63) ++ [_]u8{ '.', 'c', 'o', 'm' };
+    const total255 = repeat("a.", 127) ++ [_]u8{'a'};
+    const label64 = repeat("a", 64) ++ [_]u8{ '.', 'c', 'o', 'm' };
+    const total256 = repeat("a.", 127) ++ [_]u8{ 'a', 'b' };
+
     // Valid hostnames
     try HostName.validate("example");
     try HostName.validate("example.com");
@@ -1263,8 +1274,8 @@ test "HostName: validate" {
     try HostName.validate("a-b.com");
     try HostName.validate("a.b.c.d.e.f.g");
     try HostName.validate("127.0.0.1"); // Also a valid hostname
-    try HostName.validate("a" ** 63 ++ ".com"); // Label exactly 63 chars (valid)
-    try HostName.validate("a." ** 127 ++ "a"); // Total length 255 (valid)
+    try HostName.validate(&label63); // Label exactly 63 chars (valid)
+    try HostName.validate(&total255); // Total length 255 (valid)
 
     // Invalid hostnames
     try std.testing.expectError(error.InvalidHostName, HostName.validate(""));
@@ -1277,8 +1288,8 @@ test "HostName: validate" {
     try std.testing.expectError(error.InvalidHostName, HostName.validate("host_name.com"));
     try std.testing.expectError(error.InvalidHostName, HostName.validate("."));
     try std.testing.expectError(error.InvalidHostName, HostName.validate(".."));
-    try std.testing.expectError(error.InvalidHostName, HostName.validate("a" ** 64 ++ ".com")); // Label length 64 (too long)
-    try std.testing.expectError(error.NameTooLong, HostName.validate("a." ** 127 ++ "ab")); // Total length 256 (too long)
+    try std.testing.expectError(error.InvalidHostName, HostName.validate(&label64)); // Label length 64 (too long)
+    try std.testing.expectError(error.NameTooLong, HostName.validate(&total256)); // Total length 256 (too long)
 }
 
 test "HostName: eql" {
@@ -1554,23 +1565,23 @@ test "tcpConnectToHost: basic" {
 }
 
 test "IpAddress: initIp4" {
-    const addr = IpAddress.initIp4(.{0} ** 4, 8080);
+    const addr = IpAddress.initIp4(@splat(0), 8080);
     try std.testing.expectEqual(os.net.AF.INET, addr.any.family);
 }
 
 test "IpAddress: initIp6" {
-    const addr = IpAddress.initIp6(.{0} ** 16, 8080, 0, 0);
+    const addr = IpAddress.initIp6(@splat(0), 8080, 0, 0);
     try std.testing.expectEqual(os.net.AF.INET6, addr.any.family);
 }
 
 test "IpAddress: setPort/v4" {
-    var addr = IpAddress.initIp4(.{0} ** 4, 0);
+    var addr = IpAddress.initIp4(@splat(0), 0);
     addr.setPort(8080);
     try std.testing.expectEqual(8080, addr.getPort());
 }
 
 test "IpAddress: setPort/v6" {
-    var addr = IpAddress.initIp6(.{0} ** 16, 0, 0, 0);
+    var addr = IpAddress.initIp6(@splat(0), 0, 0, 0);
     addr.setPort(8080);
     try std.testing.expectEqual(8080, addr.getPort());
 }

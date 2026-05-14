@@ -180,7 +180,6 @@ pub const vtable: Io.VTable = .{
     .netConnectUnix = netConnectUnixImpl,
     .netSocketCreatePair = netSocketCreatePairImpl,
     .netSend = netSendImpl,
-    .netRead = netReadImpl,
     .netWrite = netWriteImpl,
     .netWriteFile = netWriteFileImpl,
     .netClose = netCloseImpl,
@@ -371,6 +370,14 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             };
             break :result .{ null, 1 };
         } },
+        .net_read => |*o| return .{ .net_read = result: {
+            const n = netReadOpImpl(o.socket_handle, o.data, timeout) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
+                else => |e| break :result e,
+            };
+            break :result n;
+        } },
     }
 }
 
@@ -449,6 +456,10 @@ const BatchCompletionData = union(Io.Operation.Tag) {
         message_buffer: *Io.net.IncomingMessage,
         data_buffer: []u8,
     },
+    net_read: struct {
+        op: ev.NetRecv,
+        iovecs: [max_iovecs_len]os_net.iovec,
+    },
 
     fn getCompletion(self: *BatchCompletionData) *ev.Completion {
         return switch (self.*) {
@@ -456,6 +467,7 @@ const BatchCompletionData = union(Io.Operation.Tag) {
             .file_write_streaming => |*d| &d.op.c,
             .device_io_control => |*d| &d.op.c,
             .net_receive => |*d| &d.op.c,
+            .net_read => |*d| &d.op.c,
         };
     }
 };
@@ -704,6 +716,15 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             );
             return &data.net_receive.op.c;
         },
+        .net_read => |*o| {
+            data.* = .{ .net_read = .{ .op = undefined, .iovecs = undefined } };
+            data.net_read.op = ev.NetRecv.init(
+                stdIoHandleToZio(o.socket_handle),
+                ev.ReadBuf.fromSlices(o.data, &data.net_read.iovecs),
+                .{},
+            );
+            return &data.net_read.op.c;
+        },
     }
 }
 
@@ -760,6 +781,9 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 break :blk data.device_io_control.op.getResult() catch 0;
             }
         } },
+        .net_read => .{
+            .net_read = data.net_read.op.getResult() catch |err| recvErrToReadErr(err),
+        },
         .net_receive => .{
             .net_receive = blk: {
                 const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };
@@ -2107,14 +2131,26 @@ fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.
     return .{ null, messages.len };
 }
 
-fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
+fn netReadOpImpl(
+    handle: Io.net.Socket.Handle,
+    data: [][]u8,
+    timeout: time.Timeout,
+) (Io.Operation.NetRead.Error || Io.Cancelable || common.Timeoutable)!usize {
+    if (data.len == 0) return 0;
+    var iovecs: [max_iovecs_len]os_net.iovec = undefined;
+    var op = ev.NetRecv.init(stdIoHandleToZio(handle), ev.ReadBuf.fromSlices(data, &iovecs), .{});
+    try timedWaitForIo(&op.c, timeout);
+    return op.getResult() catch |err| return recvErrToReadErr(err);
+}
+
+fn recvErrToReadErr(err: ev.NetRecv.Error) Io.Operation.NetRead.Error {
     return switch (err) {
         error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-        error.Timeout => error.Timeout,
         error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
-        error.Canceled => error.Canceled,
+        error.Timeout,
+        error.Canceled,
         error.WouldBlock,
         error.ConnectionRefused,
         error.ConnectionAborted,
