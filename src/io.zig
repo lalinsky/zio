@@ -767,7 +767,7 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 data.net_receive.message_buffer.* = .{
                     .from = zioIpToStdIo(data.net_receive.addr_storage.ip),
                     .data = data.net_receive.data_buffer[0..result.len],
-                    .control = data.net_receive.message_buffer.control,
+                    .control = data.net_receive.message_buffer.control[0..result.controllen],
                     .flags = decodeIncomingFlags(result.flags),
                 };
                 break :blk .{ null, 1 };
