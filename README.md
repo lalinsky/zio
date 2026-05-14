@@ -3,8 +3,6 @@
 [![CI](https://github.com/lalinsky/zio/actions/workflows/test.yml/badge.svg)](https://github.com/lalinsky/zio/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
-
-> **Zig 0.16.0 only.** For Zig master (0.17+), use the [`zig-0.17`](https://github.com/lalinsky/zio/tree/zig-0.17) branch.
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
 
 The project consists of a few high-level components:
@@ -14,6 +12,8 @@ The project consists of a few high-level components:
 - Integration with standard library interfaces, like [`std.Io.Reader`] and [`std.Io.Writer`], and also [`std.Io`].
 
 It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
+
+> The main branch is for Zig 0.16 . For Zig master (0.17+), use the [`zig-0.17`](https://github.com/lalinsky/zio/tree/zig-0.17) branch.
 
 [`std.Io`]: https://ziglang.org/documentation/0.16.0/std/#std.Io
 [`std.Io.Reader`]: https://ziglang.org/documentation/0.16.0/std/#std.Io.Reader
