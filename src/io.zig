@@ -433,6 +433,7 @@ const BatchCompletionData = union(Io.Operation.Tag) {
     file_write_streaming: struct {
         op: ev.FileWriteStreaming,
         iovecs: [max_iovecs_len]os_fs.iovec_const,
+        splat_buf: [8]u8,
     },
     device_io_control: if (builtin.os.tag == .windows) struct {
         op: ev.DeviceIoControl,
@@ -644,10 +645,10 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             data.* = .{ .file_write_streaming = .{
                 .op = undefined,
                 .iovecs = undefined,
+                .splat_buf = undefined,
             } };
             var slices: [max_iovecs_len][]const u8 = undefined;
-            var splat_buf: [64]u8 = undefined;
-            const n = fillBuf(&slices, o.header, o.data, o.splat, &splat_buf);
+            const n = fillBuf(&slices, o.header, o.data, o.splat, &data.file_write_streaming.splat_buf);
             const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &data.file_write_streaming.iovecs);
             data.file_write_streaming.op = ev.FileWriteStreaming.init(
                 stdIoHandleToZio(o.file.handle),
