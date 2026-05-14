@@ -553,6 +553,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
 
     // Submit all pending operations
     var index = batch.submitted.head;
+    errdefer batch.submitted.head = index;
     while (index != .none) {
         const storage = &batch.storage[index.toIndex()];
         const submission = storage.submission;
