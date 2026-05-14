@@ -616,7 +616,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
             },
         };
         // Reset count after waking
-        _ = state.ready_count.swap(0, .acquire);
+        _ = state.ready_count.swap(0, .acq_rel);
     }
 }
 
@@ -848,7 +848,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState, loop: *ev.Loop) void
     // Wait for all cancellations to complete
     while (batch.pending.head != .none) {
         Futex.waitUncancelable(&state.ready_count.raw, 0);
-        _ = state.ready_count.swap(0, .acquire);
+        _ = state.ready_count.swap(0, .acq_rel);
         batchDrainReady(batch, state);
     }
 }
