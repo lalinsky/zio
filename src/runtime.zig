@@ -43,6 +43,7 @@ pub const ExecutorCount = enum(u8) {
 
     /// Create an exact executor count (1 = single-threaded, no worker threads)
     pub fn exact(n: u8) ExecutorCount {
+        assert(n >= 1 and n <= Executor.max_executors);
         return @enumFromInt(n);
     }
 
