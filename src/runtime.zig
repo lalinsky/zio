@@ -36,17 +36,18 @@ const Waiter = @import("common.zig").Waiter;
 const mod = @This();
 
 /// Number of executor threads to run (including main).
-pub const ExecutorCount = enum(u6) {
+pub const ExecutorCount = enum(u8) {
     /// Auto-detect based on CPU count
     auto = 0,
     _,
 
     /// Create an exact executor count (1 = single-threaded, no worker threads)
-    pub fn exact(n: u6) ExecutorCount {
+    pub fn exact(n: u8) ExecutorCount {
+        assert(n >= 1 and n <= Executor.max_executors);
         return @enumFromInt(n);
     }
 
-    pub fn resolve(self: ExecutorCount) u6 {
+    pub fn resolve(self: ExecutorCount) u8 {
         return switch (self) {
             .auto => @intCast(@min(Executor.max_executors, std.Thread.getCpuCount() catch 1)),
             _ => @intFromEnum(self),
@@ -1174,6 +1175,13 @@ test "runtime: multi-threaded execution with 2 executors" {
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(4, TestContext.counter);
+}
+
+test "runtime: multi-threaded execution with 64 executors" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(64) });
+    defer runtime.deinit();
+
+    try std.testing.expectEqual(64, runtime.executors.items.len);
 }
 
 test "Runtime: multi-threaded with task migration" {
