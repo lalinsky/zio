@@ -816,7 +816,7 @@ pub const Socket = struct {
     address: Address,
 
     pub fn open(sock_type: os.net.Type, domain: os.net.Domain, protocol: os.net.Protocol) !Socket {
-        var op = ev.NetOpen.init(domain, sock_type, protocol, .{});
+        var op = ev.NetOpen.init(domain, sock_type, protocol, .{ .nonblocking = true });
         try waitForIo(&op.c);
         const handle = try op.getResult();
         return .{ .handle = handle, .address = undefined };

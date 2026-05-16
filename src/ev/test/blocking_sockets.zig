@@ -36,7 +36,7 @@ test "Blocking sockets: basic smoke test" {
             const alloc = std.testing.allocator;
 
             // Open server socket
-            var open = ev.NetOpen.init(.ipv4, .stream, .ip, .{});
+            var open = ev.NetOpen.init(.ipv4, .stream, .ip, .{ .nonblocking = false });
             blocking.executeBlocking(&open.c, alloc);
             const server_sock = open.c.getResult(.net_open) catch |err| {
                 s.server_err = err;
@@ -113,7 +113,7 @@ test "Blocking sockets: basic smoke test" {
             if (s.server_err) |_| return;
 
             // Open client socket
-            var open = ev.NetOpen.init(.ipv4, .stream, .ip, .{});
+            var open = ev.NetOpen.init(.ipv4, .stream, .ip, .{ .nonblocking = false });
             blocking.executeBlocking(&open.c, alloc);
             const client_sock = open.c.getResult(.net_open) catch |err| {
                 s.client_err = err;

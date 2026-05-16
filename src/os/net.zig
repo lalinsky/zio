@@ -294,7 +294,7 @@ pub const Protocol = enum(c_int) {
 };
 
 pub const OpenFlags = packed struct {
-    nonblocking: bool = false,
+    nonblocking: bool,
     cloexec: bool = true,
 };
 
