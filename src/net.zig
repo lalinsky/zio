@@ -1361,19 +1361,35 @@ test "HostName: connect" {
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    // Start a server
+    const Test = struct {
+        fn serverFn(server: Server) !void {
+            const conn = try server.accept(.{});
+            defer conn.close();
+            var buf: [32]u8 = undefined;
+            _ = try conn.read(&buf, .none);
+        }
+
+        fn clientFn(port: u16) !void {
+            const host = try HostName.init("localhost");
+            var stream = try host.connect(port, .{});
+            defer stream.close();
+            try stream.writeAll("hello", .none);
+        }
+    };
+
     const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
     const server = try server_addr.listen(.{});
     defer server.close();
 
     const port = server.socket.address.ip.getPort();
 
-    // Connect via HostName
-    const host = try HostName.init("localhost");
-    var stream = try host.connect(port, .{});
-    defer stream.close();
+    var group: Group = .init;
+    defer group.cancel();
 
-    try stream.writeAll("hello", .none);
+    try group.spawn(Test.serverFn, .{server});
+    try group.spawn(Test.clientFn, .{port});
+
+    try group.wait();
 }
 
 test "IpAddress: getFamily" {
