@@ -260,6 +260,11 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
+    // The task currently executing on this executor.
+    // Updated before every context switch into a task and after every switch back.
+    // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
+    current_task: *AnyTask,
+
     // Executor dedicated to this thread. Written once on init, never updated.
     pub threadlocal var current: ?*Executor = null;
 
@@ -277,6 +282,7 @@ pub const Executor = struct {
         self.* = .{
             .id = id,
             .loop = undefined,
+            .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
         };
@@ -315,6 +321,7 @@ pub const Executor = struct {
 
         self.main_task.coro.setCurrent();
         Executor.current = self;
+        self.current_task = &self.main_task;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -364,7 +371,9 @@ pub const Executor = struct {
                 // Both the store and the subsequent load in fromCoroutine() happen on
                 // the same executor thread, so no cross-thread ordering is needed.
                 next_task.coro.parent_context_ptr = &self.main_task.coro.context;
+                self.current_task = next_task;
                 next_task.coro.step();
+                self.current_task = &self.main_task;
                 self.processCleanup();
             }
 
@@ -498,14 +507,14 @@ pub const Executor = struct {
         // main_task is never queued - it just checks state in run().
         if (task.coro.parent_context_ptr == &task.coro.context) {
             const home_executor: *Executor = @alignCast(@fieldParentPtr("main_task", task));
-            if (getCurrentExecutorOrNull() != home_executor) {
+            if (Executor.current != home_executor) {
                 home_executor.loop.wake();
             }
             return;
         }
 
         // Normal scheduling
-        if (getCurrentExecutorOrNull()) |current_exec| {
+        if (Executor.current) |current_exec| {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
@@ -601,8 +610,10 @@ pub const Executor = struct {
             // Both the store and the subsequent load in fromCoroutine() happen on
             // the same executor thread, so no cross-thread ordering is needed.
             next_task.coro.parent_context_ptr = &self.main_task.coro.context;
+            self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
+            self.current_task = &self.main_task;
             coro.yield();
         }
     }
@@ -611,12 +622,7 @@ pub const Executor = struct {
 /// Get the current thread's executor.
 /// Panics if called from a thread without an active executor context.
 pub fn getCurrentExecutor() *Executor {
-    return getCurrentExecutorOrNull() orelse @panic("no current executor");
-}
-
-pub fn getCurrentExecutorOrNull() ?*Executor {
-    const task = getCurrentTaskOrNull() orelse return null;
-    return task.getExecutor();
+    return Executor.current orelse @panic("no current executor");
 }
 
 /// Get the currently executing task.
@@ -627,8 +633,8 @@ pub fn getCurrentTask() *AnyTask {
 
 /// Get the currently executing task, or null if not in task context.
 pub fn getCurrentTaskOrNull() ?*AnyTask {
-    const coro = Coroutine.getCurrent() orelse return null;
-    return AnyTask.fromCoroutine(coro);
+    const exec = Executor.current orelse return null;
+    return exec.current_task;
 }
 
 /// Cooperatively yield control to allow other tasks to run.

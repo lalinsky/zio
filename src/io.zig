@@ -15,6 +15,7 @@ const Alignment = std.mem.Alignment;
 const runtime_mod = @import("runtime.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
+const getCurrentExecutor = runtime_mod.getCurrentExecutor;
 const beginShield = runtime_mod.beginShield;
 const endShield = runtime_mod.endShield;
 const checkCancel = runtime_mod.checkCancel;
@@ -548,8 +549,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
     };
 
     // Get the event loop
-    const task = getCurrentTask();
-    const loop = &task.getExecutor().loop;
+    const loop = &getCurrentExecutor().loop;
 
     // Submit all pending operations
     var index = batch.submitted.head;
@@ -611,7 +611,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
                 return error.Timeout;
             },
             error.Canceled => {
-                batchCancelPending(batch, state, loop);
+                batchCancelPending(batch, state);
                 return error.Canceled;
             },
         };
@@ -826,7 +826,7 @@ fn batchDrainReady(batch: *Io.Batch, state: *BatchState) void {
 }
 
 /// Cancel all pending batch operations and wait for them to complete
-fn batchCancelPending(batch: *Io.Batch, state: *BatchState, loop: *ev.Loop) void {
+fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
     // First drain any ready items
     batchDrainReady(batch, state);
 
@@ -840,7 +840,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState, loop: *ev.Loop) void
         if (data_ptr & 1 == 0) {
             const data: *BatchCompletionData = @ptrFromInt(data_ptr);
             const completion = data.getCompletion();
-            loop.cancel(completion);
+            if (completion.loop) |l| l.cancel(completion);
         }
         index = storage.pending.node.next;
     }
@@ -862,8 +862,7 @@ fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
 
     // If there are pending operations, cancel them and wait
     if (batch.pending.head != .none) {
-        const loop = &getCurrentTask().getExecutor().loop;
-        batchCancelPending(batch, state, loop);
+        batchCancelPending(batch, state);
     }
 
     state.deinit();
