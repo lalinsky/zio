@@ -80,7 +80,7 @@ test "Loop: close" {
     defer loop.deinit();
 
     // Create a socket first
-    var open: NetOpen = .init(.ipv4, .stream, .ip, .{});
+    var open: NetOpen = .init(.ipv4, .stream, .ip, .{ .nonblocking = true });
     loop.add(&open.c);
     try loop.run(.until_done);
     const sock = try open.c.getResult(.net_open);
@@ -97,7 +97,7 @@ test "Loop: socket create and bind" {
     defer loop.deinit();
 
     // Create socket
-    var open: NetOpen = .init(.ipv4, .stream, .ip, .{});
+    var open: NetOpen = .init(.ipv4, .stream, .ip, .{ .nonblocking = true });
     loop.add(&open.c);
     try loop.run(.until_done);
 

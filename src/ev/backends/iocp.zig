@@ -214,7 +214,7 @@ pub const SharedState = struct {
 
             // Load all extension functions using a temporary socket
             // Socket family/type doesn't matter - use AF_INET SOCK_STREAM
-            const sock = try net.socket(.ipv4, .stream, .ip, .{});
+            const sock = try net.socket(.ipv4, .stream, .ip, .{ .nonblocking = false });
             defer net.close(sock);
 
             self.exts = ExtensionFunctions{

@@ -1751,7 +1751,7 @@ fn listenErrToListenErr(err: ListenOrCancel) Io.net.IpAddress.ListenError {
 fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
     const zio_addr = stdIoIpToZio(address.*);
 
-    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), .fromStd(options.protocol), .{});
+    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), .fromStd(options.protocol), .{ .nonblocking = true });
     try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| return openErrToListenErr(err);
     errdefer {
@@ -1856,7 +1856,7 @@ fn bindErrToBindErr(err: BindOrCancel) Io.net.IpAddress.BindError {
 fn netBindIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
     const zio_addr = stdIoIpToZio(address.*);
 
-    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), if (options.protocol) |p| .fromStd(p) else .ip, .{});
+    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), if (options.protocol) |p| .fromStd(p) else .ip, .{ .nonblocking = true });
     try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| return openErrToBindErr(err);
     errdefer {
@@ -1940,7 +1940,7 @@ fn connectErrToConnectErr(err: ConnectOrCancel) Io.net.IpAddress.ConnectError {
 fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
     const zio_addr = stdIoIpToZio(address.*);
 
-    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), if (options.protocol) |p| .fromStd(p) else .ip, .{});
+    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), if (options.protocol) |p| .fromStd(p) else .ip, .{ .nonblocking = true });
     try waitForIo(&open_op.c);
     const handle = open_op.getResult() catch |err| return openErrToConnectErr(err);
     errdefer {

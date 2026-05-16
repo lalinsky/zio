@@ -816,7 +816,7 @@ pub const Socket = struct {
     address: Address,
 
     pub fn open(sock_type: os.net.Type, domain: os.net.Domain, protocol: os.net.Protocol) !Socket {
-        var op = ev.NetOpen.init(domain, sock_type, protocol, .{});
+        var op = ev.NetOpen.init(domain, sock_type, protocol, .{ .nonblocking = true });
         try waitForIo(&op.c);
         const handle = try op.getResult();
         return .{ .handle = handle, .address = undefined };
@@ -1357,23 +1357,36 @@ test "HostName: lookup with canonical name" {
 
 test "HostName: connect" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
 
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
 
-    // Start a server
+    const ServerTask = struct {
+        fn run(server: Server) !void {
+            const conn = try server.accept(.{});
+            defer conn.close();
+            var buf: [32]u8 = undefined;
+            _ = try conn.read(&buf, .none);
+        }
+    };
+
     const server_addr = try IpAddress.parseIp4("127.0.0.1", 0);
     const server = try server_addr.listen(.{});
     defer server.close();
 
     const port = server.socket.address.ip.getPort();
 
-    // Connect via HostName
+    var server_task = try rt.spawn(ServerTask.run, .{server});
+    defer server_task.cancel();
+
     const host = try HostName.init("localhost");
     var stream = try host.connect(port, .{});
     defer stream.close();
 
     try stream.writeAll("hello", .none);
+
+    try server_task.join();
 }
 
 test "IpAddress: getFamily" {
