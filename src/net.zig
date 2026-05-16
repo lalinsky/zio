@@ -1357,6 +1357,7 @@ test "HostName: lookup with canonical name" {
 
 test "HostName: connect" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
 
     const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer rt.deinit();
