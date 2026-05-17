@@ -38,7 +38,6 @@ const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
 const os_posix = @import("os/posix.zig");
-const os_windows = @import("os/windows.zig");
 const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
@@ -1759,12 +1758,7 @@ fn stdIoHandleToZio(h: Io.net.Socket.Handle) os_net.fd_t {
 /// Returns true if the fd is a pipe, socket, or device that can be polled
 /// via epoll/kqueue. Regular files return false.
 fn fdIsPollable(fd: os_fs.fd_t) bool {
-    if (builtin.os.tag == .windows) {
-        return switch (os_windows.GetFileType(fd)) {
-            os_windows.FILE_TYPE_PIPE, os_windows.FILE_TYPE_CHAR => true,
-            else => false,
-        };
-    }
+    if (builtin.os.tag == .windows) return false;
     // lseek(fd, 0, SEEK_CUR) fails with ESPIPE for pipes, sockets, fifos, ttys.
     const rc = os_posix.sys.lseek(fd, 0, os_posix.system.SEEK.CUR);
     return os_posix.errno(rc) == .SPIPE;
