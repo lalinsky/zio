@@ -1330,7 +1330,7 @@ test "File: blocking mode without runtime" {
     const file_path = "test_blocking_mode.txt";
 
     // Create and write to file (no runtime!)
-    var file = try createFile(file_path, .{ .read = true });
+    var file = try createFile(file_path, .{ .read = true, .nonblocking = false });
     defer {
         file.close();
         deleteFile(file_path) catch {};
