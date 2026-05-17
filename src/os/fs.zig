@@ -104,7 +104,7 @@ pub const FileOpenMode = enum {
 
 pub const FileOpenFlags = struct {
     mode: FileOpenMode = .read_only,
-    nonblocking: bool = false,
+    nonblocking: bool = true,
     /// When false, opening a directory path returns error.IsDir.
     /// On Windows this is enforced without extra syscalls (no FILE_FLAG_BACKUP_SEMANTICS).
     /// On POSIX an extra fstat is required; defaults to true to avoid the overhead.
@@ -123,7 +123,7 @@ pub const FileCreateFlags = struct {
     truncate: bool = false,
     exclusive: bool = false,
     mode: mode_t = 0o664,
-    nonblocking: bool = false,
+    nonblocking: bool = true,
 };
 
 pub const FileOpenError = error{
