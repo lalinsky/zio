@@ -216,6 +216,15 @@ pub extern "kernel32" fn GetFileInformationByHandle(
     lpFileInformation: *BY_HANDLE_FILE_INFORMATION,
 ) callconv(.winapi) BOOL;
 
+pub const FILE_TYPE_UNKNOWN: DWORD = 0x0000;
+pub const FILE_TYPE_DISK: DWORD = 0x0001;
+pub const FILE_TYPE_CHAR: DWORD = 0x0002;
+pub const FILE_TYPE_PIPE: DWORD = 0x0003;
+
+pub extern "kernel32" fn GetFileType(
+    hFile: HANDLE,
+) callconv(.winapi) DWORD;
+
 pub extern "kernel32" fn GetFileAttributesW(
     lpFileName: LPCWSTR,
 ) callconv(.winapi) DWORD;

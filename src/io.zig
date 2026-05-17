@@ -38,6 +38,7 @@ const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
 const os_posix = @import("os/posix.zig");
+const os_windows = @import("os/windows.zig");
 const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
@@ -1759,8 +1760,8 @@ fn stdIoHandleToZio(h: Io.net.Socket.Handle) os_net.fd_t {
 /// via epoll/kqueue. Regular files return false.
 fn fdIsPollable(fd: os_fs.fd_t) bool {
     if (builtin.os.tag == .windows) {
-        return switch (std.os.windows.GetFileType(fd)) {
-            .PIPE, .CHAR => true,
+        return switch (os_windows.GetFileType(fd)) {
+            os_windows.FILE_TYPE_PIPE, os_windows.FILE_TYPE_CHAR => true,
             else => false,
         };
     }
