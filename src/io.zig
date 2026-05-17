@@ -1111,7 +1111,11 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    return .{ .handle = fd, .flags = .{ .nonblocking = fdIsPollable(fd) } };
+    const pollable = fdIsPollable(fd);
+    if (pollable and builtin.os.tag != .windows) {
+        os_posix.setNonblocking(fd) catch {};
+    }
+    return .{ .handle = fd, .flags = .{ .nonblocking = pollable } };
 }
 
 fn dirCreateFileAtomicImpl(_: ?*anyopaque, dir: Io.Dir, dest_path: []const u8, options: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
@@ -1181,7 +1185,11 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    return .{ .handle = fd, .flags = .{ .nonblocking = fdIsPollable(fd) } };
+    const pollable = fdIsPollable(fd);
+    if (pollable and builtin.os.tag != .windows) {
+        os_posix.setNonblocking(fd) catch {};
+    }
+    return .{ .handle = fd, .flags = .{ .nonblocking = pollable } };
 }
 
 fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {

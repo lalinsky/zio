@@ -233,6 +233,10 @@ pub fn fileOpenWork(work: *Work) void {
     const file_open: *FileOpen = @fieldParentPtr("internal", internal);
     const loop = internal.linked_context.loop;
 
+    if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
+        file_open.flags.nonblocking = true;
+    }
+
     handleFileOpen(&file_open.c, file_open.internal.allocator);
 
     // If the operation failed, exit early
@@ -254,6 +258,10 @@ pub fn fileCreateWork(work: *Work) void {
     const internal: *@FieldType(FileCreate, "internal") = @fieldParentPtr("work", work);
     const file_create: *FileCreate = @fieldParentPtr("internal", internal);
     const loop = internal.linked_context.loop;
+
+    if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
+        file_create.flags.nonblocking = true;
+    }
 
     handleFileCreate(&file_create.c, file_create.internal.allocator);
 
