@@ -174,7 +174,7 @@ pub fn unlockShared(self: *RwLock) void {
     self.mutex.lockUncancelable();
     self.permits += 1;
     self.mutex.unlock();
-    self.cond.signal();
+    self.cond.broadcast();
 }
 
 test "RwLock basic write lock/unlock" {
