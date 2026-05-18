@@ -9,6 +9,8 @@ const assert = std.debug.assert;
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 
+const os_fs = @import("os/fs.zig");
+
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const log = @import("common.zig").log;
@@ -713,6 +715,10 @@ pub const Runtime = struct {
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+    /// Maps fd -> is_pollable for fds we didn't open ourselves
+    /// (stdin/stdout/stderr). Populated lazily on first streaming I/O.
+    pollable_fds: std.AutoHashMapUnmanaged(os_fs.fd_t, bool) = .empty,
+
     const Worker = struct {
         thread: std.Thread = undefined,
         ready: os.ResetEvent = .init(),
@@ -814,6 +820,9 @@ pub const Runtime = struct {
 
         // Clean up stack pool
         self.stack_pool.deinit();
+
+        // Clean up nonblocking map
+        self.pollable_fds.deinit(allocator);
 
         // Clean up task pool
         self.task_pool.deinit();

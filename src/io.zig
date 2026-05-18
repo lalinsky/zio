@@ -331,17 +331,18 @@ fn futexWakeImpl(_: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
     Futex.wake(ptr, max_waiters);
 }
 
-fn operateImpl(_: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
-    return operateInner(operation, .none) catch |err| switch (err) {
+fn operateImpl(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return operateInner(rt, operation, .none) catch |err| switch (err) {
         error.Canceled => error.Canceled,
         error.Timeout => unreachable,
     };
 }
 
-fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable || common.Timeoutable)!Io.Operation.Result {
+fn operateInner(rt: *Runtime, operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable || common.Timeoutable)!Io.Operation.Result {
     switch (operation) {
         .file_read_streaming => |*o| return .{ .file_read_streaming = result: {
-            const n = fileReadStreamingImpl(o.file, o.data, timeout) catch |err| switch (err) {
+            const n = fileReadStreamingImpl(rt, o.file, o.data, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Timeout => |e| return e,
                 else => |e| break :result e,
@@ -349,7 +350,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             break :result n;
         } },
         .file_write_streaming => |*o| return .{ .file_write_streaming = result: {
-            const n = fileWriteStreamingImpl(o.file, o.header, o.data, o.splat, timeout) catch |err| switch (err) {
+            const n = fileWriteStreamingImpl(rt, o.file, o.header, o.data, o.splat, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Timeout => |e| return e,
                 else => |e| break :result e,
@@ -378,10 +379,13 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
 /// Read from `file` at its current position into `data`, advancing the
 /// position. Returns `error.EndOfStream` on EOF (OS returned 0 bytes).
 fn fileReadStreamingImpl(
+    rt: *Runtime,
     file: Io.File,
     data: []const []u8,
     timeout: time.Timeout,
 ) (Io.Operation.FileReadStreaming.Error || Io.Cancelable || common.Timeoutable)!usize {
+    const handle = stdIoHandleToZio(file.handle);
+    const nonblocking = if (file.flags.nonblocking) true else lookupPollableFd(rt, handle);
     var iovecs: [max_iovecs_len]os_fs.iovec = undefined;
     var count: usize = 0;
     for (data) |buf| {
@@ -393,7 +397,17 @@ fn fileReadStreamingImpl(
     }
     if (count == 0) return 0;
 
-    var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
+    if (nonblocking) {
+        var op = ev.PipeRead.init(handle, .{ .iovecs = iovecs[0..count] });
+        try timedWaitForIo(&op.c, timeout);
+        const n = op.getResult() catch |err| switch (err) {
+            error.BrokenPipe => return error.EndOfStream,
+            else => |e| return e,
+        };
+        return if (n == 0) error.EndOfStream else n;
+    }
+
+    var op = ev.FileReadStreaming.init(handle, .{ .iovecs = iovecs[0..count] });
     try timedWaitForIo(&op.c, timeout);
     const n = op.getResult() catch |err| switch (err) {
         error.BrokenPipe => return error.Unexpected,
@@ -405,12 +419,15 @@ fn fileReadStreamingImpl(
 /// Write from `header` / `data` (with `splat` repetition of the last slice)
 /// to `file` at its current position, advancing the position.
 fn fileWriteStreamingImpl(
+    rt: *Runtime,
     file: Io.File,
     header: []const u8,
     data: []const []const u8,
     splat: usize,
     timeout: time.Timeout,
 ) (Io.Operation.FileWriteStreaming.Error || Io.Cancelable || common.Timeoutable)!usize {
+    const handle = stdIoHandleToZio(file.handle);
+    const nonblocking = if (file.flags.nonblocking) true else lookupPollableFd(rt, handle);
     var slices: [max_iovecs_len][]const u8 = undefined;
     var splat_buf: [64]u8 = undefined;
     const n = fillBuf(&slices, header, data, splat, &splat_buf);
@@ -419,7 +436,16 @@ fn fileWriteStreamingImpl(
     var iovecs: [max_iovecs_len]os_fs.iovec_const = undefined;
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
-    var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
+    if (nonblocking) {
+        var op = ev.PipeWrite.init(handle, wbuf);
+        try timedWaitForIo(&op.c, timeout);
+        return op.getResult() catch |err| switch (err) {
+            error.BrokenPipe => return error.BrokenPipe,
+            else => |e| return e,
+        };
+    }
+
+    var op = ev.FileWriteStreaming.init(handle, wbuf);
     try timedWaitForIo(&op.c, timeout);
     return try op.getResult();
 }
@@ -428,11 +454,17 @@ fn fileWriteStreamingImpl(
 /// Tagged union matching Io.Operation, holding the ev completion struct and any auxiliary data.
 const BatchCompletionData = union(Io.Operation.Tag) {
     file_read_streaming: struct {
-        op: ev.FileReadStreaming,
+        op: union(enum) {
+            file: ev.FileReadStreaming,
+            pipe: ev.PipeRead,
+        },
         iovecs: [max_iovecs_len]os_fs.iovec,
     },
     file_write_streaming: struct {
-        op: ev.FileWriteStreaming,
+        op: union(enum) {
+            file: ev.FileWriteStreaming,
+            pipe: ev.PipeWrite,
+        },
         iovecs: [max_iovecs_len]os_fs.iovec_const,
         splat_buf: [8]u8,
     },
@@ -453,8 +485,14 @@ const BatchCompletionData = union(Io.Operation.Tag) {
 
     fn getCompletion(self: *BatchCompletionData) *ev.Completion {
         return switch (self.*) {
-            .file_read_streaming => |*d| &d.op.c,
-            .file_write_streaming => |*d| &d.op.c,
+            .file_read_streaming => |*d| switch (d.op) {
+                .file => |*f| &f.c,
+                .pipe => |*p| &p.c,
+            },
+            .file_write_streaming => |*d| switch (d.op) {
+                .file => |*f| &f.c,
+                .pipe => |*p| &p.c,
+            },
             .device_io_control => |*d| &d.op.c,
             .net_receive => |*d| &d.op.c,
         };
@@ -514,13 +552,15 @@ fn batchAwaitAsyncImpl(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!vo
 }
 
 fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+
     // Specialized path: exactly one submitted operation, none in flight.
     const only = batch.submitted.head;
     if (only != .none and only == batch.submitted.tail and batch.pending.head == .none) {
         const storage = &batch.storage[only.toIndex()];
         const operation = storage.submission.operation;
 
-        const result = try operateInner(operation, time.Timeout.fromStd(timeout));
+        const result = try operateInner(rt, operation, time.Timeout.fromStd(timeout));
 
         batch.submitted = .empty;
         storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
@@ -535,8 +575,6 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
 
     // Nothing to do if no submissions and nothing pending
     if (batch.submitted.head == .none and batch.pending.head == .none) return;
-
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
 
     // Get or create batch state (stored in batch.userdata)
     const state: *BatchState = if (batch.userdata) |ptr|
@@ -563,7 +601,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         const data = state.pool.create() catch return error.ConcurrencyUnavailable;
 
         // Initialize the ev operation based on operation type
-        const completion = initBatchOperation(data, submission.operation);
+        const completion = initBatchOperation(rt, data, submission.operation);
 
         // Set up callback - store state pointer in completion userdata
         completion.userdata = state;
@@ -621,7 +659,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
 }
 
 /// Initialize a BatchCompletionData from an Io.Operation
-fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.Completion {
+fn initBatchOperation(rt: *Runtime, data: *BatchCompletionData, operation: Io.Operation) *ev.Completion {
     switch (operation) {
         .file_read_streaming => |*o| {
             data.* = .{ .file_read_streaming = .{
@@ -636,11 +674,21 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                     count += 1;
                 }
             }
-            data.file_read_streaming.op = ev.FileReadStreaming.init(
-                stdIoHandleToZio(o.file.handle),
-                .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
-            );
-            return &data.file_read_streaming.op.c;
+            const handle = stdIoHandleToZio(o.file.handle);
+            const nonblocking = if (o.file.flags.nonblocking) true else lookupPollableFd(rt, handle);
+            if (nonblocking) {
+                data.file_read_streaming.op = .{ .pipe = ev.PipeRead.init(
+                    handle,
+                    .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
+                ) };
+                return &data.file_read_streaming.op.pipe.c;
+            } else {
+                data.file_read_streaming.op = .{ .file = ev.FileReadStreaming.init(
+                    handle,
+                    .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
+                ) };
+                return &data.file_read_streaming.op.file.c;
+            }
         },
         .file_write_streaming => |*o| {
             data.* = .{ .file_write_streaming = .{
@@ -651,11 +699,21 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             var slices: [max_iovecs_len][]const u8 = undefined;
             const n = fillBuf(&slices, o.header, o.data, o.splat, &data.file_write_streaming.splat_buf);
             const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &data.file_write_streaming.iovecs);
-            data.file_write_streaming.op = ev.FileWriteStreaming.init(
-                stdIoHandleToZio(o.file.handle),
-                wbuf,
-            );
-            return &data.file_write_streaming.op.c;
+            const handle = stdIoHandleToZio(o.file.handle);
+            const nonblocking = if (o.file.flags.nonblocking) true else lookupPollableFd(rt, handle);
+            if (nonblocking) {
+                data.file_write_streaming.op = .{ .pipe = ev.PipeWrite.init(
+                    handle,
+                    wbuf,
+                ) };
+                return &data.file_write_streaming.op.pipe.c;
+            } else {
+                data.file_write_streaming.op = .{ .file = ev.FileWriteStreaming.init(
+                    handle,
+                    wbuf,
+                ) };
+                return &data.file_write_streaming.op.file.c;
+            }
         },
         .device_io_control => |*o| {
             if (builtin.os.tag == .windows) {
@@ -738,14 +796,20 @@ fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
 fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Operation.Result {
     return switch (tag) {
         .file_read_streaming => .{ .file_read_streaming = blk: {
-            const n = data.file_read_streaming.op.getResult() catch |err| switch (err) {
+            const n = switch (data.file_read_streaming.op) {
+                .file => |*f| f.getResult(),
+                .pipe => |*p| p.getResult(),
+            } catch |err| switch (err) {
                 error.BrokenPipe, error.Canceled => break :blk error.Unexpected,
                 else => |e| break :blk e,
             };
             break :blk if (n == 0) error.EndOfStream else n;
         } },
         .file_write_streaming => .{ .file_write_streaming = blk: {
-            break :blk data.file_write_streaming.op.getResult() catch |err| switch (err) {
+            break :blk switch (data.file_write_streaming.op) {
+                .file => |*f| f.getResult(),
+                .pipe => |*p| p.getResult(),
+            } catch |err| switch (err) {
                 error.Canceled => error.Unexpected,
                 else => |e| e,
             };
@@ -1047,7 +1111,11 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const pollable = fdIsPollable(fd);
+    if (pollable and builtin.os.tag != .windows) {
+        os_posix.setNonblocking(fd) catch {};
+    }
+    return .{ .handle = fd, .flags = .{ .nonblocking = pollable } };
 }
 
 fn dirCreateFileAtomicImpl(_: ?*anyopaque, dir: Io.Dir, dest_path: []const u8, options: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
@@ -1117,7 +1185,11 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const pollable = fdIsPollable(fd);
+    if (pollable and builtin.os.tag != .windows) {
+        os_posix.setNonblocking(fd) catch {};
+    }
+    return .{ .handle = fd, .flags = .{ .nonblocking = pollable } };
 }
 
 fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {
@@ -1689,6 +1761,25 @@ fn sockAddrLen(addr: *const os_net.sockaddr) os_net.socklen_t {
 
 fn stdIoHandleToZio(h: Io.net.Socket.Handle) os_net.fd_t {
     return if (@typeInfo(os_net.fd_t) == .pointer) @ptrCast(h) else h;
+}
+
+/// Returns true if the fd is a pipe, socket, or device that can be polled
+/// via epoll/kqueue. Regular files return false.
+fn fdIsPollable(fd: os_fs.fd_t) bool {
+    if (builtin.os.tag == .windows) return false;
+    // lseek(fd, 0, SEEK_CUR) fails with ESPIPE for pipes, sockets, fifos, ttys.
+    const rc = os_posix.sys.lseek(fd, 0, os_posix.system.SEEK.CUR);
+    return os_posix.errno(rc) == .SPIPE;
+}
+
+/// Returns true if the fd can be polled. Uses the runtime map for caching
+/// on foreign fds (e.g. stdin/stdout/stderr) that weren't opened through us.
+fn lookupPollableFd(rt: *Runtime, fd: os_fs.fd_t) bool {
+    const gop = rt.pollable_fds.getOrPut(rt.allocator, fd) catch return false;
+    if (!gop.found_existing) {
+        gop.value_ptr.* = fdIsPollable(fd);
+    }
+    return gop.value_ptr.*;
 }
 
 const OpenOrCancel = os_net.OpenError || common.Cancelable;
