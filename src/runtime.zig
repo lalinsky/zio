@@ -1187,7 +1187,7 @@ test "runtime: multi-threaded execution with 64 executors" {
 }
 
 test "Runtime: multi-threaded with task migration" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8), .allow_task_migration = true });
     defer runtime.deinit();
 
     const ResetEvent = @import("sync/ResetEvent.zig");
@@ -1301,7 +1301,7 @@ fn wakeBeforeParkStress(executor_count: u6) !void {
 test "runtime: mutex contention with task migration" {
     const Mutex = @import("sync/Mutex.zig");
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2), .allow_task_migration = true });
     defer runtime.deinit();
 
     var mutex: Mutex = .init;
