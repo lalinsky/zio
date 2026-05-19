@@ -66,6 +66,9 @@ pub const RuntimeOptions = struct {
     },
     /// Number of executor threads to run (including main).
     executors: ExecutorCount = .exact(1),
+    /// Allow tasks to be migrated to a different executor when scheduled.
+    /// Requires work-stealing to be effective for re-balancing.
+    allow_task_migration: bool = false,
 };
 
 const Awaitable = @import("awaitable.zig").Awaitable;
@@ -520,7 +523,7 @@ pub const Executor = struct {
             //       for re-balancing them
             if (current_exec.runtime == task.runtime and old.tag != .new) {
                 const home_exec = Executor.fromCoroutine(&task.coro);
-                if (current_exec == home_exec or task.canMigrate()) {
+                if (current_exec == home_exec or task.runtime.options.allow_task_migration) {
                     task.last_run_tick = 0; // Allow immediate execution on new executor
                     current_exec.scheduleTaskLocal(task);
                 } else {
@@ -532,7 +535,7 @@ pub const Executor = struct {
 
         // Non-migratable tasks must go home, even when scheduled from a foreign
         // thread or a different runtime. Only .new tasks get round-robin distribution.
-        if (old.tag != .new and !task.canMigrate()) {
+        if (old.tag != .new and !task.runtime.options.allow_task_migration) {
             Executor.fromCoroutine(&task.coro).scheduleTaskRemote(task);
             return;
         }
