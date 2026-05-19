@@ -67,8 +67,7 @@ pub const RuntimeOptions = struct {
     /// Number of executor threads to run (including main).
     executors: ExecutorCount = .exact(1),
     /// Allow tasks to be migrated to a different executor when scheduled.
-    /// Requires work-stealing to be effective for re-balancing.
-    allow_task_migration: bool = false,
+    allow_task_migration: bool = true,
 };
 
 const Awaitable = @import("awaitable.zig").Awaitable;
