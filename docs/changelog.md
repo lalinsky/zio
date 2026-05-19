@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-05-19
+
+### Added
+
+- `std.Io`: batch operations now support concurrent execution and timeouts (#387, #388)
+
+### Fixed
+
+- Fixed possible deadlock in `RwLock.unlockShared` (#395)
+- Fixed sockets not opened in non-blocking mode on the epoll backend (#392)
+- Fixed integer overflow when using `.executors = .auto` on machines with 64+ CPUs (#390)
+- Fixed coroutine stack allocation size doubling on POSIX (#386)
+
 ## [0.11.0] - 2026-05-11
 
 ### Added
@@ -26,6 +39,8 @@ All notable changes to this project will be documented in this file.
 
 - Fixed a critical bug on Linux with the epoll backend where non-blocking network reads and writes could
   silently succeed with garbage data instead of returning `error.WouldBlock`.
+
+## [0.10.0] - 2026-04-26
 
 ### Added
 
@@ -263,6 +278,8 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.12.0]: https://github.com/lalinsky/zio/releases/tag/v0.12.0
+[0.11.0]: https://github.com/lalinsky/zio/releases/tag/v0.11.0
 [0.10.0]: https://github.com/lalinsky/zio/releases/tag/v0.10.0
 [0.9.0]: https://github.com/lalinsky/zio/releases/tag/v0.9.0
 [0.8.2]: https://github.com/lalinsky/zio/releases/tag/v0.8.2
