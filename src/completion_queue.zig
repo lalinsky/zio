@@ -31,7 +31,6 @@ const os = @import("os/root.zig");
 const common = @import("common.zig");
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 const Runtime = @import("runtime.zig").Runtime;
-const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 
 const Waiter = common.Waiter;
 const Cancelable = common.Cancelable;
@@ -57,6 +56,10 @@ pub const CompletionQueue = struct {
         };
     }
 
+    fn getLoop(self: *CompletionQueue) *ev.Loop {
+        return &self.waiter.mode.direct.task.?.getExecutor().loop;
+    }
+
     /// Get the Completion that owns a group node.
     inline fn completionFromGroup(node: *GroupNode) *Completion {
         return @fieldParentPtr("group", node);
@@ -71,7 +74,7 @@ pub const CompletionQueue = struct {
         self.pending.push(&c.group);
         self.mutex.unlock();
 
-        getCurrentExecutor().loop.add(c);
+        self.getLoop().add(c);
     }
 
     /// Reset the signal counter before checking the completed queue.

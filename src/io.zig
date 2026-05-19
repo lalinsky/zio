@@ -15,7 +15,6 @@ const Alignment = std.mem.Alignment;
 const runtime_mod = @import("runtime.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
-const getCurrentExecutor = runtime_mod.getCurrentExecutor;
 const beginShield = runtime_mod.beginShield;
 const endShield = runtime_mod.endShield;
 const checkCancel = runtime_mod.checkCancel;
@@ -549,7 +548,8 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
     };
 
     // Get the event loop
-    const loop = &getCurrentExecutor().loop;
+    const task = getCurrentTask();
+    const loop = &task.getExecutor().loop;
 
     // Submit all pending operations
     var index = batch.submitted.head;

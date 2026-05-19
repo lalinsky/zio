@@ -66,6 +66,8 @@ pub const RuntimeOptions = struct {
     },
     /// Number of executor threads to run (including main).
     executors: ExecutorCount = .exact(1),
+    /// Allow tasks to be migrated to a different executor when scheduled.
+    allow_task_migration: bool = true,
 };
 
 const Awaitable = @import("awaitable.zig").Awaitable;
@@ -260,11 +262,6 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
-    // The task currently executing on this executor.
-    // Updated before every context switch into a task and after every switch back.
-    // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
-    current_task: *AnyTask,
-
     // Executor dedicated to this thread. Written once on init, never updated.
     pub threadlocal var current: ?*Executor = null;
 
@@ -282,7 +279,6 @@ pub const Executor = struct {
         self.* = .{
             .id = id,
             .loop = undefined,
-            .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
         };
@@ -321,7 +317,6 @@ pub const Executor = struct {
 
         self.main_task.coro.setCurrent();
         Executor.current = self;
-        self.current_task = &self.main_task;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -371,9 +366,7 @@ pub const Executor = struct {
                 // Both the store and the subsequent load in fromCoroutine() happen on
                 // the same executor thread, so no cross-thread ordering is needed.
                 next_task.coro.parent_context_ptr = &self.main_task.coro.context;
-                self.current_task = next_task;
                 next_task.coro.step();
-                self.current_task = &self.main_task;
                 self.processCleanup();
             }
 
@@ -507,20 +500,20 @@ pub const Executor = struct {
         // main_task is never queued - it just checks state in run().
         if (task.coro.parent_context_ptr == &task.coro.context) {
             const home_executor: *Executor = @alignCast(@fieldParentPtr("main_task", task));
-            if (Executor.current != home_executor) {
+            if (getCurrentExecutorOrNull() != home_executor) {
                 home_executor.loop.wake();
             }
             return;
         }
 
         // Normal scheduling
-        if (Executor.current) |current_exec| {
+        if (getCurrentExecutorOrNull()) |current_exec| {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
             if (current_exec.runtime == task.runtime and old.tag != .new) {
                 const home_exec = Executor.fromCoroutine(&task.coro);
-                if (current_exec == home_exec or task.canMigrate()) {
+                if (current_exec == home_exec or task.runtime.options.allow_task_migration) {
                     task.last_run_tick = 0; // Allow immediate execution on new executor
                     current_exec.scheduleTaskLocal(task);
                 } else {
@@ -532,7 +525,7 @@ pub const Executor = struct {
 
         // Non-migratable tasks must go home, even when scheduled from a foreign
         // thread or a different runtime. Only .new tasks get round-robin distribution.
-        if (old.tag != .new and !task.canMigrate()) {
+        if (old.tag != .new and !task.runtime.options.allow_task_migration) {
             Executor.fromCoroutine(&task.coro).scheduleTaskRemote(task);
             return;
         }
@@ -610,10 +603,8 @@ pub const Executor = struct {
             // Both the store and the subsequent load in fromCoroutine() happen on
             // the same executor thread, so no cross-thread ordering is needed.
             next_task.coro.parent_context_ptr = &self.main_task.coro.context;
-            self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
-            self.current_task = &self.main_task;
             coro.yield();
         }
     }
@@ -622,7 +613,12 @@ pub const Executor = struct {
 /// Get the current thread's executor.
 /// Panics if called from a thread without an active executor context.
 pub fn getCurrentExecutor() *Executor {
-    return Executor.current orelse @panic("no current executor");
+    return getCurrentExecutorOrNull() orelse @panic("no current executor");
+}
+
+pub fn getCurrentExecutorOrNull() ?*Executor {
+    const task = getCurrentTaskOrNull() orelse return null;
+    return task.getExecutor();
 }
 
 /// Get the currently executing task.
@@ -633,8 +629,8 @@ pub fn getCurrentTask() *AnyTask {
 
 /// Get the currently executing task, or null if not in task context.
 pub fn getCurrentTaskOrNull() ?*AnyTask {
-    const exec = Executor.current orelse return null;
-    return exec.current_task;
+    const coro = Coroutine.getCurrent() orelse return null;
+    return AnyTask.fromCoroutine(coro);
 }
 
 /// Cooperatively yield control to allow other tasks to run.
@@ -1191,7 +1187,7 @@ test "runtime: multi-threaded execution with 64 executors" {
 }
 
 test "Runtime: multi-threaded with task migration" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8), .allow_task_migration = true });
     defer runtime.deinit();
 
     const ResetEvent = @import("sync/ResetEvent.zig");
@@ -1305,7 +1301,7 @@ fn wakeBeforeParkStress(executor_count: u6) !void {
 test "runtime: mutex contention with task migration" {
     const Mutex = @import("sync/Mutex.zig");
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2), .allow_task_migration = true });
     defer runtime.deinit();
 
     var mutex: Mutex = .init;

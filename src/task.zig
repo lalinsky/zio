@@ -7,11 +7,11 @@ const ev = @import("ev/root.zig");
 
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
+const getCurrentExecutorOrNull = @import("runtime.zig").getCurrentExecutorOrNull;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const Cancelable = @import("common.zig").Cancelable;
-const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
@@ -224,13 +224,6 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
-    /// Check if this task can be migrated to a different executor.
-    // TODO: Enable migration once we have work-stealing for re-balancing
-    pub inline fn canMigrate(self: *const AnyTask) bool {
-        _ = self;
-        return false;
-    }
-
     pub inline fn getRuntime(self: *AnyTask) *Runtime {
         return self.runtime;
     }
@@ -250,7 +243,7 @@ pub const AnyTask = struct {
     /// - `.reschedule`: Reschedule immediately (cooperative yielding).
     ///   The task state remains `.ready`.
     pub fn yield(self: *AnyTask, comptime mode: YieldMode, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        var executor = getCurrentExecutor();
+        var executor = self.getExecutor();
 
         // Check and consume cancellation flag before yielding (unless no_cancel).
         // On cancel: restore clean .ready state (clearing any awaken bit) before returning.
@@ -277,7 +270,7 @@ pub const AnyTask = struct {
 
             // --- Resumed: landing site (b) ---
             // We could be on a different executor now due to task migration
-            executor = getCurrentExecutor();
+            executor = self.getExecutor();
             executor.processCleanup();
         }
 
@@ -455,15 +448,14 @@ pub const AnyTask = struct {
         const self = fromCoroutine(coro);
 
         // Landing site (a): handle cleanup for the task that yielded to us
-        var executor = getCurrentExecutor();
-        executor.current_task = self;
+        var executor = self.getExecutor();
         executor.processCleanup();
 
         // Run the task's function
         self.closure.call(AnyTask, self);
 
         // Re-fetch executor — task may have migrated during execution
-        executor = getCurrentExecutor();
+        executor = self.getExecutor();
         executor.pending_cleanup = .{ .finish = self };
         executor.switchOut(&self.coro);
         unreachable;
@@ -533,7 +525,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
 
     Executor.scheduleTask(task);
 
-    if (Executor.current) |current_executor| {
+    if (getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor.runtime == task.runtime) {
             current_executor.maybeYield(.reschedule, .no_cancel);
         }
