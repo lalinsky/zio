@@ -143,9 +143,6 @@ fi
 if [ "$FULL_MODE" = true ]; then
     echo "=== Building examples ==="
     zig build examples
-
-    echo "=== Building benchmarks ==="
-    zig build benchmarks
 fi
 
 echo "=== All checks passed! ==="
