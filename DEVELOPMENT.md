@@ -13,7 +13,7 @@ Testing:
 - Use `./check.sh --filter "test name"` to run specific tests
 - Use `./check.sh --target x86_64-windows --wine` to cross-compile and test via Wine
 - Use `./check.sh --target riscv64-linux --qemu` to cross-compile and test via QEMU
-- Use `./check.sh --full` to build all tests, but also build examples and benchmarks (at least once before creating a PR)
+- Use `./check.sh --full` to build all tests, but also build examples (at least once before creating a PR)
 
 Random notes on Zig usage:
 - We are using Zig 0.16+, so modules like `std.posix`, `std.Thread`, `std.fs`, `std.net` no longer exist or are mostly empty, look at `src/os/` for replacements.

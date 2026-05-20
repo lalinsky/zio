@@ -60,13 +60,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ev-demo", .file = "examples/ev_demo.zig" },
     };
 
-    // Benchmarks configuration
-    const benchmarks = [_]struct { name: []const u8, file: []const u8 }{
-        .{ .name = "ping_pong_benchmark", .file = "benchmarks/ping_pong.zig" },
-        .{ .name = "echo_server_benchmark", .file = "benchmarks/echo_server.zig" },
-        .{ .name = "spawn_throughput_benchmark", .file = "benchmarks/spawn_throughput.zig" },
-    };
-
     // Create examples step
     const examples_step = b.step("examples", "Build examples");
 
@@ -84,25 +77,6 @@ pub fn build(b: *std.Build) void {
 
         const install_exe = b.addInstallArtifact(exe, .{});
         examples_step.dependOn(&install_exe.step);
-    }
-
-    // Create benchmarks step
-    const benchmarks_step = b.step("benchmarks", "Build benchmarks");
-
-    // Create benchmark executables
-    for (benchmarks) |benchmark| {
-        const exe = b.addExecutable(.{
-            .name = benchmark.name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(benchmark.file),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        exe.root_module.addImport("zio", zio);
-
-        const install_exe = b.addInstallArtifact(exe, .{});
-        benchmarks_step.dependOn(&install_exe.step);
     }
 
     // Tests
