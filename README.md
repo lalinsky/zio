@@ -9,7 +9,8 @@ The project consists of a few high-level components:
 - Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
 - Asynchronous I/O layer that makes it look like operations are blocking for easy state management, but using event-driven OS APIs under the hood.
 - Synchronization primitives that cooperate with this runtime.
-- Integration with standard library interfaces, like [`std.Io.Reader`] and [`std.Io.Writer`], and also [`std.Io`].
+- Full implementation of the [`std.Io`] interface, so that you can use any Zig 0.16+ networking library.
+- Seamless integration with standard library interfaces, like [`std.Io.Reader`] and [`std.Io.Writer`].
 
 It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
 
