@@ -1,3 +1,13 @@
+Code organization:
+- Blocking API -> Event loop API -> OS-level wrappers
+- In `src/os/` we have the OS-specific code, mostly wrappers around libc/WinAPI/syscalls,
+  sometimes we try to abstract away the differences between platforms, but this is not always possible,
+  and it gets messy in a few places
+- In `src/ev/` we have the event loop implementation, with all the backends (epoll, kqueue, io_uring, etc.)
+- In `src/coro/` we have the coroutine context switching and stack management
+- In `src/runtime.zig` and `src/runtime/` we have the task scheduler and other runtime internals
+- The rest of the code is implementing the higher-level APIs or the `std.Io` vtable
+
 Testing:
 - Use `./check.sh` to format code, run unit tests
 - Use `./check.sh --filter "test name"` to run specific tests
@@ -5,9 +15,15 @@ Testing:
 - Use `./check.sh --target riscv64-linux --qemu` to cross-compile and test via QEMU
 - Use `./check.sh --full` to build all tests, but also build examples and benchmarks (at least once before creating a PR)
 
-Notes on Zig usage:
-- We are using Zig 0.16+, so modules like `std.posix`, `std.Thread`, `std.fs`, `std.net` no longer exist or are mostly empty, look at src/os/ for replacements.
-- Use `zig env` to get the path to the Zig standard library, if you need to check something.
+Random notes on Zig usage:
+- We are using Zig 0.16+, so modules like `std.posix`, `std.Thread`, `std.fs`, `std.net` no longer exist or are mostly empty, look at `src/os/` for replacements.
+- Use `zig env` to get the path to the Zig standard library and read the source code, if you need to check something.
+
+LLM usage:
+- We explicitly allow using LLMs for code changes, but:
+   1. You don't delegate thinking to the LLM, you need to design/architect the solution and be able to reason about it
+   2. You need to fully understand every single line of the code
+- LLM-generated submitted PRs, where it's clear the author does not understand the code, will be silently closd
 
 Release process:
 1. Update docs/changelog.md - change [Unreleased] to [X.Y.Z] with current date
