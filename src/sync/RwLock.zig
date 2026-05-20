@@ -206,6 +206,83 @@ test "RwLock basic shared lock/unlock" {
     rwlock.unlock();
 }
 
+test "RwLock last reader wakes writer when reader is queued first" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer runtime.deinit();
+
+    var rwlock = RwLock.init;
+    var writer_acquired = std.atomic.Value(bool).init(false);
+
+    try rwlock.lockShared(); // Read Lock A
+
+    const TestFn = struct {
+        fn reader(rw: *RwLock) void {
+            rw.lockSharedUncancelable();
+            rw.unlockShared();
+        }
+
+        fn writer(rw: *RwLock, acquired: *std.atomic.Value(bool)) void {
+            rw.lockUncancelable();
+            rw.unlock();
+            acquired.store(true, .release);
+        }
+    };
+
+    // Construct the queue shape that can occur after a previous writer
+    // releases: a reader is already asleep on the shared condition before the
+    // writer that needs the final reader's wake.
+    rwlock.mutex.lockUncancelable();
+    rwlock.writers_waiting += 1;
+    rwlock.mutex.unlock();
+
+    var reader_handle = try runtime.spawn(TestFn.reader, .{&rwlock});
+    while (!rwlock.cond.wait_queue.hasWaiters()) {
+        try yield();
+    }
+    // TestFn.reader is now blocked in lockSharedUncancelable().
+
+    rwlock.mutex.lockUncancelable();
+    rwlock.writers_waiting -= 1;
+    rwlock.mutex.unlock();
+
+    var writer_handle = try runtime.spawn(TestFn.writer, .{ &rwlock, &writer_acquired });
+    while (true) {
+        rwlock.mutex.lockUncancelable();
+        const writer_waiting = rwlock.writers_waiting > 0;
+        rwlock.mutex.unlock();
+        if (writer_waiting) break;
+        try yield();
+    }
+    // TestFn.reader and TestFn.writer are now both blocked on lock acquisition.
+
+    try std.testing.expect(!writer_acquired.load(.acquire));
+
+    rwlock.unlockShared(); // Read Unlock A
+    // Read Unlock A fully releases the lock. Since a writer is waiting, it
+    // should be woken and acquire the write lock; waking only the queued
+    // reader would make it sleep again because writers_waiting > 0.
+
+    var spins: usize = 0;
+    while (!writer_acquired.load(.acquire) and spins < 1000) : (spins += 1) {
+        try yield();
+    }
+    const writer_woke_from_last_reader = writer_acquired.load(.acquire);
+
+    // If the assertion is going to fail, recover the blocked tasks before
+    // leaving the test so Runtime.deinit() sees a clean task count.
+    if (!writer_woke_from_last_reader) {
+        rwlock.cond.broadcast();
+        while (!writer_acquired.load(.acquire)) {
+            try yield();
+        }
+    }
+
+    writer_handle.join();
+    reader_handle.join();
+
+    try std.testing.expect(writer_woke_from_last_reader);
+}
+
 test "RwLock concurrent readers and writers" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
