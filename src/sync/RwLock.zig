@@ -38,6 +38,7 @@ const Group = @import("../group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
+const Stopwatch = @import("../time.zig").Stopwatch;
 
 const RwLock = @This();
 
@@ -262,8 +263,8 @@ test "RwLock last reader wakes writer when reader is queued first" {
     // should be woken and acquire the write lock; waking only the queued
     // reader would make it sleep again because writers_waiting > 0.
 
-    var spins: usize = 0;
-    while (!writer_acquired.load(.acquire) and spins < 1000) : (spins += 1) {
+    var stopwatch = Stopwatch.start();
+    while (!writer_acquired.load(.acquire) and stopwatch.read().toMilliseconds() < 500) {
         try yield();
     }
     const writer_woke_from_last_reader = writer_acquired.load(.acquire);
