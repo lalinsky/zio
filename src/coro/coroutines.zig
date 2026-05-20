@@ -137,6 +137,7 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
             // Lower %sp by 2176 bytes (next 16-byte multiple above 2047+128=2175) so
             // the coroEntry window's potential save area stays below the Entrypoint.
             // coroEntry reads the Entrypoint struct via %i6, which we set to stack_ptr.
+            if (stack_ptr < ctx.stack_info.limit + 2176) @panic("Stack overflow during coroutine setup: insufficient space for SPARC64 register save area headroom");
             ctx.sp = stack_ptr - 2176;
             ctx.fp = stack_ptr;
             ctx.pc = @intFromPtr(entry_point);
@@ -1029,8 +1030,8 @@ pub inline fn switchContext(
             : [current] "{o0}" (current_context_param),
               [new] "{o1}" (new_context),
             : .{
-              // Globals (g0 is always zero, not listed)
-              .g1 = true, .g2 = true, .g3 = true, .g4 = true, .g5 = true, .g6 = true, .g7 = true,
+              // Globals (g0 is always zero; g6/g7 are ABI-reserved by the OS, not clobbered)
+              .g1 = true, .g2 = true, .g3 = true, .g4 = true, .g5 = true,
               // Outputs (o6=%sp saved/restored, not listed)
               .o0 = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true,
               // Locals
