@@ -1,4 +1,6 @@
-/.claude/settings.local.json
+/.claude
+/CLAUDE.local.md
+/notes
 /.zig-cache
 /zig-out
 /test-file
