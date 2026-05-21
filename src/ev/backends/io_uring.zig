@@ -184,13 +184,22 @@ pub fn wake(self: *Self, state: *LoopState) void {
     _ = self;
     // wake_requested is already set by Loop.wake() before calling us.
     // Use futex2_wake to match io_uring's FUTEX_WAIT which uses FUTEX2.
-    // Wake all waiters - the kernel may leave stale waiters in the futex hash
-    // table when io_uring rings are closed (suspected kernel bug).
+    //
+    // We use a SHARED (not PRIVATE) futex to work around a kernel bug:
+    // if a PRIVATE FUTEX_WAIT is queued while the process is still
+    // single-threaded, the kernel parks the waiter in the global futex
+    // hash. When threads are later created, the kernel installs a
+    // per-process private hash but does NOT migrate global-hash waiters
+    // into it. A subsequent PRIVATE futex2_wake consults only the
+    // per-process hash → matches 0 waiters → the io_uring wait never
+    // completes. SHARED futexes always use the global hash, so they are
+    // immune to this hash pivot.
+    // See: futex_repro.c in the repo root.
     _ = linux.futex2_wake(
         &state.wake_requested.raw,
         FUTEX_BITSET_MATCH_ANY,
         std.math.maxInt(i32),
-        .{ .size = .U32, .private = true },
+        .{ .size = .U32, .private = false },
     );
 }
 
@@ -214,7 +223,7 @@ fn prepFutexWait(sqe: *linux.io_uring_sqe, futex: *const u32, expected: u64) voi
         .opcode = .FUTEX_WAIT,
         .flags = 0,
         .ioprio = 0,
-        .fd = @bitCast(linux.FUTEX2_FLAGS{ .size = .U32, .private = true }),
+        .fd = @bitCast(linux.FUTEX2_FLAGS{ .size = .U32, .private = false }),
         .off = expected,
         .addr = @intFromPtr(futex),
         .len = 0,
