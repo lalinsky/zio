@@ -712,6 +712,7 @@ pub const Runtime = struct {
     workers: std.ArrayList(Worker) = .empty,
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    own_self: bool = false,
 
     const Worker = struct {
         thread: std.Thread = undefined,
@@ -724,6 +725,12 @@ pub const Runtime = struct {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
+        try self.initStatic(allocator, options);
+        self.own_self = true;
+        return self;
+    }
+
+    pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
         const num_executors = options.executors.resolve();
 
         self.* = .{
@@ -766,8 +773,6 @@ pub const Runtime = struct {
             }
             self.executors.appendAssumeCapacity(&worker.executor);
         }
-
-        return self;
     }
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
@@ -819,7 +824,9 @@ pub const Runtime = struct {
         self.task_pool.deinit();
 
         // Free the Runtime allocation
-        allocator.destroy(self);
+        if (self.own_self) {
+            allocator.destroy(self);
+        }
     }
 
     // High-level public API
