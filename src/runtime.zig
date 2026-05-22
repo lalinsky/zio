@@ -725,7 +725,7 @@ pub const Runtime = struct {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
-        try self.initCustom(allocator, options);
+        try self.initStatic(allocator, options);
         self.own_self = true;
         return self;
     }
@@ -773,7 +773,6 @@ pub const Runtime = struct {
             }
             self.executors.appendAssumeCapacity(&worker.executor);
         }
-
     }
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
