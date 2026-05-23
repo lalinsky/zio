@@ -28,42 +28,10 @@ fn completionCallback(dwError: u32, _: u32, lpOverlapped: ?*windows.OVERLAPPED) 
     ctx.waiter.signal();
 }
 
-pub const Result = struct {
-    head: ?*ADDRINFOEXW,
-    current: ?*ADDRINFOEXW,
-    return_canonical_name: bool,
-    canonical_name_buf: [dns.HostName.max_len]u8,
-
-    pub fn deinit(self: *Result) void {
-        if (self.head) |head| {
-            windows.FreeAddrInfoExW(head);
-        }
-    }
-
-    pub fn next(self: *Result) ?dns.LookupResult {
-        if (self.return_canonical_name) {
-            self.return_canonical_name = false;
-            if (self.head) |head| {
-                if (head.ai_canonname) |name| {
-                    const len = std.unicode.utf16LeToUtf8(&self.canonical_name_buf, std.mem.sliceTo(name, 0)) catch 0;
-                    if (len > 0) {
-                        return .{ .canonical_name = .{ .bytes = self.canonical_name_buf[0..len] } };
-                    }
-                }
-            }
-        }
-
-        while (self.current) |info| {
-            self.current = info.ai_next;
-            const addr = info.ai_addr orelse continue;
-            if (addr.family != os_net.AF.INET and addr.family != os_net.AF.INET6) continue;
-            return .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.ai_addrlen)) };
-        }
-        return null;
-    }
-};
-
-pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
+pub fn lookup(
+    storage: []dns.LookupResult,
+    options: dns.LookupOptions,
+) dns.LookupError!usize {
     os_net.ensureWSAInitialized();
 
     // Convert name to null-terminated UTF-16
@@ -85,7 +53,7 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
     } else @as(i32, os_net.AF.UNSPEC);
     hints.ai_socktype = os_net.SOCK.STREAM;
     hints.ai_protocol = os_net.IPPROTO.TCP;
-    if (options.canonical_name) {
+    if (options.canonical_name_buffer != null) {
         hints.ai_flags = @bitCast(windows.AI{ .CANONNAME = true });
     }
 
@@ -111,12 +79,7 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
     );
 
     if (rc == 0) {
-        return .{
-            .head = result,
-            .current = result,
-            .return_canonical_name = options.canonical_name,
-            .canonical_name_buf = undefined,
-        };
+        return fillBuffers(storage, options, result);
     }
 
     if (rc != windows.WSA_IO_PENDING) {
@@ -138,12 +101,41 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
         return winsockToLookupError(@intCast(ctx.err));
     }
 
-    return .{
-        .head = result,
-        .current = result,
-        .return_canonical_name = options.canonical_name,
-        .canonical_name_buf = undefined,
-    };
+    return fillBuffers(storage, options, result);
+}
+
+fn fillBuffers(
+    storage: []dns.LookupResult,
+    options: dns.LookupOptions,
+    head: ?*ADDRINFOEXW,
+) dns.LookupError!usize {
+    defer if (head) |h| windows.FreeAddrInfoExW(h);
+
+    var i: usize = 0;
+
+    if (options.canonical_name_buffer) |cname_buf| {
+        if (head) |h| {
+            if (h.ai_canonname) |name_ptr| {
+                const name_slice = std.mem.sliceTo(name_ptr, 0);
+                const len = std.unicode.utf16LeToUtf8(cname_buf, name_slice) catch return error.UnknownHostName;
+                cname_buf[len] = 0;
+                storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..len] } };
+                i += 1;
+            }
+        }
+    }
+
+    var current: ?*ADDRINFOEXW = head;
+    while (current) |info| : (current = info.ai_next) {
+        if (i >= storage.len) break;
+        const addr = info.ai_addr orelse continue;
+        const family = @as(os_net.sa_family_t, @intCast(addr.family));
+        if (family != os_net.AF.INET and family != os_net.AF.INET6) continue;
+        storage[i] = .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.ai_addrlen)) };
+        i += 1;
+    }
+
+    return i;
 }
 
 fn winsockToLookupError(err: i32) dns.LookupError {

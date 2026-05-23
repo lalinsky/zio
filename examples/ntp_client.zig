@@ -4,10 +4,10 @@ const zio = @import("zio");
 // --8<-- [start:lookup]
 fn lookupHost(hostname: []const u8, port: u16) !zio.net.Address {
     const host = try zio.net.HostName.init(hostname);
-    var iter = try host.lookup(.{ .port = port });
-    defer iter.deinit();
+    var results: [32]zio.net.HostName.LookupResult = undefined;
+    const count = try host.lookup(&results, .{ .port = port });
 
-    while (iter.next()) |result| {
+    for (results[0..count]) |result| {
         switch (result) {
             .address => |ip_addr| return .{ .ip = ip_addr },
             else => continue,

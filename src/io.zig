@@ -2327,30 +2327,27 @@ fn netLookupImpl(
     const io = fromRuntime(rt);
     defer resolved.close(io);
 
-    var result = zio_dns.lookup(.{
+    var storage: [32]zio_dns.LookupResult = undefined;
+    const count = zio_dns.lookup(&storage, .{
         .name = host_name.bytes,
         .port = options.port,
         .family = if (options.family) |f| switch (f) {
             .ip4 => .ipv4,
             .ip6 => .ipv6,
         } else null,
-        .canonical_name = options.canonical_name_buffer != null,
+        .canonical_name_buffer = options.canonical_name_buffer,
     }) catch |err| return dnsLookupErrToStdErr(err);
-    defer result.deinit();
 
-    while (result.next()) |entry| switch (entry) {
+    for (storage[0..count]) |entry| switch (entry) {
         .address => |addr| {
             resolved.putOne(io, .{ .address = zioIpToStdIo(addr) }) catch |err| switch (err) {
                 error.Canceled => |e| return e,
-                error.Closed => unreachable, // caller must not close `resolved` until we return
+                error.Closed => unreachable,
             };
         },
         .canonical_name => |name| {
             if (name.bytes.len > Io.net.HostName.max_len) return error.InvalidDnsCnameRecord;
-            const buf = options.canonical_name_buffer.?;
-            const dest = buf[0..name.bytes.len];
-            @memcpy(dest, name.bytes);
-            resolved.putOne(io, .{ .canonical_name = .{ .bytes = dest } }) catch |err| switch (err) {
+            resolved.putOne(io, .{ .canonical_name = .{ .bytes = name.bytes } }) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Closed => unreachable,
             };
@@ -2829,7 +2826,7 @@ test "io: netLookup resolves numeric IPv4" {
     const io = rt.io();
 
     const host: Io.net.HostName = try .init("127.0.0.1");
-    var buf: [16]Io.net.HostName.LookupResult = undefined;
+    var buf: [32]Io.net.HostName.LookupResult = undefined;
     var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buf);
     try Io.net.HostName.lookup(host, io, &queue, .{ .port = 8080 });
 
@@ -2855,7 +2852,7 @@ test "io: netLookup returns canonical name when buffer provided" {
     // Use "localhost" rather than a numeric IP: macOS getaddrinfo skips
     // AI_CANONNAME for numeric inputs.
     const host: Io.net.HostName = try .init("localhost");
-    var buf: [16]Io.net.HostName.LookupResult = undefined;
+    var buf: [32]Io.net.HostName.LookupResult = undefined;
     var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buf);
     var canon_buf: [Io.net.HostName.max_len]u8 = undefined;
     try Io.net.HostName.lookup(host, io, &queue, .{
