@@ -134,34 +134,39 @@ pub const HostName = struct {
         port: u16,
         /// Filter by address family. `null` means either.
         family: ?IpAddress.Family = null,
-        /// Request canonical name from DNS.
-        canonical_name: bool = false,
+        /// If non-null, the canonical name will be copied into this buffer.
+        canonical_name_buffer: ?*[max_len]u8 = null,
     };
 
     pub const LookupResult = dns.LookupResult;
     pub const LookupError = dns.LookupError;
 
     /// Resolves the hostname to IP addresses.
-    /// Returns an iterator over the results. Call `deinit()` when done.
+    /// Fills `storage` with up to `storage.len` results.
+    /// Returns the number of entries written.
     pub fn lookup(
         self: HostName,
+        storage: []LookupResult,
         options: LookupOptions,
-    ) LookupError!dns.Result {
-        return dns.lookup(.{
+    ) LookupError!usize {
+        return dns.lookup(storage, .{
             .name = self.bytes,
             .port = options.port,
             .family = options.family,
-            .canonical_name = options.canonical_name,
+            .canonical_name_buffer = options.canonical_name_buffer,
         });
     }
 
     /// Resolves the hostname and connects to the first successful address.
     pub fn connect(self: HostName, port: u16, options: IpAddress.ConnectOptions) !Stream {
-        var iter = try self.lookup(.{ .port = port });
-        defer iter.deinit();
+        var storage: [32]LookupResult = undefined;
+        const count = self.lookup(&storage, .{ .port = port }) catch |err| switch (err) {
+            error.TooManyAddresses => storage.len,
+            else => return err,
+        };
 
         var last_err: ?anyerror = null;
-        while (iter.next()) |entry| {
+        for (storage[0..count]) |entry| {
             switch (entry) {
                 .address => |addr| {
                     return addr.connect(.{ .timeout = options.timeout }) catch |err| {
@@ -1296,20 +1301,18 @@ test "HostName: lookup" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(.{ .port = 80 });
-    defer iter.deinit();
+    var storage: [32]HostName.LookupResult = undefined;
+    const count = try host.lookup(&storage, .{ .port = 80 });
 
-    var has_address = false;
-    while (iter.next()) |entry| {
+    try std.testing.expect(count > 0);
+    for (storage[0..count]) |entry| {
         switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(80, addr.getPort());
-                has_address = true;
             },
             .canonical_name => unreachable,
         }
     }
-    try std.testing.expect(has_address);
 }
 
 test "HostName: lookup with family filter" {
@@ -1317,10 +1320,10 @@ test "HostName: lookup with family filter" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(.{ .port = 80, .family = .ipv4 });
-    defer iter.deinit();
+    var storage: [32]HostName.LookupResult = undefined;
+    const count = try host.lookup(&storage, .{ .port = 80, .family = .ipv4 });
 
-    while (iter.next()) |entry| {
+    for (storage[0..count]) |entry| {
         switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(IpAddress.Family.ipv4, addr.getFamily());
@@ -1335,12 +1338,13 @@ test "HostName: lookup with canonical name" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(.{ .port = 80, .canonical_name = true });
-    defer iter.deinit();
+    var storage: [32]HostName.LookupResult = undefined;
+    var cname_buf: [HostName.max_len]u8 = undefined;
+    const count = try host.lookup(&storage, .{ .port = 80, .canonical_name_buffer = &cname_buf });
 
     var has_canonical_name = false;
     var has_address = false;
-    while (iter.next()) |entry| {
+    for (storage[0..count]) |entry| {
         switch (entry) {
             .address => {
                 has_address = true;
@@ -1402,13 +1406,9 @@ test "HostName: lookup localhost" {
     defer rt.deinit();
 
     const host = try HostName.init("localhost");
-    var iter = try host.lookup(.{ .port = 80 });
-    defer iter.deinit();
+    var storage: [32]HostName.LookupResult = undefined;
+    const count = try host.lookup(&storage, .{ .port = 80 });
 
-    var count: usize = 0;
-    while (iter.next()) |_| {
-        count += 1;
-    }
     try std.testing.expect(count > 0);
 }
 
@@ -1417,22 +1417,12 @@ test "HostName: lookup numeric IP" {
     defer rt.deinit();
 
     const host = try HostName.init("127.0.0.1");
-    var iter = try host.lookup(.{ .port = 8080 });
-    defer iter.deinit();
+    var storage: [32]HostName.LookupResult = undefined;
+    const count = try host.lookup(&storage, .{ .port = 8080 });
 
-    var count: usize = 0;
-    var first_addr: ?IpAddress = null;
-    while (iter.next()) |entry| {
-        switch (entry) {
-            .address => |addr| {
-                if (first_addr == null) first_addr = addr;
-                count += 1;
-            },
-            .canonical_name => unreachable,
-        }
-    }
     try std.testing.expectEqual(1, count);
-    try std.testing.expectEqual(8080, first_addr.?.getPort());
+    try std.testing.expect(storage[0] == .address);
+    try std.testing.expectEqual(8080, storage[0].address.getPort());
 }
 
 test "HostName: lookup google.com" {
@@ -1440,20 +1430,18 @@ test "HostName: lookup google.com" {
     defer rt.deinit();
 
     const host = try HostName.init("google.com");
-    var iter = try host.lookup(.{ .port = 443 });
-    defer iter.deinit();
+    var storage: [32]HostName.LookupResult = undefined;
+    const count = try host.lookup(&storage, .{ .port = 443 });
 
-    var count: usize = 0;
-    while (iter.next()) |entry| {
+    try std.testing.expect(count > 0);
+    for (storage[0..count]) |entry| {
         switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(443, addr.getPort());
-                count += 1;
             },
             .canonical_name => unreachable,
         }
     }
-    try std.testing.expect(count > 0);
 }
 
 test "tcpConnectToAddress: basic" {

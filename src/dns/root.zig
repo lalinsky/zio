@@ -12,7 +12,7 @@ pub const LookupOptions = struct {
     name: []const u8,
     port: u16,
     family: ?IpAddress.Family = null,
-    canonical_name: bool = false,
+    canonical_name_buffer: ?*[HostName.max_len]u8 = null,
 };
 
 pub const LookupResult = union(enum) {
@@ -35,6 +35,7 @@ pub const LookupError = error{
     RuntimeShutdown,
     Closed,
     NoThreadPool,
+    TooManyAddresses,
 };
 
 const backend = @import("../ev/backend.zig");
@@ -46,5 +47,4 @@ else if (builtin.os.tag.isDarwin() and backend.backend == .kqueue)
 else
     @import("posix.zig");
 
-pub const Result = impl.Result;
 pub const lookup = impl.lookup;
