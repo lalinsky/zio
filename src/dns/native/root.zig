@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const dns = @import("../root.zig");
+const ResolvConf = @import("ResolvConf.zig");
+const Hosts = @import("Hosts.zig");
 
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
@@ -24,3 +26,8 @@ pub const Resolver = struct {
         return error.UnknownHostName;
     }
 };
+
+test {
+    _ = ResolvConf;
+    _ = Hosts;
+}
