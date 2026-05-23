@@ -31,7 +31,7 @@ fn completionCallback(dwError: u32, _: u32, lpOverlapped: ?*windows.OVERLAPPED) 
 pub fn lookup(
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
-) dns.LookupError!usize {
+) dns.LookupError!dns.LookupResultCount {
     os_net.ensureWSAInitialized();
 
     // Convert name to null-terminated UTF-16
@@ -108,10 +108,11 @@ fn fillBuffers(
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
     head: ?*ADDRINFOEXW,
-) dns.LookupError!usize {
+) dns.LookupError!dns.LookupResultCount {
     defer if (head) |h| windows.FreeAddrInfoExW(h);
 
     var i: usize = 0;
+    var truncated = false;
 
     if (options.canonical_name_buffer) |cname_buf| {
         if (head) |h| {
@@ -119,23 +120,30 @@ fn fillBuffers(
                 const name_slice = std.mem.sliceTo(name_ptr, 0);
                 const len = std.unicode.utf16LeToUtf8(cname_buf, name_slice) catch return error.UnknownHostName;
                 cname_buf[len] = 0;
-                storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..len] } };
-                i += 1;
+                if (i < storage.len) {
+                    storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..len] } };
+                    i += 1;
+                } else {
+                    truncated = true;
+                }
             }
         }
     }
 
     var current: ?*ADDRINFOEXW = head;
     while (current) |info| : (current = info.ai_next) {
-        if (i >= storage.len) break;
         const addr = info.ai_addr orelse continue;
         const family = @as(os_net.sa_family_t, @intCast(addr.family));
         if (family != os_net.AF.INET and family != os_net.AF.INET6) continue;
+        if (i >= storage.len) {
+            truncated = true;
+            break;
+        }
         storage[i] = .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.ai_addrlen)) };
         i += 1;
     }
 
-    return i;
+    return .{ .count = i, .truncated = truncated };
 }
 
 fn winsockToLookupError(err: i32) dns.LookupError {

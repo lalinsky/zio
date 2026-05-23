@@ -8,13 +8,15 @@ const blockInPlace = common.blockInPlace;
 const dns = @import("root.zig");
 
 /// Fills `storage` with canonical name (if requested) and addresses from
-/// a `getaddrinfo` linked list. Returns the number of entries written.
+/// a `getaddrinfo` linked list. Returns the number of entries written and
+/// whether the result was truncated.
 pub fn fillResultsFromAddrinfo(
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
     head: ?*os_net.addrinfo,
-) usize {
+) dns.LookupResultCount {
     var i: usize = 0;
+    var truncated = false;
 
     if (options.canonical_name_buffer) |cname_buf| {
         if (head) |h| {
@@ -22,31 +24,38 @@ pub fn fillResultsFromAddrinfo(
                 const name_slice = std.mem.sliceTo(name_ptr, 0);
                 @memcpy(cname_buf[0..name_slice.len], name_slice);
                 cname_buf[name_slice.len] = 0;
-                storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..name_slice.len] } };
-                i += 1;
+                if (i < storage.len) {
+                    storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..name_slice.len] } };
+                    i += 1;
+                } else {
+                    truncated = true;
+                }
             }
         }
     }
 
     var current: ?*os_net.addrinfo = head;
     while (current) |info| : (current = @ptrCast(info.next)) {
-        if (i >= storage.len) break;
         const addr = info.addr orelse continue;
         if (addr.family != os_net.AF.INET and addr.family != os_net.AF.INET6) continue;
+        if (i >= storage.len) {
+            truncated = true;
+            break;
+        }
         storage[i] = .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.addrlen)) };
         i += 1;
     }
 
-    return i;
+    return .{ .count = i, .truncated = truncated };
 }
 
 /// Resolves a hostname to addresses. Dispatches to the thread pool and
 /// suspends the current task until the blocking getaddrinfo call completes.
-/// Returns the number of entries written to `storage`.
+/// Returns the number of entries written to `storage` and whether truncated.
 pub fn lookup(
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
-) dns.LookupError!usize {
+) dns.LookupError!dns.LookupResultCount {
     const head = try blockInPlace(lookupBlocking, .{options});
     defer if (head) |h| os_net.freeaddrinfo(h);
 

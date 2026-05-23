@@ -33,7 +33,7 @@ const MachMsgRcv = extern struct {
 pub fn lookup(
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
-) dns.LookupError!usize {
+) dns.LookupError!dns.LookupResultCount {
     var buf: [512]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();

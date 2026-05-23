@@ -140,15 +140,16 @@ pub const HostName = struct {
 
     pub const LookupResult = dns.LookupResult;
     pub const LookupError = dns.LookupError;
+    pub const LookupResultCount = dns.LookupResultCount;
 
     /// Resolves the hostname to IP addresses.
     /// Fills `storage` with up to `storage.len` results.
-    /// Returns the number of entries written.
+    /// Returns the number of entries written and whether the result was truncated.
     pub fn lookup(
         self: HostName,
         storage: []LookupResult,
         options: LookupOptions,
-    ) LookupError!usize {
+    ) LookupError!LookupResultCount {
         return dns.lookup(storage, .{
             .name = self.bytes,
             .port = options.port,
@@ -160,10 +161,10 @@ pub const HostName = struct {
     /// Resolves the hostname and connects to the first successful address.
     pub fn connect(self: HostName, port: u16, options: IpAddress.ConnectOptions) !Stream {
         var storage: [32]LookupResult = undefined;
-        const count = try self.lookup(&storage, .{ .port = port });
+        const result = try self.lookup(&storage, .{ .port = port });
 
         var last_err: ?anyerror = null;
-        for (storage[0..count]) |entry| {
+        for (storage[0..result.count]) |entry| {
             switch (entry) {
                 .address => |addr| {
                     return addr.connect(.{ .timeout = options.timeout }) catch |err| {
@@ -1299,10 +1300,10 @@ test "HostName: lookup" {
 
     const host = try HostName.init("localhost");
     var storage: [32]HostName.LookupResult = undefined;
-    const count = try host.lookup(&storage, .{ .port = 80 });
+    const result = try host.lookup(&storage, .{ .port = 80 });
 
-    try std.testing.expect(count > 0);
-    for (storage[0..count]) |entry| {
+    try std.testing.expect(result.count > 0);
+    for (storage[0..result.count]) |entry| {
         switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(80, addr.getPort());
@@ -1318,9 +1319,9 @@ test "HostName: lookup with family filter" {
 
     const host = try HostName.init("localhost");
     var storage: [32]HostName.LookupResult = undefined;
-    const count = try host.lookup(&storage, .{ .port = 80, .family = .ipv4 });
+    const result = try host.lookup(&storage, .{ .port = 80, .family = .ipv4 });
 
-    for (storage[0..count]) |entry| {
+    for (storage[0..result.count]) |entry| {
         switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(IpAddress.Family.ipv4, addr.getFamily());
@@ -1337,11 +1338,11 @@ test "HostName: lookup with canonical name" {
     const host = try HostName.init("localhost");
     var storage: [32]HostName.LookupResult = undefined;
     var cname_buf: [HostName.max_len]u8 = undefined;
-    const count = try host.lookup(&storage, .{ .port = 80, .canonical_name_buffer = &cname_buf });
+    const result = try host.lookup(&storage, .{ .port = 80, .canonical_name_buffer = &cname_buf });
 
     var has_canonical_name = false;
     var has_address = false;
-    for (storage[0..count]) |entry| {
+    for (storage[0..result.count]) |entry| {
         switch (entry) {
             .address => {
                 has_address = true;
@@ -1404,9 +1405,9 @@ test "HostName: lookup localhost" {
 
     const host = try HostName.init("localhost");
     var storage: [32]HostName.LookupResult = undefined;
-    const count = try host.lookup(&storage, .{ .port = 80 });
+    const result = try host.lookup(&storage, .{ .port = 80 });
 
-    try std.testing.expect(count > 0);
+    try std.testing.expect(result.count > 0);
 }
 
 test "HostName: lookup numeric IP" {
@@ -1415,9 +1416,9 @@ test "HostName: lookup numeric IP" {
 
     const host = try HostName.init("127.0.0.1");
     var storage: [32]HostName.LookupResult = undefined;
-    const count = try host.lookup(&storage, .{ .port = 8080 });
+    const result = try host.lookup(&storage, .{ .port = 8080 });
 
-    try std.testing.expectEqual(1, count);
+    try std.testing.expectEqual(1, result.count);
     try std.testing.expect(storage[0] == .address);
     try std.testing.expectEqual(8080, storage[0].address.getPort());
 }
@@ -1428,10 +1429,10 @@ test "HostName: lookup google.com" {
 
     const host = try HostName.init("google.com");
     var storage: [32]HostName.LookupResult = undefined;
-    const count = try host.lookup(&storage, .{ .port = 443 });
+    const result = try host.lookup(&storage, .{ .port = 443 });
 
-    try std.testing.expect(count > 0);
-    for (storage[0..count]) |entry| {
+    try std.testing.expect(result.count > 0);
+    for (storage[0..result.count]) |entry| {
         switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(443, addr.getPort());

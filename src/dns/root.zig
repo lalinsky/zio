@@ -20,6 +20,11 @@ pub const LookupResult = union(enum) {
     canonical_name: HostName,
 };
 
+pub const LookupResultCount = struct {
+    count: usize,
+    truncated: bool,
+};
+
 pub const LookupError = error{
     HostLacksNetworkAddresses,
     TemporaryNameServerFailure,

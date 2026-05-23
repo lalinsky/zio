@@ -2328,7 +2328,7 @@ fn netLookupImpl(
     defer resolved.close(io);
 
     var storage: [32]zio_dns.LookupResult = undefined;
-    const count = zio_dns.lookup(&storage, .{
+    const result = zio_dns.lookup(&storage, .{
         .name = host_name.bytes,
         .port = options.port,
         .family = if (options.family) |f| switch (f) {
@@ -2338,7 +2338,7 @@ fn netLookupImpl(
         .canonical_name_buffer = options.canonical_name_buffer,
     }) catch |err| return dnsLookupErrToStdErr(err);
 
-    for (storage[0..count]) |entry| switch (entry) {
+    for (storage[0..result.count]) |entry| switch (entry) {
         .address => |addr| {
             resolved.putOne(io, .{ .address = zioIpToStdIo(addr) }) catch |err| switch (err) {
                 error.Canceled => |e| return e,
