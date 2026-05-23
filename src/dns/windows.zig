@@ -116,6 +116,7 @@ fn fillBuffers(
     if (options.canonical_name_buffer) |cname_buf| {
         if (head) |h| {
             if (h.ai_canonname) |name_ptr| {
+                if (i >= storage.len) return i;
                 const name_slice = std.mem.sliceTo(name_ptr, 0);
                 const len = std.unicode.utf16LeToUtf8(cname_buf, name_slice) catch return error.UnknownHostName;
                 cname_buf[len] = 0;
@@ -127,10 +128,9 @@ fn fillBuffers(
 
     var current: ?*ADDRINFOEXW = head;
     while (current) |info| : (current = info.ai_next) {
-        if (i >= storage.len) break;
         const addr = info.ai_addr orelse continue;
-        const family = @as(os_net.sa_family_t, @intCast(addr.family));
-        if (family != os_net.AF.INET and family != os_net.AF.INET6) continue;
+        if (addr.family != os_net.AF.INET and addr.family != os_net.AF.INET6) continue;
+        if (i >= storage.len) return error.TooManyAddresses;
         storage[i] = .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.ai_addrlen)) };
         i += 1;
     }

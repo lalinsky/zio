@@ -35,6 +35,7 @@ pub const LookupError = error{
     RuntimeShutdown,
     Closed,
     NoThreadPool,
+    TooManyAddresses,
 };
 
 const backend = @import("../ev/backend.zig");

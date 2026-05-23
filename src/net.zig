@@ -160,7 +160,10 @@ pub const HostName = struct {
     /// Resolves the hostname and connects to the first successful address.
     pub fn connect(self: HostName, port: u16, options: IpAddress.ConnectOptions) !Stream {
         var storage: [32]LookupResult = undefined;
-        const count = try self.lookup(&storage, .{ .port = port });
+        const count = self.lookup(&storage, .{ .port = port }) catch |err| switch (err) {
+            error.TooManyAddresses => storage.len,
+            else => return err,
+        };
 
         var last_err: ?anyerror = null;
         for (storage[0..count]) |entry| {

@@ -2336,7 +2336,10 @@ fn netLookupImpl(
             .ip6 => .ipv6,
         } else null,
         .canonical_name_buffer = options.canonical_name_buffer,
-    }) catch |err| return dnsLookupErrToStdErr(err);
+    }) catch |err| switch (err) {
+        error.TooManyAddresses => storage.len,
+        else => return dnsLookupErrToStdErr(err),
+    };
 
     for (storage[0..count]) |entry| switch (entry) {
         .address => |addr| {
@@ -2364,6 +2367,7 @@ fn dnsLookupErrToStdErr(err: zio_dns.LookupError) Io.net.HostName.LookupError {
         error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
         error.SystemResources, error.OutOfMemory => error.SystemResources,
         error.Canceled => error.Canceled,
+        error.TooManyAddresses => unreachable, // handled before calling this function
         error.Unexpected, error.ServiceUnavailable, error.NoThreadPool, error.RuntimeShutdown => error.Unexpected,
         error.Closed => unreachable,
     };
