@@ -38,6 +38,7 @@ pub const LookupError = error{
     TooManyAddresses,
 };
 
+const Executor = @import("../runtime.zig").Executor;
 const backend = @import("../ev/backend.zig");
 
 pub const impl = if (builtin.os.tag == .windows)
@@ -47,4 +48,16 @@ else if (builtin.os.tag.isDarwin() and backend.backend == .kqueue)
 else
     @import("posix.zig");
 
-pub const lookup = impl.lookup;
+pub fn lookup(
+    storage: []LookupResult,
+    options: LookupOptions,
+) LookupError!usize {
+    if (Executor.current) |exec| {
+        if (exec.runtime.resolver) |*resolver| {
+            return resolver.lookup(storage, options);
+        }
+    }
+    return impl.lookup(storage, options);
+}
+
+pub const Resolver = @import("native/root.zig").Resolver;
