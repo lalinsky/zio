@@ -468,8 +468,11 @@ pub inline fn switchContext(
               .memory = true,
             }),
         .thumb => asm volatile (
-            // Calculate return address with Thumb bit (LSB=1) set via adr offset
-            \\ adr r2, 0f + 1
+            // Load resume address, then explicitly set Thumb bit (LSB=1).
+            // adr alone cannot target unaligned addresses on Thumb-1 (Cortex-M0),
+            // so we must compute the word-aligned address first, then OR in bit 0.
+            \\ adr r2, 0f
+            \\ adds r2, #1
             \\ mov r3, sp
             \\ str r3, [r0, #0]
             \\ str r7, [r0, #4]
