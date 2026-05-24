@@ -33,7 +33,6 @@ pub const LookupError = error{
     SystemResources,
     Canceled,
     RuntimeShutdown,
-    Closed,
     NoThreadPool,
     TooManyAddresses,
 };

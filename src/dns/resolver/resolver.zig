@@ -386,7 +386,7 @@ fn queryOneName(
             filled += r.count;
             min_ttl = @min(min_ttl, r.ttl);
         } else |err| switch (err) {
-            error.Canceled, error.RuntimeShutdown, error.Closed, error.NoThreadPool => return err,
+            error.Canceled, error.RuntimeShutdown, error.NoThreadPool => return err,
             else => last_err = err,
         }
     }
@@ -396,7 +396,7 @@ fn queryOneName(
             filled += r.count;
             min_ttl = @min(min_ttl, r.ttl);
         } else |err| switch (err) {
-            error.Canceled, error.RuntimeShutdown, error.Closed, error.NoThreadPool => return err,
+            error.Canceled, error.RuntimeShutdown, error.NoThreadPool => return err,
             else => last_err = err,
         }
     }
