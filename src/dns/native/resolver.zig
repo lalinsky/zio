@@ -4,14 +4,33 @@
 const std = @import("std");
 const dns = @import("../root.zig");
 const fs = @import("../../fs.zig");
+const net = @import("../../net.zig");
+const os = @import("../../os/root.zig");
 const Hosts = @import("hosts.zig").Hosts;
 const ResolvConf = @import("resolvconf.zig").ResolvConf;
+const message = @import("message.zig");
 const log = @import("../../common.zig").log;
 const Timestamp = @import("../../time.zig").Timestamp;
 const Duration = @import("../../time.zig").Duration;
+const Timeout = @import("../../time.zig").Timeout;
 const RwLock = @import("../../sync/RwLock.zig");
 
 const check_interval: Duration = .fromSeconds(5);
+
+const cache_ttl_min: u32 = 5;
+const cache_ttl_max: u32 = 60;
+
+const max_nameservers = 3;
+const max_search_domains = 6;
+const max_search_domain_len = 254;
+
+const max_cached_addrs = 3;
+
+const CacheEntry = struct {
+    addrs: [max_cached_addrs]net.IpAddress,
+    count: u8,
+    expiry: Timestamp,
+};
 
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
@@ -26,6 +45,8 @@ pub const Resolver = struct {
     conf_mtime: i64,
     conf_next_check: std.atomic.Value(Timestamp),
     conf_reloading: std.atomic.Value(bool),
+
+    cache: std.StringHashMapUnmanaged(CacheEntry),
 
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
@@ -42,12 +63,16 @@ pub const Resolver = struct {
             .conf_mtime = conf_mtime,
             .conf_next_check = .init(next_check),
             .conf_reloading = .init(false),
+            .cache = .empty,
         };
     }
 
     pub fn deinit(self: *Resolver) void {
         self.hosts.deinit();
         self.conf.deinit();
+        var it = self.cache.keyIterator();
+        while (it.next()) |key| self.allocator.free(key.*);
+        self.cache.deinit(self.allocator);
     }
 
     pub fn lookup(
@@ -58,25 +83,175 @@ pub const Resolver = struct {
         self.maybeReloadHosts();
         self.maybeReloadResolvConf();
 
-        try self.lock.lockShared();
-        defer self.lock.unlockShared();
+        // 1. Check /etc/hosts and DNS cache
+        {
+            try self.lock.lockShared();
+            defer self.lock.unlockShared();
 
-        if (self.hosts.lookupByName(options.name)) |addrs| {
-            var i: usize = 0;
-            for (addrs) |addr_in| {
-                if (i >= storage.len) break;
-                if (options.family) |f| {
-                    if (addr_in.getFamily() != f) continue;
+            if (self.hosts.lookupByName(options.name)) |addrs| {
+                var i: usize = 0;
+                for (addrs) |addr_in| {
+                    if (i >= storage.len) break;
+                    if (options.family) |f| {
+                        if (addr_in.getFamily() != f) continue;
+                    }
+                    var addr = addr_in;
+                    addr.setPort(options.port);
+                    storage[i] = .{ .address = addr };
+                    i += 1;
                 }
-                var addr = addr_in;
-                addr.setPort(options.port);
-                storage[i] = .{ .address = addr };
-                i += 1;
+                if (i > 0) return i;
             }
-            if (i > 0) return i;
+
+            if (self.cache.get(options.name)) |entry| {
+                if (Timestamp.now(.monotonic).value < entry.expiry.value) {
+                    var i: usize = 0;
+                    for (entry.addrs[0..entry.count]) |addr_in| {
+                        if (i >= storage.len) break;
+                        if (options.family) |f| {
+                            if (addr_in.getFamily() != f) continue;
+                        }
+                        var addr = addr_in;
+                        addr.setPort(options.port);
+                        storage[i] = .{ .address = addr };
+                        i += 1;
+                    }
+                    if (i > 0) return i;
+                }
+            }
         }
 
-        return error.UnknownHostName;
+        // 2. DNS query — snapshot conf fields while holding the shared lock so
+        //    we don't hold it across I/O operations.
+        var servers: [max_nameservers]net.IpAddress = undefined;
+        var server_count: usize = 0;
+        var ndots: u8 = undefined;
+        var timeout: Duration = undefined;
+        var attempts: u8 = undefined;
+
+        var search_store: [max_search_domains][max_search_domain_len + 1]u8 = undefined;
+        var search_lens: [max_search_domains]usize = undefined;
+        var search_count: usize = 0;
+
+        {
+            try self.lock.lockShared();
+            defer self.lock.unlockShared();
+
+            const conf = &self.conf;
+            ndots = conf.ndots;
+            timeout = conf.timeout;
+            attempts = conf.attempts;
+
+            const sc = @min(conf.servers.len, max_nameservers);
+            for (conf.servers[0..sc]) |srv| {
+                servers[server_count] = srv;
+                server_count += 1;
+            }
+
+            for (conf.search) |s| {
+                if (search_count >= max_search_domains) break;
+                const len = @min(s.len, max_search_domain_len);
+                @memcpy(search_store[search_count][0..len], s[0..len]);
+                search_lens[search_count] = len;
+                search_count += 1;
+            }
+        }
+
+        if (server_count == 0) return error.UnknownHostName;
+
+        const srvs = servers[0..server_count];
+        const name = options.name;
+        const rooted = name.len > 0 and name[name.len - 1] == '.';
+
+        var fqdn_buf: [256]u8 = undefined;
+        var last_err: dns.LookupError = error.UnknownHostName;
+
+        // Rooted name: only try exactly as given.
+        if (rooted) {
+            const r = try queryOneName(storage, options, name, srvs, attempts, timeout);
+            self.cacheInsert(options, storage[0..r.count], r.ttl);
+            return r.count;
+        }
+
+        var dot_count: usize = 0;
+        for (name) |c| {
+            if (c == '.') dot_count += 1;
+        }
+        const has_enough_dots = dot_count >= ndots;
+
+        // Enough dots: try unsuffixed first (Go's nameList logic).
+        if (has_enough_dots) {
+            if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
+                if (queryOneName(storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                    if (r.count > 0) {
+                        self.cacheInsert(options, storage[0..r.count], r.ttl);
+                        return r.count;
+                    }
+                } else |err| {
+                    if (err != error.UnknownHostName) return err;
+                }
+            }
+        }
+
+        // Try with each search domain.
+        for (0..search_count) |i| {
+            const suffix = search_store[i][0..search_lens[i]];
+            if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
+                if (queryOneName(storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                    if (r.count > 0) {
+                        self.cacheInsert(options, storage[0..r.count], r.ttl);
+                        return r.count;
+                    }
+                } else |err| {
+                    if (err != error.UnknownHostName) return err;
+                }
+            }
+        }
+
+        // Not enough dots: try unsuffixed last.
+        if (!has_enough_dots) {
+            if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
+                if (queryOneName(storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                    if (r.count > 0) {
+                        self.cacheInsert(options, storage[0..r.count], r.ttl);
+                        return r.count;
+                    }
+                } else |err| {
+                    last_err = err;
+                }
+            }
+        }
+
+        return last_err;
+    }
+
+    /// Insert a successful DNS result into the cache. Only caches when family is
+    /// unfiltered (both A and AAAA) and the result fits in max_cached_addrs.
+    /// Silently skips on allocation failure.
+    fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32) void {
+        if (options.family != null) return;
+        if (results.len == 0 or results.len > max_cached_addrs) return;
+
+        const ttl_secs = std.math.clamp(ttl, cache_ttl_min, cache_ttl_max);
+        var entry: CacheEntry = .{
+            .addrs = undefined,
+            .count = @intCast(results.len),
+            .expiry = Timestamp.now(.monotonic).addDuration(.fromSeconds(ttl_secs)),
+        };
+        for (results, 0..) |r, i| {
+            entry.addrs[i] = r.address;
+            entry.addrs[i].setPort(0);
+        }
+
+        self.lock.lockUncancelable();
+        defer self.lock.unlock();
+
+        if (self.cache.getPtr(options.name)) |ptr| {
+            ptr.* = entry;
+            return;
+        }
+        const key = self.allocator.dupe(u8, options.name) catch return;
+        self.cache.put(self.allocator, key, entry) catch self.allocator.free(key);
     }
 
     fn maybeReloadHosts(self: *Resolver) void {
@@ -129,6 +304,188 @@ pub const Resolver = struct {
         old.deinit();
     }
 };
+
+/// Build name + '.' + suffix into buf. suffix must already end with '.'.
+/// Returns null if the resulting FQDN would exceed the buffer.
+fn makeFqdn(buf: *[256]u8, name: []const u8, suffix: ?[]const u8) ?[]u8 {
+    const total = name.len + 1 + if (suffix) |s| s.len else @as(usize, 0);
+    if (total > buf.len) return null;
+    @memcpy(buf[0..name.len], name);
+    buf[name.len] = '.';
+    if (suffix) |s| @memcpy(buf[name.len + 1 ..][0..s.len], s);
+    return buf[0..total];
+}
+
+const QueryResult = struct { count: usize, ttl: u32 };
+
+/// Try a single FQDN against all servers, querying A and/or AAAA based on
+/// options.family. Fills storage and returns count + minimum TTL.
+fn queryOneName(
+    storage: []dns.LookupResult,
+    options: dns.LookupOptions,
+    fqdn: []const u8,
+    servers: []const net.IpAddress,
+    attempts: u8,
+    timeout: Duration,
+) dns.LookupError!QueryResult {
+    const sock_timeout: Timeout = .{ .duration = timeout };
+    var filled: usize = 0;
+    var min_ttl: u32 = std.math.maxInt(u32);
+    var last_err: dns.LookupError = error.UnknownHostName;
+
+    const do_a = options.family == null or options.family == .ipv4;
+    const do_aaaa = options.family == null or options.family == .ipv6;
+
+    if (do_a and filled < storage.len) {
+        if (queryOneType(storage[filled..], options, fqdn, .a, servers, attempts, sock_timeout)) |r| {
+            filled += r.count;
+            min_ttl = @min(min_ttl, r.ttl);
+        } else |err| switch (err) {
+            error.Canceled, error.RuntimeShutdown, error.Closed, error.NoThreadPool => return err,
+            else => last_err = err,
+        }
+    }
+
+    if (do_aaaa and filled < storage.len) {
+        if (queryOneType(storage[filled..], options, fqdn, .aaaa, servers, attempts, sock_timeout)) |r| {
+            filled += r.count;
+            min_ttl = @min(min_ttl, r.ttl);
+        } else |err| switch (err) {
+            error.Canceled, error.RuntimeShutdown, error.Closed, error.NoThreadPool => return err,
+            else => last_err = err,
+        }
+    }
+
+    if (filled == 0) return last_err;
+    return .{ .count = filled, .ttl = if (min_ttl == std.math.maxInt(u32)) 0 else min_ttl };
+}
+
+var next_query_id: std.atomic.Value(u16) = .init(1);
+
+/// Query all servers for one record type (A or AAAA), retrying up to `attempts`
+/// times. Returns count + TTL from the successful response, or an error if all
+/// attempts failed.
+fn queryOneType(
+    storage: []dns.LookupResult,
+    options: dns.LookupOptions,
+    fqdn: []const u8,
+    qtype: message.QType,
+    servers: []const net.IpAddress,
+    attempts: u8,
+    timeout: Timeout,
+) dns.LookupError!QueryResult {
+    const id = next_query_id.fetchAdd(1, .monotonic);
+
+    var query_buf: [message.max_udp_size]u8 = undefined;
+    const query = message.buildQuery(&query_buf, id, fqdn, qtype) catch return error.Unexpected;
+
+    var recv_buf: [4096]u8 = undefined;
+    var addr_storage: [16]net.IpAddress = undefined;
+    var last_err: dns.LookupError = error.UnknownHostName;
+
+    for (0..attempts) |_| {
+        for (servers) |server| {
+            const response = exchange(server, query, &recv_buf, timeout) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                log.debug("dns: {s}: {}", .{ fqdn, err });
+                last_err = error.TemporaryNameServerFailure;
+                continue;
+            };
+
+            const max_addrs = @min(addr_storage.len, storage.len);
+            const result = message.parseResponse(response, id, qtype, addr_storage[0..max_addrs], options.port) catch |err| {
+                log.debug("dns: parse error for {s}: {}", .{ fqdn, err });
+                last_err = error.NameServerFailure;
+                continue;
+            };
+
+            switch (result.rcode) {
+                .no_error => {},
+                .nx_domain => return error.UnknownHostName,
+                .serv_fail => {
+                    last_err = error.TemporaryNameServerFailure;
+                    continue;
+                },
+                else => {
+                    last_err = error.NameServerFailure;
+                    continue;
+                },
+            }
+
+            const count = @min(result.count, storage.len);
+            for (addr_storage[0..count], 0..) |addr, i| {
+                storage[i] = .{ .address = addr };
+            }
+            return .{ .count = count, .ttl = result.ttl };
+        }
+    }
+
+    return last_err;
+}
+
+/// Send a DNS query via UDP (with automatic TCP fallback when TC bit is set).
+/// Returns the response payload slice into recv_buf.
+fn exchange(
+    server: net.IpAddress,
+    query: []const u8,
+    recv_buf: []u8,
+    timeout: Timeout,
+) ![]u8 {
+    const domain: os.net.Domain = switch (server.getFamily()) {
+        .ipv4 => .ipv4,
+        .ipv6 => .ipv6,
+    };
+
+    var sock = try net.Socket.open(.dgram, domain, .ip);
+    defer sock.close();
+
+    _ = try sock.sendTo(.{ .ip = server }, query, timeout);
+    const r = try sock.receiveFrom(recv_buf, timeout);
+    const data = recv_buf[0..r.len];
+
+    // TC bit (0x0200) in flags word at offset 2: retry with TCP.
+    if (data.len >= 4 and std.mem.readInt(u16, data[2..4], .big) & 0x0200 != 0) {
+        return exchangeTcp(server, query, recv_buf, timeout);
+    }
+
+    return data;
+}
+
+/// DNS-over-TCP exchange: 2-byte length-prefixed request and response.
+fn exchangeTcp(
+    server: net.IpAddress,
+    query: []const u8,
+    recv_buf: []u8,
+    timeout: Timeout,
+) ![]u8 {
+    var stream = try server.connect(.{ .timeout = timeout });
+    defer stream.close();
+
+    var len_prefix: [2]u8 = undefined;
+    std.mem.writeInt(u16, &len_prefix, @intCast(query.len), .big);
+    try stream.writeAll(&len_prefix, timeout);
+    try stream.writeAll(query, timeout);
+
+    var resp_len_buf: [2]u8 = undefined;
+    var got: usize = 0;
+    while (got < 2) {
+        const n = try stream.read(resp_len_buf[got..], timeout);
+        if (n == 0) return error.ConnectionResetByPeer;
+        got += n;
+    }
+
+    const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
+    if (resp_len > recv_buf.len) return error.MessageTooBig;
+
+    got = 0;
+    while (got < resp_len) {
+        const n = try stream.read(recv_buf[got..resp_len], timeout);
+        if (n == 0) return error.ConnectionResetByPeer;
+        got += n;
+    }
+
+    return recv_buf[0..resp_len];
+}
 
 fn loadHosts(allocator: std.mem.Allocator, mtime_out: *i64) Hosts {
     const file = fs.openFile("/etc/hosts") catch |err| {

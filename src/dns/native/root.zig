@@ -8,6 +8,7 @@
 const resolvconf = @import("resolvconf.zig");
 const hosts = @import("hosts.zig");
 const resolver = @import("resolver.zig");
+const message = @import("message.zig");
 
 pub const Hosts = hosts.Hosts;
 pub const ResolvConf = resolvconf.ResolvConf;
@@ -17,4 +18,5 @@ test {
     _ = resolvconf;
     _ = hosts;
     _ = resolver;
+    _ = message;
 }
