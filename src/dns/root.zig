@@ -60,4 +60,4 @@ pub fn lookup(
     return impl.lookup(storage, options);
 }
 
-pub const Resolver = @import("native/root.zig").Resolver;
+pub const Resolver = @import("resolver/root.zig").Resolver;
