@@ -13,9 +13,13 @@ const log = @import("../../common.zig").log;
 const Timestamp = @import("../../time.zig").Timestamp;
 const Duration = @import("../../time.zig").Duration;
 const Timeout = @import("../../time.zig").Timeout;
+
+fn nowS() u32 {
+    return @truncate(Timestamp.now(.monotonic).toSeconds());
+}
 const RwLock = @import("../../sync/RwLock.zig");
 
-const check_interval: Duration = .fromSeconds(5);
+const check_interval_secs: u32 = 5;
 
 const cache_ttl_min: u32 = 5;
 const cache_ttl_max: u32 = 60;
@@ -38,12 +42,12 @@ pub const Resolver = struct {
 
     hosts: Hosts,
     hosts_mtime: i64,
-    hosts_next_check: std.atomic.Value(Timestamp),
+    hosts_next_check: std.atomic.Value(u32),
     hosts_reloading: std.atomic.Value(bool),
 
     conf: ResolvConf,
     conf_mtime: i64,
-    conf_next_check: std.atomic.Value(Timestamp),
+    conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
 
     cache: std.StringHashMapUnmanaged(CacheEntry),
@@ -51,17 +55,17 @@ pub const Resolver = struct {
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
         var conf_mtime: i64 = 0;
-        const next_check = Timestamp.now(.monotonic).addDuration(check_interval);
+        const next_check_s = nowS() +% check_interval_secs;
         return .{
             .allocator = allocator,
             .lock = .init,
             .hosts = loadHosts(allocator, &hosts_mtime),
             .hosts_mtime = hosts_mtime,
-            .hosts_next_check = .init(next_check),
+            .hosts_next_check = .init(next_check_s),
             .hosts_reloading = .init(false),
             .conf = loadResolvConf(allocator, &conf_mtime),
             .conf_mtime = conf_mtime,
-            .conf_next_check = .init(next_check),
+            .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
             .cache = .empty,
         };
@@ -255,13 +259,13 @@ pub const Resolver = struct {
     }
 
     fn maybeReloadHosts(self: *Resolver) void {
-        const now = Timestamp.now(.monotonic);
-        if (now.value < self.hosts_next_check.load(.monotonic).value) return;
+        const now_s = nowS();
+        if (now_s < self.hosts_next_check.load(.monotonic)) return;
 
         if (self.hosts_reloading.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return;
         defer self.hosts_reloading.store(false, .release);
 
-        self.hosts_next_check.store(now.addDuration(check_interval), .monotonic);
+        self.hosts_next_check.store(now_s +% check_interval_secs, .monotonic);
 
         const info = fs.stat("/etc/hosts") catch return;
         if (info.mtime == self.hosts_mtime) return;
@@ -280,13 +284,13 @@ pub const Resolver = struct {
     }
 
     fn maybeReloadResolvConf(self: *Resolver) void {
-        const now = Timestamp.now(.monotonic);
-        if (now.value < self.conf_next_check.load(.monotonic).value) return;
+        const now_s = nowS();
+        if (now_s < self.conf_next_check.load(.monotonic)) return;
 
         if (self.conf_reloading.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return;
         defer self.conf_reloading.store(false, .release);
 
-        self.conf_next_check.store(now.addDuration(check_interval), .monotonic);
+        self.conf_next_check.store(now_s +% check_interval_secs, .monotonic);
 
         const info = fs.stat("/etc/resolv.conf") catch return;
         if (info.mtime == self.conf_mtime) return;
