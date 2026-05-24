@@ -28,6 +28,37 @@ const max_nameservers = 3;
 const max_search_domains = 6;
 const max_search_domain_len = 254;
 
+const max_cached_name_len = 31;
+
+const CacheKey = struct {
+    len: u8,
+    buf: [max_cached_name_len]u8,
+
+    fn init(name: []const u8) ?CacheKey {
+        if (name.len > max_cached_name_len) return null;
+        var key: CacheKey = .{ .len = @intCast(name.len), .buf = undefined };
+        @memcpy(key.buf[0..name.len], name);
+        return key;
+    }
+
+    fn slice(self: *const CacheKey) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+comptime {
+    if (@sizeOf(CacheKey) != 32) @compileError("CacheKey must be exactly 32 bytes");
+}
+
+const CacheKeyContext = struct {
+    pub fn hash(_: @This(), key: CacheKey) u64 {
+        return std.hash.Wyhash.hash(0, key.slice());
+    }
+    pub fn eql(_: @This(), a: CacheKey, b: CacheKey) bool {
+        return a.len == b.len and std.mem.eql(u8, a.buf[0..a.len], b.buf[0..b.len]);
+    }
+};
+
 const max_cached_addrs = 3;
 
 const CacheEntry = struct {
@@ -50,7 +81,7 @@ pub const Resolver = struct {
     conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
 
-    cache: std.StringHashMapUnmanaged(CacheEntry),
+    cache: std.HashMapUnmanaged(CacheKey, CacheEntry, CacheKeyContext, std.hash_map.default_max_load_percentage),
 
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
@@ -74,8 +105,6 @@ pub const Resolver = struct {
     pub fn deinit(self: *Resolver) void {
         self.hosts.deinit();
         self.conf.deinit();
-        var it = self.cache.keyIterator();
-        while (it.next()) |key| self.allocator.free(key.*);
         self.cache.deinit(self.allocator);
     }
 
@@ -107,20 +136,22 @@ pub const Resolver = struct {
                 if (i > 0) return i;
             }
 
-            if (self.cache.get(options.name)) |entry| {
-                if (Timestamp.now(.monotonic).value < entry.expiry.value) {
-                    var i: usize = 0;
-                    for (entry.addrs[0..entry.count]) |addr_in| {
-                        if (i >= storage.len) break;
-                        if (options.family) |f| {
-                            if (addr_in.getFamily() != f) continue;
+            if (CacheKey.init(options.name)) |key| {
+                if (self.cache.get(key)) |entry| {
+                    if (Timestamp.now(.monotonic).value < entry.expiry.value) {
+                        var i: usize = 0;
+                        for (entry.addrs[0..entry.count]) |addr_in| {
+                            if (i >= storage.len) break;
+                            if (options.family) |f| {
+                                if (addr_in.getFamily() != f) continue;
+                            }
+                            var addr = addr_in;
+                            addr.setPort(options.port);
+                            storage[i] = .{ .address = addr };
+                            i += 1;
                         }
-                        var addr = addr_in;
-                        addr.setPort(options.port);
-                        storage[i] = .{ .address = addr };
-                        i += 1;
+                        if (i > 0) return i;
                     }
-                    if (i > 0) return i;
                 }
             }
         }
@@ -250,12 +281,12 @@ pub const Resolver = struct {
         self.lock.lockUncancelable();
         defer self.lock.unlock();
 
-        if (self.cache.getPtr(options.name)) |ptr| {
+        const key = CacheKey.init(options.name) orelse return;
+        if (self.cache.getPtr(key)) |ptr| {
             ptr.* = entry;
             return;
         }
-        const key = self.allocator.dupe(u8, options.name) catch return;
-        self.cache.put(self.allocator, key, entry) catch self.allocator.free(key);
+        self.cache.put(self.allocator, key, entry) catch {};
     }
 
     fn maybeReloadHosts(self: *Resolver) void {
