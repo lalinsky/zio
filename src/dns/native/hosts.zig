@@ -44,9 +44,12 @@ pub const Hosts = struct {
                 if (name.len == 0) continue;
                 if (name[0] == '#') break;
 
-                const gop = try hosts.by_name.getOrPut(allocator, name);
+                var lower_buf: [254]u8 = undefined;
+                if (name.len > lower_buf.len) continue;
+                const lower = std.ascii.lowerString(&lower_buf, name);
+                const gop = try hosts.by_name.getOrPut(allocator, lower);
                 if (!gop.found_existing) {
-                    gop.key_ptr.* = try allocator.dupe(u8, name);
+                    gop.key_ptr.* = try allocator.dupe(u8, lower);
                     gop.value_ptr.* = &.{};
                 }
 
@@ -62,7 +65,10 @@ pub const Hosts = struct {
 
     /// Look up addresses for a hostname. Returns null if not found.
     pub fn lookupByName(self: *const Hosts, name: []const u8) ?[]net.IpAddress {
-        return self.by_name.get(name);
+        var buf: [254]u8 = undefined;
+        if (name.len > buf.len) return null;
+        const lower = std.ascii.lowerString(&buf, name);
+        return self.by_name.get(lower);
     }
 };
 

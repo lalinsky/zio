@@ -468,6 +468,15 @@ fn queryOneType(
     return last_err;
 }
 
+fn sameEndpoint(a: net.IpAddress, b: net.IpAddress) bool {
+    if (a.getFamily() != b.getFamily()) return false;
+    if (a.getPort() != b.getPort()) return false;
+    return switch (a.getFamily()) {
+        .ipv4 => @as(*align(1) const u32, @ptrCast(&a.in.addr)).* == @as(*align(1) const u32, @ptrCast(&b.in.addr)).*,
+        .ipv6 => @as(u128, @bitCast(a.in6.addr)) == @as(u128, @bitCast(b.in6.addr)) and a.in6.scope_id == b.in6.scope_id,
+    };
+}
+
 /// Send a DNS query via UDP (with automatic TCP fallback when TC bit is set).
 /// Returns the response payload slice into recv_buf.
 fn exchange(
@@ -486,6 +495,7 @@ fn exchange(
 
     _ = try sock.sendTo(.{ .ip = server }, query, timeout);
     const r = try sock.receiveFrom(recv_buf, timeout);
+    if (!sameEndpoint(r.from.ip, server)) return error.ConnectionRefused;
     const data = recv_buf[0..r.len];
 
     // TC bit (0x0200) in flags word at offset 2: retry with TCP.

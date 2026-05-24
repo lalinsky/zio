@@ -89,7 +89,7 @@ pub const ResolvConf = struct {
                         conf.timeout = .fromSeconds(secs);
                     } else if (std.mem.startsWith(u8, opt, "attempts:")) {
                         if (std.fmt.parseInt(u8, opt["attempts:".len..], 10)) |n| {
-                            conf.attempts = n;
+                            conf.attempts = @max(n, 1);
                         } else |_| {}
                     } else if (std.mem.eql(u8, opt, "rotate")) {
                         conf.rotate = true;
@@ -113,7 +113,11 @@ pub const ResolvConf = struct {
 };
 
 fn ensureRooted(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
-    if (s.len > 0 and s[s.len - 1] == '.') return s;
+    if (s.len > 0 and s[s.len - 1] == '.') {
+        const out = try allocator.alloc(u8, s.len);
+        @memcpy(out[0..s.len], s);
+        return out;
+    }
     const out = try allocator.alloc(u8, s.len + 1);
     @memcpy(out[0..s.len], s);
     out[s.len] = '.';
