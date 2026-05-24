@@ -309,7 +309,7 @@ pub const Duration = struct {
 };
 
 /// A point in time since Unix epoch.
-pub const Timestamp = struct {
+pub const Timestamp = packed struct {
     value: TimeInt,
 
     pub const zero: Timestamp = .{ .value = 0 };

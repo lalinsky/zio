@@ -5,29 +5,16 @@
 //! and sends DNS queries directly via UDP/TCP. Falls back to
 //! the platform getaddrinfo when disabled or unavailable.
 
-const std = @import("std");
-const dns = @import("../root.zig");
-const ResolvConf = @import("ResolvConf.zig");
-const Hosts = @import("Hosts.zig");
+const resolvconf = @import("resolvconf.zig");
+const hosts = @import("hosts.zig");
+const resolver = @import("resolver.zig");
 
-pub const Resolver = struct {
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator) Resolver {
-        return .{ .allocator = allocator };
-    }
-
-    pub fn lookup(
-        _: *Resolver,
-        storage: []dns.LookupResult,
-        _: dns.LookupOptions,
-    ) dns.LookupError!usize {
-        _ = storage;
-        return error.UnknownHostName;
-    }
-};
+pub const Hosts = hosts.Hosts;
+pub const ResolvConf = resolvconf.ResolvConf;
+pub const Resolver = resolver.Resolver;
 
 test {
-    _ = ResolvConf;
-    _ = Hosts;
+    _ = resolvconf;
+    _ = hosts;
+    _ = resolver;
 }

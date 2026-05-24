@@ -753,6 +753,7 @@ pub const Runtime = struct {
             .task_pool = .init(allocator),
             .resolver = if (options.dns.custom_resolver) .init(allocator) else null,
         };
+        errdefer if (self.resolver) |*r| r.deinit();
 
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
@@ -834,6 +835,8 @@ pub const Runtime = struct {
 
         // Clean up task pool
         self.task_pool.deinit();
+
+        if (self.resolver) |*r| r.deinit();
 
         // Free the Runtime allocation
         if (self.own_self) {
