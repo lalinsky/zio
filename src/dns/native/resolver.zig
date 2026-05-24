@@ -260,12 +260,22 @@ pub const Resolver = struct {
         return last_err;
     }
 
+    fn cacheRemove(self: *Resolver, name: []const u8) void {
+        const key = CacheKey.init(name) orelse return;
+        self.lock.lockUncancelable();
+        defer self.lock.unlock();
+        _ = self.cache.remove(key);
+    }
+
     /// Insert a successful DNS result into the cache. Only caches when family is
     /// unfiltered (both A and AAAA) and the result fits in max_cached_addrs.
     /// Silently skips on allocation failure.
     fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32) void {
         if (options.family != null) return;
-        if (results.len == 0 or results.len > max_cached_addrs) return;
+        if (results.len == 0 or results.len > max_cached_addrs) {
+            self.cacheRemove(options.name);
+            return;
+        }
 
         const ttl_secs = std.math.clamp(ttl, cache_ttl_min, cache_ttl_max);
         var entry: CacheEntry = .{
