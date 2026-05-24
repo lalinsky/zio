@@ -84,6 +84,9 @@ pub const Resolver = struct {
     cache: std.HashMapUnmanaged(CacheKey, CacheEntry, CacheKeyContext, std.hash_map.default_max_load_percentage),
     rotate_index: std.atomic.Value(u32) = .init(0),
 
+    prng_mutex: std.Thread.Mutex,
+    prng: std.Random.DefaultPrng,
+
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
         var conf_mtime: i64 = 0;
@@ -100,7 +103,15 @@ pub const Resolver = struct {
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
             .cache = .empty,
+            .prng_mutex = .{},
+            .prng = std.Random.DefaultPrng.init(Timestamp.now(.realtime).value),
         };
+    }
+
+    fn nextQueryId(self: *Resolver) u16 {
+        self.prng_mutex.lock();
+        defer self.prng_mutex.unlock();
+        return self.prng.random().int(u16);
     }
 
     pub fn deinit(self: *Resolver) void {
@@ -211,7 +222,7 @@ pub const Resolver = struct {
 
         // Rooted name: only try exactly as given.
         if (rooted) {
-            const r = try queryOneName(storage, options, name, srvs, attempts, timeout);
+            const r = try queryOneName(self, storage, options, name, srvs, attempts, timeout);
             self.cacheInsert(options, storage[0..r.count], r.ttl);
             return r.count;
         }
@@ -225,7 +236,7 @@ pub const Resolver = struct {
         // Enough dots: try unsuffixed first (Go's nameList logic).
         if (has_enough_dots) {
             if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                if (queryOneName(storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) {
                         self.cacheInsert(options, storage[0..r.count], r.ttl);
                         return r.count;
@@ -240,7 +251,7 @@ pub const Resolver = struct {
         for (0..search_count) |i| {
             const suffix = search_store[i][0..search_lens[i]];
             if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
-                if (queryOneName(storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) {
                         self.cacheInsert(options, storage[0..r.count], r.ttl);
                         return r.count;
@@ -254,7 +265,7 @@ pub const Resolver = struct {
         // Not enough dots: try unsuffixed last.
         if (!has_enough_dots) {
             if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                if (queryOneName(storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) {
                         self.cacheInsert(options, storage[0..r.count], r.ttl);
                         return r.count;
@@ -374,6 +385,7 @@ const QueryResult = struct { count: usize, ttl: u32 };
 /// Try a single FQDN against all servers, querying A and/or AAAA based on
 /// options.family. Fills storage and returns count + minimum TTL.
 fn queryOneName(
+    resolver: *Resolver,
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
     fqdn: []const u8,
@@ -390,7 +402,7 @@ fn queryOneName(
     const do_aaaa = options.family == null or options.family == .ipv6;
 
     if (do_a and filled < storage.len) {
-        if (queryOneType(storage[filled..], options, fqdn, .a, servers, attempts, sock_timeout)) |r| {
+        if (queryOneType(resolver, storage[filled..], options, fqdn, .a, servers, attempts, sock_timeout)) |r| {
             filled += r.count;
             min_ttl = @min(min_ttl, r.ttl);
         } else |err| switch (err) {
@@ -400,7 +412,7 @@ fn queryOneName(
     }
 
     if (do_aaaa and filled < storage.len) {
-        if (queryOneType(storage[filled..], options, fqdn, .aaaa, servers, attempts, sock_timeout)) |r| {
+        if (queryOneType(resolver, storage[filled..], options, fqdn, .aaaa, servers, attempts, sock_timeout)) |r| {
             filled += r.count;
             min_ttl = @min(min_ttl, r.ttl);
         } else |err| switch (err) {
@@ -413,12 +425,11 @@ fn queryOneName(
     return .{ .count = filled, .ttl = if (min_ttl == std.math.maxInt(u32)) 0 else min_ttl };
 }
 
-var next_query_id: std.atomic.Value(u16) = .init(1);
-
 /// Query all servers for one record type (A or AAAA), retrying up to `attempts`
 /// times. Returns count + TTL from the successful response, or an error if all
 /// attempts failed.
 fn queryOneType(
+    resolver: *Resolver,
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
     fqdn: []const u8,
@@ -427,7 +438,7 @@ fn queryOneType(
     attempts: u8,
     timeout: Timeout,
 ) dns.LookupError!QueryResult {
-    const id = next_query_id.fetchAdd(1, .monotonic);
+    const id = resolver.nextQueryId();
 
     var query_buf: [message.max_udp_size]u8 = undefined;
     const query = message.buildQuery(&query_buf, id, fqdn, qtype) catch return error.Unexpected;
