@@ -84,7 +84,7 @@ pub const Resolver = struct {
     cache: std.HashMapUnmanaged(CacheKey, CacheEntry, CacheKeyContext, std.hash_map.default_max_load_percentage),
     rotate_index: std.atomic.Value(u32) = .init(0),
 
-    prng_mutex: std.Thread.Mutex,
+    prng_mutex: os.Mutex,
     prng: std.Random.DefaultPrng,
 
     pub fn init(allocator: std.mem.Allocator) Resolver {
@@ -103,7 +103,7 @@ pub const Resolver = struct {
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
             .cache = .empty,
-            .prng_mutex = .{},
+            .prng_mutex = os.Mutex.init(),
             .prng = std.Random.DefaultPrng.init(Timestamp.now(.realtime).value),
         };
     }
