@@ -82,6 +82,7 @@ pub const Resolver = struct {
     conf_reloading: std.atomic.Value(bool),
 
     cache: std.HashMapUnmanaged(CacheKey, CacheEntry, CacheKeyContext, std.hash_map.default_max_load_percentage),
+    rotate_index: std.atomic.Value(u32) = .init(0),
 
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
@@ -163,6 +164,7 @@ pub const Resolver = struct {
         var ndots: u8 = undefined;
         var timeout: Duration = undefined;
         var attempts: u8 = undefined;
+        var rotate: bool = undefined;
 
         var search_store: [max_search_domains][max_search_domain_len + 1]u8 = undefined;
         var search_lens: [max_search_domains]usize = undefined;
@@ -176,6 +178,7 @@ pub const Resolver = struct {
             ndots = conf.ndots;
             timeout = conf.timeout;
             attempts = conf.attempts;
+            rotate = conf.rotate;
 
             const sc = @min(conf.servers.len, max_nameservers);
             for (conf.servers[0..sc]) |srv| {
@@ -193,6 +196,11 @@ pub const Resolver = struct {
         }
 
         if (server_count == 0) return error.UnknownHostName;
+
+        if (rotate and server_count > 1) {
+            const offset = self.rotate_index.fetchAdd(1, .monotonic) % @as(u32, @intCast(server_count));
+            std.mem.rotate(net.IpAddress, servers[0..server_count], @intCast(offset));
+        }
 
         const srvs = servers[0..server_count];
         const name = options.name;
