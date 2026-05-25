@@ -513,9 +513,11 @@ fn exchange(
     defer sock.close();
 
     _ = try sock.sendTo(.{ .ip = server }, query, timeout);
-    const r = try sock.receiveFrom(recv_buf, timeout);
-    if (!sameEndpoint(r.from.ip, server)) return error.ConnectionRefused;
-    const data = recv_buf[0..r.len];
+    const data = while (true) {
+        const r = try sock.receiveFrom(recv_buf, timeout);
+        if (sameEndpoint(r.from.ip, server)) break recv_buf[0..r.len];
+        log.debug("dns: ignoring response from unexpected source", .{});
+    };
 
     // TC bit (0x0200) in flags word at offset 2: retry with TCP.
     if (data.len >= 4 and std.mem.readInt(u16, data[2..4], .big) & 0x0200 != 0) {
