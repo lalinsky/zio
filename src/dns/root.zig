@@ -59,4 +59,7 @@ pub fn lookup(
     return impl.lookup(storage, options);
 }
 
-pub const Resolver = @import("resolver/root.zig").Resolver;
+pub const Resolver = if (builtin.os.tag != .windows)
+    @import("resolver/root.zig").Resolver
+else
+    @import("resolver/noop.zig").NoResolver;

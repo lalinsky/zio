@@ -751,7 +751,7 @@ pub const Runtime = struct {
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
             .task_pool = .init(allocator),
-            .resolver = if (options.dns.custom_resolver) .init(allocator) else null,
+            .resolver = if (options.dns.custom_resolver) dns.Resolver.init(allocator) else null,
         };
         errdefer if (self.resolver) |*r| r.deinit();
 
