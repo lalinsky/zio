@@ -18,6 +18,7 @@ fn nowS() u32 {
     return @truncate(Timestamp.now(.monotonic).toSeconds());
 }
 const RwLock = @import("../../sync/RwLock.zig");
+const Mutex = @import("../../sync/Mutex.zig");
 
 const check_interval_secs: u32 = 5;
 
@@ -84,7 +85,7 @@ pub const Resolver = struct {
     cache: std.HashMapUnmanaged(CacheKey, CacheEntry, CacheKeyContext, std.hash_map.default_max_load_percentage),
     rotate_index: std.atomic.Value(u32) = .init(0),
 
-    prng_mutex: os.Mutex,
+    prng_mutex: Mutex,
     prng: std.Random.DefaultPrng,
 
     pub fn init(allocator: std.mem.Allocator) Resolver {
@@ -103,13 +104,13 @@ pub const Resolver = struct {
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
             .cache = .empty,
-            .prng_mutex = os.Mutex.init(),
-            .prng = std.Random.DefaultPrng.init(Timestamp.now(.realtime).value),
+            .prng_mutex = .init,
+            .prng = .init(Timestamp.now(.realtime).value),
         };
     }
 
     fn nextQueryId(self: *Resolver) u16 {
-        self.prng_mutex.lock();
+        self.prng_mutex.lockUncancelable();
         defer self.prng_mutex.unlock();
         return self.prng.random().int(u16);
     }
