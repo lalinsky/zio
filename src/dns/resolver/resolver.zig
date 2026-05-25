@@ -449,7 +449,7 @@ fn queryOneType(
 
     for (0..attempts) |_| {
         for (servers) |server| {
-            const response = exchange(server, query, &recv_buf, timeout) catch |err| {
+            const response = exchange(server, query, &recv_buf, id, timeout) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
                 log.debug("dns: {s}: {}", .{ fqdn, err });
                 last_err = error.TemporaryNameServerFailure;
@@ -502,6 +502,7 @@ fn exchange(
     server: net.IpAddress,
     query: []const u8,
     recv_buf: []u8,
+    id: u16,
     timeout: Timeout,
 ) ![]u8 {
     const domain: os.net.Domain = switch (server.getFamily()) {
@@ -520,7 +521,12 @@ fn exchange(
     };
 
     // TC bit (0x0200) in flags word at offset 2: retry with TCP.
-    if (data.len >= 4 and std.mem.readInt(u16, data[2..4], .big) & 0x0200 != 0) {
+    // Only upgrade when the ID matches — a spoofed packet with TC=1 and a
+    // wrong ID would otherwise waste a TCP connection.
+    if (data.len >= 4 and
+        std.mem.readInt(u16, data[0..2], .big) == id and
+        std.mem.readInt(u16, data[2..4], .big) & 0x0200 != 0)
+    {
         return exchangeTcp(server, query, recv_buf, timeout);
     }
 
