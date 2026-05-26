@@ -24,56 +24,15 @@ const check_interval_secs: u32 = 5;
 
 const cache_ttl_min: u32 = 5;
 const cache_ttl_max: u32 = 60;
-const cache_capacity = 1024;
 
 const max_nameservers = 3;
 const max_search_domains = 6;
 const max_search_domain_len = 254;
 
-const max_cached_name_len = 31;
-
-const CacheKey = struct {
-    len: u8,
-    buf: [max_cached_name_len]u8,
-
-    fn init(name: []const u8) ?CacheKey {
-        if (name.len > max_cached_name_len) return null;
-        var key: CacheKey = .{ .len = @intCast(name.len), .buf = undefined };
-        @memcpy(key.buf[0..name.len], name);
-        return key;
-    }
-
-    fn slice(self: *const CacheKey) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
-
-comptime {
-    if (@sizeOf(CacheKey) != 32) @compileError("CacheKey must be exactly 32 bytes");
-}
-
-const CacheKeyContext = struct {
-    pub fn hash(_: @This(), key: CacheKey) u64 {
-        return std.hash.Wyhash.hash(0, key.slice());
-    }
-    pub fn eql(_: @This(), a: CacheKey, b: CacheKey) bool {
-        return a.len == b.len and std.mem.eql(u8, a.buf[0..a.len], b.buf[0..b.len]);
-    }
-};
-
-const max_cached_addrs = 3;
-
-const CacheEntry = struct {
-    addrs: [max_cached_addrs]net.IpAddress,
-    count: u8,
-    expiry: Timestamp,
-};
-
-// key.len == 0 marks an empty (never-written) slot.
-const CacheSlot = struct {
-    key: CacheKey,
-    entry: CacheEntry,
-};
+const Cache = @import("cache.zig").Cache;
+const CacheKey = @import("cache.zig").CacheKey;
+const CacheEntry = @import("cache.zig").CacheEntry;
+const max_cached_addrs = @import("cache.zig").max_cached_addrs;
 
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
@@ -89,7 +48,7 @@ pub const Resolver = struct {
     conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
 
-    cache: [cache_capacity]CacheSlot,
+    cache: Cache,
     rotate_index: std.atomic.Value(u32) = .init(0),
 
     prng_mutex: Mutex,
@@ -110,7 +69,7 @@ pub const Resolver = struct {
             .conf_mtime = conf_mtime,
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
-            .cache = std.mem.zeroes([cache_capacity]CacheSlot),
+            .cache = std.mem.zeroes(Cache),
             .prng_mutex = .init,
             .prng = .init(Timestamp.now(.realtime).value),
         };
@@ -156,26 +115,19 @@ pub const Resolver = struct {
             }
 
             if (CacheKey.init(options.name)) |key| {
-                const start = cacheSlotIndex(&key);
-                for (0..cache_capacity) |probe| {
-                    const slot = &self.cache[(start + probe) & (cache_capacity - 1)];
-                    if (slot.key.len == 0) break;
-                    if (!CacheKeyContext.eql(.{}, slot.key, key)) continue;
-                    if (Timestamp.now(.monotonic).value < slot.entry.expiry.value) {
-                        var i: usize = 0;
-                        for (slot.entry.addrs[0..slot.entry.count]) |addr_in| {
-                            if (i >= storage.len) break;
-                            if (options.family) |f| {
-                                if (addr_in.getFamily() != f) continue;
-                            }
-                            var addr = addr_in;
-                            addr.setPort(options.port);
-                            storage[i] = .{ .address = addr };
-                            i += 1;
+                if (self.cache.get(&key)) |entry| {
+                    var i: usize = 0;
+                    for (entry.addrs[0..entry.count]) |addr_in| {
+                        if (i >= storage.len) break;
+                        if (options.family) |f| {
+                            if (addr_in.getFamily() != f) continue;
                         }
-                        if (i > 0) return i;
+                        var addr = addr_in;
+                        addr.setPort(options.port);
+                        storage[i] = .{ .address = addr };
+                        i += 1;
                     }
-                    break;
+                    if (i > 0) return i;
                 }
             }
         }
@@ -291,62 +243,31 @@ pub const Resolver = struct {
         return last_err;
     }
 
-    fn cacheSlotIndex(key: *const CacheKey) usize {
-        return CacheKeyContext.hash(.{}, key.*) & (cache_capacity - 1);
-    }
-
-    fn cacheExpire(self: *Resolver, key: *const CacheKey) void {
-        const start = cacheSlotIndex(key);
-        self.lock.lockUncancelable();
-        defer self.lock.unlock();
-        for (0..cache_capacity) |probe| {
-            const slot = &self.cache[(start + probe) & (cache_capacity - 1)];
-            if (slot.key.len == 0) break;
-            if (CacheKeyContext.eql(.{}, slot.key, key.*)) {
-                slot.entry.expiry = .{ .value = 0 };
-                break;
-            }
-        }
-    }
-
     fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32) void {
         if (options.family != null) return;
         const key = CacheKey.init(options.name) orelse return;
+
         if (results.len == 0 or results.len > max_cached_addrs) {
-            self.cacheExpire(&key);
+            self.lock.lockUncancelable();
+            defer self.lock.unlock();
+            self.cache.expire(&key);
             return;
         }
+
         const ttl_secs = std.math.clamp(ttl, cache_ttl_min, cache_ttl_max);
-        const now = Timestamp.now(.monotonic);
         var entry: CacheEntry = .{
             .addrs = undefined,
             .count = @intCast(results.len),
-            .expiry = now.addDuration(.fromSeconds(ttl_secs)),
+            .expiry = Timestamp.now(.monotonic).addDuration(.fromSeconds(ttl_secs)),
         };
         for (results, 0..) |r, i| {
             entry.addrs[i] = r.address;
             entry.addrs[i].setPort(0);
         }
 
-        const start = cacheSlotIndex(&key);
-
         self.lock.lockUncancelable();
         defer self.lock.unlock();
-
-        var target: usize = start;
-        for (0..cache_capacity) |probe| {
-            const idx = (start + probe) & (cache_capacity - 1);
-            const slot = &self.cache[idx];
-            if (slot.key.len == 0 or CacheKeyContext.eql(.{}, slot.key, key)) {
-                target = idx;
-                break;
-            }
-            if (target == start and now.value >= slot.entry.expiry.value) {
-                target = idx; // first expired slot; keep probing for empty or exact match
-            }
-        }
-
-        self.cache[target] = .{ .key = key, .entry = entry };
+        self.cache.put(&key, entry);
     }
 
     fn maybeReloadHosts(self: *Resolver) void {
