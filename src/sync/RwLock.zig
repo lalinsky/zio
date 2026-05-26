@@ -208,7 +208,7 @@ test "RwLock basic shared lock/unlock" {
 }
 
 test "RwLock last reader wakes writer when reader is queued first" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4), .allow_task_migration = true });
     defer runtime.deinit();
 
     var rwlock = RwLock.init;

@@ -146,8 +146,15 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
     }
 }
 
+pub export fn switchContext(
+    noalias current_context_param: *Context,
+    noalias new_context: *Context,
+) callconv(.c) void {
+    switchContextAsm(current_context_param, new_context);
+}
+
 /// Context switching function using C calling convention.
-pub inline fn switchContext(
+pub inline fn switchContextAsm(
     noalias current_context_param: *Context,
     noalias new_context: *Context,
 ) void {
