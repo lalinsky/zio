@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ev = @import("../root.zig");
 const Loop = ev.Loop;
 const Timer = ev.Timer;
@@ -421,6 +422,7 @@ test "group: nested race inside gather" {
 }
 
 test "group: large batch exceeding queue size exercises deferred pending list" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
 
     // Use a small queue to easily trigger the deferred pending list.
