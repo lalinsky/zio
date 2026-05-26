@@ -11,8 +11,7 @@ const darwin = @import("../os/darwin.zig");
 const common = @import("../common.zig");
 const ev = @import("../ev/root.zig");
 const dns = @import("root.zig");
-
-pub const Result = @import("posix.zig").Result;
+const fillResultsFromAddrinfo = @import("posix.zig").fillResultsFromAddrinfo;
 
 const LookupContext = struct {
     result: ?*os_net.addrinfo = null,
@@ -31,7 +30,10 @@ const MachMsgRcv = extern struct {
     _trailer: [32]u8,
 };
 
-pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
+pub fn lookup(
+    storage: []dns.LookupResult,
+    options: dns.LookupOptions,
+) dns.LookupError!usize {
     var buf: [512]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
@@ -46,7 +48,7 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
     } else os_net.AF.UNSPEC;
     hints.socktype = os_net.SOCK.STREAM;
     hints.protocol = os_net.IPPROTO.TCP;
-    if (options.canonical_name) {
+    if (options.canonical_name_buffer != null) {
         hints.flags.CANONNAME = true;
     }
 
@@ -88,10 +90,10 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
         0,
         @sizeOf(MachMsgRcv),
         machport,
-        .NONE, // MACH_MSG_TIMEOUT_NONE
+        .NONE,
         darwin.MACH_PORT_NULL,
     );
-    if (status != 0) { // KERN_SUCCESS = 0
+    if (status != 0) {
         return error.Unexpected;
     }
 
@@ -107,11 +109,9 @@ pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
         return eaiToLookupError(ctx.status);
     }
 
-    return .{
-        .head = ctx.result,
-        .current = ctx.result,
-        .return_canonical_name = options.canonical_name,
-    };
+    defer if (ctx.result) |r| os_net.freeaddrinfo(r);
+
+    return fillResultsFromAddrinfo(storage, options, ctx.result);
 }
 
 fn eaiToLookupError(status: i32) dns.LookupError {

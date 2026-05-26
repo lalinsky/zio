@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.1] - 2026-05-22
+
+### Added
+
+- Added sparc64 coroutine context switching (untested) (#398)
+
+### Fixed
+
+- Fixed io_uring event loop hanging when an I/O wait is registered while still single-threaded and executor threads are subsequently started (#402)
+
 ## [0.12.0] - 2026-05-19
 
 ### Added
@@ -278,6 +288,7 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.12.1]: https://github.com/lalinsky/zio/releases/tag/v0.12.1
 [0.12.0]: https://github.com/lalinsky/zio/releases/tag/v0.12.0
 [0.11.0]: https://github.com/lalinsky/zio/releases/tag/v0.11.0
 [0.10.0]: https://github.com/lalinsky/zio/releases/tag/v0.10.0

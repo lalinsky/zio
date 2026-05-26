@@ -77,6 +77,16 @@ pub const Context = switch (builtin.cpu.arch) {
 
         pub const stack_alignment = 16;
     },
+    // NOTE: untested — Zig's toolchain cannot cross-compile+link sparc64 (no bundled
+    // musl, incomplete lld SPARC64 TLS support). Requires native build to verify.
+    .sparc64 => extern struct {
+        sp: u64,  // %o6 (stack pointer)
+        fp: u64,  // %i6 (frame pointer; used by coroEntry to locate the Entrypoint)
+        pc: u64,
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -120,6 +130,16 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
         .powerpc64, .powerpc64le => {
             ctx.sp = stack_ptr;
             ctx.fp = 0;
+            ctx.pc = @intFromPtr(entry_point);
+        },
+        .sparc64 => {
+            // SPARC V9 uses a register save area at %sp+2047 (128 bytes).
+            // Lower %sp by 2176 bytes (next 16-byte multiple above 2047+128=2175) so
+            // the coroEntry window's potential save area stays below the Entrypoint.
+            // coroEntry reads the Entrypoint struct via %i6, which we set to stack_ptr.
+            if (stack_ptr < ctx.stack_info.limit + 2176) @panic("Stack overflow during coroutine setup: insufficient space for SPARC64 register save area headroom");
+            ctx.sp = stack_ptr - 2176;
+            ctx.fp = stack_ptr;
             ctx.pc = @intFromPtr(entry_point);
         },
         else => @compileError("unsupported architecture"),
@@ -448,8 +468,11 @@ pub inline fn switchContext(
               .memory = true,
             }),
         .thumb => asm volatile (
-            // Calculate return address with Thumb bit (LSB=1) set via adr offset
-            \\ adr r2, 0f + 1
+            // Load resume address, then explicitly set Thumb bit (LSB=1).
+            // adr alone cannot target unaligned addresses on Thumb-1 (Cortex-M0),
+            // so we must compute the word-aligned address first, then OR in bit 0.
+            \\ adr r2, 0f
+            \\ adds r2, #1
             \\ mov r3, sp
             \\ str r3, [r0, #0]
             \\ str r7, [r0, #4]
@@ -982,6 +1005,52 @@ pub inline fn switchContext(
               .fcsr3 = true,
               .memory = true,
             }),
+        .sparc64 => asm volatile (
+            // Flush all register windows to the stack before touching %sp.
+            // Without flushw, a window overflow after the switch would write
+            // the old context's registers to the new context's stack.
+            \\ flushw
+            \\
+            // Compute resume address (label 0:) via rd %pc (SPARC V9, non-privileged).
+            // After rd, %%o2 = address of the rd instruction (= 1b).
+            // The add computes: %%o2 += (0f - 1b) → %%o2 = address of 0:.
+            \\ 1: rd %%pc, %%o2
+            \\ add %%o2, (0f - 1b), %%o2
+            \\ stx %%o2, [%%o0 + 16]
+            \\
+            // Save current context.
+            \\ stx %%sp, [%%o0 + 0]
+            \\ stx %%i6, [%%o0 + 8]
+            \\
+            // Restore new context.
+            \\ ldx [%%o1 + 0], %%sp
+            \\ ldx [%%o1 + 8], %%i6
+            \\ ldx [%%o1 + 16], %%o2
+            \\ jmp %%o2
+            \\ nop
+            \\0:
+            :
+            : [current] "{o0}" (current_context_param),
+              [new] "{o1}" (new_context),
+            : .{
+              // Globals (g0 is always zero; g6/g7 are ABI-reserved by the OS, not clobbered)
+              .g1 = true, .g2 = true, .g3 = true, .g4 = true, .g5 = true,
+              // Outputs (o6=%sp saved/restored, not listed)
+              .o0 = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true,
+              // Locals
+              .l0 = true, .l1 = true, .l2 = true, .l3 = true, .l4 = true, .l5 = true, .l6 = true, .l7 = true,
+              // Inputs (i6=%fp saved/restored, not listed)
+              .i0 = true, .i1 = true, .i2 = true, .i3 = true, .i4 = true, .i5 = true, .i7 = true,
+              // Condition codes and misc state registers
+              .y = true, .ccr = true, .icc = true, .xcc = true, .gsr = true,
+              // Floating-point (q0-q15 are the 16 quad slots covering all 64 FP regs)
+              .q0 = true, .q1 = true, .q2 = true, .q3 = true,
+              .q4 = true, .q5 = true, .q6 = true, .q7 = true,
+              .q8 = true, .q9 = true, .q10 = true, .q11 = true,
+              .q12 = true, .q13 = true, .q14 = true, .q15 = true,
+              .fsr = true, .fprs = true,
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -1098,6 +1167,18 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ ld 3, 8(1)
             \\ mtctr 12
             \\ bctr
+        ),
+        // setupContext stores the Entrypoint address in ctx.fp (not ctx.sp).
+        // ctx.sp is lowered by 2176 bytes to reserve space below the Entrypoint
+        // for the SPARC V9 register save area (at %sp+2047, 128 bytes).
+        // On entry: %i6 = Entrypoint address (func at +0, context at +8).
+        // Zero %o7 so the callee's %i7 = 0, terminating stack traces.
+        .sparc64 => asm volatile (
+            \\ mov %%g0, %%o7
+            \\ ldx [%%i6 + 0], %%o1
+            \\ ldx [%%i6 + 8], %%o0
+            \\ jmp %%o1
+            \\ nop
         ),
         else => @compileError("unsupported architecture"),
     }

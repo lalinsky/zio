@@ -7,46 +7,53 @@ const common = @import("../common.zig");
 const blockInPlace = common.blockInPlace;
 const dns = @import("root.zig");
 
-pub const Result = struct {
+/// Fills `storage` with canonical name (if requested) and addresses from
+/// a `getaddrinfo` linked list. Returns the number of entries written, or
+/// `error.TooManyAddresses` if the resolver returned more addresses than
+/// `storage` can hold (the buffer is fully populated in that case).
+pub fn fillResultsFromAddrinfo(
+    storage: []dns.LookupResult,
+    options: dns.LookupOptions,
     head: ?*os_net.addrinfo,
-    current: ?*os_net.addrinfo,
-    return_canonical_name: bool,
+) dns.LookupError!usize {
+    var i: usize = 0;
 
-    pub fn deinit(self: *Result) void {
-        if (self.head) |head| {
-            os_net.freeaddrinfo(head);
-        }
-    }
-
-    pub fn next(self: *Result) ?dns.LookupResult {
-        if (self.return_canonical_name) {
-            self.return_canonical_name = false;
-            if (self.head) |head| {
-                if (head.canonname) |name| {
-                    return .{ .canonical_name = .{ .bytes = std.mem.sliceTo(name, 0) } };
-                }
+    if (options.canonical_name_buffer) |cname_buf| {
+        if (head) |h| {
+            if (h.canonname) |name_ptr| {
+                if (i >= storage.len) return i;
+                const name_slice = std.mem.sliceTo(name_ptr, 0);
+                @memcpy(cname_buf[0..name_slice.len], name_slice);
+                cname_buf[name_slice.len] = 0;
+                storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..name_slice.len] } };
+                i += 1;
             }
         }
-
-        while (self.current) |info| {
-            self.current = @ptrCast(info.next);
-            const addr = info.addr orelse continue;
-            if (addr.family != os_net.AF.INET and addr.family != os_net.AF.INET6) continue;
-            return .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.addrlen)) };
-        }
-        return null;
     }
-};
+
+    var current: ?*os_net.addrinfo = head;
+    while (current) |info| : (current = @ptrCast(info.next)) {
+        const addr = info.addr orelse continue;
+        if (addr.family != os_net.AF.INET and addr.family != os_net.AF.INET6) continue;
+        if (i >= storage.len) return error.TooManyAddresses;
+        storage[i] = .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.addrlen)) };
+        i += 1;
+    }
+
+    return i;
+}
 
 /// Resolves a hostname to addresses. Dispatches to the thread pool and
 /// suspends the current task until the blocking getaddrinfo call completes.
-pub fn lookup(options: dns.LookupOptions) dns.LookupError!Result {
+/// Returns the number of entries written to `storage`.
+pub fn lookup(
+    storage: []dns.LookupResult,
+    options: dns.LookupOptions,
+) dns.LookupError!usize {
     const head = try blockInPlace(lookupBlocking, .{options});
-    return .{
-        .head = head,
-        .current = head,
-        .return_canonical_name = options.canonical_name,
-    };
+    defer if (head) |h| os_net.freeaddrinfo(h);
+
+    return fillResultsFromAddrinfo(storage, options, head);
 }
 
 fn lookupBlocking(options: dns.LookupOptions) dns.LookupError!?*os_net.addrinfo {
@@ -64,7 +71,7 @@ fn lookupBlocking(options: dns.LookupOptions) dns.LookupError!?*os_net.addrinfo 
     } else os_net.AF.UNSPEC;
     hints.socktype = os_net.SOCK.STREAM;
     hints.protocol = os_net.IPPROTO.TCP;
-    if (options.canonical_name) {
+    if (options.canonical_name_buffer != null) {
         hints.flags.CANONNAME = true;
     }
 

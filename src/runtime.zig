@@ -30,6 +30,8 @@ const finishTask = @import("task.zig").finishTask;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Group = @import("group.zig").Group;
 
+const dns = @import("dns/root.zig");
+
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 
@@ -68,6 +70,13 @@ pub const RuntimeOptions = struct {
     executors: ExecutorCount = .exact(1),
     /// Allow tasks to be migrated to a different executor when scheduled.
     allow_task_migration: bool = true,
+    /// DNS resolver configuration.
+    dns: DnsOptions = .{},
+};
+
+pub const DnsOptions = struct {
+    /// Use the built-in native DNS resolver instead of getaddrinfo.
+    custom_resolver: bool = false,
 };
 
 const Awaitable = @import("awaitable.zig").Awaitable;
@@ -708,6 +717,9 @@ pub const Runtime = struct {
     workers: std.ArrayList(Worker) = .empty,
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    own_self: bool = false,
+
+    resolver: ?dns.Resolver = null,
 
     const Worker = struct {
         thread: std.Thread = undefined,
@@ -720,6 +732,12 @@ pub const Runtime = struct {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
+        try self.initStatic(allocator, options);
+        self.own_self = true;
+        return self;
+    }
+
+    pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
         const num_executors = options.executors.resolve();
 
         self.* = .{
@@ -729,7 +747,9 @@ pub const Runtime = struct {
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
             .task_pool = .init(allocator),
+            .resolver = if (options.dns.custom_resolver) dns.Resolver.init(allocator) else null,
         };
+        errdefer if (self.resolver) |*r| r.deinit();
 
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
@@ -762,8 +782,6 @@ pub const Runtime = struct {
             }
             self.executors.appendAssumeCapacity(&worker.executor);
         }
-
-        return self;
     }
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
@@ -814,8 +832,12 @@ pub const Runtime = struct {
         // Clean up task pool
         self.task_pool.deinit();
 
+        if (self.resolver) |*r| r.deinit();
+
         // Free the Runtime allocation
-        allocator.destroy(self);
+        if (self.own_self) {
+            allocator.destroy(self);
+        }
     }
 
     // High-level public API
