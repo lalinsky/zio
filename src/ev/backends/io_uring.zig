@@ -158,6 +158,7 @@ const log = @import("../../common.zig").log;
 allocator: std.mem.Allocator,
 ring: linux.IoUring,
 waker_needs_rearm: bool,
+pending: Queue(Completion) = .{},
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
@@ -206,7 +207,6 @@ pub fn wake(self: *Self, state: *LoopState) void {
 fn rearmWaker(self: *Self, state: *LoopState) !void {
     if (!self.waker_needs_rearm) return;
     const sqe = try self.ring.get_sqe();
-    // Prep FUTEX_WAIT: wait while wake_requested == 0
     prepFutexWait(sqe, &state.wake_requested.raw, 0);
     sqe.user_data = USER_DATA_WAKER;
     self.waker_needs_rearm = false;
@@ -279,23 +279,13 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         // Async operations through io_uring
         .net_connect => {
             const data = c.cast(NetConnect);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for connect", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_connect(data.handle, data.addr, data.addr_len);
             sqe.user_data = @intFromPtr(c);
         },
         .net_accept => {
             const data = c.cast(NetAccept);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for accept", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_accept(data.handle, data.addr, data.addr_len, 0);
             sqe.user_data = @intFromPtr(c);
         },
@@ -310,12 +300,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .controllen = 0,
                 .flags = 0,
             };
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for recvmsg", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
             sqe.user_data = @intFromPtr(c);
         },
@@ -330,12 +315,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .controllen = 0,
                 .flags = 0,
             };
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for sendmsg", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
             sqe.user_data = @intFromPtr(c);
         },
@@ -350,12 +330,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .controllen = 0,
                 .flags = 0,
             };
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for recvmsg", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
             sqe.user_data = @intFromPtr(c);
         },
@@ -370,12 +345,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .controllen = 0,
                 .flags = 0,
             };
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for sendmsg", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
             sqe.user_data = @intFromPtr(c);
         },
@@ -390,12 +360,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .controllen = if (data.control) |ctl| ctl.len else 0,
                 .flags = 0,
             };
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for recvmsg", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
             sqe.user_data = @intFromPtr(c);
         },
@@ -410,23 +375,13 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 .controllen = if (data.control) |ctl| ctl.len else 0,
                 .flags = 0,
             };
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for sendmsg", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
             sqe.user_data = @intFromPtr(c);
         },
         .net_poll => {
             const data = c.cast(NetPoll);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for poll_add", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             const poll_mask: u32 = switch (data.event) {
                 .recv => linux.POLL.IN,
                 .send => linux.POLL.OUT,
@@ -436,23 +391,13 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_shutdown => {
             const data = c.cast(NetShutdown);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for shutdown", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_shutdown(data.handle, @intFromEnum(data.how));
             sqe.user_data = @intFromPtr(c);
         },
         .net_close => {
             const data = c.cast(NetClose);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for close", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
@@ -466,13 +411,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.path);
-                log.err("Failed to get io_uring SQE for file_open", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             const flags = linux.O{
                 .ACCMODE = switch (data.flags.mode) {
                     .read_only => .RDONLY,
@@ -493,13 +432,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.path);
-                log.err("Failed to get io_uring SQE for file_create", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             const flags = linux.O{
                 .ACCMODE = if (data.flags.read) .RDWR else .WRONLY,
                 .CLOEXEC = true,
@@ -512,79 +445,44 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .file_close => {
             const data = c.cast(FileClose);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_close", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
         .file_read => {
             const data = c.cast(FileRead);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_read", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_readv(data.handle, data.buffer.iovecs, data.offset);
             sqe.user_data = @intFromPtr(c);
         },
         .file_write => {
             const data = c.cast(FileWrite);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_write", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_writev(data.handle, data.buffer.iovecs, data.offset);
             sqe.user_data = @intFromPtr(c);
         },
         .file_read_streaming => {
             const data = c.cast(FileReadStreaming);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_read_streaming", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_readv(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
             sqe.user_data = @intFromPtr(c);
         },
         .file_write_streaming => {
             const data = c.cast(FileWriteStreaming);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_write_streaming", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_writev(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
             sqe.user_data = @intFromPtr(c);
         },
         .file_sync => {
             const data = c.cast(FileSync);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_sync", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             const flags: u32 = if (data.flags.only_data) linux.IORING_FSYNC_DATASYNC else 0;
             sqe.prep_fsync(data.handle, flags);
             sqe.user_data = @intFromPtr(c);
         },
         .file_set_size => {
             const data = c.cast(FileSetSize);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_set_size", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_rw(.FTRUNCATE, data.handle, 0, 0, @intCast(data.length));
             sqe.user_data = @intFromPtr(c);
         },
@@ -600,13 +498,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.path);
-                log.err("Failed to get io_uring SQE for dir_create_dir", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_mkdirat(@intCast(data.dir), data.internal.path.ptr, data.mode);
             sqe.user_data = @intFromPtr(c);
         },
@@ -625,14 +517,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.old_path);
-                self.allocator.free(data.internal.new_path);
-                log.err("Failed to get io_uring SQE for dir_rename", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_renameat(@intCast(data.old_dir), data.internal.old_path.ptr, @intCast(data.new_dir), data.internal.new_path.ptr, 0);
             sqe.user_data = @intFromPtr(c);
         },
@@ -651,14 +536,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.old_path);
-                self.allocator.free(data.internal.new_path);
-                log.err("Failed to get io_uring SQE for dir_rename_preserve", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_renameat(@intCast(data.old_dir), data.internal.old_path.ptr, @intCast(data.new_dir), data.internal.new_path.ptr, @as(u32, @bitCast(linux.RENAME{ .NOREPLACE = true })));
             sqe.user_data = @intFromPtr(c);
         },
@@ -671,13 +549,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.path);
-                log.err("Failed to get io_uring SQE for dir_delete_file", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_unlinkat(@intCast(data.dir), data.internal.path.ptr, 0);
             sqe.user_data = @intFromPtr(c);
         },
@@ -690,25 +562,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.path);
-                log.err("Failed to get io_uring SQE for dir_delete_dir", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_unlinkat(@intCast(data.dir), data.internal.path.ptr, linux.AT.REMOVEDIR);
             sqe.user_data = @intFromPtr(c);
         },
 
         .file_size => {
             const data = c.cast(FileSize);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for file_size", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             // Use statx with empty pathname to get stats for the fd itself
             const mask: linux.STATX = .{ .SIZE = true };
             const flags = linux.AT.EMPTY_PATH;
@@ -738,24 +599,13 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                         return;
                     };
                 }
-                const sqe = self.getSqe(state) catch {
-                    self.allocator.free(data.internal.path);
-                    log.err("Failed to get io_uring SQE for file_stat", .{});
-                    c.setError(error.Unexpected);
-                    state.markCompletedFromBackend(c);
-                    return;
-                };
+                const sqe = self.getSqeOrDefer(c) orelse return;
                 const statx_flags: u32 = if (data.flags.follow_symlinks) 0 else linux.AT.SYMLINK_NOFOLLOW;
                 sqe.prep_statx(@intCast(data.handle), data.internal.path.ptr, statx_flags, mask, &data.internal.statx);
                 sqe.user_data = @intFromPtr(c);
             } else {
                 // No path - use AT_EMPTY_PATH to stat the fd itself
-                const sqe = self.getSqe(state) catch {
-                    log.err("Failed to get io_uring SQE for file_stat", .{});
-                    c.setError(error.Unexpected);
-                    state.markCompletedFromBackend(c);
-                    return;
-                };
+                const sqe = self.getSqeOrDefer(c) orelse return;
                 sqe.prep_statx(data.handle, "", linux.AT.EMPTY_PATH, mask, &data.internal.statx);
                 sqe.user_data = @intFromPtr(c);
             }
@@ -770,13 +620,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqe(state) catch {
-                self.allocator.free(data.internal.path);
-                log.err("Failed to get io_uring SQE for dir_open", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             var flags = linux.O{
                 .ACCMODE = .RDONLY,
                 .DIRECTORY = true,
@@ -794,12 +638,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
         .dir_close => {
             const data = c.cast(DirClose);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for dir_close", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
@@ -819,12 +658,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_hard_link => unreachable, // Handled by thread pool
         .pipe_poll => {
             const data = c.cast(PipePoll);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for pipe_poll", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             const poll_mask: u32 = switch (data.event) {
                 .read => linux.POLL.IN,
                 .write => linux.POLL.OUT,
@@ -843,45 +677,25 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .pipe_read => {
             const data = c.cast(PipeRead);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for pipe_read", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_readv(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
             sqe.user_data = @intFromPtr(c);
         },
         .pipe_write => {
             const data = c.cast(PipeWrite);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for pipe_write", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_writev(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
             sqe.user_data = @intFromPtr(c);
         },
         .pipe_close => {
             const data = c.cast(PipeClose);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for pipe_close", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             sqe.prep_close(data.handle);
             sqe.user_data = @intFromPtr(c);
         },
         .process_wait => {
             const data = c.cast(ProcessWait);
-            const sqe = self.getSqe(state) catch {
-                log.err("Failed to get io_uring SQE for process_wait", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
             // Use WAITID to wait for process exit
             sqe.prep_waitid(linux.P.PID, data.handle, &data.internal.siginfo, linux.W.EXITED, 0);
             sqe.user_data = @intFromPtr(c);
@@ -893,7 +707,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
-pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
+pub fn cancel(self: *Self, _: *LoopState, target: *Completion) void {
     switch (target.state) {
         .new => {
             // UNREACHABLE: When cancel is added via loop.add() and target.state == .new,
@@ -909,7 +723,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
             // In poll(), we:
             // - Skip cancel CQEs with user_data=USER_DATA_CANCEL
             // - Process target CQE and mark target complete with error.Canceled (or natural result)
-            const sqe = self.getSqe(state) catch {
+            const sqe = self.ring.get_sqe() catch {
                 log.err("Failed to get io_uring SQE for cancel", .{});
                 // Cancel SQE failed - do nothing, let target complete naturally
                 return;
@@ -925,33 +739,34 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     }
 }
 
-/// Get an SQE, flushing the queue with non-blocking poll if full
-fn getSqe(self: *Self, state: *LoopState) !*linux.io_uring_sqe {
-    return self.ring.get_sqe() catch |err| {
-        if (err == error.SubmissionQueueFull) {
-            // Queue full - flush with non-blocking poll to drain completions
-            _ = try self.poll(state, .zero);
-            // Retry after flush
-            return self.ring.get_sqe();
-        }
-        return err;
+/// Get an SQE or defer the completion to the pending list if the SQ is full.
+/// Returns null if deferred (caller should return immediately).
+fn getSqeOrDefer(self: *Self, c: *Completion) ?*linux.io_uring_sqe {
+    return self.ring.get_sqe() catch {
+        self.pending.push(c);
+        return null;
     };
 }
 
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     const linux_os = @import("../../os/linux.zig");
 
-    try self.rearmWaker(state);
-
     // Flush SQ to get number of pending submissions
     const to_submit = self.ring.flush_sq();
 
-    // Setup timeout for io_uring_enter2
-    // If timeout is Duration.max (infinite), pass null ts so io_uring_enter2 waits forever
+    // Setup timeout for io_uring_enter2.
+    // If the waker isn't armed (SQ was full when we last tried to rearm), we must not
+    // block indefinitely — no FUTEX_WAIT is in the ring to interrupt us from another
+    // thread. Cap to a short fallback so we re-arm on the next poll.
+    // TODO: consider a proper reserved slot strategy so the waker is never un-armed.
+    const effective_timeout = if (self.waker_needs_rearm)
+        Duration.fromMilliseconds(10)
+    else
+        timeout;
     var ts: linux.kernel_timespec = undefined;
     var arg: linux_os.io_uring_getevents_arg = .{
-        .ts = if (timeout.value == Duration.max.value) 0 else blk: {
-            const timeout_ns = timeout.toNanoseconds();
+        .ts = if (effective_timeout.value == Duration.max.value) 0 else blk: {
+            const timeout_ns = effective_timeout.toNanoseconds();
             ts = .{
                 .sec = @intCast(timeout_ns / time.ns_per_s),
                 .nsec = @intCast(timeout_ns % time.ns_per_s),
@@ -979,6 +794,9 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     const count = try self.ring.copy_cqes(&cqes, 0);
 
     if (count == 0) {
+        // Rearm waker and drain pending before returning — SQ was cleared by enter2.
+        self.rearmWaker(state) catch {};
+        self.drainPending(state);
         return true; // Timed out
     }
 
@@ -1005,9 +823,10 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             continue;
         }
 
-        // Handle EINTR by resubmitting - operation was interrupted by a signal
+        // Handle EINTR by deferring to pending — resubmit after rearmWaker so the
+        // waker always gets priority over EINTR resubmissions.
         if (cqe.res == -@as(i32, @intFromEnum(linux.E.INTR))) {
-            self.submit(state, completion);
+            self.pending.push(completion);
             continue;
         }
 
@@ -1018,7 +837,32 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         state.markCompletedFromBackend(completion);
     }
 
+    // Rearm waker first (SQ was cleared by enter2, so this is guaranteed a slot),
+    // then drain pending submissions. Order matters: waker has priority.
+    self.rearmWaker(state) catch {};
+    self.drainPending(state);
+
     return false; // Did not timeout, woke up due to events
+}
+
+fn drainPending(self: *Self, state: *LoopState) void {
+    // Swap out the pending list so that re-deferred items during this drain go
+    // into a fresh self.pending rather than back into the list we are iterating.
+    var to_drain = self.pending;
+    self.pending = .{};
+
+    while (to_drain.pop()) |c| {
+        if (c.cancel_state.load(.acquire).requested) {
+            // Complete canceled pending ops immediately rather than writing a SQE.
+            // storeResult handles resource cleanup (e.g. allocated paths).
+            self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
+            state.markCompletedFromBackend(c);
+        } else {
+            // submit() will call getSqeOrDefer(); if the SQ fills up again the
+            // completion lands in self.pending and will be retried next poll.
+            self.submit(state, c);
+        }
+    }
 }
 
 fn storeResult(self: *Self, c: *Completion, res: i32) void {
