@@ -304,8 +304,14 @@ pub const Resolver = struct {
 
         self.conf_next_check.store(now_s +% check_interval_secs, .monotonic);
 
-        const info = fs.stat("/etc/resolv.conf") catch return;
-        if (info.mtime == self.conf_mtime) return;
+        const mtime = check_mtime: {
+            const info = fs.stat("/etc/resolv.conf") catch |err| switch (err) {
+                error.FileNotFound => break :check_mtime 0,
+                else => return,
+            };
+            break :check_mtime info.mtime;
+        };
+        if (mtime == self.conf_mtime) return;
 
         var new_mtime: i64 = 0;
         var new_conf = loadResolvConf(self.allocator, &new_mtime);
@@ -545,6 +551,14 @@ fn loadHosts(allocator: std.mem.Allocator, mtime_out: *i64) Hosts {
 
 fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) ResolvConf {
     const file = fs.openFile("/etc/resolv.conf") catch |err| {
+        if (err == error.FileNotFound) {
+            const conf = ResolvConf.default(allocator) catch |err2| {
+                log.warn("dns: failed to init default ResolvConf: {}", .{err2});
+                return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
+            };
+            mtime_out.* = 0;
+            return conf;
+        }
         log.warn("dns: failed to open /etc/resolv.conf: {}", .{err});
         return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
     };

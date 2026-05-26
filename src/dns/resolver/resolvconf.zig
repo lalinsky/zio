@@ -25,6 +25,20 @@ pub const ResolvConf = struct {
         self.* = undefined;
     }
 
+    pub fn default(parent_allocator: std.mem.Allocator) !ResolvConf {
+        var conf: ResolvConf = .{
+            .arena = .init(parent_allocator),
+            .servers = &.{},
+            .search = &.{},
+        };
+        const allocator = conf.arena.allocator();
+        conf.servers = try allocator.dupe(net.IpAddress, &.{
+            try net.IpAddress.parseIp4("127.0.0.1", 53),
+            try net.IpAddress.parseIp6("::1", 53),
+        });
+        return conf;
+    }
+
     /// Parse resolv.conf from a reader. All returned memory is owned by
     /// the struct and freed by `deinit()`.
     pub fn parse(parent_allocator: std.mem.Allocator, reader: *std.Io.Reader) !ResolvConf {
