@@ -24,6 +24,7 @@ const check_interval_secs: u32 = 5;
 
 const cache_ttl_min: u32 = 5;
 const cache_ttl_max: u32 = 60;
+const cache_capacity = 1024;
 
 const max_nameservers = 3;
 const max_search_domains = 6;
@@ -68,6 +69,12 @@ const CacheEntry = struct {
     expiry: Timestamp,
 };
 
+// key.len == 0 marks an empty (never-written) slot.
+const CacheSlot = struct {
+    key: CacheKey,
+    entry: CacheEntry,
+};
+
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
     lock: RwLock,
@@ -82,7 +89,7 @@ pub const Resolver = struct {
     conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
 
-    cache: std.HashMapUnmanaged(CacheKey, CacheEntry, CacheKeyContext, std.hash_map.default_max_load_percentage),
+    cache: [cache_capacity]CacheSlot,
     rotate_index: std.atomic.Value(u32) = .init(0),
 
     prng_mutex: Mutex,
@@ -103,7 +110,7 @@ pub const Resolver = struct {
             .conf_mtime = conf_mtime,
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
-            .cache = .empty,
+            .cache = std.mem.zeroes([cache_capacity]CacheSlot),
             .prng_mutex = .init,
             .prng = .init(Timestamp.now(.realtime).value),
         };
@@ -118,7 +125,6 @@ pub const Resolver = struct {
     pub fn deinit(self: *Resolver) void {
         self.hosts.deinit();
         self.conf.deinit();
-        self.cache.deinit(self.allocator);
     }
 
     pub fn lookup(
@@ -150,10 +156,14 @@ pub const Resolver = struct {
             }
 
             if (CacheKey.init(options.name)) |key| {
-                if (self.cache.get(key)) |entry| {
-                    if (Timestamp.now(.monotonic).value < entry.expiry.value) {
+                const start = cacheSlotIndex(&key);
+                for (0..cache_capacity) |probe| {
+                    const slot = &self.cache[(start + probe) & (cache_capacity - 1)];
+                    if (slot.key.len == 0) break;
+                    if (!CacheKeyContext.eql(.{}, slot.key, key)) continue;
+                    if (Timestamp.now(.monotonic).value < slot.entry.expiry.value) {
                         var i: usize = 0;
-                        for (entry.addrs[0..entry.count]) |addr_in| {
+                        for (slot.entry.addrs[0..slot.entry.count]) |addr_in| {
                             if (i >= storage.len) break;
                             if (options.family) |f| {
                                 if (addr_in.getFamily() != f) continue;
@@ -165,6 +175,7 @@ pub const Resolver = struct {
                         }
                         if (i > 0) return i;
                     }
+                    break;
                 }
             }
         }
@@ -280,43 +291,62 @@ pub const Resolver = struct {
         return last_err;
     }
 
-    fn cacheRemove(self: *Resolver, name: []const u8) void {
-        const key = CacheKey.init(name) orelse return;
-        self.lock.lockUncancelable();
-        defer self.lock.unlock();
-        _ = self.cache.remove(key);
+    fn cacheSlotIndex(key: *const CacheKey) usize {
+        return CacheKeyContext.hash(.{}, key.*) & (cache_capacity - 1);
     }
 
-    /// Insert a successful DNS result into the cache. Only caches when family is
-    /// unfiltered (both A and AAAA) and the result fits in max_cached_addrs.
-    /// Silently skips on allocation failure.
+    fn cacheExpire(self: *Resolver, key: *const CacheKey) void {
+        const start = cacheSlotIndex(key);
+        self.lock.lockUncancelable();
+        defer self.lock.unlock();
+        for (0..cache_capacity) |probe| {
+            const slot = &self.cache[(start + probe) & (cache_capacity - 1)];
+            if (slot.key.len == 0) break;
+            if (CacheKeyContext.eql(.{}, slot.key, key.*)) {
+                slot.entry.expiry = .{ .value = 0 };
+                break;
+            }
+        }
+    }
+
     fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32) void {
         if (options.family != null) return;
+        const key = CacheKey.init(options.name) orelse return;
         if (results.len == 0 or results.len > max_cached_addrs) {
-            self.cacheRemove(options.name);
+            self.cacheExpire(&key);
             return;
         }
-
         const ttl_secs = std.math.clamp(ttl, cache_ttl_min, cache_ttl_max);
+        const now = Timestamp.now(.monotonic);
         var entry: CacheEntry = .{
             .addrs = undefined,
             .count = @intCast(results.len),
-            .expiry = Timestamp.now(.monotonic).addDuration(.fromSeconds(ttl_secs)),
+            .expiry = now.addDuration(.fromSeconds(ttl_secs)),
         };
         for (results, 0..) |r, i| {
             entry.addrs[i] = r.address;
             entry.addrs[i].setPort(0);
         }
 
+        const start = cacheSlotIndex(&key);
+
         self.lock.lockUncancelable();
         defer self.lock.unlock();
 
-        const key = CacheKey.init(options.name) orelse return;
-        if (self.cache.getPtr(key)) |ptr| {
-            ptr.* = entry;
-            return;
+        var target: usize = start;
+        for (0..cache_capacity) |probe| {
+            const idx = (start + probe) & (cache_capacity - 1);
+            const slot = &self.cache[idx];
+            if (slot.key.len == 0 or CacheKeyContext.eql(.{}, slot.key, key)) {
+                target = idx;
+                break;
+            }
+            if (target == start and now.value >= slot.entry.expiry.value) {
+                target = idx; // first expired slot; keep probing for empty or exact match
+            }
         }
-        self.cache.put(self.allocator, key, entry) catch {};
+
+        self.cache[target] = .{ .key = key, .entry = entry };
     }
 
     fn maybeReloadHosts(self: *Resolver) void {
