@@ -69,7 +69,7 @@ pub const RuntimeOptions = struct {
     /// Number of executor threads to run (including main).
     executors: ExecutorCount = .exact(1),
     /// Allow tasks to be migrated to a different executor when scheduled.
-    allow_task_migration: bool = true,
+    allow_task_migration: bool = false,
     /// DNS resolver configuration.
     dns: DnsOptions = .{},
 };
