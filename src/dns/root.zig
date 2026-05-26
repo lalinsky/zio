@@ -33,11 +33,16 @@ pub const LookupError = error{
     SystemResources,
     Canceled,
     RuntimeShutdown,
-    Closed,
     NoThreadPool,
     TooManyAddresses,
 };
 
+/// Extended error set used internally by Resolver/NoResolver. Includes
+/// UseSystemResolver, which signals the dispatch wrapper to fall back to the
+/// platform getaddrinfo rather than propagating an error to the caller.
+pub const ResolverError = LookupError || error{UseSystemResolver};
+
+const Executor = @import("../runtime.zig").Executor;
 const backend = @import("../ev/backend.zig");
 
 pub const impl = if (builtin.os.tag == .windows)
@@ -47,4 +52,24 @@ else if (builtin.os.tag.isDarwin() and backend.backend == .kqueue)
 else
     @import("posix.zig");
 
-pub const lookup = impl.lookup;
+pub fn lookup(
+    storage: []LookupResult,
+    options: LookupOptions,
+) LookupError!usize {
+    if (Executor.current) |exec| {
+        if (exec.runtime.resolver) |*resolver| {
+            if (resolver.lookup(storage, options)) |n| {
+                return n;
+            } else |err| switch (err) {
+                error.UseSystemResolver => {},
+                else => |e| return e,
+            }
+        }
+    }
+    return impl.lookup(storage, options);
+}
+
+pub const Resolver = if (builtin.os.tag != .windows)
+    @import("resolver/root.zig").Resolver
+else
+    @import("resolver/noop.zig").NoResolver;

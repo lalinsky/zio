@@ -30,6 +30,8 @@ const finishTask = @import("task.zig").finishTask;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Group = @import("group.zig").Group;
 
+const dns = @import("dns/root.zig");
+
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 
@@ -66,6 +68,13 @@ pub const RuntimeOptions = struct {
     },
     /// Number of executor threads to run (including main).
     executors: ExecutorCount = .exact(1),
+    /// DNS resolver configuration.
+    dns: DnsOptions = .{},
+};
+
+pub const DnsOptions = struct {
+    /// Use the built-in native DNS resolver instead of getaddrinfo.
+    custom_resolver: bool = false,
 };
 
 const Awaitable = @import("awaitable.zig").Awaitable;
@@ -714,6 +723,8 @@ pub const Runtime = struct {
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     own_self: bool = false,
 
+    resolver: ?dns.Resolver = null,
+
     const Worker = struct {
         thread: std.Thread = undefined,
         ready: os.ResetEvent = .init(),
@@ -740,7 +751,9 @@ pub const Runtime = struct {
             .main_executor = undefined,
             .stack_pool = .init(options.stack_pool),
             .task_pool = .init(allocator),
+            .resolver = if (options.dns.custom_resolver) dns.Resolver.init(allocator) else null,
         };
+        errdefer if (self.resolver) |*r| r.deinit();
 
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
@@ -822,6 +835,8 @@ pub const Runtime = struct {
 
         // Clean up task pool
         self.task_pool.deinit();
+
+        if (self.resolver) |*r| r.deinit();
 
         // Free the Runtime allocation
         if (self.own_self) {

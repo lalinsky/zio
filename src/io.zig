@@ -2369,7 +2369,6 @@ fn dnsLookupErrToStdErr(err: zio_dns.LookupError) Io.net.HostName.LookupError {
         error.Canceled => error.Canceled,
         error.TooManyAddresses => unreachable, // handled before calling this function
         error.Unexpected, error.ServiceUnavailable, error.NoThreadPool, error.RuntimeShutdown => error.Unexpected,
-        error.Closed => unreachable,
     };
 }
 
