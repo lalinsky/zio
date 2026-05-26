@@ -126,18 +126,18 @@ pub fn parseResponse(
         const rdata = buf[p..][0..rdlength];
         p += rdlength;
 
-        if (count >= storage.len) continue;
-
         switch (rtype) {
             1 => if (qtype == .a and rdlength == 4) { // A
-                storage[count] = net.IpAddress.initIp4(rdata[0..4].*, port);
+                ttl = if (count == 0) record_ttl else @min(ttl, record_ttl);
+                if (count < storage.len)
+                    storage[count] = net.IpAddress.initIp4(rdata[0..4].*, port);
                 count += 1;
-                ttl = if (count == 1) record_ttl else @min(ttl, record_ttl);
             },
             28 => if (qtype == .aaaa and rdlength == 16) { // AAAA
-                storage[count] = net.IpAddress.initIp6(rdata[0..16].*, port, 0, 0);
+                ttl = if (count == 0) record_ttl else @min(ttl, record_ttl);
+                if (count < storage.len)
+                    storage[count] = net.IpAddress.initIp6(rdata[0..16].*, port, 0, 0);
                 count += 1;
-                ttl = if (count == 1) record_ttl else @min(ttl, record_ttl);
             },
             else => {},
         }

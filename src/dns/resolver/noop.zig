@@ -17,7 +17,7 @@ pub const NoResolver = struct {
         _: *NoResolver,
         _: []dns.LookupResult,
         _: dns.LookupOptions,
-    ) dns.LookupError!usize {
-        return error.ServiceUnavailable;
+    ) dns.ResolverError!usize {
+        return error.UseSystemResolver;
     }
 };

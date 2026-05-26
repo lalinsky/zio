@@ -90,7 +90,7 @@ pub const Resolver = struct {
         self: *Resolver,
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
-    ) dns.LookupError!usize {
+    ) dns.ResolverError!usize {
         self.maybeReloadHosts();
         self.maybeReloadResolvConf();
 
@@ -465,9 +465,10 @@ fn exchange(
     var sock = try net.Socket.open(.dgram, domain, .ip);
     defer sock.close();
 
-    _ = try sock.sendTo(.{ .ip = server }, query, timeout);
+    const deadline = timeout.toDeadline();
+    _ = try sock.sendTo(.{ .ip = server }, query, deadline);
     const data = while (true) {
-        const r = try sock.receiveFrom(recv_buf, timeout);
+        const r = try sock.receiveFrom(recv_buf, deadline);
         if (sameEndpoint(r.from.ip, server)) break recv_buf[0..r.len];
         log.debug("dns: ignoring response from unexpected source", .{});
     };
@@ -479,7 +480,7 @@ fn exchange(
         std.mem.readInt(u16, data[0..2], .big) == id and
         std.mem.readInt(u16, data[2..4], .big) & 0x0200 != 0)
     {
-        return exchangeTcp(server, query, recv_buf, timeout);
+        return exchangeTcp(server, query, recv_buf, deadline);
     }
 
     return data;

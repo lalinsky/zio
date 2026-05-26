@@ -37,6 +37,11 @@ pub const LookupError = error{
     TooManyAddresses,
 };
 
+/// Extended error set used internally by Resolver/NoResolver. Includes
+/// UseSystemResolver, which signals the dispatch wrapper to fall back to the
+/// platform getaddrinfo rather than propagating an error to the caller.
+pub const ResolverError = LookupError || error{UseSystemResolver};
+
 const Executor = @import("../runtime.zig").Executor;
 const backend = @import("../ev/backend.zig");
 
@@ -53,7 +58,12 @@ pub fn lookup(
 ) LookupError!usize {
     if (Executor.current) |exec| {
         if (exec.runtime.resolver) |*resolver| {
-            return resolver.lookup(storage, options);
+            if (resolver.lookup(storage, options)) |n| {
+                return n;
+            } else |err| switch (err) {
+                error.UseSystemResolver => {},
+                else => |e| return e,
+            }
         }
     }
     return impl.lookup(storage, options);
