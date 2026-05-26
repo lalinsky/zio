@@ -1,10 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ev = @import("../root.zig");
 const Loop = ev.Loop;
 const Timer = ev.Timer;
 const Async = ev.Async;
 const Group = ev.Group;
 const Completion = ev.Completion;
+const PipeCreate = ev.PipeCreate;
+const PipeClose = ev.PipeClose;
 
 test "group: empty group completes immediately" {
     var loop: Loop = undefined;
@@ -416,4 +419,54 @@ test "group: nested race inside gather" {
 
     // Outer gather succeeds
     try outer.getResult();
+}
+
+test "group: large batch exceeding queue size exercises deferred pending list" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // Use a small queue to easily trigger the deferred pending list.
+    // We'll submit 6x the queue_size close operations.
+    const queue_size = 16;
+    const num_pairs = queue_size * 3; // 48 pipe pairs = 96 fds = 6x queue_size
+
+    var loop: Loop = undefined;
+    try loop.init(.{ .queue_size = queue_size });
+    defer loop.deinit();
+
+    // Phase 1: create all pipe pairs (pipe_create is synchronous, no SQEs needed)
+    const creates = try allocator.alloc(PipeCreate, num_pairs);
+    defer allocator.free(creates);
+
+    for (creates) |*pc| pc.* = .init();
+
+    var create_group: Group = .init(.gather);
+    for (creates) |*pc| create_group.add(&pc.c);
+    loop.add(&create_group.c);
+    try loop.run(.until_done);
+    try create_group.getResult();
+
+    // Collect all fds from the created pipe pairs
+    const fds = try allocator.alloc([2]std.posix.fd_t, num_pairs);
+    defer allocator.free(fds);
+    for (creates, fds) |*pc, *pair| pair.* = try pc.getResult();
+
+    // Phase 2: close all 96 fds in a single gather group (6x queue_size SQEs)
+    const closes = try allocator.alloc(PipeClose, num_pairs * 2);
+    defer allocator.free(closes);
+
+    var i: usize = 0;
+    for (fds) |pair| {
+        closes[i] = .init(pair[0]);
+        closes[i + 1] = .init(pair[1]);
+        i += 2;
+    }
+
+    var close_group: Group = .init(.gather);
+    for (closes) |*pc| close_group.add(&pc.c);
+    loop.add(&close_group.c);
+    try loop.run(.until_done);
+
+    for (closes) |*pc| try pc.getResult();
+    try close_group.getResult();
 }
