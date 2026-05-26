@@ -308,7 +308,11 @@ pub const Resolver = struct {
         if (info.mtime == self.conf_mtime) return;
 
         var new_mtime: i64 = 0;
-        const new_conf = loadResolvConf(self.allocator, &new_mtime);
+        var new_conf = loadResolvConf(self.allocator, &new_mtime);
+        if (new_conf.parse_error) {
+            new_conf.deinit();
+            return;
+        }
 
         self.lock.lockUncancelable();
         const old_conf = self.conf;
@@ -542,7 +546,7 @@ fn loadHosts(allocator: std.mem.Allocator, mtime_out: *i64) Hosts {
 fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) ResolvConf {
     const file = fs.openFile("/etc/resolv.conf") catch |err| {
         log.warn("dns: failed to open /etc/resolv.conf: {}", .{err});
-        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{} };
+        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
     };
     defer file.close();
     if (file.stat()) |info| {
@@ -552,6 +556,6 @@ fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) ResolvConf {
     var reader = file.reader(&buf);
     return ResolvConf.parse(allocator, &reader.interface) catch |err| {
         log.warn("dns: failed to parse /etc/resolv.conf: {}", .{err});
-        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{} };
+        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
     };
 }

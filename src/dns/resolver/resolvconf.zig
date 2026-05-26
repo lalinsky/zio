@@ -18,6 +18,7 @@ pub const ResolvConf = struct {
     timeout: Duration = .fromSeconds(5),
     attempts: u8 = 2,
     rotate: bool = false,
+    parse_error: bool = false,
 
     pub fn deinit(self: *ResolvConf) void {
         self.arena.deinit();
@@ -51,6 +52,7 @@ pub const ResolvConf = struct {
                 const addr_str = fields.next() orelse continue;
                 const addr = net.IpAddress.parseIp(addr_str, 53) catch |err| {
                     log.warn("resolv.conf: invalid nameserver '{s}': {}", .{ addr_str, err });
+                    conf.parse_error = true;
                     continue;
                 };
                 servers.append(allocator, addr) catch |err| {
@@ -60,6 +62,7 @@ pub const ResolvConf = struct {
             } else if (std.mem.eql(u8, keyword, "domain")) {
                 const domain = fields.next() orelse continue;
                 search.clearRetainingCapacity();
+                if (std.mem.eql(u8, domain, ".")) continue;
                 const rooted = try ensureRooted(allocator, domain);
                 search.append(allocator, rooted) catch |err| {
                     log.warn("resolv.conf: failed to add domain: {}", .{err});
