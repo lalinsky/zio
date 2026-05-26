@@ -204,9 +204,9 @@ pub fn wake(self: *Self, state: *LoopState) void {
     );
 }
 
-fn rearmWaker(self: *Self, state: *LoopState) !void {
+fn rearmWaker(self: *Self, state: *LoopState) void {
     if (!self.waker_needs_rearm) return;
-    const sqe = try self.ring.get_sqe();
+    const sqe = self.ring.get_sqe() catch return; // leaves waker_needs_rearm=true; fallback timeout kicks in
     prepFutexWait(sqe, &state.wake_requested.raw, 0);
     sqe.user_data = USER_DATA_WAKER;
     self.waker_needs_rearm = false;
@@ -795,7 +795,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
     if (count == 0) {
         // Rearm waker and drain pending before returning — SQ was cleared by enter2.
-        self.rearmWaker(state) catch {};
+        self.rearmWaker(state);
         self.drainPending(state);
         return true; // Timed out
     }
@@ -839,7 +839,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
     // Rearm waker first (SQ was cleared by enter2, so this is guaranteed a slot),
     // then drain pending submissions. Order matters: waker has priority.
-    self.rearmWaker(state) catch {};
+    self.rearmWaker(state);
     self.drainPending(state);
 
     return false; // Did not timeout, woke up due to events
