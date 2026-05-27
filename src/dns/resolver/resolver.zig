@@ -14,9 +14,6 @@ const Timestamp = @import("../../time.zig").Timestamp;
 const Duration = @import("../../time.zig").Duration;
 const Timeout = @import("../../time.zig").Timeout;
 
-fn nowS() u32 {
-    return @truncate(Timestamp.now(.monotonic).toSeconds());
-}
 const RwLock = @import("../../sync/RwLock.zig");
 const Mutex = @import("../../sync/Mutex.zig");
 const Condition = @import("../../sync/Condition.zig");
@@ -86,7 +83,7 @@ pub const Resolver = struct {
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
         var conf_mtime: i64 = 0;
-        const next_check_s = nowS() +% check_interval_secs;
+        const next_check_s: u32 = @as(u32, @truncate(Timestamp.now(.monotonic).toSeconds())) +% check_interval_secs;
         return .{
             .allocator = allocator,
             .lock = .init,
@@ -126,8 +123,9 @@ pub const Resolver = struct {
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
     ) dns.ResolverError!usize {
-        self.maybeReloadHosts();
-        self.maybeReloadResolvConf();
+        const now = Timestamp.now(.monotonic);
+        self.maybeReloadHosts(now);
+        self.maybeReloadResolvConf(now);
 
         // 1. Check /etc/hosts and DNS cache
         {
@@ -150,7 +148,7 @@ pub const Resolver = struct {
             }
 
             if (CacheKey.init(options.name)) |key| {
-                if (self.cache.get(&key)) |entry| {
+                if (self.cache.get(&key, now)) |entry| {
                     var i: usize = 0;
                     for (entry.addrs[0..entry.count]) |addr_in| {
                         if (i >= storage.len) break;
@@ -169,7 +167,7 @@ pub const Resolver = struct {
 
         // 2. Deduplicate concurrent identical DNS queries. Names that exceed the
         //    CacheKey limit are too rare to bother deduplicating.
-        const key = CacheKey.init(options.name) orelse return self.lookupDns(storage, options);
+        const key = CacheKey.init(options.name) orelse return self.lookupDns(storage, options, now);
         const bucket = self.getDedupBucket(&key);
 
         try bucket.mutex.lock();
@@ -217,7 +215,7 @@ pub const Resolver = struct {
 
         var tmp: [16]dns.LookupResult = undefined;
         const buf: []dns.LookupResult = if (storage.len >= tmp.len) storage else tmp[0..];
-        const result = self.lookupDns(buf, options);
+        const result = self.lookupDns(buf, options, now);
 
         // Notify all joiners, then remove the active node.
         bucket.mutex.lockUncancelable();
@@ -253,6 +251,7 @@ pub const Resolver = struct {
         self: *Resolver,
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
+        now: Timestamp,
     ) dns.LookupError!usize {
         // Snapshot conf fields while holding the shared lock so we don't hold
         // it across I/O operations.
@@ -309,7 +308,7 @@ pub const Resolver = struct {
         // Rooted name: only try exactly as given.
         if (rooted) {
             const r = try queryOneName(self, storage, options, name, srvs, attempts, timeout);
-            self.cacheInsert(options, storage[0..r.count], r.ttl);
+            self.cacheInsert(options, storage[0..r.count], r.ttl, now);
             return r.count;
         }
 
@@ -324,7 +323,7 @@ pub const Resolver = struct {
             if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
                 if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) {
-                        self.cacheInsert(options, storage[0..r.count], r.ttl);
+                        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
                         return r.count;
                     }
                 } else |err| {
@@ -339,7 +338,7 @@ pub const Resolver = struct {
             if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
                 if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) {
-                        self.cacheInsert(options, storage[0..r.count], r.ttl);
+                        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
                         return r.count;
                     }
                 } else |err| {
@@ -353,7 +352,7 @@ pub const Resolver = struct {
             if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
                 if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) {
-                        self.cacheInsert(options, storage[0..r.count], r.ttl);
+                        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
                         return r.count;
                     }
                 } else |err| {
@@ -365,7 +364,7 @@ pub const Resolver = struct {
         return last_err;
     }
 
-    fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32) void {
+    fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
         if (options.family != null) return;
         const key = CacheKey.init(options.name) orelse return;
 
@@ -380,7 +379,7 @@ pub const Resolver = struct {
         var entry: CacheEntry = .{
             .addrs = undefined,
             .count = @intCast(results.len),
-            .expiry = Timestamp.now(.monotonic).addDuration(.fromSeconds(ttl_secs)),
+            .expiry = now.addDuration(.fromSeconds(ttl_secs)),
         };
         for (results, 0..) |r, i| {
             entry.addrs[i] = r.address;
@@ -389,11 +388,11 @@ pub const Resolver = struct {
 
         self.lock.lockUncancelable();
         defer self.lock.unlock();
-        self.cache.put(&key, entry);
+        self.cache.put(&key, entry, now);
     }
 
-    fn maybeReloadHosts(self: *Resolver) void {
-        const now_s = nowS();
+    fn maybeReloadHosts(self: *Resolver, now: Timestamp) void {
+        const now_s: u32 = @truncate(now.toSeconds());
         if (now_s < self.hosts_next_check.load(.monotonic)) return;
 
         if (self.hosts_reloading.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return;
@@ -417,8 +416,8 @@ pub const Resolver = struct {
         old.deinit();
     }
 
-    fn maybeReloadResolvConf(self: *Resolver) void {
-        const now_s = nowS();
+    fn maybeReloadResolvConf(self: *Resolver, now: Timestamp) void {
+        const now_s: u32 = @truncate(now.toSeconds());
         if (now_s < self.conf_next_check.load(.monotonic)) return;
 
         if (self.conf_reloading.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return;
