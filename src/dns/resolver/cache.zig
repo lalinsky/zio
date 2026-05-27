@@ -16,6 +16,7 @@ pub const CacheKey = struct {
     hash: u64,
 
     pub fn init(key: *CacheKey, name: []const u8, seed: u64) void {
+        std.debug.assert(name.len <= std.math.maxInt(u8));
         const plen = @min(name.len, key_prefix_len);
         key.len = @intCast(name.len);
         key.hash = std.hash.Wyhash.hash(seed, name);
@@ -189,4 +190,30 @@ test "Cache: multiple independent entries" {
         try std.testing.expect(result != null);
         try std.testing.expectEqual(@as(u8, @intCast(i + 1)), result.?.count);
     }
+}
+
+test "Cache: long names with shared prefix stay distinct" {
+    var cache: Cache = std.mem.zeroes(Cache);
+    const name1 = "abcdefghijklmnopqrstuvw-one.test";
+    const name2 = "abcdefghijklmnopqrstuvw-two.test";
+    comptime std.debug.assert(name1.len > key_prefix_len);
+
+    const now: Timestamp = .{ .value = 1 };
+
+    var k1: CacheKey = undefined;
+    CacheKey.init(&k1, name1, 0);
+    var e1: CacheEntry = std.mem.zeroes(CacheEntry);
+    e1.count = 1;
+    e1.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&k1, e1, now);
+
+    var k2: CacheKey = undefined;
+    CacheKey.init(&k2, name2, 0);
+    var e2: CacheEntry = std.mem.zeroes(CacheEntry);
+    e2.count = 2;
+    e2.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&k2, e2, now);
+
+    try std.testing.expectEqual(@as(u8, 1), cache.get(&k1, now).?.count);
+    try std.testing.expectEqual(@as(u8, 2), cache.get(&k2, now).?.count);
 }
