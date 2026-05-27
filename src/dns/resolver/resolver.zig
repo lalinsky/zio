@@ -57,8 +57,8 @@ const Bucket = struct {
     waiters: SimpleQueue(WaiterNode) = .empty,
 };
 
-fn eqlCacheKey(a: CacheKey, b: CacheKey) bool {
-    return a.len == b.len and std.mem.eql(u8, a.buf[0..a.len], b.buf[0..b.len]);
+fn eqlCacheKey(a: *const CacheKey, b: *const CacheKey) bool {
+    return a.len == b.len and a.hash == b.hash and std.mem.eql(u8, &a.buf, &b.buf);
 }
 
 pub const Resolver = struct {
@@ -174,7 +174,7 @@ pub const Resolver = struct {
 
         var it = bucket.waiters.head;
         while (it) |n| : (it = n.next) {
-            if (n.is_active and n.family == options.family and eqlCacheKey(n.key, key)) {
+            if (n.is_active and n.family == options.family and eqlCacheKey(&n.key, &key)) {
                 // An identical query is already in flight — join it.
                 var node: WaiterNode = .{
                     .key = key,
@@ -219,7 +219,7 @@ pub const Resolver = struct {
         bucket.mutex.lockUncancelable();
         var wit = bucket.waiters.head;
         while (wit) |n| : (wit = n.next) {
-            if (!n.is_active and n.family == options.family and eqlCacheKey(n.key, key)) {
+            if (!n.is_active and n.family == options.family and eqlCacheKey(&n.key, &key)) {
                 if (result) |count| {
                     const jcount = @min(n.storage.len, count);
                     @memcpy(n.storage[0..jcount], storage[0..jcount]);
