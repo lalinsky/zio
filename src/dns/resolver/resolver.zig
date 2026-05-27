@@ -349,7 +349,9 @@ pub const Resolver = struct {
         const r: QueryResult = blk: {
             // Rooted name: only try exactly as given.
             if (rooted) {
-                break :blk try queryOneType(self, storage, options, name, qtype, srvs, attempts, deadline);
+                const r = try queryOneType(self, storage, options, name, qtype, srvs, attempts, deadline);
+                if (r.count == 0) return error.UnknownHostName;
+                break :blk r;
             }
 
             var dot_count: usize = 0;
