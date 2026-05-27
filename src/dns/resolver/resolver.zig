@@ -215,16 +215,18 @@ pub const Resolver = struct {
         bucket.waiters.push(&active_node);
         bucket.mutex.unlock();
 
-        const result = self.lookupDns(storage, options);
+        var tmp: [16]dns.LookupResult = undefined;
+        const buf: []dns.LookupResult = if (storage.len >= tmp.len) storage else tmp[0..];
+        const result = self.lookupDns(buf, options);
 
         // Notify all joiners, then remove the active node.
         bucket.mutex.lockUncancelable();
         var wit = bucket.waiters.head;
         while (wit) |n| : (wit = n.next) {
-            if (!n.is_active and n.family == options.family and eqlCacheKey(n.key, key)) {
+            if (!n.is_active and !n.done and n.family == options.family and eqlCacheKey(n.key, key)) {
                 if (result) |count| {
                     const jcount = @min(n.storage.len, count);
-                    @memcpy(n.storage[0..jcount], storage[0..jcount]);
+                    @memcpy(n.storage[0..jcount], buf[0..jcount]);
                     n.count = jcount;
                     n.err = null;
                 } else |err| {
@@ -238,7 +240,13 @@ pub const Resolver = struct {
         _ = bucket.waiters.remove(&active_node);
         bucket.mutex.unlock();
 
-        return result;
+        const count = result catch return result;
+        if (buf.ptr != storage.ptr) {
+            const acount = @min(storage.len, count);
+            @memcpy(storage[0..acount], buf[0..acount]);
+            return acount;
+        }
+        return count;
     }
 
     fn lookupDns(
