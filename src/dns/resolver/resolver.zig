@@ -19,6 +19,8 @@ fn nowS() u32 {
 }
 const RwLock = @import("../../sync/RwLock.zig");
 const Mutex = @import("../../sync/Mutex.zig");
+const Condition = @import("../../sync/Condition.zig");
+const SimpleQueue = @import("../../utils/simple_queue.zig").SimpleQueue;
 
 const check_interval_secs: u32 = 5;
 
@@ -33,6 +35,31 @@ const Cache = @import("cache.zig").Cache;
 const CacheKey = @import("cache.zig").CacheKey;
 const CacheEntry = @import("cache.zig").CacheEntry;
 const max_cached_addrs = @import("cache.zig").max_cached_addrs;
+
+const num_dedup_buckets = 64;
+
+const WaiterNode = struct {
+    next: ?*WaiterNode = null,
+    prev: ?*WaiterNode = null,
+    in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
+    key: CacheKey,
+    family: ?net.IpAddress.Family,
+    is_active: bool,
+    storage: []dns.LookupResult,
+    count: usize = 0,
+    err: ?dns.LookupError = null,
+    done: bool = false,
+    cond: Condition = .init,
+};
+
+const Bucket = struct {
+    mutex: Mutex = .init,
+    waiters: SimpleQueue(WaiterNode) = .empty,
+};
+
+fn eqlCacheKey(a: CacheKey, b: CacheKey) bool {
+    return a.len == b.len and std.mem.eql(u8, a.buf[0..a.len], b.buf[0..b.len]);
+}
 
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
@@ -54,6 +81,8 @@ pub const Resolver = struct {
     prng_mutex: Mutex,
     prng: std.Random.DefaultPrng,
 
+    dedup_buckets: [num_dedup_buckets]Bucket,
+
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
         var conf_mtime: i64 = 0;
@@ -72,7 +101,13 @@ pub const Resolver = struct {
             .cache = std.mem.zeroes(Cache),
             .prng_mutex = .init,
             .prng = .init(Timestamp.now(.realtime).value),
+            .dedup_buckets = [_]Bucket{.{}} ** num_dedup_buckets,
         };
+    }
+
+    fn getDedupBucket(self: *Resolver, key: *const CacheKey) *Bucket {
+        const hash = std.hash.Wyhash.hash(0, key.buf[0..key.len]);
+        return &self.dedup_buckets[hash & (num_dedup_buckets - 1)];
     }
 
     fn nextQueryId(self: *Resolver) u16 {
@@ -132,8 +167,87 @@ pub const Resolver = struct {
             }
         }
 
-        // 2. DNS query — snapshot conf fields while holding the shared lock so
-        //    we don't hold it across I/O operations.
+        // 2. Deduplicate concurrent identical DNS queries. Names that exceed the
+        //    CacheKey limit are too rare to bother deduplicating.
+        const key = CacheKey.init(options.name) orelse return self.lookupDns(storage, options);
+        const bucket = self.getDedupBucket(&key);
+
+        try bucket.mutex.lock();
+
+        var it = bucket.waiters.head;
+        while (it) |n| : (it = n.next) {
+            if (n.is_active and n.family == options.family and eqlCacheKey(n.key, key)) {
+                // An identical query is already in flight — join it.
+                var node: WaiterNode = .{
+                    .key = key,
+                    .family = options.family,
+                    .is_active = false,
+                    .storage = storage,
+                };
+                bucket.waiters.push(&node);
+
+                while (!node.done) {
+                    node.cond.wait(&bucket.mutex) catch |err| {
+                        if (!node.done) {
+                            _ = bucket.waiters.remove(&node);
+                            bucket.mutex.unlock();
+                            return err;
+                        }
+                        break;
+                    };
+                }
+                _ = bucket.waiters.remove(&node);
+                bucket.mutex.unlock();
+
+                if (node.err) |err| return err;
+                for (node.storage[0..node.count]) |*r| r.address.setPort(options.port);
+                return node.count;
+            }
+        }
+
+        // No in-flight request for this name+family — become the active requester.
+        var active_node: WaiterNode = .{
+            .key = key,
+            .family = options.family,
+            .is_active = true,
+            .storage = storage,
+        };
+        bucket.waiters.push(&active_node);
+        bucket.mutex.unlock();
+
+        const result = self.lookupDns(storage, options);
+
+        // Notify all joiners, then remove the active node.
+        bucket.mutex.lockUncancelable();
+        var wit = bucket.waiters.head;
+        while (wit) |n| : (wit = n.next) {
+            if (!n.is_active and n.family == options.family and eqlCacheKey(n.key, key)) {
+                if (result) |count| {
+                    const jcount = @min(n.storage.len, count);
+                    @memcpy(n.storage[0..jcount], storage[0..jcount]);
+                    n.count = jcount;
+                    n.err = null;
+                } else |err| {
+                    n.count = 0;
+                    n.err = err;
+                }
+                n.done = true;
+                n.cond.signal();
+            }
+        }
+        _ = bucket.waiters.remove(&active_node);
+        bucket.mutex.unlock();
+
+        return result;
+    }
+
+    fn lookupDns(
+        self: *Resolver,
+        storage: []dns.LookupResult,
+        options: dns.LookupOptions,
+    ) dns.LookupError!usize {
+        // Snapshot conf fields while holding the shared lock so we don't hold
+        // it across I/O operations.
         var servers: [max_nameservers]net.IpAddress = undefined;
         var server_count: usize = 0;
         var ndots: u8 = undefined;
