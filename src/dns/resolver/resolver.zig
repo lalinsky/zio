@@ -167,7 +167,7 @@ pub const Resolver = struct {
 
         // 2. Deduplicate concurrent identical DNS queries. Names that exceed the
         //    CacheKey limit are too rare to bother deduplicating.
-        const key = CacheKey.init(options.name) orelse return self.lookupDns(storage, options, now);
+        const key = CacheKey.init(options.name) orelse return self.lookupDns(storage, options);
         const bucket = self.getDedupBucket(&key);
 
         try bucket.mutex.lock();
@@ -215,7 +215,7 @@ pub const Resolver = struct {
 
         var tmp: [16]dns.LookupResult = undefined;
         const buf: []dns.LookupResult = if (storage.len >= tmp.len) storage else tmp[0..];
-        const result = self.lookupDns(buf, options, now);
+        const result = self.lookupDns(buf, options);
 
         // Notify all joiners, then remove the active node.
         bucket.mutex.lockUncancelable();
@@ -251,7 +251,6 @@ pub const Resolver = struct {
         self: *Resolver,
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
-        now: Timestamp,
     ) dns.LookupError!usize {
         // Snapshot conf fields while holding the shared lock so we don't hold
         // it across I/O operations.
@@ -305,63 +304,58 @@ pub const Resolver = struct {
         var fqdn_buf: [256]u8 = undefined;
         var last_err: dns.LookupError = error.UnknownHostName;
 
-        // Rooted name: only try exactly as given.
-        if (rooted) {
-            const r = try queryOneName(self, storage, options, name, srvs, attempts, timeout);
-            self.cacheInsert(options, storage[0..r.count], r.ttl, now);
-            return r.count;
-        }
+        const r: QueryResult = blk: {
+            // Rooted name: only try exactly as given.
+            if (rooted) {
+                break :blk try queryOneName(self, storage, options, name, srvs, attempts, timeout);
+            }
 
-        var dot_count: usize = 0;
-        for (name) |c| {
-            if (c == '.') dot_count += 1;
-        }
-        const has_enough_dots = dot_count >= ndots;
+            var dot_count: usize = 0;
+            for (name) |c| {
+                if (c == '.') dot_count += 1;
+            }
+            const has_enough_dots = dot_count >= ndots;
 
-        // Enough dots: try unsuffixed first (Go's nameList logic).
-        if (has_enough_dots) {
-            if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
-                    if (r.count > 0) {
-                        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
-                        return r.count;
+            // Enough dots: try unsuffixed first (Go's nameList logic).
+            if (has_enough_dots) {
+                if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
+                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                        if (r.count > 0) break :blk r;
+                    } else |err| {
+                        if (err != error.UnknownHostName) return err;
                     }
-                } else |err| {
-                    if (err != error.UnknownHostName) return err;
                 }
             }
-        }
 
-        // Try with each search domain.
-        for (0..search_count) |i| {
-            const suffix = search_store[i][0..search_lens[i]];
-            if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
-                if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
-                    if (r.count > 0) {
-                        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
-                        return r.count;
+            // Try with each search domain.
+            for (0..search_count) |i| {
+                const suffix = search_store[i][0..search_lens[i]];
+                if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
+                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                        if (r.count > 0) break :blk r;
+                    } else |err| {
+                        if (err != error.UnknownHostName) return err;
                     }
-                } else |err| {
-                    if (err != error.UnknownHostName) return err;
                 }
             }
-        }
 
-        // Not enough dots: try unsuffixed last.
-        if (!has_enough_dots) {
-            if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
-                    if (r.count > 0) {
-                        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
-                        return r.count;
+            // Not enough dots: try unsuffixed last.
+            if (!has_enough_dots) {
+                if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
+                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
+                        if (r.count > 0) break :blk r;
+                    } else |err| {
+                        last_err = err;
                     }
-                } else |err| {
-                    last_err = err;
                 }
             }
-        }
 
-        return last_err;
+            return last_err;
+        };
+
+        const now = Timestamp.now(.monotonic);
+        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
+        return r.count;
     }
 
     fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
