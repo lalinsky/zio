@@ -53,13 +53,13 @@ pub const Cache = struct {
     slots: [cache_capacity]CacheSlot,
 
     // Returns the cached entry for key if present and not expired.
-    pub fn get(self: *const Cache, key: *const CacheKey) ?CacheEntry {
+    pub fn get(self: *const Cache, key: *const CacheKey, now: Timestamp) ?CacheEntry {
         const start = slotIndex(key);
         for (0..probe_limit) |probe| {
             const slot = &self.slots[(start + probe) & (cache_capacity - 1)];
             if (slot.key.len == 0) return null;
             if (!eqlKey(slot.key, key)) continue;
-            if (Timestamp.now(.monotonic).value < slot.entry.expiry.value) {
+            if (now.value < slot.entry.expiry.value) {
                 return slot.entry;
             }
             return null;
@@ -69,9 +69,8 @@ pub const Cache = struct {
 
     // Stores or updates an entry. Prefers an empty or exact-match slot, then the
     // first expired slot found in the probe window, then the primary slot.
-    pub fn put(self: *Cache, key: *const CacheKey, entry: CacheEntry) void {
+    pub fn put(self: *Cache, key: *const CacheKey, entry: CacheEntry, now: Timestamp) void {
         const start = slotIndex(key);
-        const now = Timestamp.now(.monotonic);
         var target: usize = cache_capacity; // sentinel: no preferred slot yet
         for (0..probe_limit) |probe| {
             const idx = (start + probe) & (cache_capacity - 1);
@@ -110,8 +109,9 @@ test "Cache: put and get" {
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
 
-    cache.put(&key, entry);
-    const result = cache.get(&key);
+    const now: Timestamp = .{ .value = 1 };
+    cache.put(&key, entry, now);
+    const result = cache.get(&key, now);
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(u8, 1), result.?.count);
 }
@@ -123,8 +123,9 @@ test "Cache: expired entry not returned" {
     entry.count = 1;
     entry.expiry = .{ .value = 0 };
 
-    cache.put(&key, entry);
-    try std.testing.expect(cache.get(&key) == null);
+    const now: Timestamp = .{ .value = 1 };
+    cache.put(&key, entry, now);
+    try std.testing.expect(cache.get(&key, now) == null);
 }
 
 test "Cache: expire invalidates entry" {
@@ -134,27 +135,30 @@ test "Cache: expire invalidates entry" {
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
 
-    cache.put(&key, entry);
-    try std.testing.expect(cache.get(&key) != null);
+    const now: Timestamp = .{ .value = 1 };
+    cache.put(&key, entry, now);
+    try std.testing.expect(cache.get(&key, now) != null);
     cache.expire(&key);
-    try std.testing.expect(cache.get(&key) == null);
+    try std.testing.expect(cache.get(&key, now) == null);
 }
 
 test "Cache: update existing entry" {
     var cache: Cache = std.mem.zeroes(Cache);
     const key = CacheKey.init("example.com").?;
 
+    const now: Timestamp = .{ .value = 1 };
+
     var e1: CacheEntry = std.mem.zeroes(CacheEntry);
     e1.count = 1;
     e1.expiry = .{ .value = std.math.maxInt(u64) };
-    cache.put(&key, e1);
+    cache.put(&key, e1, now);
 
     var e2: CacheEntry = std.mem.zeroes(CacheEntry);
     e2.count = 2;
     e2.expiry = .{ .value = std.math.maxInt(u64) };
-    cache.put(&key, e2);
+    cache.put(&key, e2, now);
 
-    const result = cache.get(&key);
+    const result = cache.get(&key, now);
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(u8, 2), result.?.count);
 }
@@ -163,17 +167,19 @@ test "Cache: multiple independent entries" {
     var cache: Cache = std.mem.zeroes(Cache);
     const names = [_][]const u8{ "a.test", "b.test", "c.test", "d.test" };
 
+    const now: Timestamp = .{ .value = 1 };
+
     for (names, 0..) |name, i| {
         const k = CacheKey.init(name).?;
         var e: CacheEntry = std.mem.zeroes(CacheEntry);
         e.count = @intCast(i + 1);
         e.expiry = .{ .value = std.math.maxInt(u64) };
-        cache.put(&k, e);
+        cache.put(&k, e, now);
     }
 
     for (names, 0..) |name, i| {
         const k = CacheKey.init(name).?;
-        const result = cache.get(&k);
+        const result = cache.get(&k, now);
         try std.testing.expect(result != null);
         try std.testing.expectEqual(@as(u8, @intCast(i + 1)), result.?.count);
     }
