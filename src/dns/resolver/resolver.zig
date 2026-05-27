@@ -40,7 +40,6 @@ const WaiterNode = struct {
     prev: ?*WaiterNode = null,
     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
     key: CacheKey,
-    family: ?net.IpAddress.Family,
     is_active: bool,
     storage: []dns.LookupResult,
     count: usize = 0,
@@ -126,10 +125,7 @@ pub const Resolver = struct {
         self.maybeReloadHosts(now);
         self.maybeReloadResolvConf(now);
 
-        var key: CacheKey = undefined;
-        CacheKey.init(&key, options.name, self.hash_seed);
-
-        // 1. Check /etc/hosts and DNS cache
+        // 1. Check /etc/hosts
         {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
@@ -148,23 +144,61 @@ pub const Resolver = struct {
                 }
                 if (i > 0) return i;
             }
+        }
 
-            var i: usize = 0;
-            const families: []const net.IpAddress.Family = if (options.family) |f| &.{f} else &.{ .ipv4, .ipv6 };
-            for (families) |fam| {
-                var fkey: CacheKey = undefined;
-                CacheKey.init(&fkey, options.name, familySeed(self.hash_seed, fam));
-                if (self.cache.get(&fkey, now)) |entry| {
-                    for (entry.addrs[0..entry.count]) |addr_in| {
-                        if (i >= storage.len) break;
-                        var addr = addr_in;
-                        addr.setPort(options.port);
-                        storage[i] = .{ .address = addr };
-                        i += 1;
-                    }
+        // 2. Query each requested family through its own cache/dedup/DNS path.
+        if (options.family) |fam| {
+            return self.lookupOneFamily(storage, options, fam);
+        }
+
+        var total: usize = 0;
+        var last_err: dns.LookupError = error.UnknownHostName;
+
+        if (self.lookupOneFamily(storage, options, .ipv4)) |n| {
+            total += n;
+        } else |err| switch (err) {
+            error.Canceled, error.RuntimeShutdown => return err,
+            else => last_err = err,
+        }
+
+        if (self.lookupOneFamily(storage[total..], options, .ipv6)) |n| {
+            total += n;
+        } else |err| switch (err) {
+            error.Canceled, error.RuntimeShutdown => return err,
+            else => {},
+        }
+
+        if (total == 0) return last_err;
+        return total;
+    }
+
+    fn lookupOneFamily(
+        self: *Resolver,
+        storage: []dns.LookupResult,
+        options: dns.LookupOptions,
+        family: net.IpAddress.Family,
+    ) dns.LookupError!usize {
+        var opts = options;
+        opts.family = family;
+
+        var key: CacheKey = undefined;
+        CacheKey.init(&key, options.name, self.hash_seed, family);
+
+        // 1. Check DNS cache.
+        {
+            try self.lock.lockShared();
+            defer self.lock.unlockShared();
+            if (self.cache.get(&key, Timestamp.now(.monotonic))) |entry| {
+                var i: usize = 0;
+                for (entry.addrs[0..entry.count]) |addr_in| {
+                    if (i >= storage.len) break;
+                    var addr = addr_in;
+                    addr.setPort(options.port);
+                    storage[i] = .{ .address = addr };
+                    i += 1;
                 }
+                if (i > 0) return i;
             }
-            if (i > 0) return i;
         }
 
         // 2. Deduplicate concurrent identical DNS queries.
@@ -174,11 +208,10 @@ pub const Resolver = struct {
 
         var it = bucket.waiters.head;
         while (it) |n| : (it = n.next) {
-            if (n.is_active and n.family == options.family and n.key.eql(&key)) {
+            if (n.is_active and n.key.eql(&key)) {
                 // An identical query is already in flight — join it.
                 var node: WaiterNode = .{
                     .key = key,
-                    .family = options.family,
                     .is_active = false,
                     .storage = storage,
                 };
@@ -206,7 +239,6 @@ pub const Resolver = struct {
         // No in-flight request for this name+family — become the active requester.
         var active_node: WaiterNode = .{
             .key = key,
-            .family = options.family,
             .is_active = true,
             .storage = storage,
         };
@@ -215,15 +247,20 @@ pub const Resolver = struct {
 
         var tmp: [16]dns.LookupResult = undefined;
         const buf: []dns.LookupResult = if (storage.len >= tmp.len) storage else tmp[0..];
-        const result = self.lookupDns(buf, options);
+        const result = self.lookupDns(buf, opts);
+
+        if (result) |r| {
+            const now = Timestamp.now(.monotonic);
+            self.cacheInsert(options.name, family, buf[0..r.count], r.ttl, now);
+        } else |_| {}
 
         // Notify all joiners, then remove the active node.
         bucket.mutex.lockUncancelable();
         var wit = bucket.waiters.head;
         while (wit) |n| : (wit = n.next) {
-            if (!n.is_active and !n.done and n.family == options.family and n.key.eql(&key)) {
-                if (result) |count| {
-                    const jcount = @min(n.storage.len, count);
+            if (!n.is_active and !n.done and n.key.eql(&key)) {
+                if (result) |r| {
+                    const jcount = @min(n.storage.len, r.count);
                     @memcpy(n.storage[0..jcount], buf[0..jcount]);
                     n.count = jcount;
                     n.err = null;
@@ -238,20 +275,20 @@ pub const Resolver = struct {
         _ = bucket.waiters.remove(&active_node);
         bucket.mutex.unlock();
 
-        const count = result catch return result;
+        const r = result catch |err| return err;
         if (buf.ptr != storage.ptr) {
-            const acount = @min(storage.len, count);
+            const acount = @min(storage.len, r.count);
             @memcpy(storage[0..acount], buf[0..acount]);
             return acount;
         }
-        return count;
+        return r.count;
     }
 
     fn lookupDns(
         self: *Resolver,
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
-    ) dns.LookupError!usize {
+    ) dns.LookupError!QueryResult {
         // Snapshot conf fields while holding the shared lock so we don't hold
         // it across I/O operations.
         var servers: [max_nameservers]net.IpAddress = undefined;
@@ -300,14 +337,19 @@ pub const Resolver = struct {
         const srvs = servers[0..server_count];
         const name = options.name;
         const rooted = name.len > 0 and name[name.len - 1] == '.';
+        const qtype: message.QType = switch (options.family.?) {
+            .ipv4 => .a,
+            .ipv6 => .aaaa,
+        };
+        const deadline = (Timeout{ .duration = timeout }).toDeadline();
 
         var fqdn_buf: [256]u8 = undefined;
         var last_err: dns.LookupError = error.UnknownHostName;
 
-        const count: usize = blk: {
+        const r: QueryResult = blk: {
             // Rooted name: only try exactly as given.
             if (rooted) {
-                break :blk try queryOneName(self, storage, options, name, srvs, attempts, timeout);
+                break :blk try queryOneType(self, storage, options, name, qtype, srvs, attempts, deadline);
             }
 
             var dot_count: usize = 0;
@@ -319,8 +361,8 @@ pub const Resolver = struct {
             // Enough dots: try unsuffixed first (Go's nameList logic).
             if (has_enough_dots) {
                 if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |n| {
-                        if (n > 0) break :blk n;
+                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, deadline)) |r| {
+                        if (r.count > 0) break :blk r;
                     } else |err| {
                         if (err != error.UnknownHostName) return err;
                     }
@@ -331,8 +373,8 @@ pub const Resolver = struct {
             for (0..search_count) |i| {
                 const suffix = search_store[i][0..search_lens[i]];
                 if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
-                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |n| {
-                        if (n > 0) break :blk n;
+                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, deadline)) |r| {
+                        if (r.count > 0) break :blk r;
                     } else |err| {
                         if (err != error.UnknownHostName) return err;
                     }
@@ -342,8 +384,8 @@ pub const Resolver = struct {
             // Not enough dots: try unsuffixed last.
             if (!has_enough_dots) {
                 if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |n| {
-                        if (n > 0) break :blk n;
+                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, deadline)) |r| {
+                        if (r.count > 0) break :blk r;
                     } else |err| {
                         last_err = err;
                     }
@@ -353,12 +395,12 @@ pub const Resolver = struct {
             return last_err;
         };
 
-        return count;
+        return r;
     }
 
     fn cacheInsert(self: *Resolver, name: []const u8, family: net.IpAddress.Family, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
         var key: CacheKey = undefined;
-        CacheKey.init(&key, name, familySeed(self.hash_seed, family));
+        CacheKey.init(&key, name, self.hash_seed, family);
 
         if (results.len == 0 or results.len > max_cached_addrs) {
             self.lock.lockUncancelable();
@@ -456,58 +498,6 @@ fn makeFqdn(buf: *[256]u8, name: []const u8, suffix: ?[]const u8) ?[]u8 {
 }
 
 const QueryResult = struct { count: usize, ttl: u32 };
-
-fn familySeed(seed: u64, family: net.IpAddress.Family) u64 {
-    return seed ^ switch (family) {
-        .ipv4 => @as(u64, 1),
-        .ipv6 => @as(u64, 2),
-    };
-}
-
-/// Try a single FQDN against all servers, querying A and/or AAAA based on
-/// options.family. Fills storage and returns the total address count.
-/// Each RRset is cached immediately after its query returns, using its own timestamp.
-fn queryOneName(
-    resolver: *Resolver,
-    storage: []dns.LookupResult,
-    options: dns.LookupOptions,
-    fqdn: []const u8,
-    servers: []const net.IpAddress,
-    attempts: u8,
-    timeout: Duration,
-) dns.LookupError!usize {
-    const sock_timeout: Timeout = .{ .duration = timeout };
-    var filled: usize = 0;
-    var last_err: dns.LookupError = error.UnknownHostName;
-
-    const do_a = options.family == null or options.family == .ipv4;
-    const do_aaaa = options.family == null or options.family == .ipv6;
-
-    if (do_a and filled < storage.len) {
-        if (queryOneType(resolver, storage[filled..], options, fqdn, .a, servers, attempts, sock_timeout)) |r| {
-            const now = Timestamp.now(.monotonic);
-            resolver.cacheInsert(options.name, .ipv4, storage[filled..][0..r.count], r.ttl, now);
-            filled += r.count;
-        } else |err| switch (err) {
-            error.Canceled, error.RuntimeShutdown, error.NoThreadPool => return err,
-            else => last_err = err,
-        }
-    }
-
-    if (do_aaaa and filled < storage.len) {
-        if (queryOneType(resolver, storage[filled..], options, fqdn, .aaaa, servers, attempts, sock_timeout)) |r| {
-            const now = Timestamp.now(.monotonic);
-            resolver.cacheInsert(options.name, .ipv6, storage[filled..][0..r.count], r.ttl, now);
-            filled += r.count;
-        } else |err| switch (err) {
-            error.Canceled, error.RuntimeShutdown, error.NoThreadPool => return err,
-            else => last_err = err,
-        }
-    }
-
-    if (filled == 0) return last_err;
-    return filled;
-}
 
 /// Query all servers for one record type (A or AAAA), retrying up to `attempts`
 /// times. Returns count + TTL from the successful response, or an error if all
